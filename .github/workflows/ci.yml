@@ -2,9 +2,9 @@ name: Vex Gateway CI
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, develop]
   pull_request:
-    branches: [main, dev]
+    branches: [main, develop]
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,6 +14,7 @@ jobs:
     name: Build and Test
     runs-on: ubuntu-latest
     env:
+      APP_ENV: testing
       SERVER_HOST: ${{ secrets.SERVER_HOST }}
       SERVER_PORT: ${{ secrets.SERVER_PORT }}
     steps:
@@ -67,6 +68,7 @@ jobs:
       image: xd009642/tarpaulin
       options: --security-opt seccomp=unconfined
     env:
+      APP_ENV: testing
       SERVER_HOST: ${{ secrets.SERVER_HOST }}
       SERVER_PORT: ${{ secrets.SERVER_PORT }}
     steps:
