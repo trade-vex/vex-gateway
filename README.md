@@ -4,7 +4,7 @@
 
 1. Copy the environment example file:
    ```bash
-   cp env.example .env
+   cp .env.example .env
    ```
 
 2. Adjust the values in `.env` as needed for your environment.
