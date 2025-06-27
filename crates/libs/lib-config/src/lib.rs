@@ -53,15 +53,17 @@ pub mod logging;
 pub mod server;
 pub mod util;
 
+// Re-export commonly used types for convenience
+pub use environment::Environment;
+pub use logging::LoggingConfig;
+pub use server::ServerConfig;
+
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tracing::{debug, info};
 
-use crate::environment::Environment;
 use crate::error::ConfigError;
-use crate::logging::LoggingConfig;
-use crate::server::ServerConfig;
 use crate::util::find_config_dir;
 
 /// Main configuration structure for the VEX Gateway Service.
