@@ -2,6 +2,7 @@
 
 use crate::error::ConfigError;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 /// Supported runtime environments for the VEX Gateway Service.
 ///
@@ -19,7 +20,9 @@ pub enum Environment {
     Production,
 }
 
-impl Environment {
+impl FromStr for Environment {
+    type Err = ConfigError;
+
     /// Parse environment from string
     ///
     /// Supports both full names and abbreviations:
@@ -35,7 +38,7 @@ impl Environment {
     ///
     /// Returns `Ok(Environment)` on successful parse, or `ConfigError::InvalidEnvironment`
     /// if the string doesn't match any known environment.
-    pub fn from_str(s: &str) -> Result<Self, ConfigError> {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "development" | "dev" => Ok(Environment::Development),
             "testing" | "test" => Ok(Environment::Testing),
@@ -43,7 +46,9 @@ impl Environment {
             _ => Err(ConfigError::InvalidEnvironment(s.to_string())),
         }
     }
+}
 
+impl Environment {
     /// Get the configuration file name for this environment.
     ///
     /// Returns the filename (without path) that should contain

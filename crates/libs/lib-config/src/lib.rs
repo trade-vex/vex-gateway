@@ -61,6 +61,7 @@ pub use server::ServerConfig;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::str::FromStr;
 use tracing::{debug, info};
 
 use crate::error::ConfigError;
