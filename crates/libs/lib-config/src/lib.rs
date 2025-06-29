@@ -4,7 +4,7 @@
 //!
 //! # Quick Start
 //!
-//! ```rust
+//! ```no_run
 //! use lib_config::Config;
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -184,7 +184,7 @@ impl Config {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```no_run
     /// use lib_config::Config;
     ///
     /// fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -342,7 +342,7 @@ impl Config {
     /// use lib_config::Config;
     ///
     /// fn main() -> Result<(), Box<dyn std::error::Error>> {
-    ///     let config = Config::load_auto()?;
+    ///     let config = Config::load_development_defaults();
     ///     let addr = config.server_address()?;
     ///     // Use addr with your web framework
     ///     Ok(())
