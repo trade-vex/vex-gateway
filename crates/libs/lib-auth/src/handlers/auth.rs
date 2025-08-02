@@ -67,7 +67,7 @@ pub async fn get_profile(
     // This will now work with the new find_by_id method
     let user_record = app_state
         .user_repo
-        .find_by_id(user.user_id) // ✅ Method now exists
+        .find_by_id(user.user_id) // Method now exists
         .await?
         .ok_or_else(|| AuthError::UserNotFound)?;
 
