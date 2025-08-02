@@ -2038,6 +2038,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "lib-middleware"
+version = "0.1.0"
+dependencies = [
+ "actix-web",
+ "base64 0.21.7",
+ "chrono",
+ "ed25519-dalek",
+ "futures-util",
+ "hex",
+ "hmac",
+ "pkcs8",
+ "rsa",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "thiserror 1.0.69",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "lib-server"
 version = "0.1.0"
 dependencies = [
@@ -3062,6 +3084,7 @@ dependencies = [
  "pkcs1",
  "pkcs8",
  "rand_core 0.6.4",
+ "sha2",
  "signature",
  "spki",
  "subtle",
