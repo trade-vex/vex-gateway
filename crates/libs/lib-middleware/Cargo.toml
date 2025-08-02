@@ -1,0 +1,22 @@
+[package]
+name = "lib-middleware"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+actix-web = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1.0"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures-util = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.21"
+url = "2.4"
+rsa = { version = "0.9", features = ["sha2"] }
+ed25519-dalek = { version = "2.0", features = ["pkcs8"] }
+pkcs8 = { version = "0.10", features = ["pem"] }
+sha1 = "0.10"

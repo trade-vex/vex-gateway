@@ -1952,6 +1952,28 @@ name = "lib-core"
 version = "0.1.0"
 
 [[package]]
+name = "lib-middleware"
+version = "0.1.0"
+dependencies = [
+ "actix-web",
+ "base64 0.21.7",
+ "chrono",
+ "ed25519-dalek",
+ "futures-util",
+ "hex",
+ "hmac",
+ "pkcs8",
+ "rsa",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "thiserror 1.0.69",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "lib-server"
 version = "0.1.0"
 dependencies = [
@@ -2973,6 +2995,7 @@ dependencies = [
  "pkcs1",
  "pkcs8",
  "rand_core 0.6.4",
+ "sha2",
  "signature",
  "spki",
  "subtle",
@@ -4896,9 +4919,9 @@ dependencies = [
 
 [[package]]
 name = "zeroize"
-version = "1.8.1"
+version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ced3678a2879b30306d323f4542626697a464a97c0a07c9aebf7ebca65cd4dde"
+checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
 
 [[package]]
 name = "zerotrie"
