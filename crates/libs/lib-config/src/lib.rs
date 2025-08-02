@@ -58,7 +58,8 @@ pub use environment::Environment;
 pub use logging::LoggingConfig;
 pub use server::ServerConfig;
 
-use serde::{Deserialize, Serialize};
+use lib_auth::config::AuthConfig; // Import AuthConfig
+use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -71,7 +72,7 @@ use crate::util::find_config_dir;
 ///
 /// Contains all configuration settings organized by category.
 /// This is the primary configuration type that applications should use.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     /// Current runtime environment (determines validation rules)
     pub environment: Environment,
@@ -79,6 +80,8 @@ pub struct Config {
     pub server: ServerConfig,
     /// Logging configuration (level, format, output)
     pub logging: LoggingConfig,
+    /// Authentication configuration
+    pub auth: AuthConfig,
 }
 
 impl Config {
@@ -226,7 +229,7 @@ impl Config {
             environment: Environment::Development,
             server: ServerConfig {
                 host: "127.0.0.1".to_string(),
-                port: 8000,
+                port: 8081,
                 max_connections: 1000,
                 connection_timeout: 30,
                 keep_alive_timeout: 60,
@@ -237,6 +240,8 @@ impl Config {
                 colored: true,
                 file_path: None,
             },
+            // Creates a development-friendly AuthConfig without requiring env vars
+            auth: AuthConfig::development_defaults(),
         }
     }
 
@@ -423,7 +428,7 @@ mod tests {
     fn test_server_config_validation() {
         let valid_config = ServerConfig {
             host: "127.0.0.1".to_string(),
-            port: 8000,
+            port: 8081,
             max_connections: 1000,
             connection_timeout: 30,
             keep_alive_timeout: 60,
@@ -432,7 +437,7 @@ mod tests {
 
         let invalid_config = ServerConfig {
             host: "".to_string(),
-            port: 8000,
+            port: 8081,
             max_connections: 1000,
             connection_timeout: 30,
             keep_alive_timeout: 60,
@@ -460,7 +465,7 @@ mod tests {
         let config = Config::load_development_defaults();
         assert_eq!(config.environment, Environment::Development);
         assert_eq!(config.server.host, "127.0.0.1");
-        assert_eq!(config.server.port, 8000);
+        assert_eq!(config.server.port, 8080);
         assert_eq!(config.logging.level, "debug");
         assert!(config.logging.colored);
         assert!(!config.logging.structured);
@@ -471,6 +476,6 @@ mod tests {
         let config = Config::load_development_defaults();
         let addr = config.server_address().unwrap();
         assert_eq!(addr.ip().to_string(), "127.0.0.1");
-        assert_eq!(addr.port(), 8000);
+        assert_eq!(addr.port(), 1);
     }
 }

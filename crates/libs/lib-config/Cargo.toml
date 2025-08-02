@@ -9,5 +9,6 @@ config = {workspace = true}
 thiserror = {workspace = true}
 tracing = {workspace = true}
 
+lib-auth = {path = "../lib-auth"}
 [dev-dependencies]
 tempfile = {workspace = true}
