@@ -1,71 +1,124 @@
-use crate::config::AuthConfig;
-use crate::error::AuthError;
-use crate::keys::{load_private_key, load_public_key};
-use crate::config::JwtConfig; // Added for clarity
+use crate::config::{AuthConfig, OAuthProviderConfig};
+use crate::error::auth_error::AuthError;
+use crate::repository::{PostgresUserRepository, UserRepository};
 use deadpool_redis::{Config as RedisConfig, Pool as RedisPool, Runtime};
 use jsonwebtoken::{DecodingKey, EncodingKey};
-use openidconnect::core::{CoreClient, CoreProviderMetadata};
-use openidconnect::{ClientId, ClientSecret, IssuerUrl, RedirectUrl};
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// The shared state accessible by all handlers and middleware.
 #[derive(Clone)]
 pub struct AppState {
-    pub oidc_clients: Arc<HashMap<String, CoreClient>>,
+    pub user_repo: Arc<dyn UserRepository>,
+    pub db_pool: Arc<PgPool>,
     pub redis_pool: Arc<RedisPool>,
-    pub encoding_key: Arc<EncodingKey>,
-    pub decoding_key: Arc<DecodingKey>,
-    pub jwt_config: Arc<JwtConfig>,
+    pub jwt_config: crate::config::JwtConfig,
+    pub encoding_key: EncodingKey,
+    pub decoding_key: DecodingKey,
+    pub oauth_providers: HashMap<String, OAuthProviderConfig>,
+    pub http_client: reqwest::Client,
+    pub server_config: crate::config::ServerConfig,
 }
 
 impl AppState {
-    /// Creates a new AppState instance by loading all configurations and initializing clients.
-    pub async fn new(config: AuthConfig) -> Result<Self, AuthError> {
-        // 1. Initialize OIDC clients
-        let mut oidc_clients = HashMap::new();
-        for (name, provider_config) in &config.providers {
-            let provider_metadata = CoreProviderMetadata::discover_async(
-                IssuerUrl::new(provider_config.issuer_url.clone())
-                    .map_err(|e| AuthError::OidcDiscovery(e.to_string()))?,
-                openidconnect::reqwest::async_http_client, // <-- CORRECTED LINE
-            )
+    pub async fn new(config: AuthConfig) -> Result<Arc<Self>, AuthError> {
+        // Database connection
+        let db_pool = PgPoolOptions::new()
+            .max_connections(config.database.max_connections)
+            .connect(&config.database.url)
             .await
-            .map_err(|e| AuthError::OidcDiscovery(e.to_string()))?;
+            .map_err(|e| AuthError::Database(format!("Failed to connect to database: {}", e)))?;
 
-            let redirect_url = format!(
-                "{}/auth/sso/{}/callback",
-                config.server.base_url, name
-            );
-
-            let client = CoreClient::from_provider_metadata(
-                provider_metadata,
-                ClientId::new(provider_config.client_id.clone()),
-                Some(ClientSecret::new(provider_config.client_secret.clone())),
-            )
-            .set_redirect_uri(
-                RedirectUrl::new(redirect_url)
-                    .map_err(|e| AuthError::Config(format!("Invalid redirect URL: {}", e)))?,
-            );
-            oidc_clients.insert(name.clone(), client);
-        }
-
-        // 2. Initialize Redis pool
-        let redis_cfg = RedisConfig::from_url(&config.redis.url);
-        let redis_pool = redis_cfg
+        // Redis connection
+        let redis_config = RedisConfig::from_url(&config.redis.url);
+        let redis_pool = redis_config
             .create_pool(Some(Runtime::Tokio1))
-            .map_err(|e| AuthError::Config(format!("Failed to create Redis pool: {}", e)))?;
+            .map_err(|e| AuthError::Redis(format!("Failed to create Redis pool: {}", e)))?;
 
-        // 3. Load cryptographic keys
-        let encoding_key = load_private_key(&config.jwt.private_key_path)?;
-        let decoding_key = load_public_key(&config.jwt.public_key_path)?;
+        // Create the repository and store it in the state
+        let user_repo: Arc<dyn UserRepository> =
+            Arc::new(PostgresUserRepository::new(Arc::new(db_pool.clone())));
 
-        Ok(AppState {
-            oidc_clients: Arc::new(oidc_clients),
+        // JWT keys
+        let (encoding_key, decoding_key) = load_jwt_keys(&config.jwt)?;
+
+        // HTTP client for OAuth requests
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| {
+                AuthError::InternalError(format!("Failed to create HTTP client: {}", e))
+            })?;
+
+        Ok(Arc::new(Self {
+            user_repo,
+            db_pool: Arc::new(db_pool),
             redis_pool: Arc::new(redis_pool),
-            encoding_key: Arc::new(encoding_key),
-            decoding_key: Arc::new(decoding_key),
-            jwt_config: Arc::new(config.jwt),
-        })
+            jwt_config: config.jwt,
+            encoding_key,
+            decoding_key,
+            oauth_providers: config.oauth.providers,
+            http_client,
+            server_config: config.server,
+        }))
     }
+}
+
+fn load_jwt_keys(
+    config: &crate::config::JwtConfig,
+) -> Result<(EncodingKey, DecodingKey), AuthError> {
+    use std::fs;
+    use std::path::Path;
+
+    // Show the current working directory for debugging
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| "unknown".into());
+    tracing::info!("Current working directory: {:?}", current_dir);
+    tracing::info!("Looking for private key at: {}", config.private_key_path);
+    tracing::info!("Looking for public key at: {}", config.public_key_path);
+
+    // Check if files exist before trying to read them
+    if !Path::new(&config.private_key_path).exists() {
+        return Err(AuthError::Config(format!(
+            "Private key file not found: {}. Current directory: {:?}. Please run: openssl genpkey -algorithm RSA -out {} -pkcs8",
+            config.private_key_path, current_dir, config.private_key_path
+        )));
+    }
+
+    if !Path::new(&config.public_key_path).exists() {
+        return Err(AuthError::Config(format!(
+            "Public key file not found: {}. Current directory: {:?}. Please run: openssl rsa -pubout -in {} -out {}",
+            config.public_key_path, current_dir, config.private_key_path, config.public_key_path
+        )));
+    }
+
+    let private_key = fs::read(&config.private_key_path).map_err(|e| {
+        AuthError::Config(format!(
+            "Failed to read private key from {}: {}",
+            config.private_key_path, e
+        ))
+    })?;
+
+    let public_key = fs::read(&config.public_key_path).map_err(|e| {
+        AuthError::Config(format!(
+            "Failed to read public key from {}: {}",
+            config.public_key_path, e
+        ))
+    })?;
+
+    let encoding_key = EncodingKey::from_rsa_pem(&private_key).map_err(|e| {
+        AuthError::Config(format!(
+            "Invalid private key format in {}: {}",
+            config.private_key_path, e
+        ))
+    })?;
+
+    let decoding_key = DecodingKey::from_rsa_pem(&public_key).map_err(|e| {
+        AuthError::Config(format!(
+            "Invalid public key format in {}: {}",
+            config.public_key_path, e
+        ))
+    })?;
+
+    tracing::info!("Successfully loaded JWT keys");
+    Ok((encoding_key, decoding_key))
 }
