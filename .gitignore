@@ -11,3 +11,7 @@
 
 # Config
 config/production.toml
+
+**/target
+.DS_Store
+.sqlx/**
