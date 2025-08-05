@@ -23,11 +23,13 @@ struct JwtClaims {
     aud: String,
     jti: String,
 }
+
 #[derive(Clone)]
 pub struct JwtAuthentication {
     decoding_key: DecodingKey,
     issuer: String,
     audience: String,
+    algorithm: Algorithm, // Add this field
 }
 
 impl JwtAuthentication {
@@ -36,6 +38,23 @@ impl JwtAuthentication {
             decoding_key,
             issuer,
             audience,
+            algorithm: Algorithm::RS256, // Default to RS256 for production
+        }
+    }
+
+    // Add a test constructor
+    #[cfg(test)]
+    pub fn new_with_algorithm(
+        decoding_key: DecodingKey, 
+        issuer: String, 
+        audience: String,
+        algorithm: Algorithm
+    ) -> Self {
+        Self {
+            decoding_key,
+            issuer,
+            audience,
+            algorithm,
         }
     }
 }
@@ -58,6 +77,7 @@ where
             decoding_key: self.decoding_key.clone(),
             issuer: self.issuer.clone(),
             audience: self.audience.clone(),
+            algorithm: self.algorithm, // Add this
         }))
     }
 }
@@ -67,6 +87,7 @@ pub struct JwtAuthenticationMiddleware<S> {
     decoding_key: DecodingKey,
     issuer: String,
     audience: String,
+    algorithm: Algorithm, // Add this field
 }
 
 impl<S, B> Service<ServiceRequest> for JwtAuthenticationMiddleware<S>
@@ -85,6 +106,7 @@ where
         let decoding_key = self.decoding_key.clone();
         let issuer = self.issuer.clone();
         let audience = self.audience.clone();
+        let algorithm = self.algorithm; // Add this
 
         // Extract Authorization header
         let auth_header = req.headers().get("authorization");
@@ -92,8 +114,8 @@ where
         if let Some(auth_value) = auth_header {
             if let Ok(auth_str) = auth_value.to_str() {
                 if let Some(token) = auth_str.strip_prefix("Bearer ") {
-                    // Validate JWT token
-                    let mut validation = Validation::new(Algorithm::RS256);
+                    // Use the configured algorithm instead of hardcoded RS256
+                    let mut validation = Validation::new(algorithm);
                     validation.set_issuer(&[issuer]);
                     validation.set_audience(&[audience]);
 
@@ -148,5 +170,199 @@ impl actix_web::FromRequest for AuthenticatedUser {
                 "Not authenticated",
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::{test, web, App, HttpResponse};
+    use jsonwebtoken::{encode, EncodingKey, Header, Algorithm};
+    use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Test handler that requires authentication
+    async fn protected_handler(user: AuthenticatedUser) -> HttpResponse {
+        HttpResponse::Ok().json(json!({
+            "user_id": user.user_id,
+            "message": "Protected resource accessed"
+        }))
+    }
+
+    fn create_test_jwt(user_id: &str, expired: bool) -> String {
+        // Use HS256 algorithm to match the test setup
+        let key = EncodingKey::from_secret("test_secret".as_ref());
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let exp = if expired { now - 3600 } else { now + 3600 };
+        
+        let claims = JwtClaims {
+            sub: user_id.to_string(),
+            exp: exp as usize,
+            iat: now as usize,
+            iss: "vex-gateway".to_string(),
+            aud: "vex-api".to_string(),
+            jti: "test-jti".to_string(),
+        };
+        
+        // Use HS256 algorithm
+        let header = Header::new(Algorithm::HS256);
+        encode(&header, &claims, &key).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_jwt_middleware_valid_token() {
+        let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
+        let middleware = JwtAuthentication::new_with_algorithm(
+            decoding_key,
+            "vex-gateway".to_string(),
+            "vex-api".to_string(),
+            Algorithm::HS256, // Use HS256 for tests
+        );
+
+        let app = test::init_service(
+            App::new()
+                .wrap(middleware)
+                .route("/protected", web::get().to(protected_handler))
+        ).await;
+
+        let valid_token = create_test_jwt("123e4567-e89b-12d3-a456-426614174000", false);
+        
+        let req = test::TestRequest::get()
+            .uri("/protected")
+            .insert_header(("Authorization", format!("Bearer {}", valid_token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_jwt_middleware_invalid_token() {
+        let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
+        let middleware = JwtAuthentication::new_with_algorithm(
+            decoding_key,
+            "vex-gateway".to_string(),
+            "vex-api".to_string(),
+            Algorithm::HS256, // Use HS256 for tests
+        );
+
+        let app = test::init_service(
+            App::new()
+                .wrap(middleware)
+                .route("/protected", web::get().to(protected_handler))
+        ).await;
+
+        let req = test::TestRequest::get()
+            .uri("/protected")
+            .insert_header(("Authorization", "Bearer invalid_token"))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn test_jwt_middleware_expired_token() {
+        let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
+        let middleware = JwtAuthentication::new_with_algorithm(
+            decoding_key,
+            "vex-gateway".to_string(),
+            "vex-api".to_string(),
+            Algorithm::HS256, // Use HS256 for tests
+        );
+
+        let app = test::init_service(
+            App::new()
+                .wrap(middleware)
+                .route("/protected", web::get().to(protected_handler))
+        ).await;
+
+        let expired_token = create_test_jwt("123e4567-e89b-12d3-a456-426614174000", true);
+        
+        let req = test::TestRequest::get()
+            .uri("/protected")
+            .insert_header(("Authorization", format!("Bearer {}", expired_token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn test_jwt_middleware_missing_token() {
+        let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
+        let middleware = JwtAuthentication::new_with_algorithm(
+            decoding_key,
+            "vex-gateway".to_string(),
+            "vex-api".to_string(),
+            Algorithm::HS256, // Use HS256 for tests
+        );
+
+        let app = test::init_service(
+            App::new()
+                .wrap(middleware)
+                .route("/protected", web::get().to(protected_handler))
+        ).await;
+
+        let req = test::TestRequest::get()
+            .uri("/protected")
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn test_jwt_middleware_malformed_header() {
+        let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
+        let middleware = JwtAuthentication::new_with_algorithm(
+            decoding_key,
+            "vex-gateway".to_string(),
+            "vex-api".to_string(),
+            Algorithm::HS256, // Use HS256 for tests
+        );
+
+        let app = test::init_service(
+            App::new()
+                .wrap(middleware)
+                .route("/protected", web::get().to(protected_handler))
+        ).await;
+
+        let req = test::TestRequest::get()
+            .uri("/protected")
+            .insert_header(("Authorization", "InvalidFormat"))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn test_jwt_middleware_production_rs256() {
+        // Test that the default constructor uses RS256
+        let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
+        let middleware = JwtAuthentication::new(
+            decoding_key,
+            "vex-gateway".to_string(),
+            "vex-api".to_string(),
+        );
+
+        // Verify the algorithm is RS256 by checking that HS256 tokens fail
+        let app = test::init_service(
+            App::new()
+                .wrap(middleware)
+                .route("/protected", web::get().to(protected_handler))
+        ).await;
+
+        let hs256_token = create_test_jwt("123e4567-e89b-12d3-a456-426614174000", false);
+        
+        let req = test::TestRequest::get()
+            .uri("/protected")
+            .insert_header(("Authorization", format!("Bearer {}", hs256_token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        // Should fail because production middleware expects RS256, but token is HS256
+        assert_eq!(resp.status(), 401);
     }
 }
