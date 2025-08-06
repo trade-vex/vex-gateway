@@ -8,7 +8,7 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use jsonwebtoken::{DecodingKey, Validation, decode};
 use std::sync::Arc;
 use uuid::Uuid;
-
+#[derive(Clone)]
 pub struct TokenService {
     jwt_config: Arc<JwtConfig>,
     redis_pool: Arc<Pool>,

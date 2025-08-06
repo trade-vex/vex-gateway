@@ -188,7 +188,7 @@ mod provider {
 
 // end  Test Setup
 
-fn setup_test_config() -> AuthConfig {
+pub fn setup_test_config() -> AuthConfig {
     use std::collections::HashMap;
     use std::env;
 
@@ -261,9 +261,9 @@ fn setup_test_config() -> AuthConfig {
         },
         jwt: JwtConfig {
             private_key_path: env::var("JWT_PRIVATE_KEY_PATH")
-                .unwrap_or_else(|_| "./certs/jwt_private_key.pem".to_string()),
+                .unwrap_or_else(|_| "../../../certs/jwt_private_key.pem".to_string()),
             public_key_path: env::var("JWT_PUBLIC_KEY_PATH")
-                .unwrap_or_else(|_| "./certs/jwt_public_key.pem".to_string()),
+                .unwrap_or_else(|_| "../../../certs/jwt_public_key.pem".to_string()),
             issuer: env::var("JWT_ISSUER").unwrap_or_else(|_| "vex-gateway".to_string()),
             audience: env::var("JWT_AUDIENCE").unwrap_or_else(|_| "vex-api".to_string()),
             access_token_ttl_minutes: env::var("JWT_ACCESS_TOKEN_TTL_MINUTES")
@@ -932,4 +932,111 @@ mod tests {
             }
         }
     }
+}
+
+use std::time::Instant;
+use tokio::task::JoinSet;
+use crate::service::token_service::TokenService;
+use crate::state::AppState;
+#[cfg(test)]
+mod performance_tests {
+    use super::*;
+
+    // Helper functions
+    async fn create_test_token_service(config: AuthConfig) -> TokenService {
+        let app_state = Arc::new(AppState::new(config).await.unwrap());
+        TokenService::new(
+            Arc::new(app_state.jwt_config.clone()),
+            app_state.redis_pool.clone(),
+            Arc::new(app_state.encoding_key.clone()),
+            Arc::new(app_state.decoding_key.clone()),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_token_validation() {
+        let config = setup_test_config();
+        let token_service = create_test_token_service(config).await;
+        let user_id = Uuid::new_v4();
+        
+        // Create a valid token
+        let tokens = token_service.mint_tokens(user_id).await.unwrap();
+        let token = tokens.access_token;
+        
+        let start = Instant::now();
+        let mut tasks = JoinSet::new();
+        
+        // Spawn 100 concurrent validation tasks
+        for _ in 0..100 {
+            let token_clone = token.clone();
+            let service_clone = token_service.clone();
+            tasks.spawn(async move {
+                service_clone.validate_jwt(&token_clone)
+            });
+        }
+        
+        let mut success_count = 0;
+        let mut error_count = 0;
+        
+        while let Some(result) = tasks.join_next().await {
+            match result.unwrap() {
+                Ok(_) => success_count += 1,
+                Err(_) => error_count += 1,
+            }
+        }
+        
+        let duration = start.elapsed();
+        
+        assert_eq!(success_count, 100);
+        assert_eq!(error_count, 0);
+        assert!(duration.as_millis() < 1000, "Should complete within 1 second");
+        
+        println!("Validated 100 tokens concurrently in {:?}", duration);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_user_operations() {
+        let repo = setup_mock_user_repo();
+        let start = Instant::now();
+        let mut tasks = JoinSet::new();
+        
+        // Spawn 50 concurrent user creation tasks
+        for i in 0..50 {
+            let repo_clone = repo.clone();
+            tasks.spawn(async move {
+                let user = User {
+                    user_id: Uuid::new_v4(),
+                    username: format!("User {}", i),
+                    email: format!("user{}@example.com", i),
+                    password_hash: None,
+                    auth_provider: "github".to_string(),
+                    provider_id: Some(i.to_string()),
+                    avatar_url: None,
+                    email_verified: true,
+                    status: UserStatus::Active,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    last_login: None,
+                };
+                
+                repo_clone.lock().await.create_user(&user).await
+            });
+        }
+        
+        let mut success_count = 0;
+        while let Some(result) = tasks.join_next().await {
+            if result.unwrap().is_ok() {
+                success_count += 1;
+            }
+        }
+        
+        let duration = start.elapsed();
+        
+        assert_eq!(success_count, 50);
+        assert_eq!(repo.lock().await.count().await, 50);
+        
+        println!("Created 50 users concurrently in {:?}", duration);
+    }
+
+    
 }
