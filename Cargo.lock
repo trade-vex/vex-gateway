@@ -2001,6 +2001,7 @@ dependencies = [
  "async-trait",
  "bb8",
  "bincode",
+ "futures",
  "redis 0.25.4",
  "serde",
  "sqlx",
