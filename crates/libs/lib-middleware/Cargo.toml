@@ -20,3 +20,6 @@ rsa = { version = "0.9", features = ["sha2"] }
 ed25519-dalek = { version = "2.0", features = ["pkcs8"] }
 pkcs8 = { version = "0.10", features = ["pem"] }
 sha1 = "0.10"
+subtle = "2.5"
+tokio = { version = "1.0", features = ["sync"] }
+lru = "0.12"

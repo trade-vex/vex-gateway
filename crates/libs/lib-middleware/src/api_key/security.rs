@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use crate::api_key::signature::SignatureAlgorithm;
 
-/// Security types for API endpoints as defined in Binance API
+/// Security types for API endpoints 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SecurityType {
     /// Endpoint can be accessed freely
