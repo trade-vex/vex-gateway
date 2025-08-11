@@ -3,6 +3,15 @@ use async_trait::async_trait;
 use serde::{de::DeserializeOwned, Serialize};
 use std::future::Future;
 
+/// Connection pool statistics
+#[derive(Debug, Clone, Copy)]
+pub struct PoolStats {
+    pub size: u32,
+    pub idle: u32,
+    pub active: u32,
+    pub max_size: u32,
+}
+
 /// SQL database interface
 /// 
 /// This trait provides a unified interface for SQL databases
@@ -73,15 +82,6 @@ pub trait SqlDb: Send + Sync + Clone + 'static {
     fn pool_stats(&self) -> PoolStats;
 }
 
-/// Connection pool statistics
-#[derive(Debug, Clone, Copy)]
-pub struct PoolStats {
-    pub size: u32,
-    pub idle: u32,
-    pub active: u32,
-    pub max_size: u32,
-}
-
 /// Key-value store interface
 /// 
 /// This trait provides a unified interface for KV stores
@@ -91,8 +91,6 @@ pub trait KvStore: Send + Sync + Clone + 'static {
     async fn connect(url: &str) -> Result<Self>
     where
         Self: Sized;
-    
-    // ===== Basic Operations =====
     
     /// Set a value with automatic serialization
     async fn set<T>(&self, key: &str, value: &T) -> Result<()>
@@ -116,8 +114,6 @@ pub trait KvStore: Send + Sync + Clone + 'static {
     /// Check if key exists
     async fn exists(&self, key: &str) -> Result<bool>;
     
-    // ===== Batch Operations =====
-    
     /// Get multiple keys in one round-trip
     async fn mget<T>(&self, keys: &[&str]) -> Result<Vec<Option<T>>>
     where
@@ -130,8 +126,6 @@ pub trait KvStore: Send + Sync + Clone + 'static {
     
     /// Delete multiple keys
     async fn mdel(&self, keys: &[&str]) -> Result<u64>;
-    
-    // ===== Atomic Operations =====
     
     /// Atomic increment/decrement
     async fn incr(&self, key: &str, delta: i64) -> Result<i64>;
@@ -146,8 +140,6 @@ pub trait KvStore: Send + Sync + Clone + 'static {
     where
         T: Serialize + Send + Sync + PartialEq;
     
-    // ===== TTL Operations =====
-    
     /// Set with expiration
     async fn set_ex<T>(&self, key: &str, value: &T, ttl_secs: u64) -> Result<()>
     where
@@ -159,44 +151,12 @@ pub trait KvStore: Send + Sync + Clone + 'static {
     /// Get remaining TTL in seconds (None = no TTL, Some(0) = expired)
     async fn ttl(&self, key: &str) -> Result<Option<u64>>;
     
-    // ===== Pattern Operations =====
-    
     /// Find keys matching pattern (use sparingly in production!)
     async fn scan(&self, pattern: &str, limit: usize) -> Result<Vec<String>>;
-    
-    // ===== Monitoring =====
     
     /// Get connection pool statistics
     fn pool_stats(&self) -> PoolStats;
     
     /// Ping to check connection
     async fn ping(&self) -> Result<()>;
-}
-
-// ============================================================================
-// OPTIONAL: QUERYABLE TRAIT FOR COMPILE-TIME SQL CHECKING
-// ============================================================================
-
-/// Trait for types that can be queried from the database
-/// This enables compile-time SQL checking with sqlx
-pub trait Queryable: Sized {
-    /// Table name for this entity
-    const TABLE_NAME: &'static str;
-    
-    /// Column names for SELECT queries
-    const COLUMNS: &'static [&'static str];
-    
-    /// Generate SELECT query
-    fn select_query() -> String {
-        format!(
-            "SELECT {} FROM {}",
-            Self::COLUMNS.join(", "),
-            Self::TABLE_NAME
-        )
-    }
-    
-    /// Generate SELECT by ID query
-    fn select_by_id_query() -> String {
-        format!("{} WHERE id = $1", Self::select_query())
-    }
 }
