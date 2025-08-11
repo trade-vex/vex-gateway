@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 use crate::api_key::signature::SignatureAlgorithm;
+use actix_web::FromRequest;
+use actix_web::HttpMessage;
+use std::future::{Ready, ready};
 
 /// Security types for API endpoints as defined in Binance API
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,5 +188,36 @@ impl ApiKeyConfig {
     /// Check if this API key requires signatures (TRADE or USER_DATA)
     pub fn requires_signature(&self, security_type: SecurityType) -> bool {
         matches!(security_type, SecurityType::Trade | SecurityType::UserData)
+    }
+
+    /// Helper method: Check if API key can trade
+    pub fn can_trade(&self) -> bool {
+        self.has_permission(SecurityType::Trade)
+    }
+
+    /// Helper method: Check if API key can access user data
+    pub fn can_access_user_data(&self) -> bool {
+        self.has_permission(SecurityType::UserData)
+    }
+
+    /// Helper method: Check if API key can access user streams
+    pub fn can_access_user_streams(&self) -> bool {
+        self.has_permission(SecurityType::UserStream)
+    }
+}
+
+/// Implement FromRequest for ApiKeyConfig to enable direct extraction in handlers
+impl FromRequest for ApiKeyConfig {
+    type Error = actix_web::Error;
+    type Future = Ready<Result<Self, Self::Error>>;
+
+    fn from_request(req: &actix_web::HttpRequest, _: &mut actix_web::dev::Payload) -> Self::Future {
+        if let Some(api_config) = req.extensions().get::<ApiKeyConfig>() {
+            ready(Ok(api_config.clone()))
+        } else {
+            ready(Err(actix_web::error::ErrorUnauthorized(
+                "API key authentication required",
+            )))
+        }
     }
 }

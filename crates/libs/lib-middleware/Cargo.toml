@@ -20,3 +20,4 @@ rsa = { version = "0.9", features = ["sha2"] }
 ed25519-dalek = { version = "2.0", features = ["pkcs8"] }
 pkcs8 = { version = "0.10", features = ["pem"] }
 sha1 = "0.10"
+actix-http = "3.11.0"

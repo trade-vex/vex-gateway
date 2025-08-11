@@ -17,13 +17,15 @@ use crate::api_key::{
     signature::SignatureVerifier,
 };
 
+use actix_web::http::Method;
+
 /// Route-specific security configuration
 #[derive(Debug, Clone)]
 pub struct RouteSecurityConfig {
     pub path_pattern: String,
     pub security_type: SecurityType,
 }
-
+#[derive(Clone)]
 /// API Key middleware configuration
 pub struct ApiKeyMiddleware {
     api_keys: Arc<HashMap<String, ApiKeyConfig>>,
@@ -375,15 +377,32 @@ where
                 let query_params = ApiKeyMiddleware::parse_query_params(req.request());
                 let raw_query = ApiKeyMiddleware::get_raw_query_string(req.request());
                 
-                let (body_params, raw_body) = match ApiKeyMiddleware::parse_body_params(&mut req).await {
-                    Ok(result) => result,
-                    Err(e) => {
-                        error!("Failed to parse body: {}", e);
-                        return Err(actix_web::error::ErrorBadRequest(format!(
-                            "Failed to parse request body: {}", e
-                        )));
+                let (body_params, raw_body) = if req.method() == Method::POST || req.method() == Method::PUT || req.method() == Method::DELETE {
+                    match ApiKeyMiddleware::parse_body_params(&mut req).await {
+                        Ok(res) => res,
+                        Err(e) => {
+                            error!("Failed to parse body params: {}", e);
+                            return Err(actix_web::error::ErrorBadRequest(format!(
+                                "Failed to parse body params: {}", e
+                            )));
+                        }
                     }
+                } else {
+                    (HashMap::new(), String::new())
                 };
+
+                //  START: FIX - Combine query and body params for the handler
+                let mut combined_params = query_params.clone();
+                combined_params.extend(body_params.clone());
+
+                let new_body = url::form_urlencoded::Serializer::new(String::new())
+                    .extend_pairs(combined_params.iter())
+                    .finish();
+
+                let body_bytes = web::Bytes::from(new_body);
+                let new_payload = actix_http::Payload::from(body_bytes);
+                req.set_payload(new_payload.into());
+                //  END: FIX
 
                 // Validate timestamp
                 if let Err(e) = ApiKeyMiddleware::validate_timestamp_with_recv_window(
