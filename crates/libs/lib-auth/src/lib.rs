@@ -10,27 +10,6 @@ pub mod state;
 pub mod tests;
 pub mod utils;
 
-use actix_web::web;
-
 pub use config::AuthConfig;
 pub use error::auth_error::AuthError;
 pub use state::AppState;
-
-pub fn configure_services(cfg: &mut web::ServiceConfig) {
-    cfg.service(
-        web::scope("/auth")
-            // Remove /oauth/ prefix to match your URLs
-            .route(
-                "/{provider}",
-                web::get().to(handlers::oauth::initiate_oauth),
-            )
-            .route(
-                "/{provider}/callback",
-                web::get().to(handlers::oauth::handle_oauth_callback),
-            )
-            .route(
-                "/providers",
-                web::get().to(handlers::oauth::get_oauth_providers),
-            ),
-    );
-}

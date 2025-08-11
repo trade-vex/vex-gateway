@@ -12,6 +12,9 @@ use uuid::Uuid;
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AuthenticatedUser {
     pub user_id: Uuid,
+    pub email: Option<String>,
+    pub username: Option<String>,
+    pub auth_provider: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -22,6 +25,10 @@ struct JwtClaims {
     iss: String,
     aud: String,
     jti: String,
+    // Add user context claims
+    email: Option<String>,
+    username: Option<String>,
+    provider: Option<String>,
 }
 
 #[derive(Clone)]
@@ -29,7 +36,7 @@ pub struct JwtAuthentication {
     decoding_key: DecodingKey,
     issuer: String,
     audience: String,
-    algorithm: Algorithm, // Add this field
+    algorithm: Algorithm,
 }
 
 impl JwtAuthentication {
@@ -38,11 +45,10 @@ impl JwtAuthentication {
             decoding_key,
             issuer,
             audience,
-            algorithm: Algorithm::RS256, // Default to RS256 for production
+            algorithm: Algorithm::RS256,
         }
     }
 
-    // Add a test constructor
     #[cfg(test)]
     pub fn new_with_algorithm(
         decoding_key: DecodingKey, 
@@ -77,7 +83,7 @@ where
             decoding_key: self.decoding_key.clone(),
             issuer: self.issuer.clone(),
             audience: self.audience.clone(),
-            algorithm: self.algorithm, // Add this
+            algorithm: self.algorithm,
         }))
     }
 }
@@ -87,7 +93,7 @@ pub struct JwtAuthenticationMiddleware<S> {
     decoding_key: DecodingKey,
     issuer: String,
     audience: String,
-    algorithm: Algorithm, // Add this field
+    algorithm: Algorithm,
 }
 
 impl<S, B> Service<ServiceRequest> for JwtAuthenticationMiddleware<S>
@@ -106,7 +112,7 @@ where
         let decoding_key = self.decoding_key.clone();
         let issuer = self.issuer.clone();
         let audience = self.audience.clone();
-        let algorithm = self.algorithm; // Add this
+        let algorithm = self.algorithm;
 
         // Extract Authorization header
         let auth_header = req.headers().get("authorization");
@@ -123,7 +129,17 @@ where
                         Ok(token_data) => {
                             // Parse user_id from subject
                             if let Ok(user_id) = Uuid::parse_str(&token_data.claims.sub) {
-                                let authenticated_user = AuthenticatedUser { user_id };
+                                let claims = &token_data.claims;
+
+                                let authenticated_user = AuthenticatedUser {
+                                    user_id,
+                                    email: claims.email.clone(),
+                                    username: claims.username.clone(),
+                                    auth_provider: claims.provider
+                                        .clone()
+                                        .unwrap_or_else(|| "unknown".to_string()),
+                                };
+                                
                                 req.extensions_mut().insert(authenticated_user);
 
                                 let fut = self.service.call(req);
@@ -185,6 +201,9 @@ mod tests {
     async fn protected_handler(user: AuthenticatedUser) -> HttpResponse {
         HttpResponse::Ok().json(json!({
             "user_id": user.user_id,
+            "email": user.email,
+            "username": user.username,
+            "auth_provider": user.auth_provider,
             "message": "Protected resource accessed"
         }))
     }
@@ -202,6 +221,10 @@ mod tests {
             iss: "vex-gateway".to_string(),
             aud: "vex-api".to_string(),
             jti: "test-jti".to_string(),
+            // Add test user data
+            email: Some("test@example.com".to_string()),
+            username: Some("testuser".to_string()),
+            provider: Some("github".to_string()),
         };
         
         // Use HS256 algorithm
@@ -234,6 +257,63 @@ mod tests {
 
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
+        
+        // Verify the response contains user data
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["email"], "test@example.com");
+        assert_eq!(body["username"], "testuser");
+        assert_eq!(body["auth_provider"], "github");
+    }
+
+    #[tokio::test]
+    async fn test_jwt_middleware_missing_user_data() {
+        // Test JWT without optional user fields
+        let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
+        let middleware = JwtAuthentication::new_with_algorithm(
+            decoding_key,
+            "vex-gateway".to_string(),
+            "vex-api".to_string(),
+            Algorithm::HS256, // Use HS256 for tests
+        );
+
+        let app = test::init_service(
+            App::new()
+                .wrap(middleware)
+                .route("/protected", web::get().to(protected_handler))
+        ).await;
+
+        // Create JWT with minimal claims
+        let key = EncodingKey::from_secret("test_secret".as_ref());
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        
+        let minimal_claims = JwtClaims {
+            sub: "123e4567-e89b-12d3-a456-426614174000".to_string(),
+            exp: (now + 3600) as usize,
+            iat: now as usize,
+            iss: "vex-gateway".to_string(),
+            aud: "vex-api".to_string(),
+            jti: "test-jti".to_string(),
+            email: None,
+            username: None,
+            provider: None,
+        };
+        
+        let header = Header::new(Algorithm::HS256);
+        let token = encode(&header, &minimal_claims, &key).unwrap();
+        
+        let req = test::TestRequest::get()
+            .uri("/protected")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        
+        // Verify the response handles missing user data gracefully
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert!(body["email"].is_null());
+        assert!(body["username"].is_null());
+        assert_eq!(body["auth_provider"], "unknown"); // Default value
     }
 
     #[tokio::test]

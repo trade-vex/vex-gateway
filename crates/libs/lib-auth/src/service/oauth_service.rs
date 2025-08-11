@@ -177,10 +177,15 @@ impl OAuthService {
             }
         };
 
-        // Generate JWT tokens for our app
+        // Generate JWT tokens for our app - FIXED VERSION
         let tokens = self
             .token_service
-            .mint_tokens(user.user_id)
+            .create_tokens_with_claims(
+                user.user_id,
+                user.email.clone(),
+                user.username.clone(),
+                user.auth_provider.clone(),
+            )
             .await
             .map_err(|e| AuthError::CodeExchangeFailed(format!("Token minting failed: {}", e)))?;
 

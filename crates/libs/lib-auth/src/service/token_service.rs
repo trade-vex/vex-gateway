@@ -176,4 +176,58 @@ impl TokenService {
 
         Ok(())
     }
+
+    /// Create JWT tokens with user claims included
+    pub async fn create_tokens_with_claims(
+        &self,
+        user_id: uuid::Uuid,
+        email: String,
+        username: String,
+        auth_provider: String,
+    ) -> Result<crate::dto::oauth::TokenPair, crate::error::auth_error::AuthError> {
+        use jsonwebtoken::{encode, Algorithm, Header};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| crate::error::auth_error::AuthError::InternalError(e.to_string()))?
+            .as_secs();
+        let exp = now + (self.jwt_config.access_token_ttl_minutes * 60) as u64;
+
+        // Create claims with user data
+        let claims = serde_json::json!({
+            "sub": user_id.to_string(),
+            "email": email,
+            "username": username,
+            "provider": auth_provider,
+            "iat": now,
+            "exp": exp,
+            "iss": self.jwt_config.issuer,
+            "aud": self.jwt_config.audience,
+            "jti": uuid::Uuid::new_v4().to_string(),
+        });
+
+        let header = Header::new(Algorithm::RS256);
+        let access_token = encode(&header, &claims, &self.encoding_key)
+            .map_err(|e| crate::error::auth_error::AuthError::InternalError(e.to_string()))?;
+
+        // Create refresh token
+        let refresh_token = uuid::Uuid::new_v4().to_string();
+
+        // Store refresh token in Redis
+        let mut redis_conn = self.redis_pool.get().await
+            .map_err(|e| crate::error::auth_error::AuthError::Redis(e.to_string()))?;
+
+        use deadpool_redis::redis::AsyncCommands;
+        let refresh_key = format!("refresh_token:{}", refresh_token);
+        let refresh_ttl = self.jwt_config.refresh_token_ttl_days * 24 * 3600; // days to seconds
+        let _: () = redis_conn.set_ex(&refresh_key, user_id.to_string(), refresh_ttl as usize).await
+            .map_err(|e| crate::error::auth_error::AuthError::Redis(e.to_string()))?;
+
+        Ok(crate::dto::oauth::TokenPair {
+            access_token,
+            refresh_token,
+            expires_in: (self.jwt_config.access_token_ttl_minutes * 60) as i64,
+        })
+    }
 }
