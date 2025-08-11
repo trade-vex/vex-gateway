@@ -19,6 +19,7 @@ redis = { version = "0.25", optional = true }
 # Redis-specific dependencies (only needed with Redis)
 bb8 = { version = "0.8", optional = true }
 bincode = { version = "1.3", optional = true }
+futures = { version = "0.3", optional = true }
 
 [features]
 default = ["postgres", "redis"]
@@ -36,5 +37,6 @@ redis = [
     "redis/tokio-comp",   # Enable tokio support in redis
     "redis/connection-manager",  # Enable connection manager
     "dep:bb8",            # Enable bb8 for connection pooling
-    "dep:bincode"         # Enable bincode for serialization
+    "dep:bincode",        # Enable bincode for serialization
+    "dep:futures"         # Enable futures for BoxFuture
 ]
