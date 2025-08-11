@@ -7,9 +7,10 @@ use std::{
     collections::HashMap,
     rc::Rc,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH, Duration},
 };
-use tracing::{error, info, warn};
+use tokio::sync::RwLock;
+use tracing::{debug, error, info, warn};
 
 use crate::api_key::{
     error::ApiKeyError,
@@ -18,43 +19,215 @@ use crate::api_key::{
 };
 
 /// Route-specific security configuration
+/// Placeholder : Will be removed and be replaced by direct actix based routing
 #[derive(Debug, Clone)]
 pub struct RouteSecurityConfig {
     pub path_pattern: String,
     pub security_type: SecurityType,
 }
 
-/// API Key middleware configuration
+/// API Key Store with multi-level caching
+/// 
+/// Cache Hierarchy:
+/// 1. L1 (In-Memory LRU)
+/// 2. L2 (Redis)
+/// 3. L3 (Database)
+#[derive(Clone)]
+pub struct ApiKeyStore {
+    /// L1 Cache: In-memory LRU for hot keys
+    l1_cache: Arc<RwLock<lru::LruCache<String, CachedApiKey>>>,
+    /// Fallback: In-memory HashMap for development
+    memory_store: Arc<HashMap<String, ApiKeyConfig>>,
+    /// Cache configuration
+    config: CacheConfig,
+    /// Performance metrics
+    metrics: Arc<CacheMetrics>,
+}
+
+/// Cached API key with TTL
+#[derive(Clone)]
+struct CachedApiKey {
+    config: Arc<ApiKeyConfig>,
+    cached_at: SystemTime,
+}
+
+impl CachedApiKey {
+    fn new(config: ApiKeyConfig) -> Self {
+        Self {
+            config: Arc::new(config),
+            cached_at: SystemTime::now(),
+        }
+    }
+
+    fn is_expired(&self, ttl: Duration) -> bool {
+        self.cached_at.elapsed().unwrap_or(Duration::MAX) > ttl
+    }
+}
+
+/// Cache configuration 
+#[derive(Clone)]
+pub struct CacheConfig {
+    pub l1_max_size: usize,
+    pub l1_ttl: Duration,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            l1_max_size: 100_000,  // 100K hot keys in memory
+            l1_ttl: Duration::from_secs(300),  // 5 minute TTL
+        }
+    }
+}
+
+/// Cache performance metrics
+pub struct CacheMetrics {
+    pub l1_hits: std::sync::atomic::AtomicU64,
+    pub l1_misses: std::sync::atomic::AtomicU64,
+    pub db_queries: std::sync::atomic::AtomicU64,
+}
+
+impl CacheMetrics {
+    pub fn new() -> Self {
+        Self {
+            l1_hits: std::sync::atomic::AtomicU64::new(0),
+            l1_misses: std::sync::atomic::AtomicU64::new(0),
+            db_queries: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Get L1 cache hit rate for monitoring
+    pub fn get_l1_hit_rate(&self) -> f64 {
+        let hits = self.l1_hits.load(std::sync::atomic::Ordering::Relaxed);
+        let misses = self.l1_misses.load(std::sync::atomic::Ordering::Relaxed);
+        if hits + misses == 0 { 0.0 } else { hits as f64 / (hits + misses) as f64 }
+    }
+}
+
+impl ApiKeyStore {
+    /// Create new store 
+    pub fn new(config: CacheConfig) -> Self {
+        let l1_cache = Arc::new(RwLock::new(
+            lru::LruCache::new(
+                std::num::NonZeroUsize::new(config.l1_max_size)
+                    .expect("L1 cache size must be > 0")
+            )
+        ));
+
+        Self {
+            l1_cache,
+            memory_store: Arc::new(HashMap::new()),
+            config,
+            metrics: Arc::new(CacheMetrics::new()),
+        }
+    }
+
+    /// Add API keys for development
+    pub fn with_api_keys(mut self, configs: Vec<ApiKeyConfig>) -> Self {
+        let mut api_keys = HashMap::new();
+        for config in configs {
+            api_keys.insert(config.api_key.clone(), config);
+        }
+        self.memory_store = Arc::new(api_keys);
+        self
+    }
+
+    /// Fast API key lookup with caching
+    pub async fn get_api_key(&self, api_key: &str) -> Option<Arc<ApiKeyConfig>> {
+        // L1 Cache: Check in-memory LRU first 
+        {
+            let mut cache = self.l1_cache.write().await;
+            if let Some(cached) = cache.get(api_key) {
+                if !cached.is_expired(self.config.l1_ttl) {
+                    self.metrics.l1_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    debug!("L1 cache hit for key: {}", api_key);
+                    return Some(cached.config.clone());
+                } else {
+                    // Remove expired entry
+                    cache.pop(api_key);
+                }
+            }
+        }
+        
+        self.metrics.l1_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // L2/L3: Check memory store (fallback for now, will be Redis + DB)
+        if let Some(config) = self.memory_store.get(api_key) {
+            self.metrics.db_queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let config_arc = Arc::new(config.clone());
+            
+            // Update L1 cache
+            let cached = CachedApiKey::new(config.clone());
+            let mut cache = self.l1_cache.write().await;
+            cache.put(api_key.to_string(), cached);
+            
+            debug!("Memory store hit for key: {}", api_key);
+            return Some(config_arc);
+        }
+
+        // TODO: Add Redis (L2) and Database (L3) lookup here
+        // if let Some(config) = self.check_redis(api_key).await {
+        //     self.update_l1_cache(api_key, config.clone()).await;
+        //     return Some(config);
+        // }
+        // 
+        // if let Some(config) = self.check_database(api_key).await {
+        //     self.update_redis(api_key, &config).await;
+        //     self.update_l1_cache(api_key, config.clone()).await;
+        //     return Some(config);
+        // }
+
+        warn!("API key not found: {}", api_key);
+        None
+    }
+
+    /// Invalidate cache entry (when key is updated/disabled)
+    pub async fn invalidate(&self, api_key: &str) {
+        let mut cache = self.l1_cache.write().await;
+        cache.pop(api_key);
+        // TODO: Invalidate Redis cache when implemented
+        info!("Invalidated cache for key: {}", api_key);
+    }
+
+    /// Get cache metrics for monitoring
+    pub fn metrics(&self) -> &CacheMetrics {
+        &self.metrics
+    }
+}
+
 pub struct ApiKeyMiddleware {
-    api_keys: Arc<HashMap<String, ApiKeyConfig>>,
+    api_key_store: ApiKeyStore,
     default_security: SecurityType,
     route_configs: Arc<Vec<RouteSecurityConfig>>,
     strict_timestamp_validation: bool,
 }
 
 impl ApiKeyMiddleware {
+    /// Create new middleware 
     pub fn new() -> Self {
         Self {
-            api_keys: Arc::new(HashMap::new()),
+            api_key_store: ApiKeyStore::new(CacheConfig::default()),
             default_security: SecurityType::None,
             route_configs: Arc::new(vec![]),
             strict_timestamp_validation: true,
         }
     }
 
-    pub fn with_api_key(mut self, config: ApiKeyConfig) -> Self {
-        let mut api_keys = HashMap::new();
-        api_keys.insert(config.api_key.clone(), config);
-        self.api_keys = Arc::new(api_keys);
+    /// Configure with custom cache settings
+    pub fn with_cache_config(mut self, config: CacheConfig) -> Self {
+        self.api_key_store = ApiKeyStore::new(config);
         self
     }
 
+    /// Add single API key (for development)
+    pub fn with_api_key(mut self, config: ApiKeyConfig) -> Self {
+        self.api_key_store = self.api_key_store.with_api_keys(vec![config]);
+        self
+    }
+
+    /// Add multiple API keys (for development/testing)
     pub fn with_api_keys(mut self, configs: Vec<ApiKeyConfig>) -> Self {
-        let mut api_keys = HashMap::new();
-        for config in configs {
-            api_keys.insert(config.api_key.clone(), config);
-        }
-        self.api_keys = Arc::new(api_keys);
+        self.api_key_store = self.api_key_store.with_api_keys(configs);
         self
     }
 
@@ -71,6 +244,11 @@ impl ApiKeyMiddleware {
     pub fn with_strict_timestamp_validation(mut self, strict: bool) -> Self {
         self.strict_timestamp_validation = strict;
         self
+    }
+
+    /// Get cache metrics for monitoring
+    pub fn cache_metrics(&self) -> &CacheMetrics {
+        self.api_key_store.metrics()
     }
 
     /// Determine security type for the current route
@@ -279,7 +457,7 @@ where
     fn new_transform(&self, service: S) -> Self::Future {
         ready(Ok(ApiKeyMiddlewareService {
             service: Rc::new(service),
-            api_keys: self.api_keys.clone(),
+            api_key_store: self.api_key_store.clone(),
             default_security: self.default_security,
             route_configs: self.route_configs.clone(),
             strict_timestamp_validation: self.strict_timestamp_validation,
@@ -289,7 +467,7 @@ where
 
 pub struct ApiKeyMiddlewareService<S> {
     service: Rc<S>,
-    api_keys: Arc<HashMap<String, ApiKeyConfig>>,
+    api_key_store: ApiKeyStore,
     default_security: SecurityType,
     route_configs: Arc<Vec<RouteSecurityConfig>>,
     strict_timestamp_validation: bool,
@@ -308,7 +486,7 @@ where
     forward_ready!(service);
 
     fn call(&self, mut req: ServiceRequest) -> Self::Future {
-        let api_keys = self.api_keys.clone();
+        let api_key_store = self.api_key_store.clone();
         let _default_security = self.default_security;
         let route_configs = self.route_configs.clone();
         let strict_timestamp_validation = self.strict_timestamp_validation;
@@ -340,7 +518,7 @@ where
             };
 
             // Get API key configuration
-            let api_config = match api_keys.get(&api_key) {
+            let api_config = match api_key_store.get_api_key(&api_key).await {
                 Some(config) => config,
                 None => {
                     error!("API key not found: {}", api_key);
@@ -400,7 +578,7 @@ where
 
                 // Validate signature
                 if let Err(e) = ApiKeyMiddleware::validate_signature(
-                    api_config, 
+                    &api_config, 
                     &query_params, 
                     &body_params,
                     &raw_query,
