@@ -78,7 +78,6 @@ impl TokenService {
         })
     }
 
-    // Fixed refresh_tokens method
     pub async fn refresh_tokens(
         &self,
         old_refresh_token: &str,

@@ -177,7 +177,7 @@ impl OAuthService {
             }
         };
 
-        // Generate JWT tokens for our app - FIXED VERSION
+        // Generate JWT tokens for our app
         let tokens = self
             .token_service
             .create_tokens_with_claims(
