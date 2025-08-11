@@ -30,12 +30,15 @@ impl SignatureVerifier {
         
         mac.update(payload.as_bytes());
         
-        let expected_signature = hex::encode(mac.finalize().into_bytes());
-        Ok(signature.to_lowercase() == expected_signature.to_lowercase())
+        // Decode the hex signature
+        let signature_bytes = hex::decode(signature)
+            .map_err(|_| ApiKeyError::InvalidSignature("Invalid hex signature".to_string()))?;
+        
+        // Use the HMAC's built-in verify method 
+        Ok(mac.verify_slice(&signature_bytes).is_ok())
     }
 
     /// Verify RSA signature (base64 encoded) using RSASSA-PKCS1-v1_5 with SHA-256
-    /// Following the exact Binance specification
     pub fn verify_rsa(
         payload: &str,
         signature: &str,
@@ -131,7 +134,7 @@ impl SignatureVerifier {
             .join("&")
     }
 
-    /// Build payload for mixed query string and request body as per Binance example 3
+    /// Build payload for mixed query string and request body
     /// This handles the case where query and body parameters are concatenated without '&' between them
     pub fn build_mixed_payload(
         query_string: &str,
@@ -173,13 +176,13 @@ impl SignatureVerifier {
             .join("&")
     }
 
-    /// Validate timestamp according to Binance specification
+    /// Validate timestamp 
     pub fn validate_timestamp(
         timestamp: u64,
         recv_window: u64,
         server_time: u64,
     ) -> Result<(), ApiKeyError> {
-        // Check if timestamp is in the future (with 1 second tolerance as per Binance spec)
+        // Check if timestamp is in the future (with 1 second tolerance)
         if timestamp > server_time + 1000 {
             return Err(ApiKeyError::FutureTimestamp {
                 server_time,
@@ -199,12 +202,12 @@ impl SignatureVerifier {
         Ok(())
     }
 
-    /// URL encode signature for safe transmission as per Binance specification
+    /// URL encode signature for safe transmission 
     pub fn url_encode_signature(signature: &str) -> String {
         url::form_urlencoded::byte_serialize(signature.as_bytes()).collect()
     }
 
-    /// Parse timestamp from milliseconds or microseconds as per Binance spec
+    /// Parse timestamp from milliseconds or microseconds
     pub fn parse_timestamp(timestamp_str: &str) -> Result<u64, ApiKeyError> {
         let timestamp = timestamp_str
             .parse::<u64>()
