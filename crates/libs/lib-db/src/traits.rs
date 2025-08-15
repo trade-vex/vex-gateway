@@ -208,7 +208,6 @@ pub trait SqlDb: Send + Sync + Clone + 'static {
 
     /// The native pool type (e.g., sqlx::PgPool)
     type NativePool: Send + Sync;
-
     /// Connect to database with connection pooling
     ///
     /// Establishes a connection pool to the database using the provided URL.
@@ -325,7 +324,6 @@ pub trait SqlDb: Send + Sync + Clone + 'static {
     async fn query_with<'a, T>(&self, sql: &str, args: Self::Arguments<'a>) -> Result<Vec<T>>
     where
         T: Send + Unpin + for<'r> From<&'r Self::Row>;
-
     /// Query single row with parameters
     ///
     /// Executes a SELECT query and returns exactly one row.
