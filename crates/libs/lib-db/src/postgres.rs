@@ -5,9 +5,8 @@ use crate::{
 use async_trait::async_trait;
 use sqlx::{
     postgres::{PgArguments, PgPool, PgPoolOptions, PgRow},
-    Executor, Postgres, Transaction,
+    Executor,
 };
-use std::future::Future;
 use std::sync::Arc;
 
 /// PostgreSQL backend
@@ -66,69 +65,46 @@ impl PostgresDb {
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
-    
-    /// Begin a transaction explicitly
-    pub async fn begin(&self) -> Result<PostgresTransaction<'_>> {
-        let tx = self.pool.begin().await?;
-        Ok(PostgresTransaction { tx })
-    }
-}
 
-/// Transaction wrapper
-pub struct PostgresTransaction<'a> {
-    tx: Transaction<'a, Postgres>,
-}
+    // Convenience methods for direct sqlx support (execute and query commands with raw sqlx)
 
-impl<'a> PostgresTransaction<'a> {
-    /// Commit the transaction
-    pub async fn commit(self) -> Result<()> {
-        self.tx.commit().await?;
-        Ok(())
+    /// Execute a simple query without parameters 
+    pub async fn execute(&self, sql: &str) -> Result<u64> {
+        // Calls the trait method with default arguments
+        self.execute_with(sql, PgArguments::default()).await
     }
     
-    /// Rollback the transaction
-    pub async fn rollback(self) -> Result<()> {
-        self.tx.rollback().await?;
-        Ok(())
-    }
-    
-    /// Execute within transaction
-    pub async fn execute(&mut self, sql: &str) -> Result<u64> {
-        let result = self.tx.execute(sql).await?;
-        Ok(result.rows_affected())
-    }
-    
-    /// Execute with arguments within transaction
-    pub async fn execute_with(&mut self, sql: &str, args: PgArguments) -> Result<u64> {
-        let query = sqlx::query_with(sql, args);
-        let result = self.tx.execute(query).await?;
-        Ok(result.rows_affected())
-    }
-    
-    /// Query within transaction
-    pub async fn query<T>(&mut self, sql: &str) -> Result<Vec<T>>
+    /// Query multiple rows without parameters 
+    pub async fn query<T>(&self, sql: &str) -> Result<Vec<T>>
     where
         T: Send + Unpin + for<'r> From<&'r PgRow>,
     {
-        let rows: Vec<PgRow> = self.tx.fetch_all(sql).await?;
-        Ok(rows.iter().map(T::from).collect())
+        self.query_with(sql, PgArguments::default()).await
     }
     
-    /// Query with arguments within transaction
-    pub async fn query_with<T>(&mut self, sql: &str, args: PgArguments) -> Result<Vec<T>>
+    /// Query single row without parameters
+    pub async fn query_one<T>(&self, sql: &str) -> Result<T>
     where
         T: Send + Unpin + for<'r> From<&'r PgRow>,
     {
-        let query = sqlx::query_with(sql, args);
-        let rows: Vec<PgRow> = self.tx.fetch_all(query).await?;
-        Ok(rows.iter().map(T::from).collect())
+        self.query_one_with(sql, PgArguments::default()).await
+    }
+    
+    /// Query optional single row without parameters
+    pub async fn query_optional<T>(&self, sql: &str) -> Result<Option<T>>
+    where
+        T: Send + Unpin + for<'r> From<&'r PgRow>,
+    {
+        self.query_optional_with(sql, PgArguments::default()).await
     }
 }
+
 
 #[async_trait]
 impl SqlDb for PostgresDb {
     type Row = PgRow;
     type Arguments<'a> = PgArguments;
+    type NativePool = PgPool;
     
     async fn connect(url: &str) -> Result<Self> {
         let config = DbConfig::default();
@@ -153,23 +129,10 @@ impl SqlDb for PostgresDb {
         })
     }
     
-    async fn execute(&self, sql: &str) -> Result<u64> {
-        let result = self.pool.execute(sql).await?;
-        Ok(result.rows_affected())
-    }
-    
     async fn execute_with<'a>(&self, sql: &str, args: Self::Arguments<'a>) -> Result<u64> {
         let query = sqlx::query_with(sql, args);
         let result = self.pool.execute(query).await?;
         Ok(result.rows_affected())
-    }
-    
-    async fn query<T>(&self, sql: &str) -> Result<Vec<T>>
-    where
-        T: Send + Unpin + for<'r> From<&'r Self::Row>,
-    {
-        let rows: Vec<PgRow> = self.pool.fetch_all(sql).await?;
-        Ok(rows.iter().map(T::from).collect())
     }
     
     async fn query_with<'a, T>(&self, sql: &str, args: Self::Arguments<'a>) -> Result<Vec<T>>
@@ -181,14 +144,6 @@ impl SqlDb for PostgresDb {
         Ok(rows.iter().map(T::from).collect())
     }
     
-    async fn query_one<T>(&self, sql: &str) -> Result<T>
-    where
-        T: Send + Unpin + for<'r> From<&'r Self::Row>,
-    {
-        let row: PgRow = self.pool.fetch_one(sql).await?;
-        Ok(T::from(&row))
-    }
-    
     async fn query_one_with<'a, T>(&self, sql: &str, args: Self::Arguments<'a>) -> Result<T>
     where
         T: Send + Unpin + for<'r> From<&'r Self::Row>,
@@ -196,14 +151,6 @@ impl SqlDb for PostgresDb {
         let query = sqlx::query_with(sql, args);
         let row: PgRow = self.pool.fetch_one(query).await?;
         Ok(T::from(&row))
-    }
-    
-    async fn query_optional<T>(&self, sql: &str) -> Result<Option<T>>
-    where
-        T: Send + Unpin + for<'r> From<&'r Self::Row>,
-    {
-        let row: Option<PgRow> = self.pool.fetch_optional(sql).await?;
-        Ok(row.as_ref().map(T::from))
     }
     
     async fn query_optional_with<'a, T>(
@@ -218,24 +165,9 @@ impl SqlDb for PostgresDb {
         let row: Option<PgRow> = self.pool.fetch_optional(query).await?;
         Ok(row.as_ref().map(T::from))
     }
-    
-    async fn transaction<F, R, Fut>(&self, f: F) -> Result<R>
-    where
-        F: FnOnce(Self) -> Fut + Send,
-        Fut: Future<Output = Result<R>> + Send,
-        R: Send,
-    {
-        // Create a new instance that shares the pool but marks as in transaction
-        let tx_db = self.clone();
-        
-        // Execute the function with the transaction context
-        let result = f(tx_db).await?;
-        
-        Ok(result)
-    }
-    
-    fn in_transaction(&self) -> bool {
-        false
+
+    fn native_pool(&self) -> &Self::NativePool {
+        &self.pool
     }
     
     fn pool_stats(&self) -> PoolStats {

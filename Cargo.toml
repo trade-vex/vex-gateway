@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = [ "crates/bin" , "crates/tests" , "crates/libs/lib-api", "crates/libs/lib-core", "crates/libs/lib-server", "crates/libs/lib-config", "crates/libs/lib-auth", "crates/libs/lib-middleware" , "crates/libs/lib-db"]
+members = [ "crates/bin" , "crates/tests" , "crates/libs/lib-api", "crates/libs/lib-core", "crates/libs/lib-server", "crates/libs/lib-config", "crates/libs/lib-auth", "crates/libs/lib-db"]
 
 [workspace.dependencies]
 actix-web = "4.11.0"
