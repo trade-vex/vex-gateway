@@ -1,7 +1,6 @@
 use crate::error::Result;
 use async_trait::async_trait;
 use serde::{de::DeserializeOwned, Serialize};
-use std::future::Future;
 
 /// Connection pool statistics
 #[derive(Debug, Clone, Copy)]
@@ -22,30 +21,20 @@ pub trait SqlDb: Send + Sync + Clone + 'static {
     
     /// The argument type for parameterized queries
     type Arguments<'a>: Send + Sync;
+
+    /// The native pool type (e.g., sqlx::PgPool)
+    type NativePool: Send + Sync;
     
     /// Connect to database with connection pooling
     async fn connect(url: &str) -> Result<Self>
     where
         Self: Sized;
-    
-    /// Execute a query that doesn't return rows (INSERT, UPDATE, DELETE)
-    async fn execute(&self, sql: &str) -> Result<u64>;
-    
+
     /// Execute a query with parameters
     async fn execute_with<'a>(&self, sql: &str, args: Self::Arguments<'a>) -> Result<u64>;
-    
-    /// Query multiple rows
-    async fn query<T>(&self, sql: &str) -> Result<Vec<T>>
-    where
-        T: Send + Unpin + for<'r> From<&'r Self::Row>;
-    
+
     /// Query multiple rows with parameters
     async fn query_with<'a, T>(&self, sql: &str, args: Self::Arguments<'a>) -> Result<Vec<T>>
-    where
-        T: Send + Unpin + for<'r> From<&'r Self::Row>;
-    
-    /// Query single row (errors if not found)
-    async fn query_one<T>(&self, sql: &str) -> Result<T>
     where
         T: Send + Unpin + for<'r> From<&'r Self::Row>;
     
@@ -53,12 +42,7 @@ pub trait SqlDb: Send + Sync + Clone + 'static {
     async fn query_one_with<'a, T>(&self, sql: &str, args: Self::Arguments<'a>) -> Result<T>
     where
         T: Send + Unpin + for<'r> From<&'r Self::Row>;
-    
-    /// Query optional single row
-    async fn query_optional<T>(&self, sql: &str) -> Result<Option<T>>
-    where
-        T: Send + Unpin + for<'r> From<&'r Self::Row>;
-    
+
     /// Query optional single row with parameters
     async fn query_optional_with<'a, T>(
         &self,
@@ -67,16 +51,9 @@ pub trait SqlDb: Send + Sync + Clone + 'static {
     ) -> Result<Option<T>>
     where
         T: Send + Unpin + for<'r> From<&'r Self::Row>;
-    
-    /// Execute a transaction
-    async fn transaction<F, R, Fut>(&self, f: F) -> Result<R>
-    where
-        F: FnOnce(Self) -> Fut + Send,
-        Fut: Future<Output = Result<R>> + Send,
-        R: Send;
-    
-    /// Check if we're in a transaction
-    fn in_transaction(&self) -> bool;
+
+    /// Escape Hatch Pattern : Get direct access to the native sqlx pool
+    fn native_pool(&self) -> &Self::NativePool;
     
     /// Get pool statistics (for monitoring)
     fn pool_stats(&self) -> PoolStats;
