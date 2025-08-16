@@ -15,10 +15,10 @@
 //! use vex_gateway_lib_db::{Result, DbError};
 //! 
 //! #[cfg(feature = "postgres")]
-//! use vex_gateway_lib_db::postgres;
+//! use vex_gateway_lib_db::backends::sql::postgres;
 //! 
 //! #[cfg(feature = "redis")]
-//! use vex_gateway_lib_db::{redis, memory_kv};
+//! use vex_gateway_lib_db::backends::kv::{redis, memory_kv};
 //! ```
 //! 
 //! ## Architecture
@@ -32,17 +32,15 @@ pub mod error;
 /// Database trait definitions and abstractions
 pub mod traits;
 
-/// PostgreSQL database implementation
-#[cfg(feature = "postgres")]
-pub mod postgres;
-
-/// Redis database implementation for caching and key-value operations
-#[cfg(feature = "redis")]
-pub mod redis;
-
-/// In-memory key-value store implementation
-#[cfg(feature = "redis")]
-pub mod memory_kv;
+/// Database backend implementations
+pub mod backends;
 
 /// Re-export common error types and result aliases
 pub use error::{DbError, Result};
+
+// Re-export backend modules for convenience
+#[cfg(feature = "postgres")]
+pub use backends::sql::postgres;
+
+#[cfg(feature = "redis")]
+pub use backends::kv::{redis, memory_kv};
