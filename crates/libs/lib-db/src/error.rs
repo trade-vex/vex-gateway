@@ -67,6 +67,10 @@ pub enum DbError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+
+    /// Operation not supported by this store
+    #[error("operation not supported: {operation}")]
+    Unsupported { operation: String },
 }
 
 /// Result type alias
@@ -341,14 +345,15 @@ impl DbError {
     /// Get suggested HTTP status code for this error
     pub fn http_status_code(&self) -> u16 {
         match self {
-            DbError::NotFound { .. } => 404,
-            DbError::RateLimited { .. } => 429,
-            DbError::Timeout { .. } => 408,
-            DbError::Configuration { .. } | DbError::FeatureNotEnabled { .. } => 500,
-            DbError::QueryExecution { .. } | DbError::Serialization { .. } => 400,
-            DbError::Connection { .. } | DbError::Pool { .. } => 503,
-            DbError::Transaction { .. } => 409,
-            DbError::Internal { .. } => 500,
+            DbError::NotFound { .. } => 404, // Not Found
+            DbError::RateLimited { .. } => 429, // Too Many Requests
+            DbError::Timeout { .. } => 408, // Request Timeout
+            DbError::Configuration { .. } | DbError::FeatureNotEnabled { .. } => 500, // Internal server error
+            DbError::QueryExecution { .. } | DbError::Serialization { .. } => 400, // Bad Request
+            DbError::Connection { .. } | DbError::Pool { .. } => 503, // Service Unavailable
+            DbError::Transaction { .. } => 409, // Conflict
+            DbError::Internal { .. } => 500, // Internal server error
+            DbError::Unsupported { .. } => 501, // Not Implemented
         }
     }
 

@@ -1,6 +1,6 @@
 use crate::{
     error::{DbError, Result},
-    traits::{KvStore, PoolStats},
+    traits::{BasicKvStore, AdvancedKvStore, AtomicKvStore, ExpiringKvStore, PoolStats},
 };
 use async_trait::async_trait;
 use bb8::{Pool, RunError};
@@ -126,8 +126,10 @@ impl RedisDb {
     }
 }
 
+// Basic Kv Store Implementation
+
 #[async_trait]
-impl KvStore for RedisDb {
+impl BasicKvStore for RedisDb {
     async fn connect(url: &str) -> Result<Self> {
         let config = RedisConfig::default();
         
@@ -239,6 +241,30 @@ impl KvStore for RedisDb {
         .await
     }
     
+}
+
+
+// ADVANCED KV STORE IMPLEMENTATION
+
+#[async_trait]
+impl AdvancedKvStore for RedisDb {
+    async fn ping(&self) -> Result<()> {
+        self.execute_with_retry(|conn| {
+            Box::pin(async move { redis::cmd("PING").query_async(conn).await })
+        })
+        .await
+    }
+    
+    fn pool_stats(&self) -> PoolStats {
+        let state = self.pool.state();
+        PoolStats {
+            size: state.connections,
+            idle: state.idle_connections,
+            active: state.connections - state.idle_connections,
+            max_size: self.config.max_connections,
+        }
+    }
+    
     async fn mget<T>(&self, keys: &[&str]) -> Result<Vec<Option<T>>>
     where
         T: DeserializeOwned,
@@ -323,7 +349,12 @@ impl KvStore for RedisDb {
             .await?;
         Ok(deleted as u64)
     }
-    
+}
+
+// Atomic Kv Store Implementation
+
+#[async_trait]
+impl AtomicKvStore for RedisDb {
     async fn incr(&self, key: &str, delta: i64) -> Result<i64> {
         self.execute_with_retry(|conn| {
             let key = key.to_string();
@@ -351,7 +382,7 @@ impl KvStore for RedisDb {
     
     async fn cas<T>(&self, key: &str, old: &T, new: &T) -> Result<bool>
     where
-        T: Serialize + Send + Sync + PartialEq,
+        T: Serialize + DeserializeOwned + Send + Sync + PartialEq,
     {
         // Redis doesn't have native CAS, so we implement with Lua script
         let script = r#"
@@ -392,7 +423,12 @@ impl KvStore for RedisDb {
         
         Ok(result == 1)
     }
-    
+}
+
+// Expiring Kv Store Implementation
+
+#[async_trait]
+impl ExpiringKvStore for RedisDb {
     async fn set_ex<T>(&self, key: &str, value: &T, ttl_secs: u64) -> Result<()>
     where
         T: Serialize + Send + Sync,
@@ -434,54 +470,5 @@ impl KvStore for RedisDb {
             n if n >= 0 => Ok(Some(n as u64)),
             _ => Ok(None),
         }
-    }
-    
-    async fn scan(&self, pattern: &str, limit: usize) -> Result<Vec<String>> {
-        self.execute_with_retry(|conn| {
-            let pattern = pattern.to_string();
-            Box::pin(async move {
-                let mut keys = Vec::new();
-                let mut cursor = 0u64;
-                
-                loop {
-                    let (new_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
-                        .arg(cursor)
-                        .arg("MATCH")
-                        .arg(&pattern)
-                        .arg("COUNT")
-                        .arg(100)
-                        .query_async(conn)
-                        .await?;
-                    
-                    keys.extend(batch);
-                    cursor = new_cursor;
-                    
-                    if cursor == 0 || keys.len() >= limit {
-                        keys.truncate(limit);
-                        break;
-                    }
-                }
-                
-                Ok(keys)
-            })
-        })
-        .await
-    }
-    
-    fn pool_stats(&self) -> PoolStats {
-        let state = self.pool.state();
-        PoolStats {
-            size: state.connections,
-            idle: state.idle_connections,
-            active: state.connections - state.idle_connections,
-            max_size: self.config.max_connections,
-        }
-    }
-    
-    async fn ping(&self) -> Result<()> {
-        self.execute_with_retry(|conn| {
-            Box::pin(async move { redis::cmd("PING").query_async(conn).await })
-        })
-        .await
     }
 }
