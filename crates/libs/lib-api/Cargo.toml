@@ -5,3 +5,8 @@ edition = "2024"
 
 [dependencies]
 actix-web = {workspace = true}
+serde = { workspace = true }
+tokio = { workspace = true }
+vex-networking ={ git = "https://github.com/trade-vex/vex-core" , rev = "8a09622"}
+vex-config = { git = "https://github.com/trade-vex/vex-core" , rev = "8a09622"}
+common = { git = "https://github.com/trade-vex/vex-core" , rev = "8a09622"}
