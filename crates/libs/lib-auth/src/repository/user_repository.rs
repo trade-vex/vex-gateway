@@ -2,11 +2,49 @@ use crate::dto::oauth::UserInfo;
 use crate::error::auth_error::AuthError;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sea_orm::*;
+use sea_orm::prelude::*;
 use std::sync::Arc;
 use uuid::Uuid;
 
-#[derive(Debug, sqlx::FromRow, Clone)]
+#[derive(Debug, Clone, PartialEq, DeriveEntityModel)]
+#[sea_orm(table_name = "users")]
+pub struct Model {
+    #[sea_orm(primary_key)]
+    pub user_id: Uuid,
+    pub email: String,
+    pub username: String,
+    pub password_hash: Option<String>,
+    pub auth_provider: String,
+    pub provider_id: Option<String>,
+    pub avatar_url: Option<String>,
+    pub email_verified: bool,
+    pub status: UserStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_login: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "user_status")]
+pub enum UserStatus {
+    #[sea_orm(string_value = "active")]
+    Active,
+    #[sea_orm(string_value = "pending")]
+    Pending,
+    #[sea_orm(string_value = "suspended")]
+    Suspended,
+    #[sea_orm(string_value = "deleted")]
+    Deleted,
+}
+
+#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+pub enum Relation {}
+
+impl ActiveModelBehavior for ActiveModel {}
+
+// Legacy User struct for backward compatibility
+#[derive(Debug, Clone)]
 pub struct User {
     pub user_id: Uuid,
     pub email: String,
@@ -22,13 +60,23 @@ pub struct User {
     pub last_login: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, sqlx::Type)]
-#[sqlx(type_name = "user_status", rename_all = "lowercase")]
-pub enum UserStatus {
-    Active,
-    Pending,
-    Suspended,
-    Deleted,
+impl From<Model> for User {
+    fn from(model: Model) -> Self {
+        Self {
+            user_id: model.user_id,
+            email: model.email,
+            username: model.username,
+            password_hash: model.password_hash,
+            auth_provider: model.auth_provider,
+            provider_id: model.provider_id,
+            avatar_url: model.avatar_url,
+            email_verified: model.email_verified,
+            status: model.status,
+            created_at: model.created_at,
+            updated_at: model.updated_at,
+            last_login: model.last_login,
+        }
+    }
 }
 
 #[async_trait]
@@ -47,54 +95,36 @@ pub trait UserRepository: Send + Sync {
 }
 
 pub struct PostgresUserRepository {
-    pool: Arc<PgPool>,
+    db: Arc<DatabaseConnection>,
 }
 
 impl PostgresUserRepository {
-    pub fn new(pool: Arc<PgPool>) -> Self {
-        Self { pool }
+    pub fn new(db: Arc<DatabaseConnection>) -> Self {
+        Self { db }
     }
 }
 
 #[async_trait]
 impl UserRepository for PostgresUserRepository {
     async fn find_by_id(&self, user_id: Uuid) -> Result<Option<User>, AuthError> {
-        let user = sqlx::query_as!(
-            User,
-            r#"
-            SELECT user_id, email, username, password_hash, auth_provider, 
-                   provider_id, avatar_url, email_verified, 
-                   status as "status: UserStatus", 
-                   created_at, updated_at, last_login
-            FROM users 
-            WHERE user_id = $1 AND status != 'deleted'
-            "#,
-            user_id
-        )
-        .fetch_optional(&*self.pool)
-        .await
-        .map_err(|e| AuthError::Database(format!("Failed to find user by ID: {}", e)))?;
+        let user = Entity::find_by_id(user_id)
+            .filter(Column::Status.ne(UserStatus::Deleted))
+            .one(&*self.db)
+            .await
+            .map_err(|e| AuthError::Database(format!("Failed to find user by ID: {}", e)))?;
 
-        Ok(user)
+        Ok(user.map(|u| u.into()))
     }
 
     async fn find_by_email(&self, email: &str) -> Result<Option<User>, AuthError> {
-        let user = sqlx::query_as!(
-            User,
-            r#"
-            SELECT user_id, email, username, password_hash, auth_provider, 
-                   provider_id, avatar_url, email_verified, 
-                   status as "status: UserStatus", 
-                   created_at, updated_at, last_login
-            FROM users 
-            WHERE email = $1 AND status != 'deleted'
-            "#,
-            email
-        )
-        .fetch_optional(&*self.pool)
-        .await?;
+        let user = Entity::find()
+            .filter(Column::Email.eq(email))
+            .filter(Column::Status.ne(UserStatus::Deleted))
+            .one(&*self.db)
+            .await
+            .map_err(|e| AuthError::Database(format!("Failed to find user by email: {}", e)))?;
 
-        Ok(user)
+        Ok(user.map(|u| u.into()))
     }
 
     async fn find_by_provider_id(
@@ -102,96 +132,89 @@ impl UserRepository for PostgresUserRepository {
         provider: &str,
         provider_id: &str,
     ) -> Result<Option<User>, AuthError> {
-        let user = sqlx::query_as!(
-            User,
-            r#"
-            SELECT user_id, email, username, password_hash, auth_provider, 
-                   provider_id, avatar_url, email_verified, 
-                   status as "status: UserStatus", 
-                   created_at, updated_at, last_login
-            FROM users 
-            WHERE auth_provider = $1 AND provider_id = $2 AND status != 'deleted'
-            "#,
-            provider,
-            provider_id
-        )
-        .fetch_optional(&*self.pool)
-        .await?;
+        let user = Entity::find()
+            .filter(Column::AuthProvider.eq(provider))
+            .filter(Column::ProviderId.eq(provider_id))
+            .filter(Column::Status.ne(UserStatus::Deleted))
+            .one(&*self.db)
+            .await
+            .map_err(|e| AuthError::Database(format!("Failed to find user by provider ID: {}", e)))?;
 
-        Ok(user)
+        Ok(user.map(|u| u.into()))
     }
 
     async fn create_user(&self, user: &User) -> Result<User, AuthError> {
-        let created_user = sqlx::query_as!(
-            User,
-            r#"
-            INSERT INTO users (
-                user_id, email, username, password_hash, auth_provider, 
-                provider_id, avatar_url, email_verified, status, 
-                created_at, updated_at, last_login
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-            RETURNING 
-                user_id, email, username, password_hash, auth_provider, 
-                provider_id, avatar_url, email_verified, 
-                status as "status: UserStatus", 
-                created_at, updated_at, last_login
-            "#,
-            user.user_id,
-            user.email,
-            user.username,
-            user.password_hash,
-            user.auth_provider,
-            user.provider_id,
-            user.avatar_url,
-            user.email_verified,
-            user.status as _, // Cast enum for sqlx
-            user.created_at,
-            user.updated_at,
-            user.last_login
-        )
-        .fetch_one(&*self.pool)
-        .await?;
+        let user_model = ActiveModel {
+            user_id: Set(user.user_id),
+            email: Set(user.email.clone()),
+            username: Set(user.username.clone()),
+            password_hash: Set(user.password_hash.clone()),
+            auth_provider: Set(user.auth_provider.clone()),
+            provider_id: Set(user.provider_id.clone()),
+            avatar_url: Set(user.avatar_url.clone()),
+            email_verified: Set(user.email_verified),
+            status: Set(user.status.clone()),
+            created_at: Set(user.created_at),
+            updated_at: Set(user.updated_at),
+            last_login: Set(user.last_login),
+        };
 
-        Ok(created_user)
+        let created_user = user_model
+            .insert(&*self.db)
+            .await
+            .map_err(|e| AuthError::Database(format!("Failed to create user: {}", e)))?;
+
+        Ok(created_user.into())
     }
 
     async fn update_last_login(&self, user_id: Uuid) -> Result<(), AuthError> {
         let now = Utc::now();
-        sqlx::query!(
-            "UPDATE users SET last_login = $1, updated_at = $1 WHERE user_id = $2",
-            now,
-            user_id
-        )
-        .execute(&*self.pool)
-        .await?;
+        let update_result = Entity::update_many()
+            .col_expr(Column::LastLogin, Expr::value(now))
+            .col_expr(Column::UpdatedAt, Expr::value(now))
+            .filter(Column::UserId.eq(user_id))
+            .exec(&*self.db)
+            .await
+            .map_err(|e| AuthError::Database(format!("Failed to update last login: {}", e)))?;
+
+        if update_result.rows_affected == 0 {
+            return Err(AuthError::Database("User not found".to_string()));
+        }
 
         Ok(())
     }
 
     async fn verify_email(&self, user_id: Uuid) -> Result<(), AuthError> {
         let now = Utc::now();
-        sqlx::query!(
-            "UPDATE users SET email_verified = true, status = 'active', updated_at = $1 WHERE user_id = $2",
-            now,
-            user_id
-        )
-        .execute(&*self.pool)
-        .await?;
+        let update_result = Entity::update_many()
+            .col_expr(Column::EmailVerified, Expr::value(true))
+            .col_expr(Column::Status, Expr::value(UserStatus::Active))
+            .col_expr(Column::UpdatedAt, Expr::value(now))
+            .filter(Column::UserId.eq(user_id))
+            .exec(&*self.db)
+            .await
+            .map_err(|e| AuthError::Database(format!("Failed to verify email: {}", e)))?;
+
+        if update_result.rows_affected == 0 {
+            return Err(AuthError::Database("User not found".to_string()));
+        }
 
         Ok(())
     }
 
     async fn update_password(&self, user_id: Uuid, password_hash: &str) -> Result<(), AuthError> {
         let now = Utc::now();
-        sqlx::query!(
-            "UPDATE users SET password_hash = $1, updated_at = $2 WHERE user_id = $3",
-            password_hash,
-            now,
-            user_id
-        )
-        .execute(&*self.pool)
-        .await?;
+        let update_result = Entity::update_many()
+            .col_expr(Column::PasswordHash, Expr::value(password_hash))
+            .col_expr(Column::UpdatedAt, Expr::value(now))
+            .filter(Column::UserId.eq(user_id))
+            .exec(&*self.db)
+            .await
+            .map_err(|e| AuthError::Database(format!("Failed to update password: {}", e)))?;
+
+        if update_result.rows_affected == 0 {
+            return Err(AuthError::Database("User not found".to_string()));
+        }
 
         Ok(())
     }

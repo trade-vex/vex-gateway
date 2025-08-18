@@ -3,14 +3,14 @@ use crate::error::auth_error::AuthError;
 use crate::repository::{PostgresUserRepository, UserRepository};
 use deadpool_redis::{Config as RedisConfig, Pool as RedisPool, Runtime};
 use jsonwebtoken::{DecodingKey, EncodingKey};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sea_orm::{Database, DatabaseConnection};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct AppState {
     pub user_repo: Arc<dyn UserRepository>,
-    pub db_pool: Arc<PgPool>,
+    pub db: Arc<DatabaseConnection>,
     pub redis_pool: Arc<RedisPool>,
     pub jwt_config: crate::config::JwtConfig,
     pub encoding_key: EncodingKey,
@@ -23,9 +23,7 @@ pub struct AppState {
 impl AppState {
     pub async fn new(config: AuthConfig) -> Result<Arc<Self>, AuthError> {
         // Database connection
-        let db_pool = PgPoolOptions::new()
-            .max_connections(config.database.max_connections)
-            .connect(&config.database.url)
+        let db = Database::connect(&config.database.url)
             .await
             .map_err(|e| AuthError::Database(format!("Failed to connect to database: {}", e)))?;
 
@@ -37,7 +35,7 @@ impl AppState {
 
         // Create the repository and store it in the state
         let user_repo: Arc<dyn UserRepository> =
-            Arc::new(PostgresUserRepository::new(Arc::new(db_pool.clone())));
+            Arc::new(PostgresUserRepository::new(Arc::new(db.clone())));
 
         // JWT keys
         let (encoding_key, decoding_key) = load_jwt_keys(&config.jwt)?;
@@ -52,7 +50,7 @@ impl AppState {
 
         Ok(Arc::new(Self {
             user_repo,
-            db_pool: Arc::new(db_pool),
+            db: Arc::new(db),
             redis_pool: Arc::new(redis_pool),
             jwt_config: config.jwt,
             encoding_key,

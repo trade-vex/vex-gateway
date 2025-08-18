@@ -184,8 +184,8 @@ impl ResponseError for AuthError {
 }
 
 // Conversion implementations
-impl From<sqlx::Error> for AuthError {
-    fn from(error: sqlx::Error) -> Self {
+impl From<sea_orm::DbErr> for AuthError {
+    fn from(error: sea_orm::DbErr) -> Self {
         AuthError::Database(error.to_string())
     }
 }

@@ -15,7 +15,7 @@ lib-server = {path = "../libs/lib-server"}
 lib-config = {path = "../libs/lib-config"}
 lib-auth = {path = "../libs/lib-auth"}
 chrono = "0.4.41"
-sqlx = "0.8.6"
+sea-orm = { version = "0.12", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-uuid", "with-chrono"] }
 jsonwebtoken = "9.3.1"
 deadpool-redis = "0.22.0"
 dotenvy = "0.15.7"
