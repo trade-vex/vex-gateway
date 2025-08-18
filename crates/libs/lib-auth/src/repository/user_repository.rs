@@ -2,8 +2,8 @@ use crate::dto::oauth::UserInfo;
 use crate::error::auth_error::AuthError;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sea_orm::*;
 use sea_orm::prelude::*;
+use sea_orm::*;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -42,8 +42,6 @@ pub enum UserStatus {
 pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
-
-
 
 #[async_trait]
 pub trait UserRepository: Send + Sync {
@@ -104,7 +102,9 @@ impl UserRepository for PostgresUserRepository {
             .filter(Column::Status.ne(UserStatus::Deleted))
             .one(&*self.db)
             .await
-            .map_err(|e| AuthError::Database(format!("Failed to find user by provider ID: {}", e)))?;
+            .map_err(|e| {
+                AuthError::Database(format!("Failed to find user by provider ID: {}", e))
+            })?;
 
         Ok(user)
     }

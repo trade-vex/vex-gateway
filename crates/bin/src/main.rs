@@ -25,7 +25,7 @@ struct ServerState {
 mod auth_handlers {
     pub use lib_auth::handlers::auth::*;
 }
-//  Handlers 
+//  Handlers
 
 async fn auth_redirect_handler(
     provider: web::Path<String>,
@@ -119,7 +119,7 @@ async fn main() -> std::io::Result<()> {
         )
         .init();
 
-    //  Create proper auth config with OAuth providers 
+    //  Create proper auth config with OAuth providers
     let auth_config = create_auth_config_with_oauth();
 
     // Initialize AppState
@@ -155,37 +155,35 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(web::Data::new(app_state.clone())) // For lib-auth functions
             .app_data(server_state.clone()) // For custom OAuth handlers
-            
             // Public routes (no authentication required)
             .service(
                 web::scope("/auth")
                     // Your custom OAuth handlers
                     .route("/{provider}", web::get().to(auth_redirect_handler))
-                    .route("/{provider}/callback", web::get().to(auth_callback_handler))
+                    .route("/{provider}/callback", web::get().to(auth_callback_handler)),
             )
-            
             // Public auth API routes (login, refresh, etc.)
             .service(
-                web::scope("/api/auth")
-                    .configure(auth_handlers::configure) // login, logout, refresh endpoints
+                web::scope("/api/auth").configure(auth_handlers::configure), // login, logout, refresh endpoints
             )
-            
             // Protected API routes (require JWT authentication)
             .service(
                 web::scope("/api")
-                    .wrap(jwt_middleware.clone()) 
+                    .wrap(jwt_middleware.clone())
                     .route("/me", web::get().to(me_handler))
                     // Add more protected routes here
-                    .route("/profile", web::get().to(auth_handlers::get_profile))
+                    .route("/profile", web::get().to(auth_handlers::get_profile)),
             )
-            
             // Health check (public)
-            .route("/health", web::get().to(|| async { 
-                HttpResponse::Ok().json(serde_json::json!({
-                    "status": "healthy",
-                    "timestamp": chrono::Utc::now().to_rfc3339()
-                }))
-            }))
+            .route(
+                "/health",
+                web::get().to(|| async {
+                    HttpResponse::Ok().json(serde_json::json!({
+                        "status": "healthy",
+                        "timestamp": chrono::Utc::now().to_rfc3339()
+                    }))
+                }),
+            )
     })
     .listen(listener)?
     .run()
@@ -230,7 +228,7 @@ fn create_auth_config_with_oauth() -> lib_auth::config::AuthConfig {
         },
     );
 
-    // GitHub OAuth provider 
+    // GitHub OAuth provider
     if let (Ok(github_client_id), Ok(github_client_secret)) = (
         env::var("GITHUB_CLIENT_ID"),
         env::var("GITHUB_CLIENT_SECRET"),
