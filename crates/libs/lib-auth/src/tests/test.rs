@@ -14,7 +14,7 @@ use crate::{
         RedisConfig, ServerConfig,
     },
     error::auth_error::AuthError,
-    repository::{User, UserRepository, UserStatus},
+    repository::{UserRepository, UserStatus, Model},
 };
 use chrono::Utc;
 use sea_orm::Database;
@@ -48,7 +48,7 @@ pub fn load_public_key(path: &str) -> Result<DecodingKey, AuthError> {
 #[derive(Debug)]
 struct MockUserRepository {
     // Use tokio::sync::Mutex for async-aware locking.
-    users: Mutex<HashMap<Uuid, User>>,
+    users: Mutex<HashMap<Uuid, Model>>,
 }
 
 impl MockUserRepository {
@@ -63,7 +63,7 @@ impl MockUserRepository {
     }
 
     // Add get_user_by_id method
-    pub async fn get_user_by_id(&self, user_id: Uuid) -> Result<Option<User>, AuthError> {
+    pub async fn get_user_by_id(&self, user_id: Uuid) -> Result<Option<Model>, AuthError> {
         // .lock() is now an async operation.
         let users = self.users.lock().await;
         Ok(users.get(&user_id).cloned())
@@ -81,12 +81,12 @@ impl MockUserRepository {
 // Implement the UserRepository trait for the mock, matching the new trait definition.
 #[async_trait::async_trait]
 impl UserRepository for MockUserRepository {
-    async fn find_by_id(&self, user_id: Uuid) -> Result<Option<User>, AuthError> {
+    async fn find_by_id(&self, user_id: Uuid) -> Result<Option<Model>, AuthError> {
         let users = self.users.lock().await;
         Ok(users.get(&user_id).cloned())
     }
 
-    async fn find_by_email(&self, email: &str) -> Result<Option<User>, AuthError> {
+    async fn find_by_email(&self, email: &str) -> Result<Option<Model>, AuthError> {
         // .lock() is now an async operation.
         let users = self.users.lock().await;
         Ok(users.values().find(|u| u.email == email).cloned())
@@ -96,7 +96,7 @@ impl UserRepository for MockUserRepository {
         &self,
         provider: &str,
         provider_id: &str,
-    ) -> Result<Option<User>, AuthError> {
+    ) -> Result<Option<Model>, AuthError> {
         // .lock() is now an async operation.
         let users = self.users.lock().await;
         Ok(users
@@ -106,7 +106,7 @@ impl UserRepository for MockUserRepository {
     }
 
     // Implement the new generic `create_user` method.
-    async fn create_user(&self, user: &User) -> Result<User, AuthError> {
+    async fn create_user(&self, user: &Model) -> Result<Model, AuthError> {
         // .lock() is now an async operation.
         let mut users = self.users.lock().await;
         if users.values().any(|u| u.email == user.email) {
@@ -334,7 +334,7 @@ mod tests {
         let repo = setup_mock_user_repo();
         let user_id = Uuid::new_v4();
 
-        let new_user = User {
+        let new_user = Model {
             user_id,
             username: "Test User".to_string(),
             email: "test@example.com".to_string(),
@@ -430,7 +430,7 @@ mod tests {
                 let repo_clone = repo.clone();
 
                 // Create a unique user for each task
-                let user = User {
+                let user = Model {
                     user_id: Uuid::new_v4(),
                     username: format!("Concurrent User {}", i),
                     email: format!("concurrent_{}@example.com", i),
@@ -999,20 +999,20 @@ mod performance_tests {
         for i in 0..50 {
             let repo_clone = repo.clone();
             tasks.spawn(async move {
-                let user = User {
-                    user_id: Uuid::new_v4(),
-                    username: format!("User {}", i),
-                    email: format!("user{}@example.com", i),
-                    password_hash: None,
-                    auth_provider: "github".to_string(),
-                    provider_id: Some(i.to_string()),
-                    avatar_url: None,
-                    email_verified: true,
-                    status: UserStatus::Active,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
-                    last_login: None,
-                };
+                            let user = Model {
+                user_id: Uuid::new_v4(),
+                username: format!("User {}", i),
+                email: format!("user{}@example.com", i),
+                password_hash: None,
+                auth_provider: "github".to_string(),
+                provider_id: Some(i.to_string()),
+                avatar_url: None,
+                email_verified: true,
+                status: UserStatus::Active,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                last_login: None,
+            };
                 
                 repo_clone.lock().await.create_user(&user).await
             });

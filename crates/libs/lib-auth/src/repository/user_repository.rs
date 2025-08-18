@@ -43,52 +43,18 @@ pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
 
-// Legacy User struct for backward compatibility
-#[derive(Debug, Clone)]
-pub struct User {
-    pub user_id: Uuid,
-    pub email: String,
-    pub username: String,
-    pub password_hash: Option<String>,
-    pub auth_provider: String,
-    pub provider_id: Option<String>,
-    pub avatar_url: Option<String>,
-    pub email_verified: bool,
-    pub status: UserStatus,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub last_login: Option<DateTime<Utc>>,
-}
 
-impl From<Model> for User {
-    fn from(model: Model) -> Self {
-        Self {
-            user_id: model.user_id,
-            email: model.email,
-            username: model.username,
-            password_hash: model.password_hash,
-            auth_provider: model.auth_provider,
-            provider_id: model.provider_id,
-            avatar_url: model.avatar_url,
-            email_verified: model.email_verified,
-            status: model.status,
-            created_at: model.created_at,
-            updated_at: model.updated_at,
-            last_login: model.last_login,
-        }
-    }
-}
 
 #[async_trait]
 pub trait UserRepository: Send + Sync {
-    async fn find_by_id(&self, user_id: Uuid) -> Result<Option<User>, AuthError>;
-    async fn find_by_email(&self, email: &str) -> Result<Option<User>, AuthError>;
+    async fn find_by_id(&self, user_id: Uuid) -> Result<Option<Model>, AuthError>;
+    async fn find_by_email(&self, email: &str) -> Result<Option<Model>, AuthError>;
     async fn find_by_provider_id(
         &self,
         provider: &str,
         provider_id: &str,
-    ) -> Result<Option<User>, AuthError>;
-    async fn create_user(&self, user: &User) -> Result<User, AuthError>;
+    ) -> Result<Option<Model>, AuthError>;
+    async fn create_user(&self, user: &Model) -> Result<Model, AuthError>;
     async fn update_last_login(&self, user_id: Uuid) -> Result<(), AuthError>;
     async fn verify_email(&self, user_id: Uuid) -> Result<(), AuthError>;
     async fn update_password(&self, user_id: Uuid, password_hash: &str) -> Result<(), AuthError>;
@@ -106,17 +72,17 @@ impl PostgresUserRepository {
 
 #[async_trait]
 impl UserRepository for PostgresUserRepository {
-    async fn find_by_id(&self, user_id: Uuid) -> Result<Option<User>, AuthError> {
+    async fn find_by_id(&self, user_id: Uuid) -> Result<Option<Model>, AuthError> {
         let user = Entity::find_by_id(user_id)
             .filter(Column::Status.ne(UserStatus::Deleted))
             .one(&*self.db)
             .await
             .map_err(|e| AuthError::Database(format!("Failed to find user by ID: {}", e)))?;
 
-        Ok(user.map(|u| u.into()))
+        Ok(user)
     }
 
-    async fn find_by_email(&self, email: &str) -> Result<Option<User>, AuthError> {
+    async fn find_by_email(&self, email: &str) -> Result<Option<Model>, AuthError> {
         let user = Entity::find()
             .filter(Column::Email.eq(email))
             .filter(Column::Status.ne(UserStatus::Deleted))
@@ -124,14 +90,14 @@ impl UserRepository for PostgresUserRepository {
             .await
             .map_err(|e| AuthError::Database(format!("Failed to find user by email: {}", e)))?;
 
-        Ok(user.map(|u| u.into()))
+        Ok(user)
     }
 
     async fn find_by_provider_id(
         &self,
         provider: &str,
         provider_id: &str,
-    ) -> Result<Option<User>, AuthError> {
+    ) -> Result<Option<Model>, AuthError> {
         let user = Entity::find()
             .filter(Column::AuthProvider.eq(provider))
             .filter(Column::ProviderId.eq(provider_id))
@@ -140,10 +106,10 @@ impl UserRepository for PostgresUserRepository {
             .await
             .map_err(|e| AuthError::Database(format!("Failed to find user by provider ID: {}", e)))?;
 
-        Ok(user.map(|u| u.into()))
+        Ok(user)
     }
 
-    async fn create_user(&self, user: &User) -> Result<User, AuthError> {
+    async fn create_user(&self, user: &Model) -> Result<Model, AuthError> {
         let user_model = ActiveModel {
             user_id: Set(user.user_id),
             email: Set(user.email.clone()),
@@ -164,7 +130,7 @@ impl UserRepository for PostgresUserRepository {
             .await
             .map_err(|e| AuthError::Database(format!("Failed to create user: {}", e)))?;
 
-        Ok(created_user.into())
+        Ok(created_user)
     }
 
     async fn update_last_login(&self, user_id: Uuid) -> Result<(), AuthError> {
@@ -220,8 +186,8 @@ impl UserRepository for PostgresUserRepository {
     }
 }
 
-impl From<User> for UserInfo {
-    fn from(user: User) -> Self {
+impl From<Model> for UserInfo {
+    fn from(user: Model) -> Self {
         Self {
             user_id: user.user_id,
             email: user.email,

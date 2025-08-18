@@ -10,7 +10,7 @@ use std::sync::Arc;
 use url::Url;
 use uuid::Uuid;
 
-use crate::repository::{User, UserStatus};
+use crate::repository::{Model, UserStatus};
 pub struct OAuthService {
     app_state: Arc<AppState>,
     token_service: Arc<TokenService>,
@@ -155,7 +155,7 @@ impl OAuthService {
                 // The service is now responsible for creating the User entity, including the UUID.
                 // This separates the business logic of entity creation from the persistence logic of the repository.
                 let now = chrono::Utc::now();
-                let new_user = User {
+                let new_user = Model {
                     user_id: Uuid::new_v4(),
                     email: user_info.email.clone(),
                     username: user_info.name.clone(),
