@@ -12,13 +12,13 @@
 //! ## Usage
 //! 
 //! ```rust
-//! use vex_gateway_lib_db::{Result, DbError};
+//! use lib_db::{Result, DbError};
 //! 
 //! #[cfg(feature = "postgres")]
-//! use vex_gateway_lib_db::backends::sql::postgres;
+//! use lib_db::backends::sql::postgres;
 //! 
 //! #[cfg(feature = "redis")]
-//! use vex_gateway_lib_db::backends::kv::{redis, memory_kv};
+//! use lib_db::backends::kv::{redis, memory_kv};
 //! ```
 //! 
 //! ## Architecture
