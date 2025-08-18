@@ -37,7 +37,7 @@ use tokio::task::JoinHandle;
 ///     Ok(())
 /// }
 /// ```
-pub static REGISTRY: Lazy<MemoryStoreRegistry> = Lazy::new(|| MemoryStoreRegistry::new());
+pub static REGISTRY: Lazy<MemoryStoreRegistry> = Lazy::new(MemoryStoreRegistry::new);
 
 /// Registry for managing multiple memory stores
 ///
@@ -50,13 +50,19 @@ pub struct MemoryStoreRegistry {
     default_config: MemoryConfig,
 }
 
-impl MemoryStoreRegistry {
-    /// Create a new registry with default configuration
-    pub fn new() -> Self {
+impl Default for MemoryStoreRegistry {
+    fn default() -> Self {
         Self {
             stores: DashMap::new(),
             default_config: MemoryConfig::default(),
         }
+    }
+}
+
+impl MemoryStoreRegistry {
+    /// Create a new registry with default configuration
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Create a new registry with custom default configuration
@@ -223,9 +229,10 @@ pub struct MemoryConfig {
 }
 
 /// Eviction policy for when capacity is reached
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum EvictionPolicy {
     /// No eviction (return error when capacity reached)
+    #[default]
     None,
     /// Least Recently Used
     LRU,
@@ -251,11 +258,7 @@ impl Default for MemoryConfig {
     }
 }
 
-impl Default for EvictionPolicy {
-    fn default() -> Self {
-        EvictionPolicy::None
-    }
-}
+
 
 impl MemoryDb {
     /// Create a new in-memory store with default configuration
@@ -297,14 +300,14 @@ impl MemoryDb {
     /// Clean up expired entries (non-async since DashMap handles locking)
     fn cleanup_expired_entries(store: &DashMap<String, MemoryEntry>, _name: &str) {
         let now = Instant::now();
-        store.retain(|_, entry| entry.expires_at.map_or(true, |expires_at| expires_at > now));
+        store.retain(|_, entry| entry.expires_at.is_none_or(|expires_at| expires_at > now));
     }
 
     /// Check if an entry is expired
     fn is_expired(entry: &MemoryEntry) -> bool {
         entry
             .expires_at
-            .map_or(false, |expires_at| expires_at <= Instant::now())
+            .is_some_and(|expires_at| expires_at <= Instant::now())
     }
 
     /// Update access metadata
@@ -436,6 +439,12 @@ impl MemoryDb {
     #[cfg(test)]
     pub async fn len(&self) -> usize {
         self.store.len()
+    }
+
+    /// Check if the store is empty (useful for testing)
+    #[cfg(test)]
+    pub async fn is_empty(&self) -> bool {
+        self.store.is_empty()
     }
 }
 
