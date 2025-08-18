@@ -68,14 +68,7 @@ async fn test_sql_error_handling(db: &PostgresDb) -> Result<()> {
 async fn test_sql_pool_management(db: &PostgresDb) -> Result<()> {
     // Test pool statistics
     let stats = db.pool_stats();
-    assert!(stats.size >= 0);
-    assert!(stats.idle >= 0);
-    assert!(stats.active >= 0);
     assert!(stats.max_size > 0);
-    
-    // Test native pool access
-    let native_pool = db.native_pool();
-    assert!(native_pool.size() >= 0);
     
     // Test multiple concurrent operations
     let mut handles = vec![];
