@@ -1,5 +1,5 @@
 //! Database backend implementations
-//! 
+//!
 //! This module contains the different database backend implementations,
 //! organized by type (key-value stores and SQL databases).
 

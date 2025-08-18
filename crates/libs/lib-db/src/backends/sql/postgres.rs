@@ -4,8 +4,8 @@ use crate::{
 };
 use async_trait::async_trait;
 use sqlx::{
-    postgres::{PgArguments, PgPool, PgPoolOptions, PgRow},
     Executor,
+    postgres::{PgArguments, PgPool, PgPoolOptions, PgRow},
 };
 use std::sync::Arc;
 
@@ -30,10 +30,10 @@ impl Default for DbConfig {
     fn default() -> Self {
         Self {
             max_connections: 50,
-            min_connections: 10,    
+            min_connections: 10,
             acquire_timeout_ms: 500,
-            idle_timeout_secs: 300,    // 5 minutes
-            max_lifetime_secs: 1800,   // 30 minutes
+            idle_timeout_secs: 300,  // 5 minutes
+            max_lifetime_secs: 1800, // 30 minutes
         }
     }
 }
@@ -54,13 +54,13 @@ impl PostgresDb {
                 message: format!("Failed to connect to PostgreSQL: {}", e),
                 source: Some(Box::new(e)),
             })?;
-        
+
         Ok(Self {
             pool,
             config: Arc::new(config),
         })
     }
-    
+
     /// Get a reference to the underlying pool
     pub fn pool(&self) -> &PgPool {
         &self.pool
@@ -68,20 +68,20 @@ impl PostgresDb {
 
     // Convenience methods for direct sqlx support (execute and query commands with raw sqlx)
 
-    /// Execute a simple query without parameters 
+    /// Execute a simple query without parameters
     pub async fn execute(&self, sql: &str) -> Result<u64> {
         // Calls the trait method with default arguments
         self.execute_with(sql, PgArguments::default()).await
     }
-    
-    /// Query multiple rows without parameters 
+
+    /// Query multiple rows without parameters
     pub async fn query<T>(&self, sql: &str) -> Result<Vec<T>>
     where
         T: Send + Unpin + for<'r> From<&'r PgRow>,
     {
         self.query_with(sql, PgArguments::default()).await
     }
-    
+
     /// Query single row without parameters
     pub async fn query_one<T>(&self, sql: &str) -> Result<T>
     where
@@ -89,7 +89,7 @@ impl PostgresDb {
     {
         self.query_one_with(sql, PgArguments::default()).await
     }
-    
+
     /// Query optional single row without parameters
     pub async fn query_optional<T>(&self, sql: &str) -> Result<Option<T>>
     where
@@ -99,16 +99,15 @@ impl PostgresDb {
     }
 }
 
-
 #[async_trait]
 impl SqlDb for PostgresDb {
     type Row = PgRow;
     type Arguments<'a> = PgArguments;
     type NativePool = PgPool;
-    
+
     async fn connect(url: &str) -> Result<Self> {
         let config = DbConfig::default();
-        
+
         let pool = PgPoolOptions::new()
             .max_connections(config.max_connections)
             .min_connections(config.min_connections)
@@ -122,19 +121,19 @@ impl SqlDb for PostgresDb {
                 message: format!("Failed to connect to PostgreSQL: {}", e),
                 source: Some(Box::new(e)),
             })?;
-        
+
         Ok(Self {
             pool,
             config: Arc::new(config),
         })
     }
-    
+
     async fn execute_with<'a>(&self, sql: &str, args: Self::Arguments<'a>) -> Result<u64> {
         let query = sqlx::query_with(sql, args);
         let result = self.pool.execute(query).await?;
         Ok(result.rows_affected())
     }
-    
+
     async fn query_with<'a, T>(&self, sql: &str, args: Self::Arguments<'a>) -> Result<Vec<T>>
     where
         T: Send + Unpin + for<'r> From<&'r Self::Row>,
@@ -143,7 +142,7 @@ impl SqlDb for PostgresDb {
         let rows: Vec<PgRow> = self.pool.fetch_all(query).await?;
         Ok(rows.iter().map(T::from).collect())
     }
-    
+
     async fn query_one_with<'a, T>(&self, sql: &str, args: Self::Arguments<'a>) -> Result<T>
     where
         T: Send + Unpin + for<'r> From<&'r Self::Row>,
@@ -152,7 +151,7 @@ impl SqlDb for PostgresDb {
         let row: PgRow = self.pool.fetch_one(query).await?;
         Ok(T::from(&row))
     }
-    
+
     async fn query_optional_with<'a, T>(
         &self,
         sql: &str,
@@ -169,7 +168,7 @@ impl SqlDb for PostgresDb {
     fn native_pool(&self) -> &Self::NativePool {
         &self.pool
     }
-    
+
     fn pool_stats(&self) -> PoolStats {
         let size = self.pool.size() as u32;
         let idle = self.pool.num_idle() as u32;
