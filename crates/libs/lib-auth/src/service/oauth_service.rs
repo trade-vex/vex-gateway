@@ -83,9 +83,7 @@ impl OAuthService {
                 let _: () = redis_conn
                     .set_ex(&verifier_key, &code_verifier, 600)
                     .await
-                    .map_err(|e| {
-                        AuthError::Redis(format!("Failed to store verifier: {}", e))
-                    })?;
+                    .map_err(|e| AuthError::Redis(format!("Failed to store verifier: {}", e)))?;
 
                 query_pairs.append_pair("code_challenge", &code_challenge);
                 query_pairs.append_pair("code_challenge_method", "S256");
