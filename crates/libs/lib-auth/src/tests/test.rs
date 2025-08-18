@@ -507,7 +507,7 @@ mod tests {
         // Test 1: Check if server is responding
         println!("Testing basic connectivity...");
         let response = client
-            .get(&format!("{}/", base_url))
+            .get(format!("{}/", base_url))
             .send()
             .await
             .expect("Failed to connect to server");
@@ -517,7 +517,7 @@ mod tests {
         // Test 2: Test OAuth Google endpoint
         println!("Testing Google OAuth endpoint...");
         let response = client
-            .get(&format!("{}/auth/google", base_url))
+            .get(format!("{}/auth/google", base_url))
             .header("Accept", "application/json")
             .send()
             .await
@@ -539,7 +539,7 @@ mod tests {
         // Test 3: Test OAuth GitHub endpoint
         println!("Testing GitHub OAuth endpoint...");
         let response = client
-            .get(&format!("{}/auth/github", base_url))
+            .get(format!("{}/auth/github", base_url))
             .header("Accept", "application/json")
             .send()
             .await
@@ -561,7 +561,7 @@ mod tests {
         // Test 4: Test /api/me endpoint without auth (should fail)
         println!("Testing /api/me without authentication...");
         let response = client
-            .get(&format!("{}/api/me", base_url))
+            .get(format!("{}/api/me", base_url))
             .header("Accept", "application/json")
             .send()
             .await
@@ -576,7 +576,7 @@ mod tests {
 
         // Test 5: Check if health endpoint exists
         println!("Testing health endpoint...");
-        let response = client.get(&format!("{}/health", base_url)).send().await;
+        let response = client.get(format!("{}/health", base_url)).send().await;
 
         match response {
             Ok(resp) => {
@@ -594,7 +594,7 @@ mod tests {
         let test_routes = vec!["/", "/auth", "/login", "/oauth", "/api", "/status", "/ping"];
 
         for route in test_routes {
-            let response = client.get(&format!("{}{}", base_url, route)).send().await;
+            let response = client.get(format!("{}{}", base_url, route)).send().await;
 
             match response {
                 Ok(resp) => {
@@ -740,7 +740,7 @@ mod tests {
         ];
 
         for (route, description) in expected_routes {
-            match client.get(&format!("{}{}", base_url, route)).send().await {
+            match client.get(format!("{}{}", base_url, route)).send().await {
                 Ok(response) => {
                     let status = response.status();
                     println!("{}: {} -> {}", description, route, status);
@@ -751,7 +751,7 @@ mod tests {
                             .text()
                             .await
                             .unwrap_or_else(|_| "No body".to_string());
-                        if !body.is_empty() && body.len() > 0 {
+                        if !body.is_empty() {
                             println!("  Error body: {}", body);
                         }
                     }

@@ -75,23 +75,20 @@ impl OAuthService {
             query_pairs.append_pair("state", &state);
 
             // Provider-specific parameters
-            match provider {
-                "twitter" => {
-                    let (code_verifier, code_challenge) = self.generate_pkce_pair();
+            if provider == "twitter" {
+                let (code_verifier, code_challenge) = self.generate_pkce_pair();
 
-                    // Store verifier in Redis with state
-                    let verifier_key = format!("oauth_verifier:{}:{}", provider, state);
-                    let _: () = redis_conn
-                        .set_ex(&verifier_key, &code_verifier, 600)
-                        .await
-                        .map_err(|e| {
-                            AuthError::Redis(format!("Failed to store verifier: {}", e))
-                        })?;
+                // Store verifier in Redis with state
+                let verifier_key = format!("oauth_verifier:{}:{}", provider, state);
+                let _: () = redis_conn
+                    .set_ex(&verifier_key, &code_verifier, 600)
+                    .await
+                    .map_err(|e| {
+                        AuthError::Redis(format!("Failed to store verifier: {}", e))
+                    })?;
 
-                    query_pairs.append_pair("code_challenge", &code_challenge);
-                    query_pairs.append_pair("code_challenge_method", "S256");
-                }
-                _ => {}
+                query_pairs.append_pair("code_challenge", &code_challenge);
+                query_pairs.append_pair("code_challenge_method", "S256");
             }
         }
 
@@ -424,7 +421,7 @@ impl OAuthService {
             email.to_string()
         } else {
             // Fetch user's emails separately
-            self.get_github_user_email(&data["login"].as_str().unwrap_or(""))
+            self.get_github_user_email(data["login"].as_str().unwrap_or(""))
                 .await?
         };
 

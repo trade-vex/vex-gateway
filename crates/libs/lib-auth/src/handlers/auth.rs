@@ -40,8 +40,8 @@ pub async fn logout(
             let auth_str = auth_header
                 .to_str()
                 .map_err(|_| AuthError::InvalidRequest)?;
-            if auth_str.starts_with("Bearer ") {
-                auth_str[7..].to_string()
+            if let Some(stripped) = auth_str.strip_prefix("Bearer ") {
+                stripped.to_string()
             } else {
                 return Err(AuthError::InvalidRequest);
             }
@@ -69,7 +69,7 @@ pub async fn get_profile(
         .user_repo
         .find_by_id(user.user_id) // Method now exists
         .await?
-        .ok_or_else(|| AuthError::UserNotFound)?;
+        .ok_or(AuthError::UserNotFound)?;
 
     let profile = UserProfile {
         user_id: user_record.user_id,
