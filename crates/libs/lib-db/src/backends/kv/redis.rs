@@ -1,11 +1,11 @@
 use crate::{
     error::{DbError, Result},
-    traits::{BasicKvStore, AdvancedKvStore, AtomicKvStore, ExpiringKvStore, PoolStats},
+    traits::{AdvancedKvStore, AtomicKvStore, BasicKvStore, ExpiringKvStore, PoolStats},
 };
 use async_trait::async_trait;
 use bb8::{Pool, RunError};
-use redis::{aio::ConnectionManager, AsyncCommands, Client, ErrorKind, RedisError};
-use serde::{de::DeserializeOwned, Serialize};
+use redis::{AsyncCommands, Client, ErrorKind, RedisError, aio::ConnectionManager};
+use serde::{Serialize, de::DeserializeOwned};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,15 +50,15 @@ struct RedisConnectionManager {
 impl bb8::ManageConnection for RedisConnectionManager {
     type Connection = ConnectionManager;
     type Error = RedisError;
-    
+
     async fn connect(&self) -> std::result::Result<Self::Connection, Self::Error> {
         ConnectionManager::new(self.client.clone()).await
     }
-    
+
     async fn is_valid(&self, conn: &mut Self::Connection) -> std::result::Result<(), Self::Error> {
         redis::cmd("PING").query_async(conn).await
     }
-    
+
     fn has_broken(&self, _conn: &mut Self::Connection) -> bool {
         false
     }
@@ -68,10 +68,9 @@ impl RedisDb {
     /// Create with custom configuration
     pub fn with_config(config: RedisConfig) -> Self {
         // Create a dummy client - will be replaced in connect()
-        let dummy_client = Client::open("redis://127.0.0.1:6379").unwrap_or_else(|_| {
-            panic!("Failed to create dummy Redis client")
-        });
-        
+        let dummy_client = Client::open("redis://127.0.0.1:6379")
+            .unwrap_or_else(|_| panic!("Failed to create dummy Redis client"));
+
         Self {
             pool: Pool::builder().build_unchecked(RedisConnectionManager {
                 client: dummy_client,
@@ -79,7 +78,7 @@ impl RedisDb {
             config: Arc::new(config),
         }
     }
-    
+
     /// Get a connection from the pool
     async fn get_conn(&self) -> Result<bb8::PooledConnection<'_, RedisConnectionManager>> {
         self.pool
@@ -92,17 +91,21 @@ impl RedisDb {
                 RunError::User(e) => e.into(),
             })
     }
-    
+
     /// Execute with retry logic
     async fn execute_with_retry<F, T>(&self, f: F) -> Result<T>
     where
-        F: Fn(&mut ConnectionManager) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<T, RedisError>> + Send + '_>>,
+        F: Fn(
+            &mut ConnectionManager,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = std::result::Result<T, RedisError>> + Send + '_>,
+        >,
     {
         let mut last_error = None;
-        
+
         for _ in 0..self.config.retry_count {
             let mut conn = self.get_conn().await?;
-            
+
             match f(&mut *conn).await {
                 Ok(result) => return Ok(result),
                 Err(e) if Self::is_retryable(&e) => {
@@ -113,10 +116,10 @@ impl RedisDb {
                 Err(e) => return Err(e.into()),
             }
         }
-        
+
         Err(last_error.unwrap().into())
     }
-    
+
     /// Check if error is retryable
     fn is_retryable(error: &RedisError) -> bool {
         matches!(
@@ -132,21 +135,21 @@ impl RedisDb {
 impl BasicKvStore for RedisDb {
     async fn connect(url: &str) -> Result<Self> {
         let config = RedisConfig::default();
-        
+
         let client = Client::open(url).map_err(|e| DbError::Connection {
             message: format!("Failed to connect to Redis: {}", e),
             source: Some(Box::new(e)),
         })?;
-        
+
         // Test connection
         let test_conn = ConnectionManager::new(client.clone()).await?;
         drop(test_conn);
-        
+
         // Create connection pool
         let manager = RedisConnectionManager {
             client: client.clone(),
         };
-        
+
         let pool = Pool::builder()
             .max_size(config.max_connections)
             .min_idle(Some(config.min_connections))
@@ -159,13 +162,13 @@ impl BasicKvStore for RedisDb {
                 message: format!("Failed to create connection pool: {}", e),
                 source: Some(Box::new(e)),
             })?;
-        
+
         Ok(Self {
             pool,
             config: Arc::new(config),
         })
     }
-    
+
     async fn set<T>(&self, key: &str, value: &T) -> Result<()>
     where
         T: Serialize + Send + Sync,
@@ -174,7 +177,7 @@ impl BasicKvStore for RedisDb {
             message: format!("Failed to serialize value: {}", e),
             source: Some(Box::new(e)),
         })?;
-        
+
         self.execute_with_retry(|conn| {
             let key = key.to_string();
             let bytes = bytes.clone();
@@ -182,7 +185,7 @@ impl BasicKvStore for RedisDb {
         })
         .await
     }
-    
+
     async fn get<T>(&self, key: &str) -> Result<Option<T>>
     where
         T: DeserializeOwned,
@@ -193,7 +196,7 @@ impl BasicKvStore for RedisDb {
                 Box::pin(async move { conn.get(key).await })
             })
             .await?;
-        
+
         match bytes {
             Some(data) => {
                 let value = bincode::deserialize(&data).map_err(|e| DbError::Serialization {
@@ -205,7 +208,7 @@ impl BasicKvStore for RedisDb {
             None => Ok(None),
         }
     }
-    
+
     async fn set_bytes(&self, key: &str, value: &[u8]) -> Result<()> {
         self.execute_with_retry(|conn| {
             let key = key.to_string();
@@ -214,7 +217,7 @@ impl BasicKvStore for RedisDb {
         })
         .await
     }
-    
+
     async fn get_bytes(&self, key: &str) -> Result<Option<Vec<u8>>> {
         self.execute_with_retry(|conn| {
             let key = key.to_string();
@@ -222,7 +225,7 @@ impl BasicKvStore for RedisDb {
         })
         .await
     }
-    
+
     async fn delete(&self, key: &str) -> Result<bool> {
         let deleted: i32 = self
             .execute_with_retry(|conn| {
@@ -232,7 +235,7 @@ impl BasicKvStore for RedisDb {
             .await?;
         Ok(deleted > 0)
     }
-    
+
     async fn exists(&self, key: &str) -> Result<bool> {
         self.execute_with_retry(|conn| {
             let key = key.to_string();
@@ -240,9 +243,7 @@ impl BasicKvStore for RedisDb {
         })
         .await
     }
-    
 }
-
 
 // ADVANCED KV STORE IMPLEMENTATION
 
@@ -254,7 +255,7 @@ impl AdvancedKvStore for RedisDb {
         })
         .await
     }
-    
+
     fn pool_stats(&self) -> PoolStats {
         let state = self.pool.state();
         PoolStats {
@@ -264,7 +265,7 @@ impl AdvancedKvStore for RedisDb {
             max_size: self.config.max_connections,
         }
     }
-    
+
     async fn mget<T>(&self, keys: &[&str]) -> Result<Vec<Option<T>>>
     where
         T: DeserializeOwned,
@@ -275,30 +276,31 @@ impl AdvancedKvStore for RedisDb {
                 Box::pin(async move { conn.get(keys).await })
             })
             .await?;
-        
+
         let mut results = Vec::with_capacity(values.len());
         for value_opt in values {
             match value_opt {
                 Some(bytes) => {
-                    let value = bincode::deserialize(&bytes).map_err(|e| DbError::Serialization {
-                        message: format!("Failed to deserialize value: {}", e),
-                        source: Some(Box::new(e)),
-                    })?;
+                    let value =
+                        bincode::deserialize(&bytes).map_err(|e| DbError::Serialization {
+                            message: format!("Failed to deserialize value: {}", e),
+                            source: Some(Box::new(e)),
+                        })?;
                     results.push(Some(value));
                 }
                 None => results.push(None),
             }
         }
-        
+
         Ok(results)
     }
-    
+
     async fn mset<T>(&self, pairs: &[(&str, &T)]) -> Result<()>
     where
         T: Serialize + Send + Sync,
     {
         let mut items = Vec::with_capacity(pairs.len() * 2);
-        
+
         for (key, value) in pairs {
             let bytes = bincode::serialize(value).map_err(|e| DbError::Serialization {
                 message: format!("Failed to serialize value: {}", e),
@@ -306,17 +308,16 @@ impl AdvancedKvStore for RedisDb {
             })?;
             items.push((*key, bytes));
         }
-        
+
         // Convert to owned data to avoid lifetime issues
-        let items_owned: Vec<(String, Vec<u8>)> = items.into_iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect();
-            
+        let items_owned: Vec<(String, Vec<u8>)> =
+            items.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+
         let mut last_error = None;
-        
+
         for _ in 0..self.config.retry_count {
             let mut conn = self.get_conn().await?;
-            
+
             let result = {
                 let mut pipe = redis::pipe();
                 pipe.atomic();
@@ -325,7 +326,7 @@ impl AdvancedKvStore for RedisDb {
                 }
                 pipe.query_async(&mut *conn).await
             };
-            
+
             match result {
                 Ok(()) => return Ok(()),
                 Err(e) if Self::is_retryable(&e) => {
@@ -336,10 +337,10 @@ impl AdvancedKvStore for RedisDb {
                 Err(e) => return Err(e.into()),
             }
         }
-        
+
         Err(last_error.unwrap().into())
     }
-    
+
     async fn mdel(&self, keys: &[&str]) -> Result<u64> {
         let deleted: i32 = self
             .execute_with_retry(|conn| {
@@ -362,7 +363,7 @@ impl AtomicKvStore for RedisDb {
         })
         .await
     }
-    
+
     async fn set_nx<T>(&self, key: &str, value: &T) -> Result<bool>
     where
         T: Serialize + Send + Sync,
@@ -371,7 +372,7 @@ impl AtomicKvStore for RedisDb {
             message: format!("Failed to serialize value: {}", e),
             source: Some(Box::new(e)),
         })?;
-        
+
         self.execute_with_retry(|conn| {
             let key = key.to_string();
             let bytes = bytes.clone();
@@ -379,7 +380,7 @@ impl AtomicKvStore for RedisDb {
         })
         .await
     }
-    
+
     async fn cas<T>(&self, key: &str, old: &T, new: &T) -> Result<bool>
     where
         T: Serialize + DeserializeOwned + Send + Sync + PartialEq,
@@ -394,17 +395,17 @@ impl AtomicKvStore for RedisDb {
                 return 0
             end
         "#;
-        
+
         let old_bytes = bincode::serialize(old).map_err(|e| DbError::Serialization {
             message: format!("Failed to serialize old value: {}", e),
             source: Some(Box::new(e)),
         })?;
-        
+
         let new_bytes = bincode::serialize(new).map_err(|e| DbError::Serialization {
             message: format!("Failed to serialize new value: {}", e),
             source: Some(Box::new(e)),
         })?;
-        
+
         let result: i32 = self
             .execute_with_retry(|conn| {
                 let key = key.to_string();
@@ -420,7 +421,7 @@ impl AtomicKvStore for RedisDb {
                 })
             })
             .await?;
-        
+
         Ok(result == 1)
     }
 }
@@ -437,7 +438,7 @@ impl ExpiringKvStore for RedisDb {
             message: format!("Failed to serialize value: {}", e),
             source: Some(Box::new(e)),
         })?;
-        
+
         let key = key.to_string();
         self.execute_with_retry(move |conn| {
             let key = key.clone();
@@ -446,7 +447,7 @@ impl ExpiringKvStore for RedisDb {
         })
         .await
     }
-    
+
     async fn expire(&self, key: &str, ttl_secs: u64) -> Result<bool> {
         self.execute_with_retry(|conn| {
             let key = key.to_string();
@@ -455,7 +456,7 @@ impl ExpiringKvStore for RedisDb {
         })
         .await
     }
-    
+
     async fn ttl(&self, key: &str) -> Result<Option<u64>> {
         let ttl: i64 = self
             .execute_with_retry(|conn| {
@@ -463,7 +464,7 @@ impl ExpiringKvStore for RedisDb {
                 Box::pin(async move { conn.ttl(key).await })
             })
             .await?;
-        
+
         match ttl {
             -2 => Ok(None),           // Key doesn't exist
             -1 => Ok(Some(u64::MAX)), // No TTL set

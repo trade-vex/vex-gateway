@@ -345,15 +345,15 @@ impl DbError {
     /// Get suggested HTTP status code for this error
     pub fn http_status_code(&self) -> u16 {
         match self {
-            DbError::NotFound { .. } => 404, // Not Found
+            DbError::NotFound { .. } => 404,    // Not Found
             DbError::RateLimited { .. } => 429, // Too Many Requests
-            DbError::Timeout { .. } => 408, // Request Timeout
+            DbError::Timeout { .. } => 408,     // Request Timeout
             DbError::Configuration { .. } | DbError::FeatureNotEnabled { .. } => 500, // Internal server error
-            DbError::QueryExecution { .. } | DbError::Serialization { .. } => 400, // Bad Request
+            DbError::QueryExecution { .. } | DbError::Serialization { .. } => 400,    // Bad Request
             DbError::Connection { .. } | DbError::Pool { .. } => 503, // Service Unavailable
-            DbError::Transaction { .. } => 409, // Conflict
-            DbError::Internal { .. } => 500, // Internal server error
-            DbError::Unsupported { .. } => 501, // Not Implemented
+            DbError::Transaction { .. } => 409,                       // Conflict
+            DbError::Internal { .. } => 500,                          // Internal server error
+            DbError::Unsupported { .. } => 501,                       // Not Implemented
         }
     }
 
