@@ -106,7 +106,7 @@ impl RedisDb {
         for _ in 0..self.config.retry_count {
             let mut conn = self.get_conn().await?;
 
-            match f(&mut *conn).await {
+            match f(&mut conn).await {
                 Ok(result) => return Ok(result),
                 Err(e) if Self::is_retryable(&e) => {
                     last_error = Some(e);

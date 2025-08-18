@@ -170,7 +170,7 @@ impl SqlDb for PostgresDb {
     }
 
     fn pool_stats(&self) -> PoolStats {
-        let size = self.pool.size() as u32;
+        let size = self.pool.size();
         let idle = self.pool.num_idle() as u32;
         PoolStats {
             size,

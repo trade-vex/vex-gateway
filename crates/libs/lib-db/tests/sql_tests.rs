@@ -73,11 +73,10 @@ async fn test_sql_pool_management(db: &PostgresDb) -> Result<()> {
     for i in 0..5 {
         let db_clone = db.clone();
         let handle = tokio::spawn(async move {
-            let result = db_clone.execute(&format!(
+            db_clone.execute(&format!(
                 "INSERT INTO test_users (name, email, active) VALUES ('Concurrent{}', 'concurrent{}@example.com', true)",
                 i, i
-            )).await;
-            result
+            )).await
         });
         handles.push(handle);
     }

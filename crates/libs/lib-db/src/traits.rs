@@ -130,7 +130,7 @@ use serde::{Serialize, de::DeserializeOwned};
 ///     }
 /// }
 /// ```
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct PoolStats {
     /// Current number of connections in the pool
     pub size: u32,
@@ -140,17 +140,6 @@ pub struct PoolStats {
     pub active: u32,
     /// Maximum number of connections allowed in the pool
     pub max_size: u32,
-}
-
-impl Default for PoolStats {
-    fn default() -> Self {
-        Self {
-            size: 0,
-            idle: 0,
-            active: 0,
-            max_size: 0,
-        }
-    }
 }
 
 /// SQL database interface with connection pooling and parameterized queries

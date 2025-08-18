@@ -274,7 +274,7 @@ impl From<redis::RedisError> for DbError {
 // BINCODE ERROR CONVERSION (for Redis serialization)
 // ============================================================================
 
-#[cfg(all(feature = "redis"))]
+#[cfg(feature = "redis")]
 impl From<bincode::Error> for DbError {
     fn from(err: bincode::Error) -> Self {
         DbError::Serialization {
