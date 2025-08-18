@@ -77,9 +77,6 @@ async fn test_advanced_operations<T: AdvancedKvStore>(kv: &T) -> Result<()> {
     
     // Test pool stats
     let stats = kv.pool_stats();
-    assert!(stats.size >= 0);
-    assert!(stats.idle >= 0);
-    assert!(stats.active >= 0);
     assert!(stats.max_size > 0);
     
     // Test batch operations

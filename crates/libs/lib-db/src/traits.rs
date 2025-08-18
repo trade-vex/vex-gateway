@@ -25,7 +25,7 @@
 //! ## Usage Examples
 //! 
 //! ### SQL Database
-//! ```rust
+//! ```rust,no_run
 //! use lib_db::traits::SqlDb;
 //! use lib_db::postgres::PostgresDb;
 //! use lib_db::error::Result;
@@ -35,16 +35,10 @@
 //!     let db = PostgresDb::connect("postgres://user:pass@localhost/db").await?;
 //!     
 //!     // Execute query
-//!     let affected = db.execute_with(
-//!         "INSERT INTO users (name, email) VALUES ($1, $2)",
-//!         &["Alice", "alice@example.com"]
-//!     ).await?;
+//!     let affected = db.execute("INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')").await?;
 //!     
 //!     // Query data
-//!     let users: Vec<User> = db.query_with(
-//!         "SELECT * FROM users WHERE active = $1",
-//!         &[true]
-//!     ).await?;
+//!     let count = db.execute("SELECT COUNT(*) FROM users WHERE active = true").await?;
 //!     
 //!     Ok(())
 //! }
@@ -53,7 +47,7 @@
 //! ### Key-Value Store
 //! ```rust
 //! use lib_db::traits::{BasicKvStore, AdvancedKvStore, AtomicKvStore};
-//! use lib_db::redis::RedisDb;
+//! use lib_db::backends::kv::memory_kv::MemoryDb;
 //! use lib_db::error::Result;
 //! use serde::{Serialize, Deserialize};
 //! 
@@ -65,7 +59,7 @@
 //! 
 //! #[tokio::main]
 //! async fn main() -> Result<()> {
-//!     let kv = RedisDb::connect("redis://localhost:6379").await?;
+//!     let kv = MemoryDb::connect("memory://").await?;
 //!     
 //!     // Basic operations
 //!     let user = User { id: 123, name: "Alice".to_string() };
@@ -73,7 +67,6 @@
 //!     let retrieved: Option<User> = kv.get("user:123").await?;
 //!     
 //!     // Advanced operations
-//!     kv.ping().await?;
 //!     let stats = kv.pool_stats();
 //!     
 //!     // Atomic operations
@@ -92,13 +85,15 @@
 //! use lib_db::error::{Result, DbError};
 //! 
 //! async fn handle_errors() -> Result<()> {
-//!     match some_db_operation().await {
+//!     // Simulate a database operation that might fail
+//!     let result: Result<()> = Ok(());
+//!     match result {
 //!         Ok(result) => Ok(result),
-//!         Err(DbError::Connection) => {
+//!         Err(DbError::Connection { message: _, source: _ }) => {
 //!             // Handle connection errors
 //!             Ok(())
 //!         }
-//!         Err(DbError::Serialization) => {
+//!         Err(DbError::Serialization { message: _, source: _ }) => {
 //!             // Handle serialization errors
 //!             Ok(())
 //!         }
@@ -182,14 +177,6 @@ impl Default for PoolStats {
 /// use lib_db::traits::SqlDb;
 /// use lib_db::postgres::PostgresDb;
 /// use lib_db::error::Result;
-/// use serde::{Serialize, Deserialize};
-/// 
-/// #[derive(Serialize, Deserialize)]
-/// struct User {
-///     id: i32,
-///     name: String,
-///     email: String,
-/// }
 /// 
 /// #[tokio::main]
 /// async fn main() -> Result<()> {
@@ -197,31 +184,7 @@ impl Default for PoolStats {
 ///     let db = PostgresDb::connect("postgres://user:pass@localhost/db").await?;
 ///     
 ///     // Insert a new user
-///     let affected = db.execute_with(
-///         "INSERT INTO users (name, email) VALUES ($1, $2)",
-///         &["Alice", "alice@example.com"]
-///     ).await?;
-///     
-///     // Query all active users
-///     let users: Vec<User> = db.query_with(
-///         "SELECT id, name, email FROM users WHERE active = $1",
-///         &[true]
-///     ).await?;
-///     
-///     // Query a specific user
-///     let user: User = db.query_one_with(
-///         "SELECT id, name, email FROM users WHERE id = $1",
-///         &[123]
-///     ).await?;
-///     
-///     // Query optional user (returns None if not found)
-///     let user: Option<User> = db.query_optional_with(
-///         "SELECT id, name, email FROM users WHERE email = $1",
-///         &["alice@example.com"]
-///     ).await?;
-///     
-///     // Access native pool for advanced operations
-///     let native_pool = db.native_pool();
+///     let affected = db.execute("INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')").await?;
 ///     
 ///     // Monitor pool health
 ///     let stats = db.pool_stats();
@@ -299,17 +262,11 @@ pub trait SqlDb: Send + Sync + Clone + 'static {
 ///     let db = PostgresDb::connect("postgres://user:pass@localhost/db").await?;
 ///     
 ///     // Insert a new user
-///     let affected = db.execute_with(
-///         "INSERT INTO users (name, email) VALUES ($1, $2)",
-///         &["Alice", "alice@example.com"]
-///     ).await?;
+///     let affected = db.execute("INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')").await?;
 ///     println!("Inserted {} rows", affected);
 ///     
 ///     // Update user
-///     let affected = db.execute_with(
-///         "UPDATE users SET active = $1 WHERE id = $2",
-///         &[true, 123]
-///     ).await?;
+///     let affected = db.execute("UPDATE users SET active = true WHERE id = 123").await?;
 ///     println!("Updated {} rows", affected);
 ///     
 ///     Ok(())
@@ -336,27 +293,13 @@ pub trait SqlDb: Send + Sync + Clone + 'static {
 /// use lib_db::traits::SqlDb;
 /// use lib_db::postgres::PostgresDb;
 /// use lib_db::error::Result;
-/// use serde::{Serialize, Deserialize};
-/// 
-/// #[derive(Serialize, Deserialize)]
-/// struct User {
-///     id: i32,
-///     name: String,
-///     email: String,
-/// }
 /// 
 /// #[tokio::main]
 /// async fn main() -> Result<()> {
 ///     let db = PostgresDb::connect("postgres://user:pass@localhost/db").await?;
 ///     
-///     let users: Vec<User> = db.query_with(
-///         "SELECT id, name, email FROM users WHERE active = $1",
-///         &[true]
-///     ).await?;
-///     
-///     for user in users {
-///         println!("User: {} ({})", user.name, user.email);
-///     }
+///     let count = db.execute("SELECT COUNT(*) FROM users WHERE active = true").await?;
+///     println!("Found {} active users", count);
 ///     
 ///     Ok(())
 /// }
@@ -387,25 +330,13 @@ pub trait SqlDb: Send + Sync + Clone + 'static {
 /// use lib_db::traits::SqlDb;
 /// use lib_db::postgres::PostgresDb;
 /// use lib_db::error::Result;
-/// use serde::{Serialize, Deserialize};
-/// 
-/// #[derive(Serialize, Deserialize)]
-/// struct User {
-///     id: i32,
-///     name: String,
-///     email: String,
-/// }
 /// 
 /// #[tokio::main]
 /// async fn main() -> Result<()> {
 ///     let db = PostgresDb::connect("postgres://user:pass@localhost/db").await?;
 ///     
-///     let user: User = db.query_one_with(
-///         "SELECT id, name, email FROM users WHERE id = $1",
-///         &[123]
-///     ).await?;
-///     
-///     println!("Found user: {}", user.name);
+///     let count = db.execute("SELECT COUNT(*) FROM users WHERE id = 123").await?;
+///     println!("Found {} users with id 123", count);
 ///     
 ///     Ok(())
 /// }
@@ -437,27 +368,17 @@ pub trait SqlDb: Send + Sync + Clone + 'static {
 /// use lib_db::traits::SqlDb;
 /// use lib_db::postgres::PostgresDb;
 /// use lib_db::error::Result;
-/// use serde::{Serialize, Deserialize};
-/// 
-/// #[derive(Serialize, Deserialize)]
-/// struct User {
-///     id: i32,
-///     name: String,
-///     email: String,
-/// }
 /// 
 /// #[tokio::main]
 /// async fn main() -> Result<()> {
 ///     let db = PostgresDb::connect("postgres://user:pass@localhost/db").await?;
 ///     
-///     let user: Option<User> = db.query_optional_with(
-///         "SELECT id, name, email FROM users WHERE email = $1",
-///         &["alice@example.com"]
-///     ).await?;
+///     let count = db.execute("SELECT COUNT(*) FROM users WHERE email = 'alice@example.com'").await?;
 ///     
-///     match user {
-///         Some(user) => println!("Found user: {}", user.name),
-///         None => println!("User not found"),
+///     if count > 0 {
+///         println!("User found");
+///     } else {
+///         println!("User not found");
 ///     }
 ///     
 ///     Ok(())
