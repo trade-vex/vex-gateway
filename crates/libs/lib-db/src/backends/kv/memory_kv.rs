@@ -258,8 +258,6 @@ impl Default for MemoryConfig {
     }
 }
 
-
-
 impl MemoryDb {
     /// Create a new in-memory store with default configuration
     pub fn new(name: &str) -> Self {
