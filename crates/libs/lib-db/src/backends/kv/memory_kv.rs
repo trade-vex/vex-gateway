@@ -1,27 +1,27 @@
 use crate::{
     error::{DbError, Result},
-    traits::{BasicKvStore, AdvancedKvStore, AtomicKvStore, ExpiringKvStore, PoolStats},
+    traits::{AdvancedKvStore, AtomicKvStore, BasicKvStore, ExpiringKvStore, PoolStats},
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 
 /// Global registry for multiple memory stores
-/// 
+///
 /// This registry allows you to create and manage multiple isolated memory stores,
 /// each with its own configuration and data. This is useful for separating
 /// different types of cached data (e.g., user sessions, product cache, etc.).
-/// 
+///
 /// ## Example Usage
 /// ```rust
 /// use lib_db::memory_kv::REGISTRY;
 /// use lib_db::traits::BasicKvStore;
 /// use lib_db::error::Result;
-/// 
+///
 /// #[tokio::main]
 /// async fn main() -> Result<()> {
 ///     // Get different stores for different purposes
@@ -37,12 +37,10 @@ use tokio::task::JoinHandle;
 ///     Ok(())
 /// }
 /// ```
-pub static REGISTRY: Lazy<MemoryStoreRegistry> = Lazy::new(|| {
-    MemoryStoreRegistry::new()
-});
+pub static REGISTRY: Lazy<MemoryStoreRegistry> = Lazy::new(MemoryStoreRegistry::new);
 
 /// Registry for managing multiple memory stores
-/// 
+///
 /// This registry provides a centralized way to create and access multiple
 /// isolated memory stores. Each store can have its own configuration and
 /// operates independently of others.
@@ -52,15 +50,21 @@ pub struct MemoryStoreRegistry {
     default_config: MemoryConfig,
 }
 
-impl MemoryStoreRegistry {
-    /// Create a new registry with default configuration
-    pub fn new() -> Self {
+impl Default for MemoryStoreRegistry {
+    fn default() -> Self {
         Self {
             stores: DashMap::new(),
             default_config: MemoryConfig::default(),
         }
     }
-    
+}
+
+impl MemoryStoreRegistry {
+    /// Create a new registry with default configuration
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Create a new registry with custom default configuration
     pub fn with_default_config(config: MemoryConfig) -> Self {
         Self {
@@ -68,7 +72,7 @@ impl MemoryStoreRegistry {
             default_config: config,
         }
     }
-    
+
     /// Get or create a named store with default configuration
     pub async fn get_or_create(&self, name: &str) -> Arc<MemoryDb> {
         if let Some(store) = self.stores.get(name) {
@@ -79,12 +83,12 @@ impl MemoryStoreRegistry {
             store
         }
     }
-    
+
     /// Get or create a named store with custom configuration
     pub async fn get_or_create_with_config(
-        &self, 
-        name: &str, 
-        config: MemoryConfig
+        &self,
+        name: &str,
+        config: MemoryConfig,
     ) -> Arc<MemoryDb> {
         if let Some(store) = self.stores.get(name) {
             store.clone()
@@ -94,37 +98,40 @@ impl MemoryStoreRegistry {
             store
         }
     }
-    
+
     /// List all store names
     pub fn list_stores(&self) -> Vec<String> {
-        self.stores.iter().map(|entry| entry.key().clone()).collect()
+        self.stores
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect()
     }
-    
+
     /// Remove a store from the registry
     pub fn remove_store(&self, name: &str) -> Option<Arc<MemoryDb>> {
         self.stores.remove(name).map(|(_, store)| store)
     }
-    
+
     /// Get statistics for all stores
     pub async fn stats(&self) -> RegistryStats {
         let mut total_entries = 0;
         let mut total_memory = 0;
         let mut store_count = 0;
-        
+
         for store in self.stores.iter() {
             let stats = store.value().stats().await;
             total_entries += stats.total_entries;
             total_memory += stats.memory_usage;
             store_count += 1;
         }
-        
+
         RegistryStats {
             store_count,
             total_entries,
             total_memory,
         }
     }
-    
+
     /// Check if a store exists
     pub fn has_store(&self, name: &str) -> bool {
         self.stores.contains_key(name)
@@ -140,14 +147,14 @@ pub struct RegistryStats {
 }
 
 /// High-performance in-memory key-value store implementation
-/// 
+///
 /// This implementation uses DashMap for fine-grained locking, providing
 /// excellent concurrency performance. It's suitable for use cases like:
 /// - Application-level caching
 /// - Session storage
 /// - Temporary data storage
 /// - High-performance lookups
-/// 
+///
 /// ## Features
 /// - Full CRUD operations with atomic guarantees
 /// - Automatic expiration with background cleanup
@@ -155,19 +162,19 @@ pub struct RegistryStats {
 /// - Memory-efficient storage
 /// - Thread-safe concurrent access with fine-grained locking
 /// - Configurable capacity limits and eviction policies
-/// 
+///
 /// ## Performance Benefits
 /// - **DashMap**: Fine-grained locking per key instead of global locks
 /// - **Concurrent Access**: Multiple operations can happen simultaneously
 /// - **No Read-Write Contention**: Reads don't block other reads
 /// - **Background Cleanup**: Automatic expiration without blocking operations
-/// 
+///
 /// ## Example Usage
 /// ```rust
 /// use lib_db::traits::{BasicKvStore, AdvancedKvStore, AtomicKvStore, ExpiringKvStore};
 /// use lib_db::memory_kv::MemoryDb;
 /// use lib_db::error::Result;
-/// 
+///
 /// #[tokio::main]
 /// async fn main() -> Result<()> {
 ///     // Connect to a named store
@@ -222,9 +229,10 @@ pub struct MemoryConfig {
 }
 
 /// Eviction policy for when capacity is reached
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum EvictionPolicy {
     /// No eviction (return error when capacity reached)
+    #[default]
     None,
     /// Least Recently Used
     LRU,
@@ -250,12 +258,6 @@ impl Default for MemoryConfig {
     }
 }
 
-impl Default for EvictionPolicy {
-    fn default() -> Self {
-        EvictionPolicy::None
-    }
-}
-
 impl MemoryDb {
     /// Create a new in-memory store with default configuration
     pub fn new(name: &str) -> Self {
@@ -266,13 +268,13 @@ impl MemoryDb {
     pub fn with_config(name: &str, config: MemoryConfig) -> Self {
         let store = DashMap::new();
         let name = name.to_string();
-        
+
         // Start background cleanup if enabled
         let cleanup_task = if config.enable_cleanup {
             let store_clone = store.clone();
             let cleanup_interval = config.cleanup_interval;
             let name_clone = name.clone();
-            
+
             let handle = tokio::spawn(async move {
                 let mut interval = tokio::time::interval(cleanup_interval);
                 loop {
@@ -284,10 +286,10 @@ impl MemoryDb {
         } else {
             None
         };
-        
-        Self { 
-            store, 
-            config, 
+
+        Self {
+            store,
+            config,
             name,
             cleanup_task,
         }
@@ -296,14 +298,14 @@ impl MemoryDb {
     /// Clean up expired entries (non-async since DashMap handles locking)
     fn cleanup_expired_entries(store: &DashMap<String, MemoryEntry>, _name: &str) {
         let now = Instant::now();
-        store.retain(|_, entry| {
-            entry.expires_at.map_or(true, |expires_at| expires_at > now)
-        });
+        store.retain(|_, entry| entry.expires_at.is_none_or(|expires_at| expires_at > now));
     }
 
     /// Check if an entry is expired
     fn is_expired(entry: &MemoryEntry) -> bool {
-        entry.expires_at.map_or(false, |expires_at| expires_at <= Instant::now())
+        entry
+            .expires_at
+            .is_some_and(|expires_at| expires_at <= Instant::now())
     }
 
     /// Update access metadata
@@ -315,11 +317,11 @@ impl MemoryDb {
     /// Ensure capacity for new entries
     async fn ensure_capacity(&self, new_keys: usize) -> Result<()> {
         let current_len = self.store.len();
-        
+
         if current_len + new_keys <= self.config.max_entries {
             return Ok(());
         }
-        
+
         // Implement eviction based on policy
         match self.config.eviction_policy {
             EvictionPolicy::LRU => self.evict_lru(new_keys).await,
@@ -335,7 +337,8 @@ impl MemoryDb {
 
     /// Evict least recently used entries
     async fn evict_lru(&self, needed: usize) -> Result<()> {
-        let mut entries: Vec<_> = self.store
+        let mut entries: Vec<_> = self
+            .store
             .iter()
             .map(|entry| {
                 let key = entry.key().clone();
@@ -343,19 +346,20 @@ impl MemoryDb {
                 (key, last_accessed)
             })
             .collect();
-        
+
         entries.sort_by_key(|(_, last_accessed)| *last_accessed);
-        
+
         for (key, _) in entries.iter().take(needed) {
             self.store.remove(key.as_str());
         }
-        
+
         Ok(())
     }
 
     /// Evict least frequently used entries
     async fn evict_lfu(&self, needed: usize) -> Result<()> {
-        let mut entries: Vec<_> = self.store
+        let mut entries: Vec<_> = self
+            .store
             .iter()
             .map(|entry| {
                 let key = entry.key().clone();
@@ -363,13 +367,13 @@ impl MemoryDb {
                 (key, access_count)
             })
             .collect();
-        
+
         entries.sort_by_key(|(_, access_count)| *access_count);
-        
+
         for (key, _) in entries.iter().take(needed) {
             self.store.remove(key.as_str());
         }
-        
+
         Ok(())
     }
 
@@ -383,32 +387,32 @@ impl MemoryDb {
     async fn evict_random(&self, needed: usize) -> Result<()> {
         use rand::seq::SliceRandom;
         use rand::thread_rng;
-        
+
         let keys: Vec<_> = self.store.iter().map(|entry| entry.key().clone()).collect();
         let mut rng = thread_rng();
-        
+
         for key in keys.choose_multiple(&mut rng, needed) {
             self.store.remove(key);
         }
-        
+
         Ok(())
     }
 
     /// Get current store statistics
     pub async fn stats(&self) -> MemoryStats {
         let total_entries = self.store.len();
-        let expired_entries = self.store
+        let expired_entries = self
+            .store
             .iter()
             .filter(|entry| Self::is_expired(entry.value()))
             .count();
-        
-        let memory_usage = self.store
+
+        let memory_usage = self
+            .store
             .iter()
-            .map(|entry| {
-                std::mem::size_of::<MemoryEntry>() + entry.value().data.len()
-            })
+            .map(|entry| std::mem::size_of::<MemoryEntry>() + entry.value().data.len())
             .sum();
-        
+
         MemoryStats {
             total_entries,
             expired_entries,
@@ -433,6 +437,12 @@ impl MemoryDb {
     #[cfg(test)]
     pub async fn len(&self) -> usize {
         self.store.len()
+    }
+
+    /// Check if the store is empty (useful for testing)
+    #[cfg(test)]
+    pub async fn is_empty(&self) -> bool {
+        self.store.is_empty()
     }
 }
 
@@ -459,7 +469,7 @@ impl BasicKvStore for MemoryDb {
             })
         }
     }
-    
+
     async fn set<T>(&self, key: &str, value: &T) -> Result<()>
     where
         T: Serialize + Send + Sync,
@@ -468,26 +478,29 @@ impl BasicKvStore for MemoryDb {
             message: format!("Failed to serialize value: {}", e),
             source: Some(Box::new(e)),
         })?;
-        
+
         // Check capacity before inserting
         if !self.store.contains_key(key) {
             self.ensure_capacity(1).await?;
         }
-        
+
         let expires_at = self.config.default_ttl.map(|ttl| Instant::now() + ttl);
         let now = Instant::now();
-        
-        self.store.insert(key.to_string(), MemoryEntry {
-            data: bytes,
-            expires_at,
-            created_at: now,
-            access_count: 0,
-            last_accessed: now,
-        });
-        
+
+        self.store.insert(
+            key.to_string(),
+            MemoryEntry {
+                data: bytes,
+                expires_at,
+                created_at: now,
+                access_count: 0,
+                last_accessed: now,
+            },
+        );
+
         Ok(())
     }
-    
+
     async fn get<T>(&self, key: &str) -> Result<Option<T>>
     where
         T: DeserializeOwned,
@@ -497,10 +510,10 @@ impl BasicKvStore for MemoryDb {
             if Self::is_expired(&entry) {
                 return Ok(None);
             }
-            
+
             // Update access metadata
             Self::update_access(&mut entry);
-            
+
             let value = bincode::deserialize(&entry.data).map_err(|e| DbError::Serialization {
                 message: format!("Failed to deserialize value: {}", e),
                 source: Some(Box::new(e)),
@@ -510,11 +523,11 @@ impl BasicKvStore for MemoryDb {
             Ok(None)
         }
     }
-    
+
     async fn delete(&self, key: &str) -> Result<bool> {
         Ok(self.store.remove(key).is_some())
     }
-    
+
     async fn exists(&self, key: &str) -> Result<bool> {
         if let Some(entry) = self.store.get(key) {
             Ok(!Self::is_expired(&entry))
@@ -522,27 +535,30 @@ impl BasicKvStore for MemoryDb {
             Ok(false)
         }
     }
-    
+
     async fn set_bytes(&self, key: &str, value: &[u8]) -> Result<()> {
         // Check capacity before inserting
         if !self.store.contains_key(key) {
             self.ensure_capacity(1).await?;
         }
-        
+
         let expires_at = self.config.default_ttl.map(|ttl| Instant::now() + ttl);
         let now = Instant::now();
-        
-        self.store.insert(key.to_string(), MemoryEntry {
-            data: value.to_vec(),
-            expires_at,
-            created_at: now,
-            access_count: 0,
-            last_accessed: now,
-        });
-        
+
+        self.store.insert(
+            key.to_string(),
+            MemoryEntry {
+                data: value.to_vec(),
+                expires_at,
+                created_at: now,
+                access_count: 0,
+                last_accessed: now,
+            },
+        );
+
         Ok(())
     }
-    
+
     async fn get_bytes(&self, key: &str) -> Result<Option<Vec<u8>>> {
         if let Some(mut entry) = self.store.get_mut(key) {
             if Self::is_expired(&entry) {
@@ -563,86 +579,91 @@ impl AdvancedKvStore for MemoryDb {
         // Always successful for in-memory store
         Ok(())
     }
-    
+
     fn pool_stats(&self) -> PoolStats {
         // For in-memory store, we return stats about the store itself
         PoolStats {
             size: self.store.len() as u32,
-            idle: 0, // Not applicable for in-memory
+            idle: 0,   // Not applicable for in-memory
             active: 0, // Not applicable for in-memory
             max_size: self.config.max_entries as u32,
         }
     }
-    
+
     async fn mget<T>(&self, keys: &[&str]) -> Result<Vec<Option<T>>>
     where
         T: DeserializeOwned,
     {
         let mut results = Vec::with_capacity(keys.len());
-        
+
         for &key in keys {
             if let Some(mut entry) = self.store.get_mut(key) {
                 if Self::is_expired(&entry) {
                     results.push(None);
                 } else {
                     Self::update_access(&mut entry);
-                    let value = bincode::deserialize(&entry.data).map_err(|e| DbError::Serialization {
-                        message: format!("Failed to deserialize value: {}", e),
-                        source: Some(Box::new(e)),
-                    })?;
+                    let value =
+                        bincode::deserialize(&entry.data).map_err(|e| DbError::Serialization {
+                            message: format!("Failed to deserialize value: {}", e),
+                            source: Some(Box::new(e)),
+                        })?;
                     results.push(Some(value));
                 }
             } else {
                 results.push(None);
             }
         }
-        
+
         Ok(results)
     }
-    
+
     async fn mset<T>(&self, pairs: &[(&str, &T)]) -> Result<()>
     where
         T: Serialize + Send + Sync,
     {
         // Check capacity for new keys
-        let new_keys = pairs.iter()
+        let new_keys = pairs
+            .iter()
             .filter(|(key, _)| !self.store.contains_key(*key))
             .count();
-        
+
         if new_keys > 0 {
             self.ensure_capacity(new_keys).await?;
         }
-        
+
         let expires_at = self.config.default_ttl.map(|ttl| Instant::now() + ttl);
         let now = Instant::now();
-        
+
         for (key, value) in pairs {
             let bytes = bincode::serialize(value).map_err(|e| DbError::Serialization {
                 message: format!("Failed to serialize value: {}", e),
                 source: Some(Box::new(e)),
             })?;
-            
-            self.store.insert(key.to_string(), MemoryEntry {
-                data: bytes,
-                expires_at,
-                created_at: now,
-                access_count: 0,
-                last_accessed: now,
-            });
+
+            self.store.insert(
+                key.to_string(),
+                MemoryEntry {
+                    data: bytes,
+                    expires_at,
+                    created_at: now,
+                    access_count: 0,
+                    last_accessed: now,
+                },
+            );
         }
-        
+
         Ok(())
     }
-    
+
     async fn mdel(&self, keys: &[&str]) -> Result<u64> {
         let mut deleted = 0;
-        
+
         for &key in keys {
             if self.store.remove(key).is_some() {
                 deleted += 1;
             }
         }
-        
+
         Ok(deleted)
     }
 }
@@ -660,27 +681,30 @@ impl AtomicKvStore for MemoryDb {
         } else {
             0
         };
-        
+
         let new_value = current_value + delta;
         let bytes = bincode::serialize(&new_value).map_err(|e| DbError::Serialization {
             message: format!("Failed to serialize value: {}", e),
             source: Some(Box::new(e)),
         })?;
-        
+
         let expires_at = self.config.default_ttl.map(|ttl| Instant::now() + ttl);
         let now = Instant::now();
-        
-        self.store.insert(key.to_string(), MemoryEntry {
-            data: bytes,
-            expires_at,
-            created_at: now,
-            access_count: 0,
-            last_accessed: now,
-        });
-        
+
+        self.store.insert(
+            key.to_string(),
+            MemoryEntry {
+                data: bytes,
+                expires_at,
+                created_at: now,
+                access_count: 0,
+                last_accessed: now,
+            },
+        );
+
         Ok(new_value)
     }
-    
+
     async fn set_nx<T>(&self, key: &str, value: &T) -> Result<bool>
     where
         T: Serialize + Send + Sync,
@@ -691,31 +715,34 @@ impl AtomicKvStore for MemoryDb {
                 return Ok(false);
             }
         }
-        
+
         // Check capacity
         if !self.store.contains_key(key) {
             self.ensure_capacity(1).await?;
         }
-        
+
         let bytes = bincode::serialize(value).map_err(|e| DbError::Serialization {
             message: format!("Failed to serialize value: {}", e),
             source: Some(Box::new(e)),
         })?;
-        
+
         let expires_at = self.config.default_ttl.map(|ttl| Instant::now() + ttl);
         let now = Instant::now();
-        
-        self.store.insert(key.to_string(), MemoryEntry {
-            data: bytes,
-            expires_at,
-            created_at: now,
-            access_count: 0,
-            last_accessed: now,
-        });
-        
+
+        self.store.insert(
+            key.to_string(),
+            MemoryEntry {
+                data: bytes,
+                expires_at,
+                created_at: now,
+                access_count: 0,
+                last_accessed: now,
+            },
+        );
+
         Ok(true)
     }
-    
+
     async fn cas<T>(&self, key: &str, old: &T, new: &T) -> Result<bool>
     where
         T: Serialize + DeserializeOwned + Send + Sync + PartialEq,
@@ -731,28 +758,31 @@ impl AtomicKvStore for MemoryDb {
         } else {
             None
         };
-        
+
         // Check if current value matches expected old value
         if current_value.as_ref() != Some(old) {
             return Ok(false);
         }
-        
+
         let bytes = bincode::serialize(new).map_err(|e| DbError::Serialization {
             message: format!("Failed to serialize value: {}", e),
             source: Some(Box::new(e)),
         })?;
-        
+
         let expires_at = self.config.default_ttl.map(|ttl| Instant::now() + ttl);
         let now = Instant::now();
-        
-        self.store.insert(key.to_string(), MemoryEntry {
-            data: bytes,
-            expires_at,
-            created_at: now,
-            access_count: 0,
-            last_accessed: now,
-        });
-        
+
+        self.store.insert(
+            key.to_string(),
+            MemoryEntry {
+                data: bytes,
+                expires_at,
+                created_at: now,
+                access_count: 0,
+                last_accessed: now,
+            },
+        );
+
         Ok(true)
     }
 }
@@ -767,26 +797,29 @@ impl ExpiringKvStore for MemoryDb {
             message: format!("Failed to serialize value: {}", e),
             source: Some(Box::new(e)),
         })?;
-        
+
         // Check capacity before inserting
         if !self.store.contains_key(key) {
             self.ensure_capacity(1).await?;
         }
-        
+
         let expires_at = Instant::now() + Duration::from_secs(ttl_secs);
         let now = Instant::now();
-        
-        self.store.insert(key.to_string(), MemoryEntry {
-            data: bytes,
-            expires_at: Some(expires_at),
-            created_at: now,
-            access_count: 0,
-            last_accessed: now,
-        });
-        
+
+        self.store.insert(
+            key.to_string(),
+            MemoryEntry {
+                data: bytes,
+                expires_at: Some(expires_at),
+                created_at: now,
+                access_count: 0,
+                last_accessed: now,
+            },
+        );
+
         Ok(())
     }
-    
+
     async fn expire(&self, key: &str, ttl_secs: u64) -> Result<bool> {
         if let Some(mut entry) = self.store.get_mut(key) {
             if !Self::is_expired(&entry) {
@@ -794,10 +827,10 @@ impl ExpiringKvStore for MemoryDb {
                 return Ok(true);
             }
         }
-        
+
         Ok(false)
     }
-    
+
     async fn ttl(&self, key: &str) -> Result<Option<u64>> {
         if let Some(entry) = self.store.get(key) {
             if let Some(expires_at) = entry.expires_at {
@@ -856,7 +889,7 @@ impl MemoryDb {
         } else {
             url.to_string()
         };
-        
+
         (name, config)
     }
 }
@@ -881,25 +914,25 @@ mod tests {
     #[tokio::test]
     async fn test_basic_operations() {
         let kv = MemoryDb::connect("memory://test_store").await.unwrap();
-        
+
         // Test set and get
         let user = TestUser {
             id: 123,
             name: "Alice".to_string(),
         };
-        
+
         kv.set("user:123", &user).await.unwrap();
         let retrieved: Option<TestUser> = kv.get("user:123").await.unwrap();
         assert_eq!(retrieved, Some(user));
-        
+
         // Test exists
         assert!(kv.exists("user:123").await.unwrap());
         assert!(!kv.exists("user:456").await.unwrap());
-        
+
         // Test delete
         assert!(kv.delete("user:123").await.unwrap());
         assert!(!kv.delete("user:123").await.unwrap()); // Already deleted
-        
+
         // Test get after delete
         let retrieved: Option<TestUser> = kv.get("user:123").await.unwrap();
         assert_eq!(retrieved, None);
@@ -908,27 +941,35 @@ mod tests {
     #[tokio::test]
     async fn test_advanced_operations() {
         let kv = MemoryDb::connect("memory://test_advanced").await.unwrap();
-        
+
         // Test batch operations
-        let user1 = TestUser { id: 1, name: "Alice".to_string() };
-        let user2 = TestUser { id: 2, name: "Bob".to_string() };
-        
-        kv.mset(&[("user:1", &user1), ("user:2", &user2)]).await.unwrap();
+        let user1 = TestUser {
+            id: 1,
+            name: "Alice".to_string(),
+        };
+        let user2 = TestUser {
+            id: 2,
+            name: "Bob".to_string(),
+        };
+
+        kv.mset(&[("user:1", &user1), ("user:2", &user2)])
+            .await
+            .unwrap();
         let users: Vec<Option<TestUser>> = kv.mget(&["user:1", "user:2", "user:3"]).await.unwrap();
         assert_eq!(users.len(), 3);
         assert_eq!(users[0], Some(user1));
         assert_eq!(users[1], Some(user2));
         assert_eq!(users[2], None);
-        
+
         // Test atomic operations
         let new_count = kv.incr("counter", 5).await.unwrap();
         assert_eq!(new_count, 5);
-        
+
         let was_set = kv.set_nx("lock:resource", &"locked").await.unwrap();
         assert!(was_set);
         let was_set_again = kv.set_nx("lock:resource", &"locked").await.unwrap();
         assert!(!was_set_again);
-        
+
         // Test CAS
         let swapped = kv.cas("counter", &5, &10).await.unwrap();
         assert!(swapped);
@@ -939,19 +980,19 @@ mod tests {
     #[tokio::test]
     async fn test_expiration() {
         let kv = MemoryDb::connect("memory://test_expiration").await.unwrap();
-        
+
         // Test set with expiration
         kv.set_ex("session:123", &"token", 1).await.unwrap(); // 1 second TTL
-        
+
         // Should exist immediately
         assert!(kv.exists("session:123").await.unwrap());
-        
+
         // Wait for expiration
         tokio::time::sleep(Duration::from_millis(1100)).await;
-        
+
         // Should not exist after expiration
         assert!(!kv.exists("session:123").await.unwrap());
-        
+
         // Test TTL
         kv.set_ex("temp:key", &"value", 60).await.unwrap();
         let ttl = kv.ttl("temp:key").await.unwrap();
@@ -967,14 +1008,14 @@ mod tests {
             ..Default::default()
         };
         let kv = MemoryDb::with_config("test_capacity", config);
-        
+
         // Should be able to set 2 entries
         kv.set("key1", &"value1").await.unwrap();
         kv.set("key2", &"value2").await.unwrap();
-        
+
         // Third entry should trigger eviction
         kv.set("key3", &"value3").await.unwrap();
-        
+
         // First key should be evicted (LRU)
         assert!(!kv.exists("key1").await.unwrap());
         assert!(kv.exists("key2").await.unwrap());
@@ -984,10 +1025,10 @@ mod tests {
     #[tokio::test]
     async fn test_stats() {
         let kv = MemoryDb::connect("memory://test_stats").await.unwrap();
-        
+
         kv.set("key1", &"value1").await.unwrap();
         kv.set("key2", &"value2").await.unwrap();
-        
+
         let stats = kv.stats().await;
         assert_eq!(stats.total_entries, 2);
         assert_eq!(stats.expired_entries, 0);
@@ -999,22 +1040,22 @@ mod tests {
         // Test registry functionality
         let user_cache = REGISTRY.get_or_create("user_cache").await;
         let session_store = REGISTRY.get_or_create("sessions").await;
-        
+
         // Each store is isolated
         user_cache.set("user:123", &"Alice").await.unwrap();
         session_store.set("session:456", &"token").await.unwrap();
-        
+
         // Data is separate
         let user: Option<String> = user_cache.get("user:123").await.unwrap();
         let session: Option<String> = session_store.get("session:456").await.unwrap();
-        
+
         assert_eq!(user, Some("Alice".to_string()));
         assert_eq!(session, Some("token".to_string()));
-        
+
         // User data not in session store
         let user_in_session: Option<String> = session_store.get("user:123").await.unwrap();
         assert_eq!(user_in_session, None);
-        
+
         // List stores
         let stores = REGISTRY.list_stores();
         assert!(stores.contains(&"user_cache".to_string()));
@@ -1024,10 +1065,12 @@ mod tests {
     #[tokio::test]
     async fn test_url_parsing() {
         // Test URL parsing with parameters
-        let kv = MemoryDb::connect("memory://my_store?max_entries=100&ttl=3600&eviction=lru").await.unwrap();
-        
+        let kv = MemoryDb::connect("memory://my_store?max_entries=100&ttl=3600&eviction=lru")
+            .await
+            .unwrap();
+
         assert_eq!(kv.name(), "my_store");
-        
+
         // Test stats to verify configuration
         let stats = kv.stats().await;
         assert_eq!(stats.max_entries, 100);
