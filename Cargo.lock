@@ -1817,7 +1817,7 @@ dependencies = [
 name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5971ac85611da7067dbfcabef3c70ebb5606018acd9e2a3903a0da507521e0d5"
+checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
  "allocator-api2",
  "equivalent",
@@ -2496,29 +2496,6 @@ dependencies = [
  "sqlx",
  "thiserror 1.0.69",
  "tokio",
-]
-
-[[package]]
-name = "lib-middleware"
-version = "0.1.0"
-dependencies = [
- "actix-web",
- "base64 0.21.7",
- "chrono",
- "ed25519-dalek",
- "futures-util",
- "hex",
- "hmac",
- "lru",
- "pkcs8",
- "rsa",
- "serde",
- "serde_json",
- "sha1",
- "sha2",
- "subtle",
- "thiserror 1.0.69",
- "tokio",
  "tracing",
  "tracing-subscriber",
 ]
@@ -2628,13 +2605,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
 
 [[package]]
-name = "lru"
-version = "0.12.5"
+name = "matchit"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
-dependencies = [
- "hashbrown 0.15.4",
-]
+checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "md-5"
