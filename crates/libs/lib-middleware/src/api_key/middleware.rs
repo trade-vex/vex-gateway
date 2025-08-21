@@ -17,6 +17,7 @@ use crate::api_key::{
     security::{ApiKeyConfig, SecurityType, KeyMaterial},
     signature::SignatureVerifier,
 };
+use crate::repository::api_key_repository::ApiKeyRepository;
 
 /// Route-specific security configuration
 /// Placeholder : Will be removed and be replaced by direct actix based routing
@@ -30,12 +31,14 @@ pub struct RouteSecurityConfig {
 /// 
 /// Cache Hierarchy:
 /// 1. L1 (In-Memory LRU)
-/// 2. L2 (Redis)
+/// 2. L2 (Redis) - TODO
 /// 3. L3 (Database)
 #[derive(Clone)]
 pub struct ApiKeyStore {
     /// L1 Cache: In-memory LRU for hot keys
     l1_cache: Arc<RwLock<lru::LruCache<String, CachedApiKey>>>,
+    /// Database repository for persistent storage
+    api_key_repo: Option<Arc<dyn ApiKeyRepository>>,
     /// Fallback: In-memory HashMap for development
     memory_store: Arc<HashMap<String, ApiKeyConfig>>,
     /// Cache configuration
@@ -116,6 +119,28 @@ impl ApiKeyStore {
 
         Self {
             l1_cache,
+            api_key_repo: None,
+            memory_store: Arc::new(HashMap::new()),
+            config,
+            metrics: Arc::new(CacheMetrics::new()),
+        }
+    }
+
+    /// Create store with database repository
+    pub fn with_repository(
+        config: CacheConfig,
+        api_key_repo: Arc<dyn ApiKeyRepository>,
+    ) -> Self {
+        let l1_cache = Arc::new(RwLock::new(
+            lru::LruCache::new(
+                std::num::NonZeroUsize::new(config.l1_max_size)
+                    .expect("L1 cache size must be > 0")
+            )
+        ));
+
+        Self {
+            l1_cache,
+            api_key_repo: Some(api_key_repo),
             memory_store: Arc::new(HashMap::new()),
             config,
             metrics: Arc::new(CacheMetrics::new()),
@@ -151,7 +176,37 @@ impl ApiKeyStore {
         
         self.metrics.l1_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // L2/L3: Check memory store (fallback for now, will be Redis + DB)
+        // L3: Check database first (if available)
+        if let Some(repo) = &self.api_key_repo {
+            match repo.find_by_api_key(api_key).await {
+                Ok(Some(model)) => {
+                    if model.is_valid() {
+                        self.metrics.db_queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let config = model.to_api_key_config();
+                        let config_arc = Arc::new(config.clone());
+                        
+                        // Update L1 cache
+                        let cached = CachedApiKey::new(config);
+                        let mut cache = self.l1_cache.write().await;
+                        cache.put(api_key.to_string(), cached);
+                        
+                        debug!("Database hit for key: {}", api_key);
+                        return Some(config_arc);
+                    } else {
+                        debug!("API key found but invalid (disabled/expired): {}", api_key);
+                        return None;
+                    }
+                }
+                Ok(None) => {
+                    debug!("API key not found in database: {}", api_key);
+                }
+                Err(e) => {
+                    error!("Database error while fetching API key {}: {}", api_key, e);
+                }
+            }
+        }
+
+        // Fallback: Check memory store (for development/testing)
         if let Some(config) = self.memory_store.get(api_key) {
             self.metrics.db_queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let config_arc = Arc::new(config.clone());
@@ -165,14 +220,8 @@ impl ApiKeyStore {
             return Some(config_arc);
         }
 
-        // TODO: Add Redis (L2) and Database (L3) lookup here
+        // TODO: Add Redis (L2) lookup between L1 and L3
         // if let Some(config) = self.check_redis(api_key).await {
-        //     self.update_l1_cache(api_key, config.clone()).await;
-        //     return Some(config);
-        // }
-        // 
-        // if let Some(config) = self.check_database(api_key).await {
-        //     self.update_redis(api_key, &config).await;
         //     self.update_l1_cache(api_key, config.clone()).await;
         //     return Some(config);
         // }
@@ -328,13 +377,13 @@ impl ApiKeyMiddleware {
         // Verify signature based on algorithm
         let is_valid = match key_material {
             KeyMaterial::HmacSecret(secret) => {
-                SignatureVerifier::verify_hmac(&payload, signature, secret)?
+                SignatureVerifier::verify_hmac(&payload, signature, &secret)?
             }
             KeyMaterial::RsaPublicKey(public_key) => {
-                SignatureVerifier::verify_rsa(&payload, signature, public_key)?
+                SignatureVerifier::verify_rsa(&payload, signature, &public_key)?
             }
             KeyMaterial::Ed25519PublicKey(public_key) => {
-                SignatureVerifier::verify_ed25519(&payload, signature, public_key)?
+                SignatureVerifier::verify_ed25519(&payload, signature, &public_key)?
             }
         };
 

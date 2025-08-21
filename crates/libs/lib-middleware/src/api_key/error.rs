@@ -2,55 +2,78 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum ApiKeyError {
-    #[error("Missing API key header")]
-    MissingApiKey,
+    #[error("Database error: {0}")]
+    Database(String),
     
-    #[error("Invalid API key: {0}")]
-    InvalidApiKey(String),
+    #[error("API key not found")]
+    NotFound,
     
-    #[error("Insufficient permissions. Required: {required}, Available: {available}")]
-    InsufficientPermissions {
-        required: String,
-        available: String,
-    },
+    #[error("API key is disabled")]
+    Disabled,
     
-    #[error("Missing signature for signed endpoint")]
-    MissingSignature,
+    #[error("API key has expired")]
+    Expired,
     
     #[error("Invalid signature: {0}")]
     InvalidSignature(String),
     
-    #[error("Missing timestamp")]
-    MissingTimestamp,
-    
     #[error("Invalid timestamp: {0}")]
     InvalidTimestamp(String),
     
-    #[error("Request expired. Server time: {server_time}, Request time: {request_time}, Recv window: {recv_window}")]
-    RequestExpired {
-        server_time: u64,
-        request_time: u64,
-        recv_window: u64,
-    },
+    #[error("Request window exceeded")]
+    WindowExceeded,
     
-    #[error("Future timestamp. Server time: {server_time}, Request time: {request_time}")]
-    FutureTimestamp {
-        server_time: u64,
-        request_time: u64,
-    },
+    #[error("IP address not whitelisted: {0}")]
+    IpNotWhitelisted(String),
+    
+    #[error("Permission denied for security type: {0}")]
+    PermissionDenied(String),
+    
+    #[error("Invalid key material: {0}")]
+    InvalidKeyMaterial(String),
+    
+    #[error("Missing required header: {0}")]
+    MissingHeader(String),
+    
+    #[error("Invalid header format: {0}")]
+    InvalidHeader(String),
+    
+    #[error("Cache error: {0}")]
+    Cache(String),
+    
+    #[error("Serialization error: {0}")]
+    Serialization(String),
     
     #[error("Internal error: {0}")]
     Internal(String),
+    
+    #[error("Missing API key")]
+    MissingApiKey,
+    
+    #[error("Missing signature")]
+    MissingSignature,
+    
+    #[error("Invalid API key: {0}")]
+    InvalidApiKey(String),
+    
+    #[error("Missing timestamp")]
+    MissingTimestamp,
+    
+    #[error("Future timestamp - request timestamp {request_time} is ahead of server time {server_time}")]
+    FutureTimestamp { request_time: u64, server_time: u64 },
+    
+    #[error("Request expired - request timestamp {request_time} is too old (server time: {server_time}, recv_window: {recv_window}ms)")]
+    RequestExpired { request_time: u64, server_time: u64, recv_window: u64 },
 }
 
-impl From<std::io::Error> for ApiKeyError {
-    fn from(err: std::io::Error) -> Self {
-        ApiKeyError::Internal(err.to_string())
+impl From<sea_orm::DbErr> for ApiKeyError {
+    fn from(err: sea_orm::DbErr) -> Self {
+        ApiKeyError::Database(err.to_string())
     }
 }
 
-impl From<base64::DecodeError> for ApiKeyError {
-    fn from(err: base64::DecodeError) -> Self {
-        ApiKeyError::InvalidSignature(format!("Base64 decode error: {}", err))
+impl From<serde_json::Error> for ApiKeyError {
+    fn from(err: serde_json::Error) -> Self {
+        ApiKeyError::Serialization(err.to_string())
     }
 }
