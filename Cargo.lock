@@ -2501,6 +2501,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "lib-middleware"
+version = "0.1.0"
+dependencies = [
+ "actix-web",
+ "async-trait",
+ "base64 0.21.7",
+ "chrono",
+ "ed25519-dalek",
+ "futures-util",
+ "hex",
+ "hmac",
+ "lru",
+ "pkcs8",
+ "rsa",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "subtle",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "lib-server"
 version = "0.1.0"
 dependencies = [
@@ -2603,6 +2631,15 @@ name = "log"
 version = "0.4.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
+
+[[package]]
+name = "lru"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
+dependencies = [
+ "hashbrown 0.15.5",
+]
 
 [[package]]
 name = "matchit"
@@ -3827,6 +3864,7 @@ dependencies = [
  "pkcs1",
  "pkcs8",
  "rand_core 0.6.4",
+ "sha2",
  "signature",
  "spki",
  "subtle",

@@ -2,15 +2,20 @@ use serde::{Deserialize, Serialize};
 use crate::api_key::signature::SignatureAlgorithm;
 
 /// Security types for API endpoints 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sea_orm::DeriveActiveEnum, sea_orm::EnumIter)]
+#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "security_type")]
 pub enum SecurityType {
     /// Endpoint can be accessed freely
+    #[sea_orm(string_value = "none")]
     None,
     /// Endpoint requires sending a valid API-Key and signature
+    #[sea_orm(string_value = "trade")]
     Trade,
     /// Endpoint requires sending a valid API-Key and signature
+    #[sea_orm(string_value = "user_data")]
     UserData,
     /// Endpoint requires sending a valid API-Key
+    #[sea_orm(string_value = "user_stream")]
     UserStream,
 }
 
