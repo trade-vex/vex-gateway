@@ -6,6 +6,11 @@ edition = "2024"
 [dependencies]
 tokio = {workspace = true}
 actix-web = {workspace = true}
+serde_json = {workspace = true}
+tracing = {workspace = true}
+chrono = {workspace = true}
 
 #  Internal crate dependencies
 lib-api = {path = "../lib-api"}
+lib-auth = {path = "../lib-auth"}
+lib-config = {path = "../lib-config"}

@@ -240,8 +240,7 @@ impl Config {
                 colored: true,
                 file_path: None,
             },
-            // Creates a development-friendly AuthConfig without requiring env vars
-            auth: AuthConfig::development_defaults(),
+            auth: AuthConfig::from_env_with_oauth().unwrap_or_else(|_| AuthConfig::development_defaults()),
         }
     }
 

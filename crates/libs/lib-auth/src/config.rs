@@ -77,6 +77,39 @@ impl AuthConfig {
         })
     }
 
+    /// Create configuration from environment variables with proper OAuth setup
+    pub fn from_env_with_oauth() -> Result<Self, ConfigError> {
+        let mut config = Self::development_defaults();
+        
+        // Override with environment variables if present
+        if let Ok(db_url) = env::var("DATABASE_URL") {
+            config.database.url = db_url;
+        }
+        
+        if let Ok(redis_url) = env::var("REDIS_URL") {
+            config.redis.url = redis_url;
+        }
+
+        // JWT configuration from environment
+        if let Ok(private_key_path) = env::var("JWT_PRIVATE_KEY_PATH") {
+            config.jwt.private_key_path = private_key_path;
+        }
+        if let Ok(public_key_path) = env::var("JWT_PUBLIC_KEY_PATH") {
+            config.jwt.public_key_path = public_key_path;
+        }
+        if let Ok(issuer) = env::var("JWT_ISSUER") {
+            config.jwt.issuer = issuer;
+        }
+        if let Ok(audience) = env::var("JWT_AUDIENCE") {
+            config.jwt.audience = audience;
+        }
+
+        // Load OAuth providers from environment
+        config.oauth = OAuthConfig::from_env()?;
+
+        Ok(config)
+    }
+
     /// Create development defaults without requiring environment variables
     pub fn development_defaults() -> Self {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

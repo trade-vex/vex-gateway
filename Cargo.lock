@@ -2656,8 +2656,13 @@ name = "lib-server"
 version = "0.1.0"
 dependencies = [
  "actix-web",
+ "chrono",
  "lib-api",
+ "lib-auth",
+ "lib-config",
+ "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
