@@ -1,6 +1,7 @@
 pub mod api_key;
 pub mod models;
 pub mod repository;
+pub mod combined_auth;
 
 pub use api_key::{
     middleware::{ApiKeyMiddleware, RouteSecurityConfig, ApiKeyStore, CacheConfig, CacheMetrics},
@@ -16,6 +17,8 @@ pub use models::{
 pub use repository::{
     api_key_repository::{ApiKeyRepository, PostgresApiKeyRepository},
 };
+
+pub use combined_auth::{CombinedAuth, CombinedAuthMiddleware, AuthContext};
 
 #[cfg(test)]
 mod tests {

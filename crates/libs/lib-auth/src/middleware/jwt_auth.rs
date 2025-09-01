@@ -15,8 +15,8 @@ pub struct AuthenticatedUser {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct JwtClaims {
-    sub: String, // user_id
+pub struct JwtClaims {
+    pub sub: String, // user_id
     exp: usize,
     iat: usize,
     iss: String,
@@ -26,9 +26,9 @@ struct JwtClaims {
 
 #[derive(Clone)]
 pub struct JwtAuthentication {
-    decoding_key: DecodingKey,
-    issuer: String,
-    audience: String,
+    pub decoding_key: DecodingKey,
+    pub issuer: String,
+    pub audience: String,
     algorithm: Algorithm, // Add this field
 }
 

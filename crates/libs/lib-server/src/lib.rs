@@ -2,8 +2,10 @@
 //!
 //! Server initialization and application factory
 
-use actix_web::dev::Server;
-use actix_web::{web, App, HttpResponse, HttpServer};
+use actix_web::{
+    dev::Server,
+    web, App, HttpResponse, HttpServer,
+};
 use lib_api::routes;
 use lib_auth::{
     handlers::{auth, oauth},
@@ -11,13 +13,14 @@ use lib_auth::{
     state::AppState,
 };
 use lib_config::Config;
+use lib_middleware::{combined_auth::CombinedAuthMiddleware, api_key::middleware::ApiKeyMiddleware, repository::api_key_repository::PostgresApiKeyRepository,};
 use std::net::TcpListener;
 use std::sync::Arc;
 
 /// Application factory that creates the Actix-web application with all routes and middleware
 pub fn create_app(
     app_state: Arc<AppState>,
-    jwt_middleware: JwtAuthentication,
+    combined_auth: CombinedAuthMiddleware,
 ) -> App<
     impl actix_web::dev::ServiceFactory<
         actix_web::dev::ServiceRequest,
@@ -44,7 +47,7 @@ pub fn create_app(
         // Protected API routes (require JWT authentication)
         .service(
             web::scope("/api")
-                .wrap(jwt_middleware)
+                .wrap(combined_auth.clone())
                 .route("/me", web::get().to(me_handler))
                 .route("/profile", web::get().to(auth::get_profile)),
         )
@@ -86,16 +89,29 @@ pub async fn initialize_server(config: &Config) -> Result<(Arc<AppState>, Server
         config.auth.jwt.audience.clone(),
     );
 
+    let api_key_repository: Arc<dyn lib_middleware::repository::api_key_repository::ApiKeyRepository> = 
+        Arc::new(PostgresApiKeyRepository::new(app_state.db.clone()));
+
+    let api_key_middleware = ApiKeyMiddleware::new()
+        .with_repository(api_key_repository)
+        .with_default_security(lib_middleware::api_key::security::SecurityType::Trade)
+        .with_strict_timestamp_validation(true);
+
+    let combined_auth = CombinedAuthMiddleware::new(
+        jwt_middleware,
+        api_key_middleware,
+    );
+
     // Create TCP listener
     let listener = TcpListener::bind(config.server_address()?)?;
     tracing::info!("Server listening on {}", listener.local_addr().unwrap());
 
     // Create the HTTP server
     let app_state_clone = app_state.clone();
-    let jwt_middleware_clone = jwt_middleware.clone();
+    let combined_auth_clone = combined_auth.clone();
     
     let server = HttpServer::new(move || {
-        create_app(app_state_clone.clone(), jwt_middleware_clone.clone())
+        create_app(app_state_clone.clone(), combined_auth_clone.clone())
     })
     .listen(listener)?
     .run();

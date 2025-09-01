@@ -244,6 +244,7 @@ impl ApiKeyStore {
     }
 }
 
+#[derive(Clone)]
 pub struct ApiKeyMiddleware {
     api_key_store: ApiKeyStore,
     default_security: SecurityType,
@@ -277,6 +278,11 @@ impl ApiKeyMiddleware {
     /// Add multiple API keys (for development/testing)
     pub fn with_api_keys(mut self, configs: Vec<ApiKeyConfig>) -> Self {
         self.api_key_store = self.api_key_store.with_api_keys(configs);
+        self
+    }
+
+    pub fn with_repository(mut self, api_key_repo: Arc<dyn ApiKeyRepository>) -> Self {
+        self.api_key_store = ApiKeyStore::with_repository(CacheConfig::default(), api_key_repo);
         self
     }
 

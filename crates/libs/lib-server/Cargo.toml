@@ -14,3 +14,4 @@ chrono = {workspace = true}
 lib-api = {path = "../lib-api"}
 lib-auth = {path = "../lib-auth"}
 lib-config = {path = "../lib-config"}
+lib-middleware = { path = "../lib-middleware" }
