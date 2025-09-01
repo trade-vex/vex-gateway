@@ -4,8 +4,8 @@ use actix_web::{
 };
 use futures_util::future::{ready, LocalBoxFuture, Ready};
 use std::{rc::Rc, sync::Arc};
-use tracing::{debug, error, info};
-use crate::api_key::{security::ApiKeyConfig, middleware::ApiKeyMiddleware};
+use tracing::{error, info};
+use lib_middleware::api_key::{security::ApiKeyConfig, middleware::ApiKeyMiddleware};
 use lib_auth::middleware::jwt_auth::{JwtAuthentication, AuthenticatedUser, JwtClaims};
 use jsonwebtoken;
 use uuid;

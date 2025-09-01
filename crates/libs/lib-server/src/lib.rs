@@ -2,6 +2,8 @@
 //!
 //! Server initialization and application factory
 
+pub mod combined_auth;
+
 use actix_web::{
     dev::Server,
     web, App, HttpResponse, HttpServer,
@@ -13,7 +15,8 @@ use lib_auth::{
     state::AppState,
 };
 use lib_config::Config;
-use lib_middleware::{combined_auth::CombinedAuthMiddleware, api_key::middleware::ApiKeyMiddleware, repository::api_key_repository::PostgresApiKeyRepository,};
+use lib_middleware::{api_key::middleware::ApiKeyMiddleware, repository::api_key_repository::PostgresApiKeyRepository,};
+use crate::combined_auth::CombinedAuthMiddleware;
 use std::net::TcpListener;
 use std::sync::Arc;
 

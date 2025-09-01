@@ -9,6 +9,9 @@ actix-web = {workspace = true}
 serde_json = {workspace = true}
 tracing = {workspace = true}
 chrono = {workspace = true}
+futures-util = {workspace = true}
+jsonwebtoken = {workspace = true}
+uuid = {workspace = true}
 
 #  Internal crate dependencies
 lib-api = {path = "../lib-api"}

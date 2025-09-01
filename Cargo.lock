@@ -2653,6 +2653,8 @@ version = "0.1.0"
 dependencies = [
  "actix-web",
  "chrono",
+ "futures-util",
+ "jsonwebtoken 8.3.0",
  "lib-api",
  "lib-auth",
  "lib-config",
@@ -2660,6 +2662,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
