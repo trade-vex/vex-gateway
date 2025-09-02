@@ -58,7 +58,12 @@ pub fn create_app(
         .route("/health", web::get().to(health_check))
         // Other API routes
         .service(web::scope("").configure(routes::health_check_route::configure))
-        .service(web::scope("").configure(routes::orders::configure))
+        // Orders routes with combined authentication
+        .service(
+            web::scope("")
+                .wrap(combined_auth.clone())
+                .configure(routes::orders::configure)
+        )
 }
 
 /// Health check handler

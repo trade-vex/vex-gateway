@@ -3,9 +3,9 @@ use actix_web::{
     Error, HttpMessage, HttpRequest,
 };
 use futures_util::future::{ready, LocalBoxFuture, Ready};
-use std::{rc::Rc, sync::Arc};
+use std::{rc::Rc};
 use tracing::{error, info};
-use lib_middleware::api_key::{security::ApiKeyConfig, middleware::ApiKeyMiddleware};
+use lib_middleware::api_key::{middleware::ApiKeyMiddleware};
 use lib_auth::middleware::jwt_auth::{JwtAuthentication, AuthenticatedUser, JwtClaims};
 use jsonwebtoken;
 use uuid;
@@ -145,52 +145,3 @@ where
         })
     }
 }
-
-#[derive(Debug, Clone)]
-pub enum AuthContext {
-    Jwt(AuthenticatedUser),
-    ApiKey(Arc<ApiKeyConfig>),
-}
-
-impl AuthContext {
-    pub fn user_id(&self) -> Option<uuid::Uuid> {
-        match self {
-            AuthContext::Jwt(user) => Some(user.user_id),
-            AuthContext::ApiKey(_) => None,
-        }
-    }
-
-    pub fn is_jwt(&self) -> bool {
-        matches!(self, AuthContext::Jwt(_))
-    }
-
-    pub fn is_api_key(&self) -> bool {
-        matches!(self, AuthContext::ApiKey(_))
-    }
-
-    pub fn api_key_config(&self) -> Option<&ApiKeyConfig> {
-        match self {
-            AuthContext::ApiKey(config) => Some(config),
-            _ => None,
-        }
-    }
-}
-
-impl actix_web::FromRequest for AuthContext {
-    type Error = actix_web::Error;
-    type Future = Ready<Result<Self, Self::Error>>;
-
-    fn from_request(req: &actix_web::HttpRequest, _: &mut actix_web::dev::Payload) -> Self::Future {
-        if let Some(jwt_user) = req.extensions().get::<AuthenticatedUser>() {
-            return ready(Ok(AuthContext::Jwt(jwt_user.clone())));
-        }
-        
-        if let Some(api_config) = req.extensions().get::<Arc<ApiKeyConfig>>() {
-            return ready(Ok(AuthContext::ApiKey(api_config.clone())));
-        }
-        
-        ready(Err(actix_web::error::ErrorUnauthorized("Authentication required")))
-    }
-}
-
-pub use CombinedAuthMiddleware as CombinedAuth;

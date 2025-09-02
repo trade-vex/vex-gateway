@@ -2532,11 +2532,13 @@ version = "0.1.0"
 dependencies = [
  "actix-web",
  "common",
+ "futures-util",
  "lib-auth",
  "lib-middleware",
  "serde",
  "serde_json",
  "tokio",
+ "uuid",
  "vex-config",
  "vex-networking",
 ]
