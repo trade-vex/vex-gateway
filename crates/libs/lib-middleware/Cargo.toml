@@ -32,6 +32,11 @@ uuid = { version = "1", features = ["v4", "serde"] }
 sea-orm = { version = "0.12.2", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-uuid", "with-chrono"] }
 async-trait = "0.1.88"
 
+# Redis dependencies
+redis = { version = "0.24", features = ["tokio-comp", "connection-manager"] }
+bb8 = "0.8"
+bincode = "1.3"
+
 # Auth library dependency
 lib-auth = { path = "../lib-auth" }
 
