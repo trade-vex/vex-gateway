@@ -26,11 +26,11 @@ async fn main() -> std::io::Result<()> {
 
     // Bind to the configured address and port
     // This creates a TCP listener that will accept incoming connections
-    let listener = TcpListener::bind(address).expect(&format!("Failed to bind to {}", address));
+    let listener = TcpListener::bind(&address)
+        .unwrap_or_else(|e| panic!("Failed to bind to {}: {}", address, e));
 
     // Log that the server is starting
     println!("Server listening on {}", address);
-
     // Start the HTTP server and wait for it to complete
     // The server will handle incoming requests until it's shut down
     run(listener)?.await
