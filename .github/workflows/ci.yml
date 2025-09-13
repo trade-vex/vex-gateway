@@ -14,8 +14,8 @@ jobs:
     name: Build and Test
     runs-on: ubuntu-latest
     env:
-      SERVER_HOST: ${{ secrets.SERVER_HOST }}
-      SERVER_PORT: ${{ secrets.SERVER_PORT }}
+      SERVER_HOST: ${{ secrets.SERVER_HOST || '127.0.0.1' }}
+      SERVER_PORT: ${{ secrets.SERVER_PORT || '8000' }}
     steps:
       - uses: actions/checkout@v4
 
