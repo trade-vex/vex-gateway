@@ -1,4 +1,10 @@
 [workspace]
 resolver = "2"
-members = [ "crates/bin" , "crates/libs/lib-api", "crates/libs/lib-core"]
+members = [ "crates/bin" , "crates/libs/lib-api", "crates/libs/lib-core", "crates/libs/lib-server", "crates/libs/lib-config"]
 
+[workspace.dependencies]
+actix-web = "4.11.0"
+tokio = {version = "1.45" , features = ["full"]}
+serde = { version = "1.0", features = ["derive"] }
+config = "0.14" 
+dotenv = "0.15" 

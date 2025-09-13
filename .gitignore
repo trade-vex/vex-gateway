@@ -1,2 +1,10 @@
-/target
 .env
+.DS_Store
+
+# IDEs
+.vscode
+.idea
+
+# Build
+**/target
+**/build
