@@ -67,8 +67,8 @@ jobs:
       image: xd009642/tarpaulin
       options: --security-opt seccomp=unconfined
     env:
-      SERVER_HOST: ${{ secrets.SERVER_HOST }}
-      SERVER_PORT: ${{ secrets.SERVER_PORT }}
+      SERVER_HOST: ${{ secrets.SERVER_HOST || '127.0.0.1' }}
+      SERVER_PORT: ${{ secrets.SERVER_PORT || '8000' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
