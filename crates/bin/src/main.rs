@@ -25,13 +25,25 @@ async fn main() -> std::io::Result<()> {
     dotenvy::dotenv().ok();
 
     // Load configuration
-    let config = Config::load_auto().unwrap_or_else(|e| {
-        error!(
-            "Failed to load configuration: {}. Falling back to defaults.",
-            e
-        );
-        Config::load_development_defaults()
-    });
+    let config = match Config::load_auto() {
+        Ok(config) => {
+            info!("Configuration loaded successfully:");
+            info!("  Server host: {}", config.server.host);
+            info!("  Server port: {}", config.server.port);
+            config
+        },
+        Err(e) => {
+            error!(
+                "Failed to load configuration: {}. Falling back to defaults.",
+                e
+            );
+            let fallback_config = Config::load_development_defaults();
+            info!("Using fallback configuration:");
+            info!("  Server host: {}", fallback_config.server.host);
+            info!("  Server port: {}", fallback_config.server.port);
+            fallback_config
+        }
+    };
 
     // Initialize logging
     fmt()

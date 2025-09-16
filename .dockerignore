@@ -1,0 +1,46 @@
+# Git
+.git
+.gitignore
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Rust
+# target/ - Commented out to allow copying pre-built binary
+**/*.rs.bk
+# Cargo.lock - Commented out to allow copying for reproducible builds
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Test artifacts
+coverage/
+*.prof
+
+# Documentation
+README.md
+*.md
+
+# CI/CD
+.github/
+
+# Temporary files
+tmp/
+temp/

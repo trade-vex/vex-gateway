@@ -1,0 +1,32 @@
+# Media Driver Dockerfile using local binary
+FROM ubuntu:22.04
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    libbsd0 \
+    libuuid1 \
+    libssl3 \
+    zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create aeron directory for media driver
+RUN mkdir -p /aeron/media-driver && chmod 755 /aeron/media-driver
+
+# Set working directory
+WORKDIR /aeron
+
+# Copy the locally extracted binary and libraries
+COPY aeron-binaries/aeronmd /usr/local/bin/aeronmd
+COPY aeron-binaries/lib/ /usr/local/lib/
+
+# Make it executable
+RUN chmod +x /usr/local/bin/aeronmd
+
+# Set library path
+ENV LD_LIBRARY_PATH=/usr/local/lib
+
+# Expose port for Aeron (default is 40123)
+EXPOSE 40123
+
+# Run the media driver
+CMD ["aeronmd", "-D", "aeron.dir=/aeron/media-driver"]
