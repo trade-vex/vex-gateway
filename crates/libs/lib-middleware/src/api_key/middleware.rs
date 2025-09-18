@@ -16,7 +16,7 @@ use crate::api_key::{
     error::ApiKeyError,
     security::{ApiKeyConfig, SecurityType, KeyMaterial},
     signature::SignatureVerifier,
-    cache::{ApiKeyCache},
+    cache::{ApiKeyCache, CacheStats},
     redis_cache::{RedisApiKeyCache, RedisCacheConfig},
 };
 use crate::repository::api_key_repository::ApiKeyRepository;
@@ -125,6 +125,20 @@ impl CacheMetrics {
         let hits = self.l2_hits.load(std::sync::atomic::Ordering::Relaxed);
         let misses = self.l2_misses.load(std::sync::atomic::Ordering::Relaxed);
         if hits + misses == 0 { 0.0 } else { hits as f64 / (hits + misses) as f64 }
+    }
+
+    /// Get overall cache statistics
+    pub fn get_cache_stats(&self) -> CacheStats {
+        CacheStats {
+            hits: self.l1_hits.load(std::sync::atomic::Ordering::Relaxed) + 
+                  self.l2_hits.load(std::sync::atomic::Ordering::Relaxed),
+            misses: self.l1_misses.load(std::sync::atomic::Ordering::Relaxed) + 
+                    self.l2_misses.load(std::sync::atomic::Ordering::Relaxed),
+            errors: self.l2_errors.load(std::sync::atomic::Ordering::Relaxed),
+            sets: 0, // Not tracked in this metrics struct
+            deletes: 0, // Not tracked in this metrics struct
+            size: None,
+        }
     }
 }
 
