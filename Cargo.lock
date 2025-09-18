@@ -5167,9 +5167,16 @@ checksum = "8f50febec83f5ee1df3015341d8bd429f2d1cc62bcba7ea2076759d315084683"
 name = "tests"
 version = "0.1.0"
 dependencies = [
+ "actix-web",
+ "chrono",
+ "jsonwebtoken 9.3.1",
+ "lib-auth",
+ "lib-config",
  "lib-server",
  "reqwest 0.11.27",
+ "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

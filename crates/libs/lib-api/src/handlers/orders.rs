@@ -1,41 +1,16 @@
 //! lib-api/src/handlers/orders.rs
 
-use actix_web::{HttpRequest, HttpResponse, web, HttpMessage};
+use actix_web::{HttpResponse, web};
 use serde::{Deserialize, Serialize};
 use serde_json;
-use std::sync::Arc;
 use std::time::Duration;
 use std::sync::mpsc;
 use vex_networking::client::{VexGateway, OrderCommandHandler};
-use futures_util::future::{ready, Ready};
 use vex_config::GatewayNetworkingConfig;
-use lib_auth::middleware::jwt_auth::AuthenticatedUser;
-use lib_middleware::api_key::security::ApiKeyConfig;
 use common::model::enums::{Side, OrderType};
 use common::cmd::{OrderCommand, OrderCommandType};
+use crate::handlers::auth_extractors::AuthenticatedUserId;
 
-#[derive(Debug, Clone)]
-pub enum AuthContext {
-    Jwt(AuthenticatedUser),
-    ApiKey(Arc<ApiKeyConfig>),
-}
-
-impl actix_web::FromRequest for AuthContext {
-    type Error = actix_web::Error;
-    type Future = Ready<Result<Self, Self::Error>>;
-
-    fn from_request(req: &actix_web::HttpRequest, _: &mut actix_web::dev::Payload) -> Self::Future {
-        if let Some(jwt_user) = req.extensions().get::<AuthenticatedUser>() {
-            return ready(Ok(AuthContext::Jwt(jwt_user.clone())));
-        }
-        
-        if let Some(api_config) = req.extensions().get::<Arc<ApiKeyConfig>>() {
-            return ready(Ok(AuthContext::ApiKey(api_config.clone())));
-        }
-        
-        ready(Err(actix_web::error::ErrorUnauthorized("Authentication required")))
-    }
-}
 
 #[derive(Debug, Deserialize)]
 pub struct OrderRequest {
@@ -156,44 +131,13 @@ async fn process_order(order_data: OrderRequest) -> HttpResponse {
     }
 }
 
+
 pub async fn order_with_auth(
-    req: HttpRequest,
     order_data: web::Json<OrderRequest>,
+    auth_user: AuthenticatedUserId,
 ) -> HttpResponse {
-    let user_id = if let Some(jwt_user) = req.extensions().get::<AuthenticatedUser>() {
-        jwt_user.user_id.as_u128() as u64
-    } else if let Some(_api_config) = req.extensions().get::<Arc<ApiKeyConfig>>() {
-        order_data.user_id.unwrap_or_else(|| 0)
-    } else {
-        return HttpResponse::Unauthorized().json(serde_json::json!({
-            "error": "Authentication required"
-        }));
-    };
-
-    let mut order_data = order_data.into_inner();
-    order_data.user_id = Some(user_id);
-
-    process_order(order_data).await
-}
-
-pub async fn order_with_auth_context(
-    auth_context: AuthContext,
-    order_data: web::Json<OrderRequest>,
-) -> HttpResponse {
-    let user_id = match auth_context {
-        AuthContext::Jwt(user) => user.user_id.as_u128() as u64,
-        AuthContext::ApiKey(_api_config) => {
-            match order_data.user_id {
-                Some(id) => id,
-                None => {
-                    return HttpResponse::BadRequest().json(serde_json::json!({
-                        "error": "user_id is required for API key requests"
-                    }));
-                }
-            }
-        }
-    };
-
+    let user_id = auth_user.0.as_u128() as u64;
+    
     let mut order_data = order_data.into_inner();
     order_data.user_id = Some(user_id);
 
