@@ -37,7 +37,7 @@ impl std::fmt::Display for SecurityType {
 }
 
 /// Key material for different signature algorithms
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum KeyMaterial {
     /// HMAC secret key
     HmacSecret(String),
@@ -58,7 +58,7 @@ impl KeyMaterial {
 }
 
 /// API Key configuration and permissions
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ApiKeyConfig {
     pub api_key: String,
     pub key_material: Option<KeyMaterial>,
