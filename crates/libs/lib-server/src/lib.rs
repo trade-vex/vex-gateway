@@ -27,6 +27,7 @@ use std::sync::Arc;
 pub fn create_app(
     app_state: Arc<AppState>,
     combined_auth: CombinedAuthMiddleware,
+    api_key_repository: Arc<dyn lib_middleware::repository::api_key_repository::ApiKeyRepository>,
 ) -> App<
     impl actix_web::dev::ServiceFactory<
         actix_web::dev::ServiceRequest,
@@ -38,6 +39,7 @@ pub fn create_app(
 > {
     App::new()
         .app_data(web::Data::new(app_state.clone()))
+        .app_data(web::Data::new(api_key_repository))
         // Public OAuth routes
         .service(
             web::scope("/auth/oauth")
@@ -55,7 +57,11 @@ pub fn create_app(
             web::scope("/api")
                 .wrap(combined_auth.clone())
                 .route("/me", web::get().to(me_handler))
-                .route("/profile", web::get().to(auth::get_profile)),
+                .route("/profile", web::get().to(auth::get_profile))
+                .service(
+                    web::scope("/keys")
+                        .configure(routes::api_keys::configure)
+                ),
         )
         // Health check (public)
         .route("/health", web::get().to(health_check))
@@ -104,7 +110,7 @@ pub async fn initialize_server(config: &Config) -> Result<(Arc<AppState>, Server
         Arc::new(PostgresApiKeyRepository::new(app_state.db.clone()));
 
     let api_key_middleware = ApiKeyMiddleware::new()
-        .with_repository(api_key_repository)
+        .with_repository(api_key_repository.clone())
         .with_default_security(lib_middleware::api_key::security::SecurityType::Trade)
         .with_strict_timestamp_validation(true);
 
@@ -120,9 +126,10 @@ pub async fn initialize_server(config: &Config) -> Result<(Arc<AppState>, Server
     // Create the HTTP server
     let app_state_clone = app_state.clone();
     let combined_auth_clone = combined_auth.clone();
+    let api_key_repo_clone = api_key_repository.clone();
     
     let server = HttpServer::new(move || {
-        create_app(app_state_clone.clone(), combined_auth_clone.clone())
+        create_app(app_state_clone.clone(), combined_auth_clone.clone(), api_key_repo_clone.clone())
     })
     .listen(listener)?
     .run();

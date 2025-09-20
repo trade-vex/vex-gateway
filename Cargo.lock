@@ -2531,13 +2531,16 @@ name = "lib-api"
 version = "0.1.0"
 dependencies = [
  "actix-web",
+ "chrono",
  "common",
  "futures-util",
  "lib-auth",
  "lib-middleware",
+ "sea-orm",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
  "uuid",
  "vex-config",
  "vex-networking",
