@@ -257,12 +257,12 @@ impl Config {
     ///
     /// ## All Environments
     /// - Server host cannot be empty
-    /// - Server port cannot be 0
     /// - Max connections cannot be 0
     /// - Connection timeout cannot be 0
     /// - Log level must be valid
     ///
     /// ## Production Environment
+    /// - Server port cannot be 0 (must be explicitly configured)
     /// - Cannot bind to localhost (127.0.0.1 or localhost)
     /// - Cannot use trace or debug logging levels
     ///
@@ -270,7 +270,8 @@ impl Config {
     /// - Max connections should be reasonable (< 10000)
     ///
     /// ## Testing Environment
-    /// - Should use non-privileged ports (>= 1024)
+    /// - Port 0 is allowed for ephemeral port usage
+    /// - If port is not 0, should use non-privileged ports (>= 1024)
     pub fn validate(&self) -> Result<(), ConfigError> {
         debug!(
             "Validating configuration for environment: {:?}",
@@ -289,6 +290,12 @@ impl Config {
                 debug!("Applying production-specific validation rules");
 
                 // Production-specific validations
+                if self.server.port == 0 {
+                    return Err(ConfigError::ValidationError(
+                        "Production environment must have an explicitly configured port (cannot be 0)".to_string(),
+                    ));
+                }
+
                 if self.server.host == "127.0.0.1" || self.server.host == "localhost" {
                     return Err(ConfigError::ValidationError(
                         "Production environment should not bind to localhost".to_string(),
@@ -315,9 +322,10 @@ impl Config {
                 debug!("Applying testing-specific validation rules");
 
                 // Testing-specific validations
-                if self.server.port < 1024 {
+                // Port 0 is allowed for ephemeral ports, but if a specific port is used, it should be non-privileged
+                if self.server.port != 0 && self.server.port < 1024 {
                     return Err(ConfigError::ValidationError(
-                        "Testing environment should use non-privileged ports".to_string(),
+                        "Testing environment should use non-privileged ports (>= 1024) or port 0 for ephemeral ports".to_string(),
                     ));
                 }
             }
@@ -472,5 +480,27 @@ mod tests {
         let addr = config.server_address().unwrap();
         assert_eq!(addr.ip().to_string(), "127.0.0.1");
         assert_eq!(addr.port(), 8000);
+    }
+
+    #[test]
+    fn test_port_0_validation() {
+        // Test that port 0 is allowed in testing environment
+        let mut testing_config = Config::load_development_defaults();
+        testing_config.environment = Environment::Testing;
+        testing_config.server.port = 0;
+        assert!(testing_config.validate().is_ok());
+
+        // Test that port 0 is rejected in production environment
+        let mut production_config = Config::load_development_defaults();
+        production_config.environment = Environment::Production;
+        production_config.server.port = 0;
+        production_config.server.host = "0.0.0.0".to_string();
+        production_config.logging.level = "info".to_string();
+        assert!(production_config.validate().is_err());
+
+        // Test that port 0 is allowed in development environment
+        let mut dev_config = Config::load_development_defaults();
+        dev_config.server.port = 0;
+        assert!(dev_config.validate().is_ok());
     }
 }

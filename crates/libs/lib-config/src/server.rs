@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 pub struct ServerConfig {
     /// The host address to bind the server to (e.g., "127.0.0.1", "0.0.0.0")
     pub host: String,
-    /// The port number to bind the server to (0 for random port in testing)
+    /// The port number to bind the server to (0 for ephemeral port in testing)
     pub port: u16,
     /// Maximum number of concurrent connections the server will accept
     pub max_connections: usize,
@@ -27,6 +27,7 @@ impl ServerConfig {
     ///
     /// Performs basic validation to ensure the server configuration
     /// contains reasonable values that won't cause runtime issues.
+    /// Note: Port 0 is allowed for ephemeral port usage in testing environments.
     ///
     /// # Returns
     ///
@@ -36,12 +37,6 @@ impl ServerConfig {
         if self.host.is_empty() {
             return Err(ConfigError::ValidationError(
                 "Server host cannot be empty".to_string(),
-            ));
-        }
-
-        if self.port == 0 {
-            return Err(ConfigError::ValidationError(
-                "Server port cannot be 0".to_string(),
             ));
         }
 
