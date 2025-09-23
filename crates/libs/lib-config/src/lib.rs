@@ -302,7 +302,8 @@ impl Config {
                     ));
                 }
 
-                if self.logging.level == "trace" || self.logging.level == "debug" {
+                let log_level = self.logging.level.trim().to_lowercase();
+                if log_level == "trace" || log_level == "debug" {
                     return Err(ConfigError::ValidationError(
                         "Production environment should not use trace or debug logging".to_string(),
                     ));
