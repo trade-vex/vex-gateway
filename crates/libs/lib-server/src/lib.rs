@@ -39,7 +39,7 @@ pub fn create_app(
 > {
     App::new()
         .app_data(web::Data::new(app_state.clone()))
-        .app_data(web::Data::new(api_key_repository))
+        .app_data(web::Data::from(api_key_repository))
         // Public OAuth routes
         .service(
             web::scope("/auth/oauth")
