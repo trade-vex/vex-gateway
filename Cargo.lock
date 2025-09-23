@@ -2536,6 +2536,7 @@ dependencies = [
  "futures-util",
  "lib-auth",
  "lib-middleware",
+ "lib-utils",
  "sea-orm",
  "serde",
  "serde_json",
@@ -2667,9 +2668,23 @@ dependencies = [
  "lib-auth",
  "lib-config",
  "lib-middleware",
+ "lib-utils",
  "serde_json",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "lib-utils"
+version = "0.1.0"
+dependencies = [
+ "actix-web",
+ "futures-util",
+ "lib-auth",
+ "lib-middleware",
+ "serde",
+ "serde_json",
  "uuid",
 ]
 

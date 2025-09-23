@@ -1,6 +1,6 @@
 use actix_web::{test, web, App, HttpResponse, HttpMessage, middleware::Logger};
 use crate::combined_auth::CombinedAuthMiddleware;
-use lib_api::handlers::auth_extractors::AuthContext;
+use lib_utils::AuthContext;
 use lib_middleware::api_key::{middleware::ApiKeyMiddleware, security::{ApiKeyConfig, SecurityType}};
 use lib_auth::middleware::jwt_auth::JwtAuthentication;
 use jsonwebtoken::{EncodingKey, DecodingKey, Algorithm, Header, encode};

@@ -9,7 +9,7 @@ use vex_networking::client::{VexGateway, OrderCommandHandler};
 use vex_config::GatewayNetworkingConfig;
 use common::model::enums::{Side, OrderType};
 use common::cmd::{OrderCommand, OrderCommandType};
-use crate::handlers::auth_extractors::AuthenticatedUserId;
+use lib_utils::AuthenticatedUserId;
 
 
 #[derive(Debug, Deserialize)]
