@@ -10,6 +10,17 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, warn};
 
+/// this function redacts an API key for safe logging by showing only the last 4 characters
+/// or "***" for short keys to avoid leaking sensitive data
+fn redact_key(key: &str) -> String {
+    let n = key.chars().count();
+    if n <= 4 { 
+        "***".into() 
+    } else {
+        format!("***{}", &key[key.len().saturating_sub(4)..])
+    }
+}
+
 #[derive(Clone)]
 pub struct RedisApiKeyCache {
     pool: Pool<RedisConnectionManager>,
@@ -182,11 +193,11 @@ impl ApiKeyCache for RedisApiKeyCache {
                 self.stats.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 match bincode::deserialize::<ApiKeyConfig>(&data) {
                     Ok(config) => {
-                        debug!("Cache hit for API key: {}", key);
+                        debug!("Cache hit for API key: {}", redact_key(key));
                         Ok(Some(config))
                     }
                     Err(e) => {
-                        warn!("Failed to deserialize cached API key {}: {}", key, e);
+                        warn!("Failed to deserialize cached API key {}: {}", redact_key(key), e);
                         self.stats.misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         Ok(None)
                     }
@@ -194,7 +205,7 @@ impl ApiKeyCache for RedisApiKeyCache {
             }
             None => {
                 self.stats.misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                debug!("Cache miss for API key: {}", key);
+                debug!("Cache miss for API key: {}", redact_key(key));
                 Ok(None)
             }
         }
@@ -221,7 +232,7 @@ impl ApiKeyCache for RedisApiKeyCache {
         }).await?;
 
         self.stats.sets.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        debug!("Cached API key: {} with TTL: {}s", key, ttl.as_secs());
+        debug!("Cached API key: {} with TTL: {}s", redact_key(key), ttl.as_secs());
         Ok(())
     }
 
@@ -237,7 +248,7 @@ impl ApiKeyCache for RedisApiKeyCache {
         }).await?;
 
         self.stats.deletes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        debug!("Deleted cached API key: {}", key);
+        debug!("Deleted cached API key: {}", redact_key(key));
         Ok(())
     }
 
