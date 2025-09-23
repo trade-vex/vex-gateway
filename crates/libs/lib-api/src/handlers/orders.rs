@@ -33,15 +33,15 @@ pub struct OrderResponse {
     pub message: String,
 }
 
-pub async fn order(
-    req: web::Json<OrderRequest>,
-    user_id: AuthenticatedUserId,
-) -> HttpResponse {
-    // Extract order data from the request
-    let order_data = req.into_inner();
+// pub async fn order(
+//     req: web::Json<OrderRequest>,
+//     user_id: AuthenticatedUserId,
+// ) -> HttpResponse {
+//     // Extract order data from the request
+//     let order_data = req.into_inner();
     
-    process_order(order_data, user_id.0.as_u128() as u64).await
-}
+//     process_order(order_data, user_id.0.as_u128() as u64).await
+// }
 
 /// Common order processing logic
 async fn process_order(order_data: OrderRequest, user_id: u64) -> HttpResponse {
