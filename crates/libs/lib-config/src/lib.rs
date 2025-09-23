@@ -55,6 +55,7 @@ pub mod util;
 
 // Re-export commonly used types for convenience
 pub use environment::Environment;
+pub use error::ConfigError;
 pub use logging::LoggingConfig;
 pub use server::ServerConfig;
 
@@ -64,7 +65,6 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use tracing::{debug, info};
 
-use crate::error::ConfigError;
 use crate::util::find_config_dir;
 
 /// Main configuration structure for the VEX Gateway Service.

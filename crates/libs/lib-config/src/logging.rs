@@ -1,7 +1,7 @@
 //! lib-config/src/logging.rs
 
 use crate::environment::Environment;
-use crate::error::ConfigError;
+use crate::ConfigError;
 use crate::server::ServerConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
