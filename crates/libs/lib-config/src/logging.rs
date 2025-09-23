@@ -1,8 +1,6 @@
 //! lib-config/src/logging.rs
 
-use crate::environment::Environment;
 use crate::ConfigError;
-use crate::server::ServerConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -41,18 +39,4 @@ impl LoggingConfig {
         }
         Ok(())
     }
-}
-
-/// Main configuration structure for the VEX Gateway Service.
-///
-/// Contains all configuration settings organized by category.
-/// This is the primary configuration type that applications should use.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Config {
-    /// Current runtime environment (determines validation rules)
-    pub environment: Environment,
-    /// Server-specific configuration (network, connections, timeouts)
-    pub server: ServerConfig,
-    /// Logging configuration (level, format, output)
-    pub logging: LoggingConfig,
 }
