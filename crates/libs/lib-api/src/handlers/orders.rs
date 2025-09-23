@@ -46,11 +46,11 @@ pub struct OrderResponse {
 /// Common order processing logic
 async fn process_order(order_data: OrderRequest, user_id: u64) -> HttpResponse {
     
-    // Generate a unique order ID 
+    // Generate a unique order ID using milliseconds (fits in u64, no truncation)
     let order_id = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_nanos() as u64;
+        .as_millis() as u64;
 
     let command = OrderCommand {
         command: OrderCommandType::PlaceLimitOrder,
