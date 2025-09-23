@@ -31,6 +31,12 @@ async fn main() -> std::io::Result<()> {
         Config::load_development_defaults()
     });
 
+    // Validate configuration before using any config values
+    if let Err(e) = config.validate() {
+        eprintln!("Configuration validation failed: {}", e);
+        std::process::exit(1);
+    }
+
     // Parse log level from config
     let log_level = config
         .logging
