@@ -2,7 +2,6 @@
 
 use actix_web::{HttpResponse, web};
 use serde::{Deserialize, Serialize};
-use serde_json;
 use std::time::Duration;
 use std::sync::mpsc;
 use vex_networking::client::{VexGateway, OrderCommandHandler};
@@ -17,7 +16,6 @@ pub struct OrderRequest {
     pub price: u64,
     pub volume: u64,
     pub symbol_id: u32,
-    pub user_id: Option<u64>,
     pub side: Side,
     pub order_type: OrderType,
 }
@@ -26,7 +24,6 @@ pub struct OrderRequest {
 pub struct CancelOrderRequest {
     pub order_id: u64,
     pub symbol_id: u32,
-    pub user_id: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -36,24 +33,18 @@ pub struct OrderResponse {
     pub message: String,
 }
 
-pub async fn order(req: web::Json<OrderRequest>) -> HttpResponse {
+pub async fn order(
+    req: web::Json<OrderRequest>,
+    user_id: AuthenticatedUserId,
+) -> HttpResponse {
     // Extract order data from the request
     let order_data = req.into_inner();
     
-    // Validate that user_id is provided for legacy endpoint
-    if order_data.user_id.is_none() {
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "user_id is required for this endpoint"
-        }));
-    }
-    
-    process_order(order_data).await
+    process_order(order_data, user_id.0.as_u128() as u64).await
 }
 
 /// Common order processing logic
-async fn process_order(order_data: OrderRequest) -> HttpResponse {
-    // Extract order data from the request
-    let user_id = order_data.user_id.expect("user_id should be set at this point");
+async fn process_order(order_data: OrderRequest, user_id: u64) -> HttpResponse {
     
     // Generate a unique order ID 
     let order_id = std::time::SystemTime::now()
@@ -145,30 +136,23 @@ pub async fn order_with_auth(
 ) -> HttpResponse {
     let user_id = auth_user.0.as_u128() as u64;
     
-    let mut order_data = order_data.into_inner();
-    order_data.user_id = Some(user_id);
+    let order_data = order_data.into_inner();
 
-    process_order(order_data).await
+    process_order(order_data, user_id).await
 }
 
-pub async fn cancel_order(req: web::Json<CancelOrderRequest>) -> HttpResponse {
+pub async fn cancel_order(
+    req: web::Json<CancelOrderRequest>,
+    user_id: AuthenticatedUserId,
+) -> HttpResponse {
     // Extract cancel order data from the request
     let cancel_data = req.into_inner();
     
-    // Validate that user_id is provided for legacy endpoint
-    if cancel_data.user_id.is_none() {
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "user_id is required for this endpoint"
-        }));
-    }
-    
-    process_cancel_order(cancel_data).await
+    process_cancel_order(cancel_data, user_id.0.as_u128() as u64).await
 }
 
 /// Common cancel order processing logic
-async fn process_cancel_order(cancel_data: CancelOrderRequest) -> HttpResponse {
-    // Extract cancel order data from the request
-    let user_id = cancel_data.user_id.expect("user_id should be set at this point");
+async fn process_cancel_order(cancel_data: CancelOrderRequest, user_id: u64) -> HttpResponse {
     
     let command = OrderCommand {
         command: OrderCommandType::CancelOrder,
@@ -253,8 +237,7 @@ pub async fn cancel_order_with_auth(
 ) -> HttpResponse {
     let user_id = auth_user.0.as_u128() as u64;
     
-    let mut cancel_data = cancel_data.into_inner();
-    cancel_data.user_id = Some(user_id);
+    let cancel_data = cancel_data.into_inner();
 
-    process_cancel_order(cancel_data).await
+    process_cancel_order(cancel_data, user_id).await
 }
