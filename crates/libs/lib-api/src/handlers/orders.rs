@@ -134,7 +134,9 @@ pub async fn order_with_auth(
     order_data: web::Json<OrderRequest>,
     auth_user: AuthenticatedUserId,
 ) -> HttpResponse {
-    let user_id = auth_user.0.as_u128() as u64;
+    // Use folded hash to preserve all UUID bits in u64
+    let raw = auth_user.0.as_u128();
+    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
     
     let order_data = order_data.into_inner();
 
@@ -148,7 +150,10 @@ pub async fn cancel_order(
     // Extract cancel order data from the request
     let cancel_data = req.into_inner();
     
-    process_cancel_order(cancel_data, user_id.0.as_u128() as u64).await
+    // Use folded hash to preserve all UUID bits in u64
+    let raw = user_id.0.as_u128();
+    let stable_user_id = ((raw >> 64) as u64) ^ (raw as u64);
+    process_cancel_order(cancel_data, stable_user_id).await
 }
 
 /// Common cancel order processing logic
@@ -235,7 +240,9 @@ pub async fn cancel_order_with_auth(
     cancel_data: web::Json<CancelOrderRequest>,
     auth_user: AuthenticatedUserId,
 ) -> HttpResponse {
-    let user_id = auth_user.0.as_u128() as u64;
+    // Use folded hash to preserve all UUID bits in u64
+    let raw = auth_user.0.as_u128();
+    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
     
     let cancel_data = cancel_data.into_inner();
 
