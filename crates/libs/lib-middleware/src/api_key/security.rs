@@ -68,7 +68,7 @@ pub struct ApiKeyConfig {
     pub description: Option<String>,
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub ip_whitelist: Vec<String>,
+    pub ip_blacklist: Vec<String>,
 }
 
 impl ApiKeyConfig {
@@ -87,7 +87,7 @@ impl ApiKeyConfig {
             description: None,
             created_at: Some(chrono::Utc::now()),
             expires_at: None,
-            ip_whitelist: vec![],
+            ip_blacklist: vec![],
         }
     }
 
@@ -139,9 +139,9 @@ impl ApiKeyConfig {
         self
     }
 
-    /// Set IP whitelist
-    pub fn with_ip_whitelist(mut self, ip_list: Vec<String>) -> Self {
-        self.ip_whitelist = ip_list;
+    /// Set IP blacklist
+    pub fn with_ip_blacklist(mut self, ip_list: Vec<String>) -> Self {
+        self.ip_blacklist = ip_list;
         self
     }
 
@@ -170,11 +170,11 @@ impl ApiKeyConfig {
 
     /// Check if the request IP is allowed
     pub fn is_ip_allowed(&self, ip: &str) -> bool {
-        if self.ip_whitelist.is_empty() {
-            return true; // No whitelist means all IPs are allowed
+        if self.ip_blacklist.is_empty() {
+            return true; // No blacklist means all IPs are allowed
         }
         
-        self.ip_whitelist.contains(&ip.to_string())
+        !self.ip_blacklist.contains(&ip.to_string())
     }
 
     /// Get the signature algorithm for this API key

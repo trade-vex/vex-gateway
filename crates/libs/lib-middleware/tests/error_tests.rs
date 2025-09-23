@@ -26,8 +26,8 @@ fn test_api_key_error_variants() {
     let window_exceeded = ApiKeyError::WindowExceeded;
     assert_eq!(window_exceeded.to_string(), "Request window exceeded");
 
-    let ip_not_whitelisted = ApiKeyError::IpNotWhitelisted("192.168.1.1".to_string());
-    assert_eq!(ip_not_whitelisted.to_string(), "IP address not whitelisted: 192.168.1.1");
+    let ip_blacklisted = ApiKeyError::IpBlacklisted("192.168.1.1".to_string());
+    assert_eq!(ip_blacklisted.to_string(), "IP address blacklisted: 192.168.1.1");
 
     let permission_denied = ApiKeyError::PermissionDenied("TRADE".to_string());
     assert_eq!(permission_denied.to_string(), "Permission denied for security type: TRADE");

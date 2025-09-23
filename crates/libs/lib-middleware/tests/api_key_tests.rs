@@ -15,7 +15,7 @@ fn test_model_creation() {
         recv_window: 5000,
         enabled: true,
         description: Some("Test API key".to_string()),
-        ip_whitelist: vec!["192.168.1.1".to_string()],
+        ip_blacklist: vec!["192.168.1.1".to_string()],
         user_id: Some(Uuid::new_v4()),
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -29,7 +29,7 @@ fn test_model_creation() {
     assert_eq!(model.recv_window, 5000);
     assert!(model.enabled);
     assert_eq!(model.description, Some("Test API key".to_string()));
-    assert_eq!(model.ip_whitelist, vec!["192.168.1.1".to_string()]);
+    assert_eq!(model.ip_blacklist, vec!["192.168.1.1".to_string()]);
     assert!(model.user_id.is_some());
     assert!(model.expires_at.is_some());
     assert!(model.last_used_at.is_none());
@@ -46,7 +46,7 @@ fn test_model_clone() {
         recv_window: 5000,
         enabled: true,
         description: None,
-        ip_whitelist: vec![],
+        ip_blacklist: vec![],
         user_id: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -72,7 +72,7 @@ fn test_model_serialization() {
         recv_window: 10000,
         enabled: false,
         description: Some("Disabled key".to_string()),
-        ip_whitelist: vec!["127.0.0.1".to_string(), "192.168.1.0/24".to_string()],
+        ip_blacklist: vec!["127.0.0.1".to_string(), "192.168.1.0/24".to_string()],
         user_id: Some(Uuid::new_v4()),
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -136,7 +136,7 @@ fn test_new_api_key_creation() {
         permissions: vec![SecurityType::Trade, SecurityType::UserData],
         recv_window: 15000,
         description: Some("Trading bot key".to_string()),
-        ip_whitelist: vec!["10.0.0.0/8".to_string()],
+        ip_blacklist: vec!["10.0.0.0/8".to_string()],
         user_id: Some(user_id),
         expires_at: Some(Utc::now() + Duration::days(90)),
     };
@@ -146,7 +146,7 @@ fn test_new_api_key_creation() {
     assert_eq!(new_api_key.permissions, vec![SecurityType::Trade, SecurityType::UserData]);
     assert_eq!(new_api_key.recv_window, 15000);
     assert_eq!(new_api_key.description, Some("Trading bot key".to_string()));
-    assert_eq!(new_api_key.ip_whitelist, vec!["10.0.0.0/8".to_string()]);
+    assert_eq!(new_api_key.ip_blacklist, vec!["10.0.0.0/8".to_string()]);
     assert_eq!(new_api_key.user_id, Some(user_id));
     assert!(new_api_key.expires_at.is_some());
 }
@@ -159,7 +159,7 @@ fn test_new_api_key_defaults() {
         permissions: vec![SecurityType::UserStream],
         recv_window: 5000,
         description: None,
-        ip_whitelist: vec![],
+        ip_blacklist: vec![],
         user_id: None,
         expires_at: None,
     };
@@ -168,7 +168,7 @@ fn test_new_api_key_defaults() {
     assert!(new_api_key.key_material.is_none());
     assert_eq!(new_api_key.permissions, vec![SecurityType::UserStream]);
     assert!(new_api_key.description.is_none());
-    assert!(new_api_key.ip_whitelist.is_empty());
+    assert!(new_api_key.ip_blacklist.is_empty());
     assert!(new_api_key.user_id.is_none());
     assert!(new_api_key.expires_at.is_none());
 }
@@ -181,7 +181,7 @@ fn test_new_api_key_clone() {
         permissions: vec![SecurityType::None],
         recv_window: 5000,
         description: Some("Clone test".to_string()),
-        ip_whitelist: vec!["127.0.0.1".to_string()],
+        ip_blacklist: vec!["127.0.0.1".to_string()],
         user_id: Some(Uuid::new_v4()),
         expires_at: Some(Utc::now()),
     };
@@ -201,7 +201,7 @@ fn test_new_api_key_debug() {
         permissions: vec![],
         recv_window: 5000,
         description: None,
-        ip_whitelist: vec![],
+        ip_blacklist: vec![],
         user_id: None,
         expires_at: None,
     };
@@ -222,7 +222,7 @@ fn test_model_with_empty_permissions() {
         recv_window: 5000,
         enabled: true,
         description: None,
-        ip_whitelist: vec![],
+        ip_blacklist: vec![],
         user_id: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -256,7 +256,7 @@ fn test_model_with_complex_permissions() {
         recv_window: 30000,
         enabled: true,
         description: Some("Complex permissions test".to_string()),
-        ip_whitelist: vec![],
+        ip_blacklist: vec![],
         user_id: Some(Uuid::new_v4()),
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -268,7 +268,7 @@ fn test_model_with_complex_permissions() {
 }
 
 #[test]
-fn test_model_with_multiple_ip_whitelist() {
+fn test_model_with_multiple_ip_blacklist() {
     let ip_list = vec![
         "192.168.1.0/24".to_string(),
         "10.0.0.0/8".to_string(),
@@ -286,8 +286,8 @@ fn test_model_with_multiple_ip_whitelist() {
         permissions: json!(["USER_STREAM"]),
         recv_window: 5000,
         enabled: true,
-        description: Some("Multi-IP whitelist".to_string()),
-        ip_whitelist: ip_list.clone(),
+        description: Some("Multi-IP blacklist".to_string()),
+        ip_blacklist: ip_list.clone(),
         user_id: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -295,8 +295,8 @@ fn test_model_with_multiple_ip_whitelist() {
         last_used_at: None,
     };
     
-    assert_eq!(model.ip_whitelist, ip_list);
-    assert_eq!(model.ip_whitelist.len(), 6);
+    assert_eq!(model.ip_blacklist, ip_list);
+    assert_eq!(model.ip_blacklist.len(), 6);
 }
 
 #[test]
@@ -311,7 +311,7 @@ fn test_model_edge_cases() {
         recv_window: 60000, // Maximum allowed
         enabled: true,
         description: None,
-        ip_whitelist: vec![],
+        ip_blacklist: vec![],
         user_id: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -332,7 +332,7 @@ fn test_model_edge_cases() {
         recv_window: 5000,
         enabled: true,
         description: Some(long_description.clone()),
-        ip_whitelist: vec![],
+        ip_blacklist: vec![],
         user_id: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -357,7 +357,7 @@ fn test_uuid_consistency() {
         recv_window: 5000,
         enabled: true,
         description: None,
-        ip_whitelist: vec![],
+        ip_blacklist: vec![],
         user_id: Some(user_id),
         created_at: Utc::now(),
         updated_at: Utc::now(),

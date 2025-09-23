@@ -19,7 +19,7 @@ pub struct Model {
     pub recv_window: i64,
     pub enabled: bool,
     pub description: Option<String>,
-    pub ip_whitelist: Vec<String>,
+    pub ip_blacklist: Vec<String>,
     pub user_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -98,7 +98,7 @@ impl Model {
             description: self.description.clone(),
             created_at: Some(self.created_at),
             expires_at: self.expires_at,
-            ip_whitelist: self.ip_whitelist.clone(),
+            ip_blacklist: self.ip_blacklist.clone(),
         }
     }
 
@@ -129,9 +129,9 @@ impl Model {
         permissions.contains(&SecurityType::None)
     }
 
-    /// Check if the IP address is whitelisted (empty whitelist means all IPs allowed)
-    pub fn is_ip_whitelisted(&self, ip: &str) -> bool {
-        self.ip_whitelist.is_empty() || self.ip_whitelist.contains(&ip.to_string())
+    /// Check if the IP address is blacklisted (empty blacklist means all IPs allowed)
+    pub fn is_ip_blacklisted(&self, ip: &str) -> bool {
+        !self.ip_blacklist.is_empty() && self.ip_blacklist.contains(&ip.to_string())
     }
 }
 
@@ -143,7 +143,7 @@ pub struct NewApiKey {
     pub permissions: Vec<SecurityType>,
     pub recv_window: u64,
     pub description: Option<String>,
-    pub ip_whitelist: Vec<String>,
+    pub ip_blacklist: Vec<String>,
     pub user_id: Option<Uuid>,
     pub expires_at: Option<DateTime<Utc>>,
 }
@@ -156,7 +156,7 @@ impl NewApiKey {
             permissions: vec![SecurityType::None],
             recv_window: 5000,
             description: None,
-            ip_whitelist: vec![],
+            ip_blacklist: vec![],
             user_id: None,
             expires_at: None,
         }
@@ -196,7 +196,7 @@ impl NewApiKey {
             recv_window: Set(self.recv_window as i64),
             enabled: Set(true),
             description: Set(self.description),
-            ip_whitelist: Set(self.ip_whitelist),
+            ip_blacklist: Set(self.ip_blacklist),
             user_id: Set(self.user_id),
             created_at: Set(now),
             updated_at: Set(now),

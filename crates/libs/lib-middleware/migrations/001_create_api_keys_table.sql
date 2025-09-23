@@ -12,7 +12,7 @@ CREATE TABLE api_keys (
     recv_window BIGINT NOT NULL DEFAULT 5000,
     enabled BOOLEAN NOT NULL DEFAULT true,
     description TEXT,
-    ip_whitelist TEXT[] DEFAULT ARRAY[]::TEXT[],
+    ip_blacklist TEXT[] DEFAULT ARRAY[]::TEXT[],
     user_id UUID, -- Optional foreign key to users table
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

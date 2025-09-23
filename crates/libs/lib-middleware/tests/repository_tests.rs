@@ -49,7 +49,7 @@ impl ApiKeyRepository for MockApiKeyRepository {
             recv_window: 5000,
             enabled: true,
             description: Some("Mock API key".to_string()),
-            ip_whitelist: vec![],
+            ip_blacklist: vec![],
             user_id: Some(Uuid::new_v4()),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -76,7 +76,7 @@ impl ApiKeyRepository for MockApiKeyRepository {
             recv_window: 5000,
             enabled: true,
             description: None,
-            ip_whitelist: vec![],
+            ip_blacklist: vec![],
             user_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -104,7 +104,7 @@ impl ApiKeyRepository for MockApiKeyRepository {
                 recv_window: 5000,
                 enabled: true,
                 description: Some("User's trading key".to_string()),
-                ip_whitelist: vec!["192.168.1.1".to_string()],
+                ip_blacklist: vec!["192.168.1.1".to_string()],
                 user_id: Some(user_id),
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
@@ -120,7 +120,7 @@ impl ApiKeyRepository for MockApiKeyRepository {
                 recv_window: 5000,
                 enabled: false,
                 description: Some("User's stream key (disabled)".to_string()),
-                ip_whitelist: vec![],
+                ip_blacklist: vec![],
                 user_id: Some(user_id),
                 created_at: Utc::now() - Duration::days(10),
                 updated_at: Utc::now() - Duration::days(1),
@@ -152,7 +152,7 @@ impl ApiKeyRepository for MockApiKeyRepository {
             recv_window: new_api_key.recv_window as i64,
             enabled: true, // Always enable newly created keys in mock
             description: new_api_key.description,
-            ip_whitelist: new_api_key.ip_whitelist,
+            ip_blacklist: new_api_key.ip_blacklist,
             user_id: new_api_key.user_id,
             created_at: now,
             updated_at: now,
@@ -179,7 +179,7 @@ impl ApiKeyRepository for MockApiKeyRepository {
             recv_window: 10000,
             enabled: true,
             description: Some("Updated description".to_string()),
-            ip_whitelist: vec!["127.0.0.1".to_string()],
+            ip_blacklist: vec!["127.0.0.1".to_string()],
             user_id: Some(Uuid::new_v4()),
             created_at: Utc::now() - Duration::hours(1),
             updated_at: Utc::now(),
@@ -239,7 +239,7 @@ impl ApiKeyRepository for MockApiKeyRepository {
                 recv_window: 5000,
                 enabled: true,
                 description: Some("Active trading key".to_string()),
-                ip_whitelist: vec![],
+                ip_blacklist: vec![],
                 user_id: Some(Uuid::new_v4()),
                 created_at: Utc::now() - Duration::days(5),
                 updated_at: Utc::now() - Duration::hours(1),
@@ -255,7 +255,7 @@ impl ApiKeyRepository for MockApiKeyRepository {
                 recv_window: 5000,
                 enabled: true,
                 description: None,
-                ip_whitelist: vec![],
+                ip_blacklist: vec![],
                 user_id: Some(Uuid::new_v4()),
                 created_at: Utc::now() - Duration::days(1),
                 updated_at: Utc::now() - Duration::hours(2),
@@ -286,7 +286,7 @@ impl ApiKeyRepository for MockApiKeyRepository {
                 recv_window: 5000,
                 enabled: true,
                 description: Some("About to expire".to_string()),
-                ip_whitelist: vec![],
+                ip_blacklist: vec![],
                 user_id: Some(Uuid::new_v4()),
                 created_at: Utc::now() - Duration::days(60),
                 updated_at: Utc::now() - Duration::days(1),
@@ -321,7 +321,7 @@ impl ApiKeyRepository for MockApiKeyRepository {
                 recv_window: 5000,
                 enabled: true,
                 description: Some(format!("Key with {} permission", permission_str)),
-                ip_whitelist: vec![],
+                ip_blacklist: vec![],
                 user_id: Some(Uuid::new_v4()),
                 created_at: Utc::now() - Duration::days(1),
                 updated_at: Utc::now(),
@@ -374,7 +374,7 @@ async fn test_repository_create() {
         permissions: vec![SecurityType::Trade, SecurityType::UserData],
         recv_window: 10000,
         description: Some("Test key creation".to_string()),
-        ip_whitelist: vec!["192.168.1.1".to_string()],
+        ip_blacklist: vec!["192.168.1.1".to_string()],
         user_id: Some(Uuid::new_v4()),
         expires_at: Some(Utc::now() + Duration::days(90)),
     };
@@ -386,7 +386,7 @@ async fn test_repository_create() {
     assert_eq!(result.recv_window, new_api_key.recv_window as i64);
     assert!(result.enabled); // Mock always creates enabled keys
     assert_eq!(result.description, new_api_key.description);
-    assert_eq!(result.ip_whitelist, new_api_key.ip_whitelist);
+    assert_eq!(result.ip_blacklist, new_api_key.ip_blacklist);
     assert_eq!(result.user_id, new_api_key.user_id);
 }
 

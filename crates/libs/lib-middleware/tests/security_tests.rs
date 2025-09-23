@@ -63,7 +63,7 @@ fn test_api_key_config_new() {
     assert!(config.description.is_none());
     assert!(config.created_at.is_some());
     assert!(config.expires_at.is_none());
-    assert!(config.ip_whitelist.is_empty());
+    assert!(config.ip_blacklist.is_empty());
 }
 
 #[test]
@@ -152,12 +152,12 @@ fn test_api_key_config_with_expiration() {
 }
 
 #[test]
-fn test_api_key_config_with_ip_whitelist() {
+fn test_api_key_config_with_ip_blacklist() {
     let ip_list = vec!["192.168.1.1".to_string(), "10.0.0.1".to_string()];
     let config = ApiKeyConfig::new("test-key".to_string())
-        .with_ip_whitelist(ip_list.clone());
+        .with_ip_blacklist(ip_list.clone());
     
-    assert_eq!(config.ip_whitelist, ip_list);
+    assert_eq!(config.ip_blacklist, ip_list);
 }
 
 #[test]
@@ -204,17 +204,17 @@ fn test_api_key_config_is_valid() {
 fn test_api_key_config_is_ip_allowed() {
     let mut config = ApiKeyConfig::new("test-key".to_string());
     
-    // Empty whitelist should allow all IPs
+    // Empty blacklist should allow all IPs
     assert!(config.is_ip_allowed("192.168.1.1"));
     assert!(config.is_ip_allowed("10.0.0.1"));
     assert!(config.is_ip_allowed("127.0.0.1"));
     
-    // With whitelist, only whitelisted IPs should be allowed
-    config.ip_whitelist = vec!["192.168.1.1".to_string(), "127.0.0.1".to_string()];
-    assert!(config.is_ip_allowed("192.168.1.1"));
-    assert!(config.is_ip_allowed("127.0.0.1"));
-    assert!(!config.is_ip_allowed("10.0.0.1"));
-    assert!(!config.is_ip_allowed("8.8.8.8"));
+    // With blacklist, blacklisted IPs should be denied
+    config.ip_blacklist = vec!["192.168.1.1".to_string(), "127.0.0.1".to_string()];
+    assert!(!config.is_ip_allowed("192.168.1.1"));
+    assert!(!config.is_ip_allowed("127.0.0.1"));
+    assert!(config.is_ip_allowed("10.0.0.1"));
+    assert!(config.is_ip_allowed("8.8.8.8"));
 }
 
 #[test]
@@ -270,7 +270,7 @@ fn test_api_key_config_chaining() {
         .with_recv_window(10000)
         .with_enabled(false)
         .with_description("Test key".to_string())
-        .with_ip_whitelist(vec!["127.0.0.1".to_string()]);
+        .with_ip_blacklist(vec!["127.0.0.1".to_string()]);
     
     assert_eq!(config.api_key, "test-key");
     assert!(matches!(config.key_material, Some(KeyMaterial::HmacSecret(_))));
@@ -278,5 +278,5 @@ fn test_api_key_config_chaining() {
     assert_eq!(config.recv_window, 10000);
     assert!(!config.enabled);
     assert_eq!(config.description, Some("Test key".to_string()));
-    assert_eq!(config.ip_whitelist, vec!["127.0.0.1".to_string()]);
+    assert_eq!(config.ip_blacklist, vec!["127.0.0.1".to_string()]);
 }

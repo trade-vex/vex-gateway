@@ -452,11 +452,11 @@ async fn test_l2_cache_serialization_roundtrip() {
             .with_permissions(vec![SecurityType::UserStream])
             .with_recv_window(60000),
         
-        // Key with IP whitelist
-        ApiKeyConfig::new("whitelist_key".to_string())
-            .with_hmac_secret("whitelist_secret".to_string())
+        // Key with IP blacklist
+        ApiKeyConfig::new("blacklist_key".to_string())
+            .with_hmac_secret("blacklist_secret".to_string())
             .with_permissions(vec![SecurityType::Trade, SecurityType::UserData])
-            .with_ip_whitelist(vec!["192.168.1.1".to_string(), "10.0.0.1".to_string()])
+            .with_ip_blacklist(vec!["192.168.1.1".to_string(), "10.0.0.1".to_string()])
             .with_recv_window(5000),
     ];
 
@@ -482,7 +482,7 @@ async fn test_l2_cache_serialization_roundtrip() {
         assert_eq!(retrieved_key.recv_window, api_key.recv_window);
         assert_eq!(retrieved_key.enabled, api_key.enabled);
         assert_eq!(retrieved_key.description, api_key.description);
-        assert_eq!(retrieved_key.ip_whitelist, api_key.ip_whitelist);
+        assert_eq!(retrieved_key.ip_blacklist, api_key.ip_blacklist);
         
         // Key material should also match
         match (&retrieved_key.key_material, &api_key.key_material) {

@@ -23,8 +23,8 @@ pub enum ApiKeyError {
     #[error("Request window exceeded")]
     WindowExceeded,
     
-    #[error("IP address not whitelisted: {0}")]
-    IpNotWhitelisted(String),
+    #[error("IP address blacklisted: {0}")]
+    IpBlacklisted(String),
     
     #[error("Permission denied for security type: {0}")]
     PermissionDenied(String),
