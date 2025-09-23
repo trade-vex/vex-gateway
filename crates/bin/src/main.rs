@@ -26,8 +26,8 @@ async fn main() -> std::io::Result<()> {
     // Load server configuration automatically
     // This will find config files in the current directory or any parent directory
     let config = Config::load_auto().unwrap_or_else(|e| {
-        error!("Failed to load configuration: {}", e);
-        error!("Falling back to development defaults");
+        eprintln!("Failed to load configuration: {}", e);
+        eprintln!("Falling back to development defaults");
         Config::load_development_defaults()
     });
 
