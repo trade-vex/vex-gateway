@@ -1,7 +1,7 @@
 //! lib-api/src/handlers/api_keys.rs
 
 use actix_web::{web, HttpResponse, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
 
@@ -11,6 +11,23 @@ use lib_middleware::{
     api_key::security::{SecurityType, KeyMaterial},
 };
 use sea_orm::Set;
+
+/// masks an API key for safe serialization
+/// keep first 4 and last 4 characters and masks the rest with *
+/// for short keys len <= 8 returns "****"
+fn mask_api_key<S>(api_key: &str, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let masked = if api_key.len() <= 8 {
+        "****".to_string()
+    } else {
+        let start = &api_key[..4];
+        let end = &api_key[api_key.len() - 4..];
+        format!("{}****{}", start, end)
+    };
+    serializer.serialize_str(&masked)
+}
 
 #[derive(Debug, Deserialize)]
 pub struct CreateApiKeyRequest {
@@ -31,6 +48,7 @@ pub struct UpdateApiKeyRequest {
 #[derive(Debug, Serialize)]
 pub struct ApiKeyResponse {
     pub id: Uuid,
+    #[serde(serialize_with = "mask_api_key")]
     pub api_key: String,
     pub permissions: Vec<String>,
     pub recv_window: i64,
