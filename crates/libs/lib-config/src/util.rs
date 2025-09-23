@@ -16,7 +16,7 @@ use tracing::{info, warn};
 ///
 /// # Returns
 ///
-/// Returns the path to the directory containing the `config/` subdirectory.
+/// Returns the path to the `config/` directory.
 pub fn find_config_dir() -> PathBuf {
     // 1. Check APP_CONFIG_DIR env var
     if let Ok(dir) = std::env::var("APP_CONFIG_DIR") {
