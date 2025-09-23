@@ -1,1 +1,2 @@
-pub mod combined_auth_tests;
+#[cfg(test)]
+mod combined_auth_tests;
