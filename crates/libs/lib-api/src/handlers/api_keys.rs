@@ -68,6 +68,12 @@ pub struct ApiKeyListResponse {
     pub total: usize,
 }
 
+#[derive(Debug, Serialize)]
+pub struct CreateApiKeyResponse {
+    pub api_key: String,  // Plaintext key - only returned during creation
+    pub key_info: ApiKeyResponse,  // Masked key info for consistency
+}
+
 impl From<ApiKeyModel> for ApiKeyResponse {
     fn from(model: ApiKeyModel) -> Self {
         // parsing permissions from JSON
@@ -155,7 +161,11 @@ pub async fn create_api_key(
 
     match repo.create(new_api_key).await {
         Ok(created_key) => {
-            let response = ApiKeyResponse::from(created_key);
+            let key_info = ApiKeyResponse::from(created_key);
+            let response = CreateApiKeyResponse {
+                api_key: api_key.clone(),  // Plaintext key - only returned during creation
+                key_info,  // Masked key info
+            };
             Ok(HttpResponse::Created().json(response))
         }
         Err(e) => {
