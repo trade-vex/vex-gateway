@@ -30,7 +30,7 @@ pub fn configure_services(cfg: &mut web::ServiceConfig) {
             .service(
                 web::scope("/password")
                     .route("/login", web::post().to(handlers::auth::login))
-                    .route("/signup", web::post().to(handlers::auth::signup))
+                    // .route("/signup", web::post().to(handlers::auth::signup))
             )
             // Common auth routes
             .route("/logout", web::post().to(handlers::auth::logout))
