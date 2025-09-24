@@ -194,7 +194,7 @@ mod tests {
         let key = EncodingKey::from_secret("test_secret".as_ref());
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .expect("Failed to get current system time - this should never happen")
             .as_secs();
         let exp = if expired { now - 3600 } else { now + 3600 };
 
@@ -209,7 +209,8 @@ mod tests {
 
         // Use HS256 algorithm
         let header = Header::new(Algorithm::HS256);
-        encode(&header, &claims, &key).unwrap()
+        encode(&header, &claims, &key)
+            .expect("Failed to encode JWT token - this indicates a configuration issue")
     }
 
     #[tokio::test]
