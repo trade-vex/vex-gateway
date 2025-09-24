@@ -44,7 +44,7 @@ url = "2.5.4"
 rand = "0.8"
 base64 = "0.22.1"
 sha2 = "0.10.9"
-validator = "0.20.0"
+validator = { version = "0.20", features = ["derive"] }
 tokio-test = "0.4.4"
 rsa = "0.9.8"
 axum = "0.8.4"
