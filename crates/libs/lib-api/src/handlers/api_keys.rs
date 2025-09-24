@@ -29,7 +29,7 @@ where
     serializer.serialize_str(&masked)
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CreateApiKeyRequest {
     pub description: Option<String>,
     pub permissions: Vec<String>,
@@ -40,12 +40,12 @@ pub struct CreateApiKeyRequest {
     pub key_material_value: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct UpdateApiKeyRequest {
     pub permissions: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ApiKeyResponse {
     pub id: Uuid,
     #[serde(serialize_with = "mask_api_key")]
@@ -62,13 +62,13 @@ pub struct ApiKeyResponse {
     pub last_used_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ApiKeyListResponse {
     pub api_keys: Vec<ApiKeyResponse>,
     pub total: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreateApiKeyResponse {
     pub api_key: String,  // Plaintext key - only returned during creation
     pub key_info: ApiKeyResponse,  // Masked key info for consistency

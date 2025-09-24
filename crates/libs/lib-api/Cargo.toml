@@ -19,3 +19,6 @@ lib-utils = { path = "../lib-utils" }
 vex-networking ={ git = "https://github.com/trade-vex/vex-core" , rev = "8a09622"}
 vex-config = { git = "https://github.com/trade-vex/vex-core" , rev = "8a09622"}
 common = { git = "https://github.com/trade-vex/vex-core" , rev = "8a09622"}
+
+[dev-dependencies]
+tokio-test = "0.4"

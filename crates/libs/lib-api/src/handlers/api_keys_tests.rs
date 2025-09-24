@@ -1,0 +1,705 @@
+//! Unit tests for API key handlers
+//! 
+//! These tests use the actual Postgres implementation of ApiKeyRepository
+//! to test the real CRUD operations with the database.
+
+use actix_web::web;
+use chrono::Utc;
+use sea_orm::{Database, DatabaseConnection, ConnectionTrait};
+use std::sync::Arc;
+use uuid::Uuid;
+
+use crate::handlers::api_keys::{
+    create_api_key, list_api_keys, get_api_key, update_api_key, 
+    delete_api_key, toggle_api_key,
+    CreateApiKeyRequest, UpdateApiKeyRequest, ApiKeyListResponse, ApiKeyResponse
+};
+use lib_middleware::repository::api_key_repository::ApiKeyRepository;
+use lib_auth::middleware::jwt_auth::AuthenticatedUser;
+
+async fn setup_test_db() -> DatabaseConnection {
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgresql://vex:1234@localhost:5432/vex_gateway".to_string());
+    
+    Database::connect(&database_url)
+        .await
+        .expect("Failed to connect to test database")
+}
+
+async fn setup_test_db_with_schema() -> DatabaseConnection {
+    let db = setup_test_db().await;
+    
+    let create_table_sql = r#"
+        -- Create enum types for API key management
+        DO $$ BEGIN
+            CREATE TYPE security_type AS ENUM ('none', 'trade', 'user_data', 'user_stream');
+        EXCEPTION
+            WHEN duplicate_object THEN null;
+        END $$;
+        
+        DO $$ BEGIN
+            CREATE TYPE key_material_type AS ENUM ('hmac_secret', 'rsa_public_key', 'ed25519_public_key');
+        EXCEPTION
+            WHEN duplicate_object THEN null;
+        END $$;
+        
+        -- Create api_keys table
+        CREATE TABLE IF NOT EXISTS api_keys (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            api_key VARCHAR(255) NOT NULL UNIQUE,
+            key_material_type key_material_type,
+            key_material_value TEXT,
+            permissions JSONB NOT NULL DEFAULT '["none"]'::jsonb,
+            recv_window BIGINT NOT NULL DEFAULT 5000,
+            enabled BOOLEAN NOT NULL DEFAULT true,
+            description TEXT,
+            ip_blacklist TEXT[] DEFAULT ARRAY[]::TEXT[],
+            user_id UUID,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            expires_at TIMESTAMPTZ,
+            last_used_at TIMESTAMPTZ
+        );
+        
+        CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys(user_id);
+        CREATE INDEX IF NOT EXISTS idx_api_keys_enabled ON api_keys(enabled);
+        CREATE INDEX IF NOT EXISTS idx_api_keys_expires_at ON api_keys(expires_at);
+    "#;
+    
+    db.execute_unprepared(create_table_sql)
+        .await
+        .expect("Failed to create test database schema");
+    
+    db
+}
+
+async fn cleanup_test_data(db: &DatabaseConnection) {
+    let cleanup_sql = "DELETE FROM api_keys WHERE user_id IS NOT NULL";
+    db.execute_unprepared(cleanup_sql)
+        .await
+        .expect("Failed to cleanup test data");
+}
+
+fn create_test_user() -> AuthenticatedUser {
+    AuthenticatedUser {
+        user_id: Uuid::new_v4(),
+    }
+}
+
+fn create_test_request() -> CreateApiKeyRequest {
+    CreateApiKeyRequest {
+        description: Some("Test API Key".to_string()),
+        permissions: vec!["trade".to_string(), "user_data".to_string()],
+        recv_window: Some(5000),
+        expires_at: Some(Utc::now() + chrono::Duration::days(30)),
+        ip_blacklist: Some(vec!["192.168.1.1".to_string()]),
+        key_material_type: Some("hmac_secret".to_string()),
+        key_material_value: Some("test-secret-key".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Once;
+
+    static CLEANUP: Once = Once::new();
+
+    /// Global cleanup that runs once after all tests
+    async fn global_cleanup() {
+        CLEANUP.call_once(|| {
+            // This will run only once after all tests
+            println!("Cleaning up global test environment...");
+        });
+        
+        // Run cleanup synchronously to ensure it completes
+        let db = setup_test_db().await;
+        cleanup_test_data(&db).await;
+    }
+
+    #[tokio::test]
+    async fn test_create_api_key_success() {
+        let db = setup_test_db_with_schema().await;
+        
+        let repo = Arc::new(lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(Arc::new(db.clone())));
+        let user = create_test_user();
+        let request = create_test_request();
+
+        let result = create_api_key(
+            web::Json(request.clone()),
+            web::Data::from(repo.clone() as Arc<dyn ApiKeyRepository>),
+            user.clone(),
+        ).await;
+
+        match result {
+            Ok(response) => {
+                assert_eq!(response.status(), 201);
+                
+                let user_keys = repo.find_by_user_id(user.user_id).await.unwrap();
+                assert_eq!(user_keys.len(), 1);
+                
+                let api_key_model = &user_keys[0];
+                assert_eq!(api_key_model.user_id, Some(user.user_id));
+                assert_eq!(api_key_model.description, request.description);
+                assert!(api_key_model.api_key.starts_with("vex_"));
+                assert!(api_key_model.enabled);
+            }
+            Err(e) => {
+                panic!("Handler returned error: {}", e);
+            }
+        }
+        
+    }
+
+    #[tokio::test]
+    async fn test_create_api_key_invalid_permissions() {
+        let db = setup_test_db_with_schema().await;
+        let repo = Arc::new(lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(Arc::new(db.clone())));
+        let user = create_test_user();
+        
+        let mut request = create_test_request();
+        request.permissions = vec!["invalid_permission".to_string()];
+
+        let result = create_api_key(
+            web::Json(request),
+            web::Data::from(repo.clone() as Arc<dyn ApiKeyRepository>),
+            user,
+        ).await;
+
+        match result {
+            Ok(_) => {
+                panic!("Expected error for invalid permissions, but got success");
+            }
+            Err(e) => {
+                assert!(e.to_string().contains("Invalid permissions"));
+            }
+        }
+        
+    }
+
+    #[tokio::test]
+    async fn test_create_api_key_invalid_key_material() {
+        let db = setup_test_db_with_schema().await;
+        let repo = Arc::new(lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(Arc::new(db.clone())));
+        let user = create_test_user();
+        
+        let mut request = create_test_request();
+        request.key_material_type = Some("invalid_type".to_string());
+
+        let result = create_api_key(
+            web::Json(request),
+            web::Data::from(repo.clone() as Arc<dyn ApiKeyRepository>),
+            user,
+        ).await;
+
+        match result {
+            Ok(_) => {
+                panic!("Expected error for invalid key material, but got success");
+            }
+            Err(e) => {
+                assert!(e.to_string().contains("Invalid key material"));
+            }
+        }
+        
+    }
+
+    #[tokio::test]
+    async fn test_list_api_keys_success() {
+        let db = setup_test_db_with_schema().await;
+        
+        let repo = Arc::new(lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(Arc::new(db.clone())));
+        let user = create_test_user();
+        
+        let request1 = create_test_request();
+        let request2 = CreateApiKeyRequest {
+            description: Some("Second API Key".to_string()),
+            permissions: vec!["user_stream".to_string()],
+            recv_window: Some(10000),
+            expires_at: None,
+            ip_blacklist: None,
+            key_material_type: None,
+            key_material_value: None,
+        };
+
+        // create first API key
+        let _result1 = create_api_key(
+            web::Json(request1),
+            web::Data::from(repo.clone() as Arc<dyn ApiKeyRepository>),
+            user.clone(),
+        ).await;
+
+        // create second API key
+        let _result2 = create_api_key(
+            web::Json(request2),
+            web::Data::from(repo.clone() as Arc<dyn ApiKeyRepository>),
+            user.clone(),
+        ).await;
+
+        let result = list_api_keys(
+            web::Data::from(repo.clone() as Arc<dyn ApiKeyRepository>),
+            user.clone(),
+        ).await;
+
+        match result {
+            Ok(response) => {
+                assert_eq!(response.status(), 200);
+                
+                // parsing the response body to validate the output
+                let body = response.into_body();
+                let bytes = actix_web::body::to_bytes(body).await.unwrap();
+                let list_response: ApiKeyListResponse = serde_json::from_slice(&bytes).unwrap();
+                
+                assert_eq!(list_response.total, 2);
+                assert_eq!(list_response.api_keys.len(), 2);
+                
+                for api_key_response in &list_response.api_keys {
+                    assert_eq!(api_key_response.user_id, Some(user.user_id));
+                    assert!(api_key_response.api_key.starts_with("vex_"));
+                    assert!(api_key_response.enabled);
+                    
+                    // verifying API keys are masked in the response
+                    assert!(api_key_response.api_key.contains("*"));
+                }
+                
+                let descriptions: Vec<&String> = list_response.api_keys
+                    .iter()
+                    .filter_map(|key| key.description.as_ref())
+                    .collect();
+                assert!(descriptions.contains(&&"Test API Key".to_string()));
+                assert!(descriptions.contains(&&"Second API Key".to_string()));
+            }
+            Err(e) => {
+                panic!("List API keys failed: {}", e);
+            }
+        }
+        
+    }
+
+    #[tokio::test]
+    async fn test_get_api_key_success() {
+        let db = setup_test_db_with_schema().await;
+        
+        let repo = Arc::new(lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(Arc::new(db.clone())));
+        let user = create_test_user();
+        let request = create_test_request();
+
+        let create_result = create_api_key(
+            web::Json(request.clone()),
+            web::Data::from(repo.clone() as Arc<dyn ApiKeyRepository>),
+            user.clone(),
+        ).await;
+
+        let api_key_id = match create_result {
+            Ok(_) => {
+                let user_keys = repo.find_by_user_id(user.user_id).await.unwrap();
+                assert_eq!(user_keys.len(), 1);
+                user_keys[0].id
+            }
+            Err(e) => {
+                panic!("Failed to create API key: {}", e);
+            }
+        };
+
+        let result = get_api_key(
+            web::Path::from(api_key_id),
+            web::Data::from(repo.clone() as Arc<dyn ApiKeyRepository>),
+            user.clone(),
+        ).await;
+
+        match result {
+            Ok(response) => {
+                assert_eq!(response.status(), 200);
+                
+                // parsing the response body to validate the output
+                let body = response.into_body();
+                let bytes = actix_web::body::to_bytes(body).await.unwrap();
+                let api_key_response: ApiKeyResponse = serde_json::from_slice(&bytes).unwrap();
+                
+                assert_eq!(api_key_response.id, api_key_id);
+                assert_eq!(api_key_response.user_id, Some(user.user_id));
+                assert_eq!(api_key_response.description, request.description);
+                assert!(api_key_response.api_key.starts_with("vex_"));
+                assert!(api_key_response.enabled);
+                
+                // verifying API key is masked in the response
+                assert!(api_key_response.api_key.contains("*"));
+            }
+            Err(e) => {
+                panic!("Get API key failed: {}", e);
+            }
+        }
+        
+    }
+
+    #[tokio::test]
+    async fn test_get_api_key_not_found() {
+        let db = setup_test_db_with_schema().await;
+        let repo = Arc::new(lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(Arc::new(db.clone())));
+        let user = create_test_user();
+        let non_existent_id = Uuid::new_v4();
+
+        let result = get_api_key(
+            web::Path::from(non_existent_id),
+            web::Data::from(repo.clone() as Arc<dyn ApiKeyRepository>),
+            user,
+        ).await;
+
+        match result {
+            Ok(response) => {
+                assert_eq!(response.status(), 404);
+                
+                let api_key = repo.find_by_id(non_existent_id).await.unwrap();
+                assert!(api_key.is_none());
+            }
+            Err(e) => {
+                panic!("Get API key failed: {}", e);
+            }
+        }
+        
+    }
+
+    #[tokio::test]
+    async fn test_get_api_key_access_denied() {
+        let db = setup_test_db_with_schema().await;
+        let repo = Arc::new(lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(Arc::new(db.clone())));
+        let user1 = create_test_user();
+        let user2 = create_test_user();
+        let request = create_test_request();
+
+        let create_result = create_api_key(
+            web::Json(request),
+            web::Data::from(repo.clone() as Arc<dyn ApiKeyRepository>),
+            user1.clone(),
+        ).await;
+
+        let api_key_id = match create_result {
+            Ok(_) => {
+                let user_keys = repo.find_by_user_id(user1.user_id).await.unwrap();
+                assert_eq!(user_keys.len(), 1);
+                user_keys[0].id
+            }
+            Err(e) => {
+                panic!("Failed to create API key: {}", e);
+            }
+        };
+
+        // try to get API key with user2: should be denied
+        let result = get_api_key(
+            web::Path::from(api_key_id),
+            web::Data::from(repo.clone() as Arc<dyn ApiKeyRepository>),
+            user2.clone(),
+        ).await;
+
+        match result {
+            Ok(response) => {
+                assert_eq!(response.status(), 403);
+                
+                // verifying the API key belongs to user1, not user2
+                let api_key = repo.find_by_id(api_key_id).await.unwrap().unwrap();
+                assert_eq!(api_key.user_id, Some(user1.user_id));
+                assert_ne!(api_key.user_id, Some(user2.user_id));
+            }
+            Err(e) => {
+                panic!("Get API key failed: {}", e);
+            }
+        }
+        
+    }
+
+    #[tokio::test]
+    async fn test_update_api_key_success() {
+        let db = setup_test_db_with_schema().await;
+        
+        let repo = Arc::new(lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(Arc::new(db.clone())));
+        let user = create_test_user();
+        let request = create_test_request();
+
+        let create_result = create_api_key(
+            web::Json(request),
+            web::Data::from(repo.clone() as Arc<dyn ApiKeyRepository>),
+            user.clone(),
+        ).await;
+
+        let api_key_id = match create_result {
+            Ok(_) => {
+                let user_keys = repo.find_by_user_id(user.user_id).await.unwrap();
+                assert_eq!(user_keys.len(), 1);
+                user_keys[0].id
+            }
+            Err(e) => {
+                panic!("Failed to create API key: {}", e);
+            }
+        };
+
+        let update_request = UpdateApiKeyRequest {
+            permissions: vec!["user_stream".to_string()],
+        };
+
+        let result = update_api_key(
+            web::Path::from(api_key_id),
+            web::Json(update_request),
+            web::Data::from(repo.clone() as Arc<dyn ApiKeyRepository>),
+            user.clone(),
+        ).await;
+
+        match result {
+            Ok(response) => {
+                assert_eq!(response.status(), 200);
+                
+                // parsing the response body to validate the output
+                let body = response.into_body();
+                let bytes = actix_web::body::to_bytes(body).await.unwrap();
+                let api_key_response: ApiKeyResponse = serde_json::from_slice(&bytes).unwrap();
+                
+                assert_eq!(api_key_response.id, api_key_id);
+                assert_eq!(api_key_response.user_id, Some(user.user_id));
+                assert!(api_key_response.api_key.starts_with("vex_"));
+                assert!(api_key_response.enabled);
+                
+                // verifying API key is masked in the response
+                assert!(api_key_response.api_key.contains("*"));
+                
+                // verifying the permissions were updated
+                assert_eq!(api_key_response.permissions, vec!["user_stream"]);
+                
+                // verifying the update in the database by fetching the API key
+                let updated_key = repo.find_by_id(api_key_id).await.unwrap().unwrap();
+                assert_eq!(updated_key.id, api_key_id);
+                assert_eq!(updated_key.user_id, Some(user.user_id));
+                
+                // verifying the permissions were actually updated in the database
+                // the permissions are stored as JSON in the database
+                let db_permissions: Vec<String> = serde_json::from_value(updated_key.permissions).unwrap();
+                assert_eq!(db_permissions, vec!["user_stream"]);
+            }
+            Err(e) => {
+                panic!("Update API key failed: {}", e);
+            }
+        }
+        
+    }
+
+    #[tokio::test]
+    async fn test_update_api_key_invalid_permissions() {
+        let db = setup_test_db_with_schema().await;
+        let repo = Arc::new(lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(Arc::new(db.clone())));
+        let user = create_test_user();
+        let request = create_test_request();
+
+        let create_result = create_api_key(
+            web::Json(request),
+            web::Data::from(repo.clone() as Arc<dyn ApiKeyRepository>),
+            user.clone(),
+        ).await;
+
+        let api_key_id = match create_result {
+            Ok(_) => {
+                let user_keys = repo.find_by_user_id(user.user_id).await.unwrap();
+                assert_eq!(user_keys.len(), 1);
+                user_keys[0].id
+            }
+            Err(e) => {
+                panic!("Failed to create API key: {}", e);
+            }
+        };
+
+        let update_request = UpdateApiKeyRequest {
+            permissions: vec!["invalid_permission".to_string()],
+        };
+
+        let result = update_api_key(
+            web::Path::from(api_key_id),
+            web::Json(update_request),
+            web::Data::from(repo.clone() as Arc<dyn ApiKeyRepository>),
+            user.clone(),
+        ).await;
+
+        match result {
+            Ok(_) => {
+                panic!("Expected error for invalid permissions, but got success");
+            }
+            Err(e) => {
+                assert!(e.to_string().contains("Invalid permissions"));
+            }
+        }
+        
+    }
+
+    #[tokio::test]
+    async fn test_delete_api_key_success() {
+        let db = setup_test_db_with_schema().await;
+        
+        let repo = Arc::new(lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(Arc::new(db.clone())));
+        let user = create_test_user();
+        let request = create_test_request();
+
+        let create_result = create_api_key(
+            web::Json(request),
+            web::Data::from(repo.clone() as Arc<dyn ApiKeyRepository>),
+            user.clone(),
+        ).await;
+
+        let api_key_id = match create_result {
+            Ok(_) => {
+                let user_keys = repo.find_by_user_id(user.user_id).await.unwrap();
+                assert_eq!(user_keys.len(), 1);
+                user_keys[0].id
+            }
+            Err(e) => {
+                panic!("Failed to create API key: {}", e);
+            }
+        };
+
+        let result = delete_api_key(
+            web::Path::from(api_key_id),
+            web::Data::from(repo.clone() as Arc<dyn ApiKeyRepository>),
+            user.clone(),
+        ).await;
+
+        match result {
+            Ok(response) => {
+                assert_eq!(response.status(), 200);
+                
+                // parsing the response body to validate the output
+                let body = response.into_body();
+                let bytes = actix_web::body::to_bytes(body).await.unwrap();
+                let delete_response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                
+                assert_eq!(delete_response["message"], "API key deleted successfully");
+                
+                let deleted_key = repo.find_by_id(api_key_id).await.unwrap();
+                assert!(deleted_key.is_some());
+                assert!(!deleted_key.unwrap().enabled);
+            }
+            Err(e) => {
+                panic!("Delete API key failed: {}", e);
+            }
+        }
+        
+    }
+
+    #[tokio::test]
+    async fn test_toggle_api_key_enable() {
+        let db = setup_test_db_with_schema().await;
+        
+        let repo = Arc::new(lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(Arc::new(db.clone())));
+        let user = create_test_user();
+        let request = create_test_request();
+
+        let create_result = create_api_key(
+            web::Json(request),
+            web::Data::from(repo.clone() as Arc<dyn ApiKeyRepository>),
+            user.clone(),
+        ).await;
+
+        let api_key_id = match create_result {
+            Ok(_) => {
+                let user_keys = repo.find_by_user_id(user.user_id).await.unwrap();
+                assert_eq!(user_keys.len(), 1);
+                user_keys[0].id
+            }
+            Err(e) => {
+                panic!("Failed to create API key: {}", e);
+            }
+        };
+
+        // disable API key first
+        let disable_request = serde_json::json!({"enabled": false});
+        let _disable_result = toggle_api_key(
+            web::Path::from(api_key_id),
+            web::Json(disable_request),
+            web::Data::from(repo.clone() as Arc<dyn ApiKeyRepository>),
+            user.clone(),
+        ).await;
+
+        // enable API key
+        let enable_request = serde_json::json!({"enabled": true});
+        let result = toggle_api_key(
+            web::Path::from(api_key_id),
+            web::Json(enable_request),
+            web::Data::from(repo.clone() as Arc<dyn ApiKeyRepository>),
+            user.clone(),
+        ).await;
+
+        match result {
+            Ok(response) => {
+                assert_eq!(response.status(), 200);
+                
+                // parsing the response body to validate the output
+                let body = response.into_body();
+                let bytes = actix_web::body::to_bytes(body).await.unwrap();
+                let toggle_response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                
+                assert_eq!(toggle_response["message"], "API key enabled successfully");
+                
+                let enabled_key = repo.find_by_id(api_key_id).await.unwrap().unwrap();
+                assert!(enabled_key.enabled);
+            }
+            Err(e) => {
+                panic!("Toggle API key failed: {}", e);
+            }
+        }
+        
+    }
+
+    #[tokio::test]
+    async fn test_toggle_api_key_disable() {
+        let db = setup_test_db_with_schema().await;
+        
+        let repo = Arc::new(lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(Arc::new(db.clone())));
+        let user = create_test_user();
+        let request = create_test_request();
+
+        let create_result = create_api_key(
+            web::Json(request),
+            web::Data::from(repo.clone() as Arc<dyn ApiKeyRepository>),
+            user.clone(),
+        ).await;
+
+        let api_key_id = match create_result {
+            Ok(_) => {
+                let user_keys = repo.find_by_user_id(user.user_id).await.unwrap();
+                assert_eq!(user_keys.len(), 1);
+                user_keys[0].id
+            }
+            Err(e) => {
+                panic!("Failed to create API key: {}", e);
+            }
+        };
+
+        // disable API key
+        let disable_request = serde_json::json!({"enabled": false});
+        let result = toggle_api_key(
+            web::Path::from(api_key_id),
+            web::Json(disable_request),
+            web::Data::from(repo.clone() as Arc<dyn ApiKeyRepository>),
+            user.clone(),
+        ).await;
+
+        match result {
+            Ok(response) => {
+                assert_eq!(response.status(), 200);
+                
+                // parsing the response body to validate the output
+                let body = response.into_body();
+                let bytes = actix_web::body::to_bytes(body).await.unwrap();
+                let toggle_response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                
+                assert_eq!(toggle_response["message"], "API key disabled successfully");
+                
+                let disabled_key = repo.find_by_id(api_key_id).await.unwrap().unwrap();
+                assert!(!disabled_key.enabled);
+            }
+            Err(e) => {
+                panic!("Toggle API key failed: {}", e);
+            }
+        }
+        
+    }
+
+
+    #[tokio::test]
+    async fn zzz_cleanup_after_all_tests() {
+        global_cleanup().await;
+    }
+}
