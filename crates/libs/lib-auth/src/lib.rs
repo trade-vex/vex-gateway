@@ -19,18 +19,22 @@ pub use state::AppState;
 pub fn configure_services(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/auth")
-            // Remove /oauth/ prefix to match your URLs
-            .route(
-                "/providers",
-                web::get().to(handlers::oauth::get_oauth_providers),
+            // OAuth strategy routes (existing)
+            .service(
+                web::scope("/oauth")
+                    .route("/providers", web::get().to(handlers::oauth::get_oauth_providers))
+                    .route("/{provider}", web::get().to(handlers::oauth::initiate_oauth))
+                    .route("/{provider}/callback", web::get().to(handlers::oauth::handle_oauth_callback))
             )
-            .route(
-                "/{provider}",
-                web::get().to(handlers::oauth::initiate_oauth),
+            // Password strategy routes (new)
+            .service(
+                web::scope("/password")
+                    .route("/login", web::post().to(handlers::auth::login))
+                    .route("/signup", web::post().to(handlers::auth::signup))
             )
-            .route(
-                "/{provider}/callback",
-                web::get().to(handlers::oauth::handle_oauth_callback),
-            ),
+            // Common auth routes
+            .route("/logout", web::post().to(handlers::auth::logout))
+            .route("/refresh", web::post().to(handlers::auth::refresh_token))
+            .route("/profile", web::get().to(handlers::auth::get_profile))
     );
 }
