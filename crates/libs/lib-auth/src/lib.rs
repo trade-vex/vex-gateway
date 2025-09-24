@@ -21,16 +21,16 @@ pub fn configure_services(cfg: &mut web::ServiceConfig) {
         web::scope("/auth")
             // Remove /oauth/ prefix to match your URLs
             .route(
+                "/providers",
+                web::get().to(handlers::oauth::get_oauth_providers),
+            )
+            .route(
                 "/{provider}",
                 web::get().to(handlers::oauth::initiate_oauth),
             )
             .route(
                 "/{provider}/callback",
                 web::get().to(handlers::oauth::handle_oauth_callback),
-            )
-            .route(
-                "/providers",
-                web::get().to(handlers::oauth::get_oauth_providers),
             ),
     );
 }
