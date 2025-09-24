@@ -102,12 +102,16 @@ async fn main() -> std::io::Result<()> {
     dotenvy::dotenv().ok();
 
     let config = Config::load_auto().unwrap_or_else(|e| {
-        error!(
-            "Failed to load configuration: {}. Falling back to defaults.",
-            e
-        );
+        eprintln!("Failed to load configuration: {}", e);
+        eprintln!("Falling back to development defaults");
         Config::load_development_defaults()
     });
+
+    // Validate configuration before using any config values
+    if let Err(e) = config.validate() {
+        eprintln!("Configuration validation failed: {}", e);
+        std::process::exit(1);
+    }
 
     fmt()
         .with_max_level(
