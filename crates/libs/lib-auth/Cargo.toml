@@ -9,13 +9,13 @@ actix-web = { workspace = true }
 # SSO & JWT
 openidconnect = { version = "3", features = ["reqwest"] }
 jsonwebtoken = { workspace = true }
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { workspace = true }
 
 # Data & Config
-serde = { version = "1", features = ["derive"] }
+serde = { workspace = true }
 serde_json = { workspace = true }
 config = { workspace = true}
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { workspace = true }
 chrono = { workspace = true }
 
 # Async & Error Handling
@@ -37,6 +37,6 @@ validator = { version = "0.20", features = ["derive"] }
 
 [dev-dependencies]
 tokio = { workspace = true }
-serde_json = "1.0"
-tokio-test = "0.4.4"
+serde_json = { workspace = true }
 dotenvy = { workspace = true }
+tokio-test = "0.4.4"
