@@ -483,7 +483,7 @@ impl OAuthService {
         let claims = self.token_service.validate_jwt(token)?;
 
         // Calculate time until expiration
-        let current_time: i64  = chrono::Utc::now().timestamp() ;
+        let current_time: i64 = chrono::Utc::now().timestamp();
         let time_remaining = if claims.exp > current_time {
             claims.exp - current_time
         } else {
@@ -499,7 +499,11 @@ impl OAuthService {
             .map_err(|e| AuthError::Redis(format!("Redis connection failed: {}", e)))?;
 
         let _: () = redis_conn
-            .set_ex(format!("blacklisted_token:{}", token), "1", time_remaining as usize)
+            .set_ex(
+                format!("blacklisted_token:{}", token),
+                "1",
+                time_remaining as usize,
+            )
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to blacklist token: {}", e)))?;
 

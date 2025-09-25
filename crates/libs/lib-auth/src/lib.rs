@@ -22,19 +22,26 @@ pub fn configure_services(cfg: &mut web::ServiceConfig) {
             // OAuth strategy routes (existing)
             .service(
                 web::scope("/oauth")
-                    .route("/providers", web::get().to(handlers::oauth::get_oauth_providers))
-                    .route("/{provider}", web::get().to(handlers::oauth::initiate_oauth))
-                    .route("/{provider}/callback", web::get().to(handlers::oauth::handle_oauth_callback))
+                    .route(
+                        "/providers",
+                        web::get().to(handlers::oauth::get_oauth_providers),
+                    )
+                    .route(
+                        "/{provider}",
+                        web::get().to(handlers::oauth::initiate_oauth),
+                    )
+                    .route(
+                        "/{provider}/callback",
+                        web::get().to(handlers::oauth::handle_oauth_callback),
+                    ),
             )
             // Password strategy routes (new)
             .service(
-                web::scope("/password")
-                    .route("/login", web::post().to(handlers::auth::login))
-                    // .route("/signup", web::post().to(handlers::auth::signup))
+                web::scope("/password").route("/login", web::post().to(handlers::auth::login)), // .route("/signup", web::post().to(handlers::auth::signup))
             )
             // Common auth routes
             .route("/logout", web::post().to(handlers::auth::logout))
             .route("/refresh", web::post().to(handlers::auth::refresh_token))
-            .route("/profile", web::get().to(handlers::auth::get_profile))
+            .route("/profile", web::get().to(handlers::auth::get_profile)),
     );
 }

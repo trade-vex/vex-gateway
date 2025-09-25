@@ -65,8 +65,8 @@ pub struct TokenResponse {
 pub struct AppClaims {
     // Standard claims
     pub sub: String, // Subject (our internal user ID)
-    pub exp: i64,  // Expiration time
-    pub iat: i64,  // Issued at
+    pub exp: i64,    // Expiration time
+    pub iat: i64,    // Issued at
     pub iss: String, // Issuer (our app)
     pub aud: String, // Audience (the intended recipient, e.g., "api")
 
