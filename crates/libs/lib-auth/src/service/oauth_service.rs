@@ -502,7 +502,7 @@ impl OAuthService {
             .set_ex(
                 format!("blacklisted_token:{}", token),
                 "1",
-                time_remaining as usize,
+                time_remaining as u64,
             )
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to blacklist token: {}", e)))?;

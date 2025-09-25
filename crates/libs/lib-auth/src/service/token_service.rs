@@ -67,7 +67,7 @@ impl TokenService {
         let redis_val = format!("{}:{}", user_id, jti);
 
         let _: () = conn
-            .set_ex(redis_key, redis_val, refresh_ttl_secs as usize)
+            .set_ex(redis_key, redis_val, refresh_ttl_secs as u64)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to store refresh token: {}", e)))?;
 
@@ -110,7 +110,7 @@ impl TokenService {
             let blacklist_key = format!("blacklist:{}", old_jti);
             let blacklist_ttl = self.jwt_config.access_token_ttl_minutes * 60;
             let _: () = conn
-                .set_ex(blacklist_key, "1", blacklist_ttl as usize)
+                .set_ex(blacklist_key, "1", blacklist_ttl as u64)
                 .await
                 .map_err(|e| AuthError::Redis(format!("Failed to blacklist token: {}", e)))?;
 
@@ -170,7 +170,7 @@ impl TokenService {
 
         let blacklist_key = format!("blacklist:{}", claims.jti);
         let _: () = conn
-            .set_ex(blacklist_key, "1", ttl as usize)
+            .set_ex(blacklist_key, "1", ttl as u64)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to blacklist token: {}", e)))?;
 
