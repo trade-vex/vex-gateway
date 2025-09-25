@@ -48,6 +48,7 @@ validator = { version = "0.20", features = ["derive"] }
 tokio-test = "0.4.4"
 rsa = "0.9.8"
 axum = "0.8.4"
+zeroize = "1.7"
 [dev-dependencies]
 actix-web = { version = "4", features = ["macros"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
