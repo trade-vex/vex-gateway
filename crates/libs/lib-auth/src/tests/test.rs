@@ -530,10 +530,10 @@ mod tests {
                 .await
                 .unwrap_or_else(|_| "No body".to_string());
             println!("Google OAuth error body: {}", body);
-        } else if response.status().is_redirection() {
-            if let Some(location) = response.headers().get("location") {
-                println!("Google OAuth redirect to: {:?}", location);
-            }
+        } else if response.status().is_redirection()
+            && let Some(location) = response.headers().get("location")
+        {
+            println!("Google OAuth redirect to: {:?}", location);
         }
 
         // Test 3: Test OAuth GitHub endpoint
@@ -552,10 +552,10 @@ mod tests {
                 .await
                 .unwrap_or_else(|_| "No body".to_string());
             println!("GitHub OAuth error body: {}", body);
-        } else if response.status().is_redirection() {
-            if let Some(location) = response.headers().get("location") {
-                println!("GitHub OAuth redirect to: {:?}", location);
-            }
+        } else if response.status().is_redirection()
+            && let Some(location) = response.headers().get("location")
+        {
+            println!("GitHub OAuth redirect to: {:?}", location);
         }
 
         // Test 4: Test /api/me endpoint without auth (should fail)

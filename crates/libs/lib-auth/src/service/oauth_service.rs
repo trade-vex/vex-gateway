@@ -330,22 +330,22 @@ impl OAuthService {
         })?;
 
         // Special handling for GitHub - fetch emails separately
-        if provider == "github" {
-            if let Ok(emails) = self.fetch_github_emails(access_token).await {
-                // Find the primary email
-                if let Some(primary_email) = emails.iter().find(|email| {
-                    email
-                        .get("primary")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false)
-                }) {
-                    if let Some(email_str) = primary_email.get("email").and_then(|v| v.as_str()) {
-                        user_info["email"] = serde_json::Value::String(email_str.to_string());
-                    }
-                    if let Some(verified) = primary_email.get("verified").and_then(|v| v.as_bool())
-                    {
-                        user_info["email_verified"] = serde_json::Value::Bool(verified);
-                    }
+        if provider == "github"
+            && let Ok(emails) = self.fetch_github_emails(access_token).await
+        {
+            // Find the primary email
+            if let Some(primary_email) = emails.iter().find(|email| {
+                email
+                    .get("primary")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            }) {
+                if let Some(email_str) = primary_email.get("email").and_then(|v| v.as_str()) {
+                    user_info["email"] = serde_json::Value::String(email_str.to_string());
+                }
+                if let Some(verified) = primary_email.get("verified").and_then(|v| v.as_bool())
+                {
+                    user_info["email_verified"] = serde_json::Value::Bool(verified);
                 }
             }
         }

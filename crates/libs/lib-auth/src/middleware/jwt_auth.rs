@@ -111,32 +111,31 @@ where
         // Extract Authorization header
         let auth_header = req.headers().get("authorization");
 
-        if let Some(auth_value) = auth_header {
-            if let Ok(auth_str) = auth_value.to_str() {
-                if let Some(token) = auth_str.strip_prefix("Bearer ") {
-                    // Use the configured algorithm instead of hardcoded RS256
-                    let mut validation = Validation::new(algorithm);
-                    validation.set_issuer(&[issuer]);
-                    validation.set_audience(&[audience]);
+        if let Some(auth_value) = auth_header
+            && let Ok(auth_str) = auth_value.to_str()
+            && let Some(token) = auth_str.strip_prefix("Bearer ")
+        {
+            // Use the configured algorithm instead of hardcoded RS256
+            let mut validation = Validation::new(algorithm);
+            validation.set_issuer(&[issuer]);
+            validation.set_audience(&[audience]);
 
-                    match decode::<JwtClaims>(token, &decoding_key, &validation) {
-                        Ok(token_data) => {
-                            // Parse user_id from subject
-                            if let Ok(user_id) = Uuid::parse_str(&token_data.claims.sub) {
-                                let authenticated_user = AuthenticatedUser { user_id };
-                                req.extensions_mut().insert(authenticated_user);
+            match decode::<JwtClaims>(token, &decoding_key, &validation) {
+                Ok(token_data) => {
+                    // Parse user_id from subject
+                    if let Ok(user_id) = Uuid::parse_str(&token_data.claims.sub) {
+                        let authenticated_user = AuthenticatedUser { user_id };
+                        req.extensions_mut().insert(authenticated_user);
 
-                                let fut = self.service.call(req);
-                                return Box::pin(async move {
-                                    let response = fut.await?;
-                                    Ok(response.map_into_boxed_body())
-                                });
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("JWT validation failed: {}", e);
-                        }
+                        let fut = self.service.call(req);
+                        return Box::pin(async move {
+                            let response = fut.await?;
+                            Ok(response.map_into_boxed_body())
+                        });
                     }
+                }
+                Err(e) => {
+                    tracing::warn!("JWT validation failed: {}", e);
                 }
             }
         }
