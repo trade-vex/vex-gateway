@@ -6,4 +6,8 @@ edition = "2021"
 [dependencies]
 serde = {workspace = true}
 config = {workspace = true}
-dotenv = {workspace = true}
+thiserror = {workspace = true}
+tracing = {workspace = true}
+
+[dev-dependencies]
+tempfile = {workspace = true}

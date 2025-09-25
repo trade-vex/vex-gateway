@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 tokio = {workspace = true}
 actix-web = {workspace = true}
+tracing = {workspace = true}
+tracing-subscriber = {workspace = true}
 
 # Internal crate dependencies
 lib-server = {path = "../libs/lib-server"}

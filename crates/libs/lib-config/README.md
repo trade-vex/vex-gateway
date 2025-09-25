@@ -1,27 +1,62 @@
-# lib-config
+# How to Use the Configuration System
 
-Configuration management for the vex-gateway-service.
+## Simple Usage (Recommended)
 
-## Usage
+**Just use `Config::load_auto()` - it works from anywhere:**
 
-The configuration can be set using environment variables:
+```rust
+use lib_config::Config;
 
-- `SERVER_HOST` - Server host (default: "127.0.0.1")
-- `SERVER_PORT` - Server port (default: 8000)
-
-## Example
-
-```bash
-# Set custom host and port
-export SERVER_HOST=0.0.0.0
-export SERVER_PORT=3000
-
-# Run the application
-cargo run
+fn main() {
+    // This automatically finds your config files, no matter where you run from
+    let config = Config::load_auto()?;
+    
+    // Use your config
+    let address = config.server_address()?;
+    println!("Server: {}:{}", config.server.host, config.server.port);
+}
 ```
 
-## Default Values
+## How It Works
 
-If no environment variables are set, the following defaults are used:
-- Host: `127.0.0.1`
-- Port: `8000` 
+1. **Automatic Discovery**: `Config::load_auto()` searches for `config/` directory in:
+   - Current directory
+   - Parent directories (up to filesystem root)
+   - Or use `APP_CONFIG_DIR` environment variable to override
+
+2. **Environment Detection**: 
+   - Reads `APP_ENV` environment variable
+   - Falls back to "development" if not set
+
+3. **Configuration Files**: Looks for:
+   - `config/default.toml` (base config)
+   - `config/{environment}.toml` (environment-specific)
+
+## Examples
+
+### Run from project root:
+```bash
+cargo run --bin bin
+# Finds: ./config/development.toml
+```
+
+### Run from subdirectory:
+```bash
+cd crates/libs/lib-config
+cargo run --example basic_usage
+# Finds: ../../config/development.toml (searches up)
+```
+
+### Override config directory:
+```bash
+export APP_CONFIG_DIR=/path/to/config
+cargo run --bin bin
+# Uses: /path/to/config/development.toml
+```
+
+### Change environment:
+```bash
+export APP_ENV=production
+cargo run --bin bin
+# Uses: config/production.toml
+```
