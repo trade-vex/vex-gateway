@@ -47,8 +47,8 @@ impl TokenService {
         let access_claims = AppClaims {
             sub: user_id.to_string(),
             jti: jti.clone(),
-            iat: now.timestamp() as usize,
-            exp: access_exp.timestamp() as usize,
+            iat: now.timestamp(),
+            exp: access_exp.timestamp(),
             iss: self.jwt_config.issuer.clone(),
             aud: self.jwt_config.audience.clone(),
         };
@@ -162,8 +162,8 @@ impl TokenService {
 
         // Calculate TTL until token expires
         let current_time = Utc::now().timestamp();
-        let ttl = if claims.exp > current_time as usize {
-            (claims.exp - current_time as usize) as u64
+        let ttl = if claims.exp > current_time {
+            claims.exp - current_time
         } else {
             return Ok(()); // Token already expired, no need to blacklist
         };
