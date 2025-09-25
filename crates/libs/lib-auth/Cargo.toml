@@ -5,11 +5,11 @@ edition = "2024"
 
 [dependencies]
 actix-web = { workspace = true }
-
-# SSO & JWT
-openidconnect = { version = "3", features = ["reqwest"] }
 jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }
+url = "2.5.4"
+
+openidconnect = { version = "3", features = ["reqwest"] }
 
 # Data & Config
 serde = { workspace = true }
@@ -18,21 +18,20 @@ config = { workspace = true}
 uuid = { workspace = true }
 chrono = { workspace = true }
 
-# Async & Error Handling
 futures-util = "0.3"
 thiserror = { workspace = true }
 
 # Database & Cache
 deadpool-redis = { workspace = true }
 redis = { workspace = true }
-
 async-trait = { workspace = true }
 sea-orm = { workspace = true }
 tracing = { workspace = true }
+
+# Crypto
 rand = "0.8"
 base64 = "0.22.1"
 sha2 = "0.10.9"
-url = "2.5.4"
 validator = { version = "0.20", features = ["derive"] }
 
 [dev-dependencies]
