@@ -15,7 +15,6 @@ lib-server = {path = "../libs/lib-server"}
 lib-config = {path = "../libs/lib-config"}
 lib-auth = {path = "../libs/lib-auth"}
 chrono = { workspace = true }
-sea-orm = { version = "0.12", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-uuid", "with-chrono"] }
 jsonwebtoken = { workspace = true }
 deadpool-redis = { workspace = true }
 dotenvy = { workspace = true }

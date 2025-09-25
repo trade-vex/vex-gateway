@@ -38,7 +38,7 @@ log = "0.4"
 dotenvy = { workspace = true }
 async-trait = "0.1.88"
 mockall = "0.11"
-sea-orm = { version = "0.12.2", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-uuid", "with-chrono"] }
+sea-orm = { workspace = true }
 tracing.workspace = true
 url = "2.5.4"
 rand = "0.8"
