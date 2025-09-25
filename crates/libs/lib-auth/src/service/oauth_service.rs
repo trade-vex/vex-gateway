@@ -418,9 +418,11 @@ impl OAuthService {
         let email = if let Some(email) = data["email"].as_str() {
             email.to_string()
         } else {
-            // Fetch user's emails separately
-            self.get_github_user_email(data["login"].as_str().unwrap_or(""))
-                .await?
+            // This case should not happen since fetch_github_emails is called in get_user_info
+            // before this method is called, but handle it gracefully
+            return Err(AuthError::UserInfoFetchFailed(
+                "GitHub email is not available".to_string(),
+            ));
         };
 
         Ok(OAuthUserInfo {
@@ -439,14 +441,6 @@ impl OAuthService {
             username: data["login"].as_str().map(|s| s.to_string()),
             avatar_url: data["avatar_url"].as_str().map(|s| s.to_string()),
         })
-    }
-
-    async fn get_github_user_email(&self, _username: &str) -> Result<String, AuthError> {
-        // This would require additional scope "user:email"
-        // For now, return an error if email is not public
-        Err(AuthError::UserInfoFetchFailed(
-            "GitHub email is not public".to_string(),
-        ))
     }
 
     fn parse_twitter_user_info(&self, data: Value) -> Result<OAuthUserInfo, AuthError> {
