@@ -173,7 +173,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "Authentication required")]
     async fn test_combined_auth_no_authentication() {
         let (_, decoding_key) = match setup_test_keys() {
             Some(keys) => keys,
@@ -216,7 +215,18 @@ mod tests {
             .uri("/test")
             .to_request();
 
-        test::call_service(&app, req).await;
+        let resp = test::try_call_service(&app, req).await;
+        
+        match resp {
+            Ok(response) => {
+                panic!("Expected authentication to fail, but got response: {:?}", response.status());
+            }
+            Err(error) => {
+                // Verify that the error is an unauthorized error
+                assert_eq!(error.as_response_error().status_code(), actix_web::http::StatusCode::UNAUTHORIZED);
+                assert!(error.to_string().contains("Authentication required"));
+            }
+        }
     }
 
     #[tokio::test]
@@ -311,7 +321,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "Invalid or missing JWT token")]
     async fn test_combined_auth_error_handling() {
         let decoding_key = DecodingKey::from_secret(b"invalid-key");
         let jwt_middleware = JwtAuthentication::new(
@@ -336,7 +345,18 @@ mod tests {
             .insert_header(("Authorization", "Bearer invalid-token"))
             .to_request();
 
-        test::call_service(&app, req).await;
+        let resp = test::try_call_service(&app, req).await;
+        
+        match resp {
+            Ok(response) => {
+                panic!("Expected authentication to fail, but got response: {:?}", response.status());
+            }
+            Err(error) => {
+                // Verify that the error is an unauthorized error
+                assert_eq!(error.as_response_error().status_code(), actix_web::http::StatusCode::UNAUTHORIZED);
+                assert!(error.to_string().contains("Invalid or missing JWT token"));
+            }
+        }
     }
 
     #[tokio::test]
