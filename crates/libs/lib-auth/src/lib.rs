@@ -15,9 +15,10 @@ use actix_web::web;
 pub use config::AuthConfig;
 pub use error::auth_error::AuthError;
 
-pub fn configure_services(cfg: &mut web::ServiceConfig) {
+/// Configure public routes for auth that don't require authentication
+pub fn configure_public_auth_services(cfg: &mut web::ServiceConfig) {
     cfg
-        // OAuth strategy routes
+        // OAuth strategy routes (all public)
         .service(
             web::scope("/oauth")
                 .route(
@@ -33,11 +34,17 @@ pub fn configure_services(cfg: &mut web::ServiceConfig) {
                     web::get().to(handlers::oauth::handle_oauth_callback),
                 ),
         )
-        // Common auth routes
+        // Public auth routes
         .route("/signup", web::post().to(handlers::auth::signup))
         .route("/login", web::post().to(handlers::auth::login))
+        .route("/refresh", web::post().to(handlers::auth::refresh_token));
+}
+
+/// Configure protected routes for auth that require authentication
+pub fn configure_protected_auth_services(cfg: &mut web::ServiceConfig) {
+    cfg
+        // Protected auth routes
         .route("/logout", web::post().to(handlers::auth::logout))
-        .route("/refresh", web::post().to(handlers::auth::refresh_token))
         .route("/profile", web::get().to(handlers::auth::get_profile))
         .route(
             "/verify-email",

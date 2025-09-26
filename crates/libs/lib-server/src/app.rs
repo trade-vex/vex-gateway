@@ -40,10 +40,14 @@ pub fn create_app(
         .app_data(web::Data::new(app_state.http_client.clone()))
         .app_data(web::Data::new(token_service))
         .app_data(web::Data::new(oauth_service))
-        // Apply JWT middleware
-        .wrap(jwt_middleware)
-        // Configure lib-auth routes (OAuth, login, signup, etc.)
-        .service(web::scope("").configure(lib_auth::configure_services))
+        // Configure public routes (no authentication required)
+        .service(web::scope("").configure(lib_auth::configure_public_auth_services))
         // Configure lib-api routes (health check, etc.)
         .service(web::scope("").configure(routes::health_check_route::configure))
+        // Configure protected routes with JWT middleware
+        .service(
+            web::scope("")
+                .wrap(jwt_middleware)
+                .configure(lib_auth::configure_protected_auth_services)
+        )
 }
