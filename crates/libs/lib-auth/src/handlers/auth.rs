@@ -26,7 +26,7 @@ pub async fn signup(
     req.validate()
         .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
 
-    tracing::info!("Signup request for email: {}", req.email);
+    tracing::debug!("Signup request");
 
     // Check if user already exists
     if let Some(_existing_user) = user_repo.find_by_email(&req.email).await? {
@@ -85,7 +85,7 @@ pub async fn login(
     req.validate()
         .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
 
-    tracing::info!("Login request for email: {}", req.email);
+    tracing::debug!("Login request");
 
     // Find user by email
     let user = user_repo
@@ -164,7 +164,7 @@ pub async fn get_profile(
     user: AuthenticatedUser,
     user_repo: web::Data<Arc<dyn UserRepository>>,
 ) -> Result<HttpResponse, AuthError> {
-    tracing::info!("Get profile request for user: {}", user.user_id);
+    tracing::debug!("Get profile request");
 
     let user_record = user_repo
         .find_by_id(user.user_id)
@@ -190,7 +190,7 @@ pub async fn refresh_token(
     req: web::Json<RefreshTokenRequest>,
     token_service: web::Data<Arc<TokenService>>,
 ) -> Result<HttpResponse, AuthError> {
-    tracing::info!("Token refresh request");
+    tracing::debug!("Token refresh request");
 
     let new_tokens = token_service.refresh_tokens(&req.refresh_token).await?;
 
@@ -208,7 +208,7 @@ pub async fn verify_email(
     user: AuthenticatedUser,
     user_repo: web::Data<Arc<dyn UserRepository>>,
 ) -> Result<HttpResponse, AuthError> {
-    tracing::info!("Email verification request for user: {}", user.user_id);
+    tracing::debug!("Email verification request");
 
     user_repo.verify_email(user.user_id).await?;
 
