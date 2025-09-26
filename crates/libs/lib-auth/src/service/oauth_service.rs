@@ -187,7 +187,7 @@ impl OAuthService {
         Ok(OAuthLoginResponse {
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,
-            expires_in: tokens.expires_in as u64,
+            expires_in: tokens.expires_in,
             user: user.into(),
         })
     }
