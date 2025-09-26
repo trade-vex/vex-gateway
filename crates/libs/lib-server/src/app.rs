@@ -49,6 +49,6 @@ pub fn create_app(
         .service(
             web::scope("")
                 .wrap(jwt_middleware)
-                .configure(lib_auth::configure_protected_auth_services)
+                .configure(lib_auth::configure_protected_auth_services),
         )
 }

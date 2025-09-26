@@ -3,6 +3,8 @@ use actix_web::{
     body::{BoxBody, MessageBody},
     dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready},
 };
+use deadpool_redis::Pool;
+use deadpool_redis::redis::AsyncCommands;
 use futures_util::future::LocalBoxFuture;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
@@ -10,8 +12,6 @@ use serde_json;
 use std::future::{Ready, ready};
 use std::sync::Arc;
 use uuid::Uuid;
-use deadpool_redis::Pool;
-use deadpool_redis::redis::AsyncCommands;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AuthenticatedUser {
@@ -38,7 +38,12 @@ pub struct JwtAuthentication {
 }
 
 impl JwtAuthentication {
-    pub fn new(decoding_key: DecodingKey, issuer: String, audience: String, redis_pool: Arc<Pool>) -> Self {
+    pub fn new(
+        decoding_key: DecodingKey,
+        issuer: String,
+        audience: String,
+        redis_pool: Arc<Pool>,
+    ) -> Self {
         Self {
             decoding_key,
             issuer,
@@ -121,7 +126,7 @@ where
 
         // Check Authorization header
         let auth_header = req.headers().get("authorization");
-        
+
         if let Some(auth_value) = auth_header
             && let Ok(auth_str) = auth_value.to_str()
             && let Some(token) = auth_str.strip_prefix("Bearer ")
@@ -136,13 +141,13 @@ where
                     if let Ok(user_id) = Uuid::parse_str(&token_data.claims.sub) {
                         let jti = token_data.claims.jti.clone();
                         let authenticated_user = AuthenticatedUser { user_id };
-                        
+
                         // Store the authenticated user for later
                         req.extensions_mut().insert(authenticated_user.clone());
-                        
+
                         // Continue with async blacklist check and service call
                         let fut = self.service.call(req);
-                        
+
                         return Box::pin(async move {
                             // Check if token is blacklisted
                             let is_blacklisted = if let Ok(mut conn) = redis_pool.get().await {
@@ -150,7 +155,10 @@ where
                                 match conn.exists::<_, bool>(&blacklist_key).await {
                                     Ok(exists) => {
                                         if exists {
-                                            tracing::warn!("Attempted use of blacklisted token with JTI: {}", jti);
+                                            tracing::warn!(
+                                                "Attempted use of blacklisted token with JTI: {}",
+                                                jti
+                                            );
                                         }
                                         exists
                                     }
@@ -160,7 +168,9 @@ where
                                     }
                                 }
                             } else {
-                                tracing::error!("Failed to get Redis connection for blacklist check");
+                                tracing::error!(
+                                    "Failed to get Redis connection for blacklist check"
+                                );
                                 false // Fail open
                             };
 
@@ -168,13 +178,14 @@ where
                                 // Token is blacklisted, return unauthorized
                                 let res = fut.await?;
                                 let (req, _) = res.into_parts();
-                                let response = HttpResponse::Unauthorized().json(serde_json::json!({
-                                    "error": {
-                                        "code": "token_revoked",
-                                        "message": "Token has been revoked",
-                                        "status": 401
-                                    }
-                                }));
+                                let response =
+                                    HttpResponse::Unauthorized().json(serde_json::json!({
+                                        "error": {
+                                            "code": "token_revoked",
+                                            "message": "Token has been revoked",
+                                            "status": 401
+                                        }
+                                    }));
                                 Ok(ServiceResponse::new(req, response).map_into_boxed_body())
                             } else {
                                 // Token is valid, continue with the request
@@ -228,7 +239,7 @@ mod tests {
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
     use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
-    
+
     // Helper function to create a test Redis pool
     fn create_test_redis_pool() -> Arc<Pool> {
         use deadpool_redis::Config as RedisPoolConfig;
@@ -236,7 +247,7 @@ mod tests {
         Arc::new(
             redis_cfg
                 .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("Failed to create test Redis pool")
+                .expect("Failed to create test Redis pool"),
         )
     }
 
@@ -266,8 +277,7 @@ mod tests {
         };
 
         let header = Header::new(Algorithm::HS256);
-        encode(&header, &claims, &key)
-            .expect("Failed to encode JWT token")
+        encode(&header, &claims, &key).expect("Failed to encode JWT token")
     }
 
     #[tokio::test]
@@ -294,7 +304,11 @@ mod tests {
         )
         .await;
 
-        let valid_token = create_test_jwt("123e4567-e89b-12d3-a456-426614174000", false, "test-jti-valid");
+        let valid_token = create_test_jwt(
+            "123e4567-e89b-12d3-a456-426614174000",
+            false,
+            "test-jti-valid",
+        );
 
         let req = test::TestRequest::get()
             .uri("/protected")
@@ -352,7 +366,11 @@ mod tests {
         )
         .await;
 
-        let expired_token = create_test_jwt("123e4567-e89b-12d3-a456-426614174000", true, "test-jti-expired");
+        let expired_token = create_test_jwt(
+            "123e4567-e89b-12d3-a456-426614174000",
+            true,
+            "test-jti-expired",
+        );
 
         let req = test::TestRequest::get()
             .uri("/protected")
@@ -434,7 +452,11 @@ mod tests {
         )
         .await;
 
-        let hs256_token = create_test_jwt("123e4567-e89b-12d3-a456-426614174000", false, "test-jti-rs256");
+        let hs256_token = create_test_jwt(
+            "123e4567-e89b-12d3-a456-426614174000",
+            false,
+            "test-jti-rs256",
+        );
 
         let req = test::TestRequest::get()
             .uri("/protected")
@@ -460,7 +482,10 @@ mod tests {
 
         // Add a JTI to the blacklist
         if let Ok(mut conn) = redis_pool.get().await {
-            let _: () = conn.set_ex("blacklist:test-jti-blacklisted", "1", 3600).await.unwrap();
+            let _: () = conn
+                .set_ex("blacklist:test-jti-blacklisted", "1", 3600)
+                .await
+                .unwrap();
         }
 
         let app = test::init_service(
@@ -470,7 +495,11 @@ mod tests {
         )
         .await;
 
-        let valid_token = create_test_jwt("123e4567-e89b-12d3-a456-426614174000", false, "test-jti-blacklisted");
+        let valid_token = create_test_jwt(
+            "123e4567-e89b-12d3-a456-426614174000",
+            false,
+            "test-jti-blacklisted",
+        );
 
         let req = test::TestRequest::get()
             .uri("/protected")
@@ -480,7 +509,7 @@ mod tests {
         let resp = test::call_service(&app, req).await;
         // Should fail because token is blacklisted
         assert_eq!(resp.status(), 401);
-        
+
         // Verify the error message
         let body: serde_json::Value = test::read_body_json(resp).await;
         assert_eq!(body["error"]["code"], "token_revoked");

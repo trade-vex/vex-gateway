@@ -477,22 +477,22 @@ impl OAuthService {
     pub async fn logout(&self, token: &str) -> Result<(), AuthError> {
         // Validate the JWT to extract claims
         let claims = self.token_service.validate_jwt(token)?;
-        
+
         // Check if token has JTI
         if claims.jti.is_empty() {
             // No JTI, nothing to blacklist
             return Ok(());
         }
-        
+
         // Calculate TTL
         let current_time = chrono::Utc::now().timestamp();
         if claims.exp <= current_time {
             // Token already expired, no need to blacklist
             return Ok(());
         }
-        
+
         let ttl_secs = (claims.exp - current_time) as u64;
-        
+
         // Delegate to TokenService to blacklist the JTI
         self.token_service
             .blacklist_jti(&claims.jti, ttl_secs)

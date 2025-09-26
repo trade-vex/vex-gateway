@@ -76,13 +76,13 @@ impl AppState {
                 // Remove username and password
                 let _ = url.set_username("");
                 let _ = url.set_password(None);
-                
+
                 // For database URLs, we can show scheme, host, port, and path (database name)
                 let scheme = url.scheme();
                 let host = url.host_str().unwrap_or("<unknown>");
                 let port = url.port();
                 let path = url.path();
-                
+
                 if let Some(port) = port {
                     format!("{}://{}:{}{}", scheme, host, port, path)
                 } else {
@@ -224,7 +224,7 @@ mod tests {
         let url = "postgresql://user:password@localhost:5432/mydb?sslmode=require";
         let sanitized = AppState::sanitize_url(url);
         assert_eq!(sanitized, "postgresql://localhost:5432/mydb");
-        
+
         // Test PostgreSQL URL without port
         let url = "postgresql://user:pass@localhost/mydb";
         let sanitized = AppState::sanitize_url(url);
@@ -237,7 +237,7 @@ mod tests {
         let url = "redis://user:password@localhost:6379/0";
         let sanitized = AppState::sanitize_url(url);
         assert_eq!(sanitized, "redis://localhost:6379/0");
-        
+
         // Test Redis URL without credentials
         let url = "redis://localhost:6379/1";
         let sanitized = AppState::sanitize_url(url);
