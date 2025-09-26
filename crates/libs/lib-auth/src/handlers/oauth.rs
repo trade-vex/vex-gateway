@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tracing::error;
 
 /// Initiate OAuth flow
-/// GET /auth/oauth/{provider}
+/// GET /oauth/{provider}
 pub async fn initiate_oauth(
     provider: web::Path<String>,
     oauth_service: web::Data<Arc<OAuthService>>,
@@ -24,7 +24,7 @@ pub async fn initiate_oauth(
 }
 
 /// Handle OAuth callback
-/// GET /auth/oauth/{provider}/callback?code=...&state=...
+/// GET /oauth/{provider}/callback?code=...&state=...
 pub async fn handle_oauth_callback(
     provider: web::Path<String>,
     query: web::Query<OAuthCallbackQuery>,
@@ -43,7 +43,7 @@ pub async fn handle_oauth_callback(
 }
 
 /// Get list of available OAuth providers
-/// GET /auth/oauth/providers
+/// GET /oauth/providers
 pub async fn get_oauth_providers(
     oauth_service: web::Data<Arc<OAuthService>>,
 ) -> Result<HttpResponse, AuthError> {
