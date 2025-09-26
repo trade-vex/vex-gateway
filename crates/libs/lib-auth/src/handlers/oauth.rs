@@ -31,7 +31,7 @@ pub async fn handle_oauth_callback(
     oauth_service: web::Data<Arc<OAuthService>>,
 ) -> Result<HttpResponse, AuthError> {
     match oauth_service
-        .handle_callback(&provider, &query.code, &query.state)
+        .handle_callback(&provider, query.code.as_deref().unwrap_or(""), &query.state)
         .await
     {
         Ok(response) => Ok(HttpResponse::Ok().json(response)),

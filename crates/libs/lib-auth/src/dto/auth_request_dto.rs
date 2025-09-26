@@ -34,7 +34,7 @@ pub struct ChangePasswordRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct OAuthCallbackQuery {
-    pub code: String,
+    pub code: Option<String>,
     pub state: String,
     pub error: Option<String>,
     pub error_description: Option<String>,
