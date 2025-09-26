@@ -476,7 +476,7 @@ mod tests {
         let config = Config::load_development_defaults();
         assert_eq!(config.environment, Environment::Development);
         assert_eq!(config.server.host, "127.0.0.1");
-        assert_eq!(config.server.port, 8080);
+        assert_eq!(config.server.port, 8081);
         assert_eq!(config.logging.level, "debug");
         assert!(config.logging.colored);
         assert!(!config.logging.structured);
@@ -487,7 +487,7 @@ mod tests {
         let config = Config::load_development_defaults();
         let addr = config.server_address().unwrap();
         assert_eq!(addr.ip().to_string(), "127.0.0.1");
-        assert_eq!(addr.port(), 1);
+        assert_eq!(addr.port(), 8081);
     }
 
     #[test]
