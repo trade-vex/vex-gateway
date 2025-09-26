@@ -14,6 +14,24 @@ pub struct RefreshTokenRequest {
     pub refresh_token: String,
 }
 
+#[derive(Debug, Deserialize, Validate)]
+pub struct SignupRequest {
+    #[validate(email)]
+    pub email: String,
+    #[validate(length(min = 3, max = 100))]
+    pub username: String,
+    #[validate(length(min = 8))]
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct ChangePasswordRequest {
+    #[validate(length(min = 8))]
+    pub old_password: String,
+    #[validate(length(min = 8))]
+    pub new_password: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct OAuthCallbackQuery {
     pub code: String,

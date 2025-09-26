@@ -36,13 +36,13 @@ pub fn configure_services(cfg: &mut web::ServiceConfig) {
                         web::get().to(handlers::oauth::handle_oauth_callback),
                     ),
             )
-            // Password strategy routes (new)
-            .service(
-                web::scope("/password").route("/login", web::post().to(handlers::auth::login)), // .route("/signup", web::post().to(handlers::auth::signup))
-            )
             // Common auth routes
+            .route("/signup", web::post().to(handlers::auth::signup))
+            .route("/login", web::post().to(handlers::auth::login))
             .route("/logout", web::post().to(handlers::auth::logout))
             .route("/refresh", web::post().to(handlers::auth::refresh_token))
-            .route("/profile", web::get().to(handlers::auth::get_profile)),
+            .route("/profile", web::get().to(handlers::auth::get_profile))
+            .route("/verify-email", web::post().to(handlers::auth::verify_email))
+            .route("/change-password", web::post().to(handlers::auth::change_password)),
     );
 }
