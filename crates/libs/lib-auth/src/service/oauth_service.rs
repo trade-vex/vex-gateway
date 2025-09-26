@@ -1,27 +1,46 @@
 use crate::config::OAuthProviderConfig;
-use crate::dto::auth_response_dto::{OAuthTokenResponse, OAuthLoginResponse , OAuthUserInfo};
+use crate::dto::auth_response_dto::{OAuthLoginResponse, OAuthTokenResponse, OAuthUserInfo};
 use crate::error::auth_error::AuthError;
 use crate::service::token_service::TokenService;
-use crate::state::AppState;
 use crate::utils::rand::generate_random_string;
+use deadpool_redis::Pool as RedisPool;
 use deadpool_redis::redis::AsyncCommands;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use url::Url;
 use uuid::Uuid;
 
 use crate::models::user::{Model, UserStatus};
+use crate::repository::UserRepository;
+
 pub struct OAuthService {
-    app_state: Arc<AppState>,
+    redis_pool: Arc<RedisPool>,
+    http_client: reqwest::Client,
+    oauth_providers: HashMap<String, OAuthProviderConfig>,
     token_service: Arc<TokenService>,
+    user_repo: Arc<dyn UserRepository>,
 }
 
 impl OAuthService {
-    pub fn new(app_state: Arc<AppState>, token_service: Arc<TokenService>) -> Self {
+    pub fn new(
+        redis_pool: Arc<RedisPool>,
+        http_client: reqwest::Client,
+        oauth_providers: HashMap<String, OAuthProviderConfig>,
+        token_service: Arc<TokenService>,
+        user_repo: Arc<dyn UserRepository>,
+    ) -> Self {
         Self {
-            app_state,
+            redis_pool,
+            http_client,
+            oauth_providers,
             token_service,
+            user_repo,
         }
+    }
+
+    pub async fn get_available_providers(&self) -> Vec<String> {
+        self.oauth_providers.keys().cloned().collect()
     }
 
     pub async fn get_auth_url(&self, provider: &str) -> Result<String, AuthError> {
@@ -31,20 +50,15 @@ impl OAuthService {
             ));
         }
 
-        let provider_config = self
-            .app_state
-            .oauth_providers
-            .get(provider)
-            .ok_or_else(|| {
-                AuthError::InvalidProvider(format!("Provider '{}' not configured", provider))
-            })?;
+        let provider_config = self.oauth_providers.get(provider).ok_or_else(|| {
+            AuthError::InvalidProvider(format!("Provider '{}' not configured", provider))
+        })?;
 
         // Generate state for CSRF protection
         let state = generate_random_string(32);
 
         // Store state in Redis with 10-minute expiry
         let mut redis_conn = self
-            .app_state
             .redis_pool
             .get()
             .await
@@ -59,7 +73,8 @@ impl OAuthService {
         // Build redirect URI
         let redirect_uri = format!(
             "{}/auth/{}/callback",
-            self.app_state.server_config.base_url, provider
+            "http://localhost:8081",
+            provider // TODO: Get from config
         );
 
         // Build authorization URL
@@ -103,13 +118,9 @@ impl OAuthService {
         self.verify_and_consume_state(provider, state).await?;
 
         // Get provider config
-        let provider_config = self
-            .app_state
-            .oauth_providers
-            .get(provider)
-            .ok_or_else(|| {
-                AuthError::InvalidProvider(format!("Provider '{}' not configured", provider))
-            })?;
+        let provider_config = self.oauth_providers.get(provider).ok_or_else(|| {
+            AuthError::InvalidProvider(format!("Provider '{}' not configured", provider))
+        })?;
 
         // Exchange code for access token - pass state parameter
         let token_response = self
@@ -123,26 +134,20 @@ impl OAuthService {
 
         // Find or create user in our database
         let user = match self
-            .app_state
             .user_repo
             .find_by_provider_id(provider, &user_info.provider_id)
             .await?
         {
             Some(existing_user) => {
                 // Update last login
-                self.app_state
-                    .user_repo
+                self.user_repo
                     .update_last_login(existing_user.user_id)
                     .await?;
                 existing_user
             }
             None => {
                 // Check if user exists with same email but different provider
-                if let Some(_existing_user) = self
-                    .app_state
-                    .user_repo
-                    .find_by_email(&user_info.email)
-                    .await?
+                if let Some(_existing_user) = self.user_repo.find_by_email(&user_info.email).await?
                 {
                     return Err(AuthError::EmailAlreadyExists);
                 }
@@ -168,7 +173,7 @@ impl OAuthService {
                 // Create new user by passing the full User object.
                 // NOTE: This requires the `UserRepository` trait to have a `create_user` method,
                 // for example: `async fn create_user(&self, user: &User) -> Result<User, AuthError>;`
-                self.app_state.user_repo.create_user(&new_user).await?
+                self.user_repo.create_user(&new_user).await?
             }
         };
 
@@ -189,7 +194,6 @@ impl OAuthService {
 
     async fn verify_and_consume_state(&self, provider: &str, state: &str) -> Result<(), AuthError> {
         let mut redis_conn = self
-            .app_state
             .redis_pool
             .get()
             .await
@@ -225,7 +229,8 @@ impl OAuthService {
     ) -> Result<OAuthTokenResponse, AuthError> {
         let redirect_uri = format!(
             "{}/auth/{}/callback",
-            self.app_state.server_config.base_url, provider
+            "http://localhost:8081",
+            provider // TODO: Get from config
         );
 
         let mut params = vec![
@@ -246,7 +251,6 @@ impl OAuthService {
         }
 
         let response = self
-            .app_state
             .http_client
             .post(&config.token_url)
             .header("Accept", "application/json")
@@ -274,7 +278,6 @@ impl OAuthService {
 
     async fn get_stored_verifier(&self, provider: &str, state: &str) -> Result<String, AuthError> {
         let mut redis_conn = self
-            .app_state
             .redis_pool
             .get()
             .await
@@ -307,7 +310,6 @@ impl OAuthService {
         config: &OAuthProviderConfig,
     ) -> Result<OAuthUserInfo, AuthError> {
         let response = self
-            .app_state
             .http_client
             .get(&config.user_info_url)
             .header("Authorization", format!("Bearer {}", access_token))
@@ -343,8 +345,7 @@ impl OAuthService {
                 if let Some(email_str) = primary_email.get("email").and_then(|v| v.as_str()) {
                     user_info["email"] = serde_json::Value::String(email_str.to_string());
                 }
-                if let Some(verified) = primary_email.get("verified").and_then(|v| v.as_bool())
-                {
+                if let Some(verified) = primary_email.get("verified").and_then(|v| v.as_bool()) {
                     user_info["email_verified"] = serde_json::Value::Bool(verified);
                 }
             }
@@ -370,7 +371,6 @@ impl OAuthService {
         access_token: &str,
     ) -> Result<Vec<serde_json::Value>, AuthError> {
         let response = self
-            .app_state
             .http_client
             .get("https://api.github.com/user/emails")
             .header("Authorization", format!("Bearer {}", access_token))
@@ -492,7 +492,6 @@ impl OAuthService {
 
         // Add to Redis blacklist
         let mut redis_conn = self
-            .app_state
             .redis_pool
             .get()
             .await

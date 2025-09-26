@@ -1,23 +1,25 @@
 use actix_web::{HttpRequest, HttpResponse, web};
-use serde_json::json;
-use validator::Validate;
-use bcrypt::{hash, verify, DEFAULT_COST};
+use bcrypt::{DEFAULT_COST, hash, verify};
 use chrono::Utc;
+use serde_json::json;
 use uuid::Uuid;
+use validator::Validate;
 
-use crate::dto::auth_request_dto::{LoginRequest, RefreshTokenRequest, SignupRequest, ChangePasswordRequest};
-use crate::dto::auth_response_dto::{LoginResponse, RefreshTokenResponse, UserProfile, UserInfo};
+use crate::dto::auth_request_dto::{
+    ChangePasswordRequest, LoginRequest, RefreshTokenRequest, SignupRequest,
+};
+use crate::dto::auth_response_dto::{LoginResponse, RefreshTokenResponse, UserInfo, UserProfile};
 use crate::error::auth_error::AuthError;
 use crate::middleware::jwt_auth::AuthenticatedUser;
 use crate::models::user::{Model, UserStatus};
+use crate::repository::UserRepository;
 use crate::service::token_service::TokenService;
-use crate::state::AppState;
 use std::sync::Arc;
 
 // Signup handler
 pub async fn signup(
     req: web::Json<SignupRequest>,
-    app_state: web::Data<Arc<AppState>>,
+    user_repo: web::Data<Arc<dyn UserRepository>>,
     token_service: web::Data<Arc<TokenService>>,
 ) -> Result<HttpResponse, AuthError> {
     // Validate the request
@@ -27,7 +29,7 @@ pub async fn signup(
     tracing::info!("Signup request for email: {}", req.email);
 
     // Check if user already exists
-    if let Some(_existing_user) = app_state.user_repo.find_by_email(&req.email).await? {
+    if let Some(_existing_user) = user_repo.find_by_email(&req.email).await? {
         return Err(AuthError::EmailAlreadyExists);
     }
 
@@ -53,13 +55,13 @@ pub async fn signup(
     };
 
     // Save user to database
-    let created_user = app_state.user_repo.create_user(&new_user).await?;
+    let created_user = user_repo.create_user(&new_user).await?;
 
     // Generate tokens
     let tokens = token_service.mint_tokens(created_user.user_id).await?;
 
     // Update last login
-    app_state.user_repo.update_last_login(created_user.user_id).await?;
+    user_repo.update_last_login(created_user.user_id).await?;
 
     let user_info = UserInfo::from(created_user);
     let response = LoginResponse {
@@ -76,7 +78,7 @@ pub async fn signup(
 // Login handler
 pub async fn login(
     req: web::Json<LoginRequest>,
-    app_state: web::Data<Arc<AppState>>,
+    user_repo: web::Data<Arc<dyn UserRepository>>,
     token_service: web::Data<Arc<TokenService>>,
 ) -> Result<HttpResponse, AuthError> {
     // Validate the request
@@ -86,8 +88,7 @@ pub async fn login(
     tracing::info!("Login request for email: {}", req.email);
 
     // Find user by email
-    let user = app_state
-        .user_repo
+    let user = user_repo
         .find_by_email(&req.email)
         .await?
         .ok_or(AuthError::InvalidCredentials)?;
@@ -98,11 +99,14 @@ pub async fn login(
     }
 
     // Verify password
-    let password_hash = user.password_hash.clone()
+    let password_hash = user
+        .password_hash
+        .clone()
         .ok_or(AuthError::InvalidCredentials)?;
-    
+
     if !verify(&req.password, &password_hash)
-        .map_err(|e| AuthError::Validation(format!("Password verification failed: {}", e)))? {
+        .map_err(|e| AuthError::Validation(format!("Password verification failed: {}", e)))?
+    {
         return Err(AuthError::InvalidCredentials);
     }
 
@@ -112,7 +116,7 @@ pub async fn login(
     let tokens = token_service.mint_tokens(user_id).await?;
 
     // Update last login
-    app_state.user_repo.update_last_login(user_id).await?;
+    user_repo.update_last_login(user_id).await?;
 
     let user_info = UserInfo::from(user);
     let response = LoginResponse {
@@ -158,12 +162,11 @@ pub async fn logout(
 // Get user profile
 pub async fn get_profile(
     user: AuthenticatedUser,
-    app_state: web::Data<Arc<AppState>>,
+    user_repo: web::Data<Arc<dyn UserRepository>>,
 ) -> Result<HttpResponse, AuthError> {
     tracing::info!("Get profile request for user: {}", user.user_id);
 
-    let user_record = app_state
-        .user_repo
+    let user_record = user_repo
         .find_by_id(user.user_id)
         .await?
         .ok_or(AuthError::UserNotFound)?;
@@ -203,11 +206,11 @@ pub async fn refresh_token(
 // Verify email handler
 pub async fn verify_email(
     user: AuthenticatedUser,
-    app_state: web::Data<Arc<AppState>>,
+    user_repo: web::Data<Arc<dyn UserRepository>>,
 ) -> Result<HttpResponse, AuthError> {
     tracing::info!("Email verification request for user: {}", user.user_id);
 
-    app_state.user_repo.verify_email(user.user_id).await?;
+    user_repo.verify_email(user.user_id).await?;
 
     Ok(HttpResponse::Ok().json(json!({
         "message": "Email verified successfully",
@@ -219,15 +222,14 @@ pub async fn verify_email(
 pub async fn change_password(
     user: AuthenticatedUser,
     req: web::Json<ChangePasswordRequest>,
-    app_state: web::Data<Arc<AppState>>,
+    user_repo: web::Data<Arc<dyn UserRepository>>,
 ) -> Result<HttpResponse, AuthError> {
     // Validate the request
     req.validate()
         .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
 
     // Get user
-    let user_record = app_state
-        .user_repo
+    let user_record = user_repo
         .find_by_id(user.user_id)
         .await?
         .ok_or(AuthError::UserNotFound)?;
@@ -235,7 +237,8 @@ pub async fn change_password(
     // Verify old password
     if let Some(password_hash) = &user_record.password_hash {
         if !verify(&req.old_password, password_hash)
-            .map_err(|e| AuthError::Validation(format!("Password verification failed: {}", e)))? {
+            .map_err(|e| AuthError::Validation(format!("Password verification failed: {}", e)))?
+        {
             return Err(AuthError::InvalidCredentials);
         }
     } else {
@@ -247,7 +250,9 @@ pub async fn change_password(
         .map_err(|e| AuthError::Validation(format!("Password hashing failed: {}", e)))?;
 
     // Update password
-    app_state.user_repo.update_password(user.user_id, &new_password_hash).await?;
+    user_repo
+        .update_password(user.user_id, &new_password_hash)
+        .await?;
 
     Ok(HttpResponse::Ok().json(json!({
         "message": "Password changed successfully",

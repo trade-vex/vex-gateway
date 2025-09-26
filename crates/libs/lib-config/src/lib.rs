@@ -59,7 +59,6 @@ pub use error::ConfigError;
 pub use logging::LoggingConfig;
 pub use server::ServerConfig;
 
-use lib_auth::config::AuthConfig; // Import AuthConfig
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -83,6 +82,9 @@ pub struct Config {
     /// Authentication configuration
     pub auth: AuthConfig,
 }
+
+/// Re-export AuthConfig from lib-auth for convenience
+pub use lib_auth::config::AuthConfig;
 
 impl Config {
     /// Load configuration for the specified environment.

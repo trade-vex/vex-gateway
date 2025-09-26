@@ -65,7 +65,6 @@ pub struct UserProfile {
     pub last_login: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-
 #[derive(Debug, Clone)]
 pub struct OAuthUserInfo {
     pub provider_id: String,

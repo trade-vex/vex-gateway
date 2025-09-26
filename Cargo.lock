@@ -1889,8 +1889,17 @@ name = "lib-server"
 version = "0.1.0"
 dependencies = [
  "actix-web",
+ "chrono",
+ "deadpool-redis",
+ "jsonwebtoken",
  "lib-api",
+ "lib-auth",
+ "lib-config",
+ "reqwest",
+ "sea-orm",
+ "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

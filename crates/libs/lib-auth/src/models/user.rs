@@ -1,5 +1,5 @@
-use sea_orm::prelude::*;
 use chrono::{DateTime, Utc};
+use sea_orm::prelude::*;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, DeriveEntityModel)]
@@ -43,7 +43,7 @@ impl Model {
     pub fn is_active(&self) -> bool {
         self.status == UserStatus::Active
     }
-    
+
     pub fn can_login(&self) -> bool {
         self.status == UserStatus::Active && self.email_verified
     }

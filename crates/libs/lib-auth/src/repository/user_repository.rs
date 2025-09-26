@@ -1,9 +1,9 @@
 use crate::error::auth_error::AuthError;
-use crate::models::user::{Model, UserStatus, Entity, Column, ActiveModel};
+use crate::models::user::{ActiveModel, Column, Entity, Model, UserStatus};
 use async_trait::async_trait;
+use chrono::Utc;
 use sea_orm::prelude::*;
 use sea_orm::*;
-use chrono::Utc;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -149,4 +149,3 @@ impl UserRepository for PostgresUserRepository {
         Ok(())
     }
 }
-
