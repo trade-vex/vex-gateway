@@ -30,6 +30,7 @@ pub fn create_app(
         app_state.decoding_key.clone(),
         app_state.jwt_config.issuer.clone(),
         app_state.jwt_config.audience.clone(),
+        app_state.redis_pool.clone(),
     );
 
     App::new()
