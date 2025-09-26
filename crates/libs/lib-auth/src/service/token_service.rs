@@ -176,4 +176,21 @@ impl TokenService {
 
         Ok(())
     }
+
+    // Blacklist a JTI with specific TTL
+    pub async fn blacklist_jti(&self, jti: &str, ttl_secs: u64) -> Result<(), AuthError> {
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+
+        let blacklist_key = format!("blacklist:{}", jti);
+        let _: () = conn
+            .set_ex(blacklist_key, "1", ttl_secs)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to blacklist JTI: {}", e)))?;
+
+        Ok(())
+    }
 }
