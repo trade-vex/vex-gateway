@@ -3,3 +3,4 @@
 pub mod health_check_route;
 pub mod orders;
 pub mod api_keys;
+pub mod users;

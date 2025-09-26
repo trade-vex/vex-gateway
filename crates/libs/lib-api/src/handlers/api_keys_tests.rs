@@ -700,6 +700,7 @@ mod tests {
 
     #[tokio::test]
     async fn zzz_cleanup_after_all_tests() {
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         global_cleanup().await;
     }
 }

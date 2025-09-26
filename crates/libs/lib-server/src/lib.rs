@@ -12,6 +12,7 @@ use actix_web::{
     web, App, HttpResponse, HttpServer,
 };
 use lib_api::routes;
+use lib_api::repository::trading_repository::{TradingRepository, PostgresTradingRepository};
 use lib_auth::{
     handlers::{auth, oauth},
     middleware::jwt_auth::{AuthenticatedUser, JwtAuthentication},
@@ -28,6 +29,7 @@ pub fn create_app(
     app_state: Arc<AppState>,
     combined_auth: CombinedAuthMiddleware,
     api_key_repository: Arc<dyn lib_middleware::repository::api_key_repository::ApiKeyRepository>,
+    trading_repository: Arc<dyn TradingRepository>,
 ) -> App<
     impl actix_web::dev::ServiceFactory<
         actix_web::dev::ServiceRequest,
@@ -40,6 +42,7 @@ pub fn create_app(
     App::new()
         .app_data(web::Data::new(app_state.clone()))
         .app_data(web::Data::from(api_key_repository))
+        .app_data(web::Data::from(trading_repository))
         // Public OAuth routes
         .service(
             web::scope("/auth/oauth")
@@ -61,6 +64,10 @@ pub fn create_app(
                 .service(
                     web::scope("/keys")
                         .configure(routes::api_keys::configure)
+                )
+                .service(
+                    web::scope("/users")
+                        .configure(routes::users::configure)
                 ),
         )
         // Health check (public)
@@ -109,6 +116,9 @@ pub async fn initialize_server(config: &Config) -> Result<(Arc<AppState>, Server
     let api_key_repository: Arc<dyn lib_middleware::repository::api_key_repository::ApiKeyRepository> = 
         Arc::new(PostgresApiKeyRepository::new(app_state.db.clone()));
 
+    let trading_repository: Arc<dyn TradingRepository> = 
+        Arc::new(PostgresTradingRepository::new(app_state.db.clone()));
+
     let api_key_middleware = ApiKeyMiddleware::new()
         .with_repository(api_key_repository.clone())
         .with_default_security(lib_middleware::api_key::security::SecurityType::Trade)
@@ -127,9 +137,10 @@ pub async fn initialize_server(config: &Config) -> Result<(Arc<AppState>, Server
     let app_state_clone = app_state.clone();
     let combined_auth_clone = combined_auth.clone();
     let api_key_repo_clone = api_key_repository.clone();
+    let trading_repo_clone = trading_repository.clone();
     
     let server = HttpServer::new(move || {
-        create_app(app_state_clone.clone(), combined_auth_clone.clone(), api_key_repo_clone.clone())
+        create_app(app_state_clone.clone(), combined_auth_clone.clone(), api_key_repo_clone.clone(), trading_repo_clone.clone())
     })
     .listen(listener)?
     .run();
