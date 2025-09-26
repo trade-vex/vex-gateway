@@ -1,5 +1,5 @@
 use crate::config::OAuthProviderConfig;
-use crate::dto::oauth::{OAuthTokenResponse, OAuthUserInfo};
+use crate::dto::auth_response_dto::{OAuthTokenResponse, OAuthLoginResponse , OAuthUserInfo};
 use crate::error::auth_error::AuthError;
 use crate::service::token_service::TokenService;
 use crate::state::AppState;
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use url::Url;
 use uuid::Uuid;
 
-use crate::repository::{Model, UserStatus};
+use crate::models::user::{Model, UserStatus};
 pub struct OAuthService {
     app_state: Arc<AppState>,
     token_service: Arc<TokenService>,
@@ -98,7 +98,7 @@ impl OAuthService {
         provider: &str,
         code: &str,
         state: &str,
-    ) -> Result<crate::dto::oauth::OAuthLoginResponse, AuthError> {
+    ) -> Result<OAuthLoginResponse, AuthError> {
         // Verify and consume state
         self.verify_and_consume_state(provider, state).await?;
 
@@ -179,7 +179,7 @@ impl OAuthService {
             .await
             .map_err(|e| AuthError::CodeExchangeFailed(format!("Token minting failed: {}", e)))?;
 
-        Ok(crate::dto::oauth::OAuthLoginResponse {
+        Ok(OAuthLoginResponse {
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,
             expires_in: tokens.expires_in as u64,

@@ -1,5 +1,5 @@
 use crate::config::JwtConfig;
-use crate::dto::auth::{AppClaims, TokenResponse};
+use crate::dto::jwt_response_dto::{AppClaims, TokenResponse};
 use crate::error::auth_error::AuthError;
 use chrono::{Duration, Utc};
 use deadpool_redis::Pool;

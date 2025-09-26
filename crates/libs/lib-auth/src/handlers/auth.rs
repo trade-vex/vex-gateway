@@ -1,7 +1,8 @@
 use actix_web::{HttpRequest, HttpResponse, web};
 use serde_json::json;
 
-use crate::dto::auth::{LoginRequest, RefreshTokenRequest, RefreshTokenResponse, UserProfile};
+use crate::dto::auth_request_dto::{LoginRequest, RefreshTokenRequest};
+use crate::dto::auth_response_dto::{RefreshTokenResponse, UserProfile};
 use crate::error::auth_error::AuthError;
 use crate::middleware::jwt_auth::AuthenticatedUser;
 use crate::service::token_service::TokenService;

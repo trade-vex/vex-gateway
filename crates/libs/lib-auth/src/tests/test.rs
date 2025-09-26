@@ -14,7 +14,8 @@ use crate::{
         RedisConfig, ServerConfig,
     },
     error::auth_error::AuthError,
-    repository::{Model, UserRepository, UserStatus},
+    repository::UserRepository,
+    models::user::{Model , UserStatus}
 };
 use chrono::Utc;
 use sea_orm::Database;

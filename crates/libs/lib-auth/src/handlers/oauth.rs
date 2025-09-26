@@ -1,4 +1,4 @@
-use crate::dto::oauth::OAuthCallbackQuery;
+use crate::dto::auth_request_dto::OAuthCallbackQuery;
 use crate::error::auth_error::AuthError;
 use crate::service::oauth_service::OAuthService;
 use crate::service::token_service::TokenService;
