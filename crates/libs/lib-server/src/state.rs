@@ -10,6 +10,7 @@ use lib_auth::service::{OAuthService, TokenService};
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
+use url::Url;
 
 /// Central application state containing all dependencies
 ///
@@ -66,6 +67,36 @@ impl AppState {
             decoding_key,
             oauth_providers: config.oauth.providers.clone(),
         }))
+    }
+
+    /// Sanitize a URL string to remove credentials and sensitive information
+    fn sanitize_url(url_str: &str) -> String {
+        match Url::parse(url_str) {
+            Ok(mut url) => {
+                // Remove username and password
+                let _ = url.set_username("");
+                let _ = url.set_password(None);
+                
+                // For database URLs, we can show scheme, host, port, and path (database name)
+                let scheme = url.scheme();
+                let host = url.host_str().unwrap_or("<unknown>");
+                let port = url.port();
+                let path = url.path();
+                
+                if let Some(port) = port {
+                    format!("{}://{}:{}{}", scheme, host, port, path)
+                } else {
+                    // Use default ports if not specified
+                    let default_port = match scheme {
+                        "postgresql" | "postgres" => ":5432",
+                        "redis" | "rediss" => ":6379",
+                        _ => "",
+                    };
+                    format!("{}://{}{}{}", scheme, host, default_port, path)
+                }
+            }
+            Err(_) => "<invalid-url>".to_string(),
+        }
     }
 
     /// Initialize JWT keys from configuration
@@ -131,7 +162,8 @@ impl AppState {
         config: &lib_auth::config::DatabaseConfig,
     ) -> Result<DatabaseConnection, Box<dyn std::error::Error + Send + Sync>> {
         use sea_orm::Database;
-        tracing::info!("Connecting to database: {}", config.url);
+        let sanitized_url = Self::sanitize_url(&config.url);
+        tracing::info!("Connecting to database: {}", sanitized_url);
         Database::connect(&config.url)
             .await
             .map_err(|e| format!("Failed to connect to database: {}", e).into())
@@ -142,7 +174,8 @@ impl AppState {
         config: &lib_auth::config::RedisConfig,
     ) -> Result<RedisPool, Box<dyn std::error::Error + Send + Sync>> {
         use deadpool_redis::{Config as RedisConfig, Runtime};
-        tracing::info!("Connecting to Redis: {}", config.url);
+        let sanitized_url = Self::sanitize_url(&config.url);
+        tracing::info!("Connecting to Redis: {}", sanitized_url);
         let redis_config = RedisConfig::from_url(&config.url);
         redis_config
             .create_pool(Some(Runtime::Tokio1))
@@ -178,5 +211,43 @@ impl AppState {
             token_service,
             self.user_repo.clone(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_database_url() {
+        // Test PostgreSQL URL with credentials
+        let url = "postgresql://user:password@localhost:5432/mydb?sslmode=require";
+        let sanitized = AppState::sanitize_url(url);
+        assert_eq!(sanitized, "postgresql://localhost:5432/mydb");
+        
+        // Test PostgreSQL URL without port
+        let url = "postgresql://user:pass@localhost/mydb";
+        let sanitized = AppState::sanitize_url(url);
+        assert_eq!(sanitized, "postgresql://localhost:5432/mydb");
+    }
+
+    #[test]
+    fn test_sanitize_redis_url() {
+        // Test Redis URL with credentials
+        let url = "redis://user:password@localhost:6379/0";
+        let sanitized = AppState::sanitize_url(url);
+        assert_eq!(sanitized, "redis://localhost:6379/0");
+        
+        // Test Redis URL without credentials
+        let url = "redis://localhost:6379/1";
+        let sanitized = AppState::sanitize_url(url);
+        assert_eq!(sanitized, "redis://localhost:6379/1");
+    }
+
+    #[test]
+    fn test_sanitize_invalid_url() {
+        let url = "not a valid url";
+        let sanitized = AppState::sanitize_url(url);
+        assert_eq!(sanitized, "<invalid-url>");
     }
 }
