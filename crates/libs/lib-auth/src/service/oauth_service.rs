@@ -201,21 +201,16 @@ impl OAuthService {
 
         let state_key = format!("oauth_state:{}:{}", provider, state);
 
-        // Check if state exists
-        let state_valid: bool = redis_conn
-            .exists(&state_key)
+        // Atomically get and delete the state in a single operation
+        let state_value: Option<String> = redis::cmd("GETDEL")
+            .arg(&state_key)
+            .query_async(&mut redis_conn)
             .await
-            .map_err(|e| AuthError::Redis(format!("Failed to check state: {}", e)))?;
+            .map_err(|e| AuthError::Redis(format!("Failed to get and delete state: {}", e)))?;
 
-        if !state_valid {
+        if state_value.is_none() {
             return Err(AuthError::StateMismatch);
         }
-
-        // Delete the state (one-time use)
-        let _: () = redis_conn
-            .del(&state_key)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to delete state: {}", e)))?;
 
         Ok(())
     }
