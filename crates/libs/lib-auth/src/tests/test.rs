@@ -125,8 +125,10 @@ impl UserRepository for MockUserRepository {
             let now = Utc::now();
             user.last_login = Some(now);
             user.updated_at = now;
+            Ok(())
+        } else {
+            Err(AuthError::Database("User not found".to_string()))
         }
-        Ok(())
     }
 
     async fn verify_email(&self, user_id: Uuid) -> Result<(), AuthError> {
@@ -136,8 +138,10 @@ impl UserRepository for MockUserRepository {
             user.email_verified = true;
             user.status = UserStatus::Active;
             user.updated_at = Utc::now();
+            Ok(())
+        } else {
+            Err(AuthError::Database("User not found".to_string()))
         }
-        Ok(())
     }
 
     async fn update_password(&self, user_id: Uuid, password_hash: &str) -> Result<(), AuthError> {
@@ -146,8 +150,10 @@ impl UserRepository for MockUserRepository {
         if let Some(user) = users.get_mut(&user_id) {
             user.password_hash = Some(password_hash.to_string());
             user.updated_at = Utc::now();
+            Ok(())
+        } else {
+            Err(AuthError::Database("User not found".to_string()))
         }
-        Ok(())
     }
 }
 
@@ -291,8 +297,8 @@ pub fn setup_test_config() -> AuthConfig {
     }
 }
 
-fn setup_mock_user_repo() -> Arc<Mutex<MockUserRepository>> {
-    Arc::new(Mutex::new(MockUserRepository::new()))
+fn setup_mock_user_repo() -> Arc<MockUserRepository> {
+    Arc::new(MockUserRepository::new())
 }
 
 // end  Test Cases
@@ -350,12 +356,10 @@ mod tests {
         };
 
         // Create - Call the new `create_user` method.
-        repo.lock().await.create_user(&new_user).await.unwrap();
+        repo.create_user(&new_user).await.unwrap();
 
         // Read
         let fetched_user = repo
-            .lock()
-            .await
             .get_user_by_id(user_id)
             .await
             .unwrap()
@@ -363,8 +367,8 @@ mod tests {
         assert_eq!(fetched_user.user_id, new_user.user_id);
 
         // Delete
-        repo.lock().await.delete_user(user_id).await.unwrap();
-        let result = repo.lock().await.get_user_by_id(user_id).await.unwrap();
+        repo.delete_user(user_id).await.unwrap();
+        let result = repo.get_user_by_id(user_id).await.unwrap();
         assert!(result.is_none());
     }
 
@@ -450,7 +454,7 @@ mod tests {
                     // Call the `create_user` method from the refactored trait.
                     // The lock on the mutex is acquired, the user is created, and the lock
                     // is released, all within the `create_user` method's synchronous body.
-                    repo_clone.lock().await.create_user(&user).await
+                    repo_clone.create_user(&user).await
                 })
             })
             .collect();
@@ -462,7 +466,7 @@ mod tests {
         }
 
         // Verify that exactly 10 users were created, proving the mutex worked.
-        let user_count = repo.lock().await.count().await;
+        let user_count = repo.count().await;
         assert_eq!(user_count, 10);
     }
 
@@ -519,11 +523,7 @@ mod tests {
 
         // Test 1: Check if server is responding
         println!("Testing basic connectivity...");
-        let response = match client
-            .get(format!("{}/", base_url))
-            .send()
-            .await
-        {
+        let response = match client.get(format!("{}/", base_url)).send().await {
             Ok(resp) => resp,
             Err(e) => {
                 println!("Server not available, skipping test: {}", e);
@@ -1034,7 +1034,7 @@ mod tests {
 //                     last_login: None,
 //                 };
 
-//                 repo_clone.lock().await.create_user(&user).await
+//                 repo_clone.create_user(&user).await
 //             });
 //         }
 
@@ -1048,7 +1048,7 @@ mod tests {
 //         let duration = start.elapsed();
 
 //         assert_eq!(success_count, 50);
-//         assert_eq!(repo.lock().await.count().await, 50);
+//         assert_eq!(repo.count().await, 50);
 
 //         println!("Created 50 users concurrently in {:?}", duration);
 //     }
