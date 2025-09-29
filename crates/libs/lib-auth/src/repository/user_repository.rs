@@ -141,6 +141,7 @@ impl UserRepository for PostgresUserRepository {
             .col_expr(Column::PasswordHash, Expr::value(password_hash))
             .col_expr(Column::UpdatedAt, Expr::value(now))
             .filter(Column::UserId.eq(user_id))
+            .filter(Column::Status.ne(UserStatus::Deleted)) // Exclude deleted users
             .exec(&*self.db)
             .await
             .map_err(|e| AuthError::Database(format!("Failed to update password: {}", e)))?;
