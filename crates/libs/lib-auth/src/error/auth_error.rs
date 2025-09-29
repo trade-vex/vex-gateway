@@ -121,7 +121,9 @@ impl ResponseError for AuthError {
                 "INVALID_CALLBACK",
                 "Invalid OAuth callback parameters".to_string(),
             ),
-            AuthError::ProviderError(_) => (400, "PROVIDER_ERROR", self.to_string()),
+            AuthError::ProviderError(_) => {
+                (400, "PROVIDER_ERROR", "Upstream provider error".to_string())
+            }
             AuthError::EmailAlreadyExists => (
                 409,
                 "EMAIL_EXISTS",

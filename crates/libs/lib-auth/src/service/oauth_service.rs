@@ -1,27 +1,46 @@
 use crate::config::OAuthProviderConfig;
-use crate::dto::oauth::{OAuthTokenResponse, OAuthUserInfo};
+use crate::dto::auth_response_dto::{OAuthLoginResponse, OAuthTokenResponse, OAuthUserInfo};
 use crate::error::auth_error::AuthError;
 use crate::service::token_service::TokenService;
-use crate::state::AppState;
 use crate::utils::rand::generate_random_string;
+use deadpool_redis::Pool as RedisPool;
 use deadpool_redis::redis::AsyncCommands;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use url::Url;
 use uuid::Uuid;
 
-use crate::repository::{Model, UserStatus};
+use crate::models::user::{Model, UserStatus};
+use crate::repository::UserRepository;
+
 pub struct OAuthService {
-    app_state: Arc<AppState>,
+    redis_pool: Arc<RedisPool>,
+    http_client: reqwest::Client,
+    oauth_providers: HashMap<String, OAuthProviderConfig>,
     token_service: Arc<TokenService>,
+    user_repo: Arc<dyn UserRepository>,
 }
 
 impl OAuthService {
-    pub fn new(app_state: Arc<AppState>, token_service: Arc<TokenService>) -> Self {
+    pub fn new(
+        redis_pool: Arc<RedisPool>,
+        http_client: reqwest::Client,
+        oauth_providers: HashMap<String, OAuthProviderConfig>,
+        token_service: Arc<TokenService>,
+        user_repo: Arc<dyn UserRepository>,
+    ) -> Self {
         Self {
-            app_state,
+            redis_pool,
+            http_client,
+            oauth_providers,
             token_service,
+            user_repo,
         }
+    }
+
+    pub async fn get_available_providers(&self) -> Vec<String> {
+        self.oauth_providers.keys().cloned().collect()
     }
 
     pub async fn get_auth_url(&self, provider: &str) -> Result<String, AuthError> {
@@ -31,20 +50,15 @@ impl OAuthService {
             ));
         }
 
-        let provider_config = self
-            .app_state
-            .oauth_providers
-            .get(provider)
-            .ok_or_else(|| {
-                AuthError::InvalidProvider(format!("Provider '{}' not configured", provider))
-            })?;
+        let provider_config = self.oauth_providers.get(provider).ok_or_else(|| {
+            AuthError::InvalidProvider(format!("Provider '{}' not configured", provider))
+        })?;
 
         // Generate state for CSRF protection
         let state = generate_random_string(32);
 
         // Store state in Redis with 10-minute expiry
         let mut redis_conn = self
-            .app_state
             .redis_pool
             .get()
             .await
@@ -59,7 +73,8 @@ impl OAuthService {
         // Build redirect URI
         let redirect_uri = format!(
             "{}/auth/{}/callback",
-            self.app_state.server_config.base_url, provider
+            "http://localhost:8081",
+            provider // TODO: Get from config
         );
 
         // Build authorization URL
@@ -98,18 +113,14 @@ impl OAuthService {
         provider: &str,
         code: &str,
         state: &str,
-    ) -> Result<crate::dto::oauth::OAuthLoginResponse, AuthError> {
+    ) -> Result<OAuthLoginResponse, AuthError> {
         // Verify and consume state
         self.verify_and_consume_state(provider, state).await?;
 
         // Get provider config
-        let provider_config = self
-            .app_state
-            .oauth_providers
-            .get(provider)
-            .ok_or_else(|| {
-                AuthError::InvalidProvider(format!("Provider '{}' not configured", provider))
-            })?;
+        let provider_config = self.oauth_providers.get(provider).ok_or_else(|| {
+            AuthError::InvalidProvider(format!("Provider '{}' not configured", provider))
+        })?;
 
         // Exchange code for access token - pass state parameter
         let token_response = self
@@ -123,26 +134,20 @@ impl OAuthService {
 
         // Find or create user in our database
         let user = match self
-            .app_state
             .user_repo
             .find_by_provider_id(provider, &user_info.provider_id)
             .await?
         {
             Some(existing_user) => {
                 // Update last login
-                self.app_state
-                    .user_repo
+                self.user_repo
                     .update_last_login(existing_user.user_id)
                     .await?;
                 existing_user
             }
             None => {
                 // Check if user exists with same email but different provider
-                if let Some(_existing_user) = self
-                    .app_state
-                    .user_repo
-                    .find_by_email(&user_info.email)
-                    .await?
+                if let Some(_existing_user) = self.user_repo.find_by_email(&user_info.email).await?
                 {
                     return Err(AuthError::EmailAlreadyExists);
                 }
@@ -168,7 +173,7 @@ impl OAuthService {
                 // Create new user by passing the full User object.
                 // NOTE: This requires the `UserRepository` trait to have a `create_user` method,
                 // for example: `async fn create_user(&self, user: &User) -> Result<User, AuthError>;`
-                self.app_state.user_repo.create_user(&new_user).await?
+                self.user_repo.create_user(&new_user).await?
             }
         };
 
@@ -179,17 +184,16 @@ impl OAuthService {
             .await
             .map_err(|e| AuthError::CodeExchangeFailed(format!("Token minting failed: {}", e)))?;
 
-        Ok(crate::dto::oauth::OAuthLoginResponse {
+        Ok(OAuthLoginResponse {
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,
-            expires_in: tokens.expires_in as u64,
+            expires_in: tokens.expires_in,
             user: user.into(),
         })
     }
 
     async fn verify_and_consume_state(&self, provider: &str, state: &str) -> Result<(), AuthError> {
         let mut redis_conn = self
-            .app_state
             .redis_pool
             .get()
             .await
@@ -197,21 +201,16 @@ impl OAuthService {
 
         let state_key = format!("oauth_state:{}:{}", provider, state);
 
-        // Check if state exists
-        let state_valid: bool = redis_conn
-            .exists(&state_key)
+        // Atomically get and delete the state in a single operation
+        let state_value: Option<String> = redis::cmd("GETDEL")
+            .arg(&state_key)
+            .query_async(&mut redis_conn)
             .await
-            .map_err(|e| AuthError::Redis(format!("Failed to check state: {}", e)))?;
+            .map_err(|e| AuthError::Redis(format!("Failed to get and delete state: {}", e)))?;
 
-        if !state_valid {
+        if state_value.is_none() {
             return Err(AuthError::StateMismatch);
         }
-
-        // Delete the state (one-time use)
-        let _: () = redis_conn
-            .del(&state_key)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to delete state: {}", e)))?;
 
         Ok(())
     }
@@ -225,7 +224,8 @@ impl OAuthService {
     ) -> Result<OAuthTokenResponse, AuthError> {
         let redirect_uri = format!(
             "{}/auth/{}/callback",
-            self.app_state.server_config.base_url, provider
+            "http://localhost:8081",
+            provider // TODO: Get from config
         );
 
         let mut params = vec![
@@ -246,7 +246,6 @@ impl OAuthService {
         }
 
         let response = self
-            .app_state
             .http_client
             .post(&config.token_url)
             .header("Accept", "application/json")
@@ -274,7 +273,6 @@ impl OAuthService {
 
     async fn get_stored_verifier(&self, provider: &str, state: &str) -> Result<String, AuthError> {
         let mut redis_conn = self
-            .app_state
             .redis_pool
             .get()
             .await
@@ -307,7 +305,6 @@ impl OAuthService {
         config: &OAuthProviderConfig,
     ) -> Result<OAuthUserInfo, AuthError> {
         let response = self
-            .app_state
             .http_client
             .get(&config.user_info_url)
             .header("Authorization", format!("Bearer {}", access_token))
@@ -330,22 +327,21 @@ impl OAuthService {
         })?;
 
         // Special handling for GitHub - fetch emails separately
-        if provider == "github" {
-            if let Ok(emails) = self.fetch_github_emails(access_token).await {
-                // Find the primary email
-                if let Some(primary_email) = emails.iter().find(|email| {
-                    email
-                        .get("primary")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false)
-                }) {
-                    if let Some(email_str) = primary_email.get("email").and_then(|v| v.as_str()) {
-                        user_info["email"] = serde_json::Value::String(email_str.to_string());
-                    }
-                    if let Some(verified) = primary_email.get("verified").and_then(|v| v.as_bool())
-                    {
-                        user_info["email_verified"] = serde_json::Value::Bool(verified);
-                    }
+        if provider == "github"
+            && let Ok(emails) = self.fetch_github_emails(access_token).await
+        {
+            // Find the primary email
+            if let Some(primary_email) = emails.iter().find(|email| {
+                email
+                    .get("primary")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            }) {
+                if let Some(email_str) = primary_email.get("email").and_then(|v| v.as_str()) {
+                    user_info["email"] = serde_json::Value::String(email_str.to_string());
+                }
+                if let Some(verified) = primary_email.get("verified").and_then(|v| v.as_bool()) {
+                    user_info["email_verified"] = serde_json::Value::Bool(verified);
                 }
             }
         }
@@ -370,7 +366,6 @@ impl OAuthService {
         access_token: &str,
     ) -> Result<Vec<serde_json::Value>, AuthError> {
         let response = self
-            .app_state
             .http_client
             .get("https://api.github.com/user/emails")
             .header("Authorization", format!("Bearer {}", access_token))
@@ -418,9 +413,11 @@ impl OAuthService {
         let email = if let Some(email) = data["email"].as_str() {
             email.to_string()
         } else {
-            // Fetch user's emails separately
-            self.get_github_user_email(data["login"].as_str().unwrap_or(""))
-                .await?
+            // This case should not happen since fetch_github_emails is called in get_user_info
+            // before this method is called, but handle it gracefully
+            return Err(AuthError::UserInfoFetchFailed(
+                "GitHub email is not available".to_string(),
+            ));
         };
 
         Ok(OAuthUserInfo {
@@ -439,14 +436,6 @@ impl OAuthService {
             username: data["login"].as_str().map(|s| s.to_string()),
             avatar_url: data["avatar_url"].as_str().map(|s| s.to_string()),
         })
-    }
-
-    async fn get_github_user_email(&self, _username: &str) -> Result<String, AuthError> {
-        // This would require additional scope "user:email"
-        // For now, return an error if email is not public
-        Err(AuthError::UserInfoFetchFailed(
-            "GitHub email is not public".to_string(),
-        ))
     }
 
     fn parse_twitter_user_info(&self, data: Value) -> Result<OAuthUserInfo, AuthError> {
@@ -486,29 +475,27 @@ impl OAuthService {
     }
 
     pub async fn logout(&self, token: &str) -> Result<(), AuthError> {
+        // Validate the JWT to extract claims
         let claims = self.token_service.validate_jwt(token)?;
 
-        // Calculate time until expiration
-        let current_time: usize = chrono::Utc::now().timestamp() as usize;
-        let time_remaining = if claims.exp > current_time {
-            claims.exp - current_time
-        } else {
-            return Ok(()); // Token already expired
-        };
+        // Check if token has JTI
+        if claims.jti.is_empty() {
+            // No JTI, nothing to blacklist
+            return Ok(());
+        }
 
-        // Add to Redis blacklist
-        let mut redis_conn = self
-            .app_state
-            .redis_pool
-            .get()
+        // Calculate TTL
+        let current_time = chrono::Utc::now().timestamp();
+        if claims.exp <= current_time {
+            // Token already expired, no need to blacklist
+            return Ok(());
+        }
+
+        let ttl_secs = (claims.exp - current_time) as u64;
+
+        // Delegate to TokenService to blacklist the JTI
+        self.token_service
+            .blacklist_jti(&claims.jti, ttl_secs)
             .await
-            .map_err(|e| AuthError::Redis(format!("Redis connection failed: {}", e)))?;
-
-        let _: () = redis_conn
-            .set_ex(format!("blacklisted_token:{}", token), "1", time_remaining)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to blacklist token: {}", e)))?;
-
-        Ok(())
     }
 }

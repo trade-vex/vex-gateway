@@ -7,9 +7,18 @@ actix-web = "4.11.0"
 tokio = {version = "1.45" , features = ["full"]}
 serde = { version = "1.0", features = ["derive"] }
 config = "0.14"
+async-trait = "0.1.88"
 thiserror = "1.0"
 tempfile = "3.8"
 tracing = "0.1"
-tracing-subscriber = "0.3" 
-
-async-trait = "0.1"
+tracing-subscriber = "0.3.20"
+sea-orm = { version = "1.1.16", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-uuid", "with-chrono"] }
+redis = { version = "0.32", features = ["tokio-comp"] }
+serde_json = "1.0.105"
+jsonwebtoken = "9.3.1"
+deadpool-redis = "0.22.0"
+dotenvy = "0.15.7"
+chrono = { version = "0.4.41", features = ["serde"] } 
+uuid = { version = "1", features = ["v4", "serde"] }
+reqwest = { version = "0.11", features = ["json"] }
+url = "2.5"

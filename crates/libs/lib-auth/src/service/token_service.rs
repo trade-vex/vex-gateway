@@ -1,5 +1,5 @@
 use crate::config::JwtConfig;
-use crate::dto::auth::{AppClaims, TokenResponse};
+use crate::dto::jwt_response_dto::{AppClaims, TokenResponse};
 use crate::error::auth_error::AuthError;
 use chrono::{Duration, Utc};
 use deadpool_redis::Pool;
@@ -47,8 +47,8 @@ impl TokenService {
         let access_claims = AppClaims {
             sub: user_id.to_string(),
             jti: jti.clone(),
-            iat: now.timestamp() as usize,
-            exp: access_exp.timestamp() as usize,
+            iat: now.timestamp(),
+            exp: access_exp.timestamp(),
             iss: self.jwt_config.issuer.clone(),
             aud: self.jwt_config.audience.clone(),
         };
@@ -67,7 +67,7 @@ impl TokenService {
         let redis_val = format!("{}:{}", user_id, jti);
 
         let _: () = conn
-            .set_ex(redis_key, redis_val, refresh_ttl_secs as usize)
+            .set_ex(redis_key, redis_val, refresh_ttl_secs as u64)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to store refresh token: {}", e)))?;
 
@@ -110,7 +110,7 @@ impl TokenService {
             let blacklist_key = format!("blacklist:{}", old_jti);
             let blacklist_ttl = self.jwt_config.access_token_ttl_minutes * 60;
             let _: () = conn
-                .set_ex(blacklist_key, "1", blacklist_ttl as usize)
+                .set_ex(blacklist_key, "1", blacklist_ttl as u64)
                 .await
                 .map_err(|e| AuthError::Redis(format!("Failed to blacklist token: {}", e)))?;
 
@@ -162,17 +162,34 @@ impl TokenService {
 
         // Calculate TTL until token expires
         let current_time = Utc::now().timestamp();
-        let ttl = if claims.exp > current_time as usize {
-            (claims.exp - current_time as usize) as u64
+        let ttl = if claims.exp > current_time {
+            claims.exp - current_time
         } else {
             return Ok(()); // Token already expired, no need to blacklist
         };
 
         let blacklist_key = format!("blacklist:{}", claims.jti);
         let _: () = conn
-            .set_ex(blacklist_key, "1", ttl as usize)
+            .set_ex(blacklist_key, "1", ttl as u64)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to blacklist token: {}", e)))?;
+
+        Ok(())
+    }
+
+    // Blacklist a JTI with specific TTL
+    pub async fn blacklist_jti(&self, jti: &str, ttl_secs: u64) -> Result<(), AuthError> {
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+
+        let blacklist_key = format!("blacklist:{}", jti);
+        let _: () = conn
+            .set_ex(blacklist_key, "1", ttl_secs)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to blacklist JTI: {}", e)))?;
 
         Ok(())
     }

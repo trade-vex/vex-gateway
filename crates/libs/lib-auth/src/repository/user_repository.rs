@@ -1,47 +1,11 @@
-use crate::dto::oauth::UserInfo;
 use crate::error::auth_error::AuthError;
+use crate::models::user::{ActiveModel, Column, Entity, Model, UserStatus};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use sea_orm::prelude::*;
 use sea_orm::*;
 use std::sync::Arc;
 use uuid::Uuid;
-
-#[derive(Debug, Clone, PartialEq, DeriveEntityModel)]
-#[sea_orm(table_name = "users")]
-pub struct Model {
-    #[sea_orm(primary_key)]
-    pub user_id: Uuid,
-    pub email: String,
-    pub username: String,
-    pub password_hash: Option<String>,
-    pub auth_provider: String,
-    pub provider_id: Option<String>,
-    pub avatar_url: Option<String>,
-    pub email_verified: bool,
-    pub status: UserStatus,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub last_login: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, PartialEq, EnumIter, DeriveActiveEnum)]
-#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "user_status")]
-pub enum UserStatus {
-    #[sea_orm(string_value = "active")]
-    Active,
-    #[sea_orm(string_value = "pending")]
-    Pending,
-    #[sea_orm(string_value = "suspended")]
-    Suspended,
-    #[sea_orm(string_value = "deleted")]
-    Deleted,
-}
-
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {}
-
-impl ActiveModelBehavior for ActiveModel {}
 
 #[async_trait]
 pub trait UserRepository: Send + Sync {
@@ -183,19 +147,5 @@ impl UserRepository for PostgresUserRepository {
         }
 
         Ok(())
-    }
-}
-
-impl From<Model> for UserInfo {
-    fn from(user: Model) -> Self {
-        Self {
-            user_id: user.user_id,
-            email: user.email,
-            username: user.username,
-            avatar_url: user.avatar_url,
-            auth_provider: user.auth_provider,
-            email_verified: user.email_verified,
-            created_at: user.created_at,
-        }
     }
 }
