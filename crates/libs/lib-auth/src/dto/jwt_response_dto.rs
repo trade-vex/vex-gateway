@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
-pub struct TokenResponse {
+pub struct JwtTokenResponse {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_in: u64, // TTL in seconds for the access token

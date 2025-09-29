@@ -1,5 +1,5 @@
 use crate::config::JwtConfig;
-use crate::dto::jwt_response_dto::{AppClaims, TokenResponse};
+use crate::dto::jwt_response_dto::{AppClaims, JwtTokenResponse};
 use crate::error::auth_error::AuthError;
 use chrono::{Duration, Utc};
 use deadpool_redis::Pool;
@@ -31,7 +31,7 @@ impl TokenService {
         }
     }
 
-    pub async fn mint_tokens(&self, user_id: Uuid) -> Result<TokenResponse, AuthError> {
+    pub async fn mint_tokens(&self, user_id: Uuid) -> Result<JwtTokenResponse, AuthError> {
         // Fix the Redis connection error handling
         let mut conn = self
             .redis_pool
@@ -71,7 +71,7 @@ impl TokenService {
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to store refresh token: {}", e)))?;
 
-        Ok(TokenResponse {
+        Ok(JwtTokenResponse {
             access_token,
             refresh_token,
             expires_in: (self.jwt_config.access_token_ttl_minutes * 60) as u64,
@@ -82,7 +82,7 @@ impl TokenService {
     pub async fn refresh_tokens(
         &self,
         old_refresh_token: &str,
-    ) -> Result<TokenResponse, AuthError> {
+    ) -> Result<JwtTokenResponse, AuthError> {
         let mut conn = self
             .redis_pool
             .get()
