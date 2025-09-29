@@ -2545,6 +2545,7 @@ dependencies = [
  "futures-util",
  "lib-auth",
  "lib-middleware",
+ "lib-trading",
  "lib-utils",
  "sea-orm",
  "serde",
@@ -2679,10 +2680,22 @@ dependencies = [
  "lib-auth",
  "lib-config",
  "lib-middleware",
+ "lib-trading",
  "lib-utils",
  "serde_json",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "lib-trading"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "sea-orm",
+ "serde",
  "uuid",
 ]
 

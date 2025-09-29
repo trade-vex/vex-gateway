@@ -19,3 +19,4 @@ lib-auth = {path = "../lib-auth"}
 lib-config = {path = "../lib-config"}
 lib-middleware = { path = "../lib-middleware" }
 lib-utils = { path = "../lib-utils" }
+lib-trading = { path = "../lib-trading" }

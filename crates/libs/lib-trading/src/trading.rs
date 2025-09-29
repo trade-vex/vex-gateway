@@ -1,11 +1,12 @@
-//! lib-api/src/models/trading.rs
-
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use uuid::Uuid;
 
-pub use crate::models::orders::Model as OrderModel;
-pub use crate::models::user_balances::Model as UserBalanceModel;
+// Re-export models from separate modules
+pub use crate::orders::Model as OrderModel;
+pub use crate::user_balances::Model as UserBalanceModel;
 
+// Simple types as specified
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Side {
     Bid,
@@ -33,10 +34,11 @@ impl std::str::FromStr for Side {
     }
 }
 
+// API Response DTOs
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OrderResponse {
     pub order_id: u64,
-    pub user_id: u64,
+    pub user_id: Uuid,
     pub price: u64,
     pub size: u64,
     pub side: Side,
@@ -45,7 +47,7 @@ pub struct OrderResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserBalanceResponse {
-    pub user_id: u64,
+    pub user_id: Uuid,
     pub available: u64,
     pub locked: u64,
     pub total: u64,
@@ -64,12 +66,12 @@ pub struct OrdersListResponse {
     pub total: usize,
 }
 
-
+// Conversion implementations
 impl From<OrderModel> for OrderResponse {
     fn from(model: OrderModel) -> Self {
         Self {
             order_id: model.order_id as u64,
-            user_id: model.user_id as u64,
+            user_id: model.user_id,
             price: model.price as u64,
             size: model.size as u64,
             side: model.side.parse().unwrap_or(Side::Bid),
@@ -81,7 +83,7 @@ impl From<OrderModel> for OrderResponse {
 impl From<UserBalanceModel> for UserBalanceResponse {
     fn from(model: UserBalanceModel) -> Self {
         Self {
-            user_id: model.user_id as u64,
+            user_id: model.user_id,
             available: model.available as u64,
             locked: model.locked as u64,
             total: (model.available + model.locked) as u64,

@@ -1,12 +1,12 @@
-//! lib-api/src/repository/trading_repository.rs
-
 use async_trait::async_trait;
 use sea_orm::prelude::*;
 use sea_orm::*;
 use std::sync::Arc;
-use crate::models::orders::{Model as OrderModel, Entity as OrderEntity, Column as OrderColumn, ActiveModel as OrderActiveModel};
-use crate::models::user_balances::{Model as UserBalanceModel, Entity as UserBalanceEntity, Column as UserBalanceColumn, ActiveModel as UserBalanceActiveModel};
+use uuid::Uuid;
+use crate::orders::{Model as OrderModel, Entity as OrderEntity, Column as OrderColumn, ActiveModel as OrderActiveModel};
+use crate::user_balances::{Model as UserBalanceModel, Entity as UserBalanceEntity, Column as UserBalanceColumn, ActiveModel as UserBalanceActiveModel};
 
+// Error type for trading operations
 #[derive(Debug)]
 pub enum TradingError {
     Database(String),
@@ -34,19 +34,20 @@ pub type Result<T> = std::result::Result<T, TradingError>;
 
 #[async_trait]
 pub trait TradingRepository: Send + Sync {
-    // user_balance operations
-    async fn get_user_balances(&self, user_id: u64) -> Result<Vec<UserBalanceModel>>;
-    async fn get_user_balance(&self, user_id: u64) -> Result<Option<UserBalanceModel>>;
-    async fn update_user_balance(&self, user_id: u64, available: u64, locked: u64) -> Result<()>;
-    async fn create_user_balance(&self, user_id: u64, available: u64, locked: u64) -> Result<()>;
+    // Balance operations
+    async fn get_user_balances(&self, user_id: Uuid) -> Result<Vec<UserBalanceModel>>;
+    async fn get_user_balance(&self, user_id: Uuid) -> Result<Option<UserBalanceModel>>;
+    async fn update_user_balance(&self, user_id: Uuid, available: u64, locked: u64) -> Result<()>;
+    async fn create_user_balance(&self, user_id: Uuid, available: u64, locked: u64) -> Result<()>;
     
-    // order operations
-    async fn get_open_orders(&self, user_id: u64) -> Result<Vec<OrderModel>>;
-    async fn get_order_by_id(&self, order_id: u64, user_id: u64) -> Result<Option<OrderModel>>;
+    // Order operations
+    async fn get_open_orders(&self, user_id: Uuid) -> Result<Vec<OrderModel>>;
+    async fn get_order_by_id(&self, order_id: u64, user_id: Uuid) -> Result<Option<OrderModel>>;
     async fn create_order(&self, order: OrderModel) -> Result<u64>;
-    async fn count_user_orders(&self, user_id: u64) -> Result<u64>;
+    async fn count_user_orders(&self, user_id: Uuid) -> Result<u64>;
 }
 
+// PostgreSQL implementation
 pub struct PostgresTradingRepository {
     db: Arc<DatabaseConnection>,
 }
@@ -59,23 +60,23 @@ impl PostgresTradingRepository {
 
 #[async_trait]
 impl TradingRepository for PostgresTradingRepository {
-    async fn get_user_balances(&self, user_id: u64) -> Result<Vec<UserBalanceModel>> {
+    async fn get_user_balances(&self, user_id: Uuid) -> Result<Vec<UserBalanceModel>> {
         UserBalanceEntity::find()
-            .filter(UserBalanceColumn::UserId.eq(user_id as i64))
+            .filter(UserBalanceColumn::UserId.eq(user_id))
             .all(&*self.db)
             .await
             .map_err(Into::into)
     }
 
-    async fn get_user_balance(&self, user_id: u64) -> Result<Option<UserBalanceModel>> {
-        UserBalanceEntity::find_by_id(user_id as i64)
+    async fn get_user_balance(&self, user_id: Uuid) -> Result<Option<UserBalanceModel>> {
+        UserBalanceEntity::find_by_id(user_id)
             .one(&*self.db)
             .await
             .map_err(Into::into)
     }
 
-    async fn update_user_balance(&self, user_id: u64, available: u64, locked: u64) -> Result<()> {
-        let mut balance: UserBalanceActiveModel = UserBalanceEntity::find_by_id(user_id as i64)
+    async fn update_user_balance(&self, user_id: Uuid, available: u64, locked: u64) -> Result<()> {
+        let mut balance: UserBalanceActiveModel = UserBalanceEntity::find_by_id(user_id)
             .one(&*self.db)
             .await?
             .ok_or(TradingError::NotFound)?
@@ -89,9 +90,9 @@ impl TradingRepository for PostgresTradingRepository {
         Ok(())
     }
 
-    async fn create_user_balance(&self, user_id: u64, available: u64, locked: u64) -> Result<()> {
+    async fn create_user_balance(&self, user_id: Uuid, available: u64, locked: u64) -> Result<()> {
         let balance = UserBalanceActiveModel {
-            user_id: Set(user_id as i64),
+            user_id: Set(user_id),
             available: Set(available as i64),
             locked: Set(locked as i64),
             last_updated: Set(chrono::Utc::now()),
@@ -102,20 +103,20 @@ impl TradingRepository for PostgresTradingRepository {
         Ok(())
     }
 
-    async fn get_open_orders(&self, user_id: u64) -> Result<Vec<OrderModel>> {
+    async fn get_open_orders(&self, user_id: Uuid) -> Result<Vec<OrderModel>> {
         OrderEntity::find()
-            .filter(OrderColumn::UserId.eq(user_id as i64))
+            .filter(OrderColumn::UserId.eq(user_id))
             .order_by_desc(OrderColumn::Timestamp)
             .all(&*self.db)
             .await
             .map_err(Into::into)
     }
 
-    async fn get_order_by_id(&self, order_id: u64, user_id: u64) -> Result<Option<OrderModel>> {
+    async fn get_order_by_id(&self, order_id: u64, user_id: Uuid) -> Result<Option<OrderModel>> {
         OrderEntity::find()
             .filter(
                 OrderColumn::OrderId.eq(order_id as i64)
-                    .and(OrderColumn::UserId.eq(user_id as i64))
+                    .and(OrderColumn::UserId.eq(user_id))
             )
             .one(&*self.db)
             .await
@@ -136,9 +137,9 @@ impl TradingRepository for PostgresTradingRepository {
         Ok(result.order_id as u64)
     }
 
-    async fn count_user_orders(&self, user_id: u64) -> Result<u64> {
+    async fn count_user_orders(&self, user_id: Uuid) -> Result<u64> {
         let count = OrderEntity::find()
-            .filter(OrderColumn::UserId.eq(user_id as i64))
+            .filter(OrderColumn::UserId.eq(user_id))
             .count(&*self.db)
             .await?;
         Ok(count as u64)

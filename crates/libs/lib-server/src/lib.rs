@@ -12,7 +12,7 @@ use actix_web::{
     web, App, HttpResponse, HttpServer,
 };
 use lib_api::routes;
-use lib_api::repository::trading_repository::{TradingRepository, PostgresTradingRepository};
+use lib_trading::{TradingRepository, PostgresTradingRepository};
 use lib_auth::{
     handlers::{auth, oauth},
     middleware::jwt_auth::{AuthenticatedUser, JwtAuthentication},
