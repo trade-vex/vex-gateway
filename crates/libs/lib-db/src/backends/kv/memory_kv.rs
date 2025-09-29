@@ -672,26 +672,39 @@ impl AdvancedKvStore for MemoryDb {
 #[async_trait]
 impl AtomicKvStore for MemoryDb {
     async fn incr(&self, key: &str, delta: i64) -> Result<i64> {
-        let current_value = if let Some(mut entry) = self.store.get_mut(key) {
+        if let Some(mut entry) = self.store.get_mut(key) {
             if Self::is_expired(&entry) {
-                0
-            } else {
-                Self::update_access(&mut entry);
-                bincode::deserialize::<i64>(&entry.data).unwrap_or(0)
+                let now = Instant::now();
+                let new_value = delta;
+                entry.data = bincode::serialize(&new_value).map_err(|e| DbError::Serialization {
+                    message: format!("Failed to serialize value: {}", e),
+                    source: Some(Box::new(e)),
+                })?;
+                entry.expires_at = self.config.default_ttl.map(|ttl| now + ttl);
+                entry.created_at = now;
+                entry.access_count = 0;
+                entry.last_accessed = now;
+                return Ok(new_value);
             }
-        } else {
-            0
-        };
+            let current = bincode::deserialize::<i64>(&entry.data).unwrap_or(0);
+            let new_value = current + delta;
+            entry.data = bincode::serialize(&new_value).map_err(|e| DbError::Serialization {
+                message: format!("Failed to serialize value: {}", e),
+                source: Some(Box::new(e)),
+            })?;
+            Self::update_access(&mut entry);
+            return Ok(new_value);
+        }
 
-        let new_value = current_value + delta;
+        // Insert new key: ensure capacity then insert
+        self.ensure_capacity(1).await?;
+        let now = Instant::now();
+        let expires_at = self.config.default_ttl.map(|ttl| now + ttl);
+        let new_value = delta;
         let bytes = bincode::serialize(&new_value).map_err(|e| DbError::Serialization {
             message: format!("Failed to serialize value: {}", e),
             source: Some(Box::new(e)),
         })?;
-
-        let expires_at = self.config.default_ttl.map(|ttl| Instant::now() + ttl);
-        let now = Instant::now();
-
         self.store.insert(
             key.to_string(),
             MemoryEntry {
@@ -702,7 +715,6 @@ impl AtomicKvStore for MemoryDb {
                 last_accessed: now,
             },
         );
-
         Ok(new_value)
     }
 
