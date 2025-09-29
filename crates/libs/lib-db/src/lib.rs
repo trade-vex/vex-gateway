@@ -42,5 +42,8 @@ pub use error::{DbError, Result};
 #[cfg(feature = "postgres")]
 pub use backends::sql::postgres;
 
+// In-memory backend is always available
+pub use backends::kv::memory_kv;
+
 #[cfg(feature = "redis")]
-pub use backends::kv::{memory_kv, redis};
+pub use backends::kv::redis;
