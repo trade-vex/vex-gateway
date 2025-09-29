@@ -766,43 +766,24 @@ impl AtomicKvStore for MemoryDb {
     where
         T: Serialize + DeserializeOwned + Send + Sync + PartialEq,
     {
-        // Get current value
-        let current_value = if let Some(mut entry) = self.store.get_mut(key) {
+        if let Some(mut entry) = self.store.get_mut(key) {
             if Self::is_expired(&entry) {
-                None
-            } else {
-                Self::update_access(&mut entry);
-                bincode::deserialize::<T>(&entry.data).ok()
+                return Ok(false);
             }
-        } else {
-            None
-        };
-
-        // Check if current value matches expected old value
-        if current_value.as_ref() != Some(old) {
-            return Ok(false);
+            let current = bincode::deserialize::<T>(&entry.data).ok();
+            if current.as_ref() != Some(old) {
+                return Ok(false);
+            }
+            let now = Instant::now();
+            entry.data = bincode::serialize(new).map_err(|e| DbError::Serialization {
+                message: format!("Failed to serialize value: {}", e),
+                source: Some(Box::new(e)),
+            })?;
+            entry.expires_at = self.config.default_ttl.map(|ttl| now + ttl);
+            Self::update_access(&mut entry);
+            return Ok(true);
         }
-
-        let bytes = bincode::serialize(new).map_err(|e| DbError::Serialization {
-            message: format!("Failed to serialize value: {}", e),
-            source: Some(Box::new(e)),
-        })?;
-
-        let expires_at = self.config.default_ttl.map(|ttl| Instant::now() + ttl);
-        let now = Instant::now();
-
-        self.store.insert(
-            key.to_string(),
-            MemoryEntry {
-                data: bytes,
-                expires_at,
-                created_at: now,
-                access_count: 0,
-                last_accessed: now,
-            },
-        );
-
-        Ok(true)
+        Ok(false)
     }
 }
 
