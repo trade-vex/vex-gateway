@@ -7,13 +7,13 @@
 ```rust
 use lib_config::Config;
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // This automatically finds your config files, no matter where you run from
     let config = Config::load_auto()?;
     
     // Use your config
     let address = config.server_address()?;
-    println!("Server: {}:{}", config.server.host, config.server.port);
+    println!("Server: {}", address);
 }
 ```
 
@@ -36,7 +36,7 @@ fn main() {
 
 ### Run from project root:
 ```bash
-cargo run --bin bin
+cargo run --bin gateway
 # Finds: ./config/development.toml
 ```
 
