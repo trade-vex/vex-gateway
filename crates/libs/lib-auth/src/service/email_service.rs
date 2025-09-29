@@ -65,7 +65,9 @@ impl EmailService {
     async fn store_otp(&self, email: &str, otp: &str) -> Result<(), AuthError> {
         // Validate otp_expiry_minutes is positive
         if self.otp_expiry_minutes <= 0 {
-            return Err(AuthError::Validation("OTP expiry minutes must be positive".to_string()));
+            return Err(AuthError::Validation(
+                "OTP expiry minutes must be positive".to_string(),
+            ));
         }
 
         let mut conn = self

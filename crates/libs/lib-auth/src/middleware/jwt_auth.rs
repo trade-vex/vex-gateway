@@ -27,7 +27,7 @@ struct JwtClaims {
     iss: String,
     aud: String,
     jti: String,
-    pwd: i64,    // password changed timestamp
+    pwd: i64, // password changed timestamp
 }
 
 #[derive(Clone)]
@@ -166,7 +166,10 @@ where
                                             Ok(exists)
                                         }
                                         Err(e) => {
-                                            tracing::error!("Failed to check token blacklist: {}", e);
+                                            tracing::error!(
+                                                "Failed to check token blacklist: {}",
+                                                e
+                                            );
                                             Err("Redis blacklist check failed")
                                         }
                                     }
@@ -192,9 +195,9 @@ where
                                                 "status": 401
                                             }
                                         }));
-                                    return Ok(
+                                    Ok(
                                         ServiceResponse::new(req, response).map_into_boxed_body()
-                                    );
+                                    )
                                 }
                                 Ok(false) => {
                                     // Token is valid and not blacklisted, proceed to the inner service

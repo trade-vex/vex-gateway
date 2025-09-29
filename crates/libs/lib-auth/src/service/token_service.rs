@@ -196,7 +196,11 @@ impl TokenService {
     }
 
     // Mint tokens with specific password timestamp (for session invalidation)
-    pub async fn mint_tokens_with_password_time(&self, user_id: Uuid, password_timestamp: i64) -> Result<JwtTokenResponse, AuthError> {
+    pub async fn mint_tokens_with_password_time(
+        &self,
+        user_id: Uuid,
+        password_timestamp: i64,
+    ) -> Result<JwtTokenResponse, AuthError> {
         let mut conn = self
             .redis_pool
             .get()
@@ -252,7 +256,7 @@ impl TokenService {
             .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
 
         // Find all refresh tokens for this user
-        let pattern = format!("refresh:*");
+        let pattern = "refresh:*".to_string();
         let keys: Vec<String> = conn
             .keys(pattern)
             .await
@@ -262,11 +266,12 @@ impl TokenService {
         for key in keys {
             if let Ok(Some(val)) = conn.get::<String, Option<String>>(key.clone()).await {
                 let parts: Vec<&str> = val.split(':').collect();
-                if parts.len() == 2 && parts[0] == &user_id.to_string() {
+                if parts.len() == 2 && parts[0] == user_id.to_string() {
                     // Delete the refresh token
-                    let _: () = conn.del(key).await
-                        .map_err(|e| AuthError::Redis(format!("Failed to delete refresh token: {}", e)))?;
-                    
+                    let _: () = conn.del(key).await.map_err(|e| {
+                        AuthError::Redis(format!("Failed to delete refresh token: {}", e))
+                    })?;
+
                     // Blacklist the associated JTI
                     let jti = parts[1];
                     let blacklist_key = format!("blacklist:{}", jti);
