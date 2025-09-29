@@ -114,9 +114,26 @@ impl UserRepository for MockUserRepository {
             // Assuming an appropriate error variant exists
             return Err(AuthError::EmailAlreadyExists);
         }
-        // This now correctly uses the user_id provided by the service layer.
-        users.insert(user.user_id, user.clone());
-        Ok(user.clone())
+        
+        // Create user with server-assigned audit fields for integrity
+        let now = Utc::now();
+        let created_user = Model {
+            user_id: user.user_id,
+            email: user.email.clone(),
+            username: user.username.clone(),
+            password_hash: user.password_hash.clone(),
+            auth_provider: user.auth_provider.clone(),
+            provider_id: user.provider_id.clone(),
+            avatar_url: user.avatar_url.clone(),
+            email_verified: user.email_verified,
+            status: UserStatus::Pending, // Safe initial status
+            created_at: now, // Server-assigned timestamp
+            updated_at: now, // Server-assigned timestamp
+            last_login: user.last_login, // Accept caller-supplied last_login if appropriate
+        };
+        
+        users.insert(user.user_id, created_user.clone());
+        Ok(created_user)
     }
 
     async fn update_last_login(&self, user_id: Uuid) -> Result<(), AuthError> {
@@ -354,9 +371,9 @@ mod tests {
             provider_id: Some("12345".to_string()),
             avatar_url: None,
             email_verified: true,
-            status: UserStatus::Active,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            status: UserStatus::Active, // This will be ignored and set to Pending
+            created_at: Utc::now(), // This will be ignored and set to server time
+            updated_at: Utc::now(), // This will be ignored and set to server time
             last_login: None,
         };
 
@@ -370,6 +387,17 @@ mod tests {
             .unwrap()
             .expect("User should be found in the mock repository"); // This will no longer panic.
         assert_eq!(fetched_user.user_id, new_user.user_id);
+        
+        // Verify audit integrity - status should be Pending, not the caller-supplied Active
+        assert_eq!(fetched_user.status, UserStatus::Pending);
+        
+        // Verify that timestamps are server-assigned (should be recent)
+        let now = Utc::now();
+        let time_diff = now.signed_duration_since(fetched_user.created_at).num_seconds();
+        assert!(time_diff >= 0 && time_diff < 5); // Created within last 5 seconds
+        
+        let time_diff_updated = now.signed_duration_since(fetched_user.updated_at).num_seconds();
+        assert!(time_diff_updated >= 0 && time_diff_updated < 5); // Updated within last 5 seconds
 
         // Delete
         repo.delete_user(user_id).await.unwrap();

@@ -74,6 +74,7 @@ impl UserRepository for PostgresUserRepository {
     }
 
     async fn create_user(&self, user: &Model) -> Result<Model, AuthError> {
+        let now = Utc::now();
         let user_model = ActiveModel {
             user_id: Set(user.user_id),
             email: Set(user.email.clone()),
@@ -83,10 +84,10 @@ impl UserRepository for PostgresUserRepository {
             provider_id: Set(user.provider_id.clone()),
             avatar_url: Set(user.avatar_url.clone()),
             email_verified: Set(user.email_verified),
-            status: Set(user.status.clone()),
-            created_at: Set(user.created_at),
-            updated_at: Set(user.updated_at),
-            last_login: Set(user.last_login),
+            status: Set(UserStatus::Pending), // Safe initial status
+            created_at: Set(now), // Server-assigned timestamp
+            updated_at: Set(now), // Server-assigned timestamp
+            last_login: Set(user.last_login), // Accept caller-supplied last_login if appropriate
         };
 
         let created_user = user_model
