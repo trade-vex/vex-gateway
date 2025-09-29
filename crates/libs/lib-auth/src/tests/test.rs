@@ -157,8 +157,15 @@ impl UserRepository for MockUserRepository {
         // .lock() is now an async operation.
         let mut users = self.users.lock().await;
         if let Some(user) = users.get_mut(&user_id) {
+            // Check if user is deleted - don't update deleted users
+            if user.status == UserStatus::Deleted {
+                return Err(AuthError::Database("User not found".to_string()));
+            }
+            // Only allow Pending→Active transition
+            if user.status != UserStatus::Pending {
+                return Err(AuthError::Database("User not found".to_string()));
+            }
             user.email_verified = true;
-            user.status = UserStatus::Active;
             user.updated_at = Utc::now();
             Ok(())
         } else {
