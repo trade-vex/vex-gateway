@@ -15,6 +15,17 @@ async fn test_basic_sql_operations(db: &PostgresDb) -> Result<()> {
 
     db.execute(create_table).await?;
 
+    // Run the basic operations and ensure cleanup happens even if operations fail
+    let result = run_basic_operations(db).await;
+    
+    // Always clean up the test table, even if operations failed
+    let _ = db.execute("DROP TABLE IF EXISTS test_users").await;
+    
+    result
+}
+
+/// Helper function that contains the actual test logic for basic SQL operations
+async fn run_basic_operations(db: &PostgresDb) -> Result<()> {
     // Insert test data
     let affected = db.execute(
         "INSERT INTO test_users (name, email, active) VALUES ('Alice', 'alice@example.com', true)"
@@ -45,6 +56,30 @@ async fn test_basic_sql_operations(db: &PostgresDb) -> Result<()> {
 
 /// Test helper function for SQL error handling
 async fn test_sql_error_handling(db: &PostgresDb) -> Result<()> {
+    // Create a test table for error testing
+    let create_table = r#"
+        CREATE TABLE IF NOT EXISTS test_users (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            email VARCHAR(255) UNIQUE NOT NULL,
+            active BOOLEAN DEFAULT true,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    "#;
+
+    db.execute(create_table).await?;
+
+    // Run error handling tests and ensure cleanup happens even if tests fail
+    let result = run_error_handling_tests(db).await;
+    
+    // Always clean up the test table, even if tests failed
+    let _ = db.execute("DROP TABLE IF EXISTS test_users").await;
+    
+    result
+}
+
+/// Helper function that contains the actual error handling test logic
+async fn run_error_handling_tests(db: &PostgresDb) -> Result<()> {
     // Test querying non-existent table
     let result = db.execute("SELECT COUNT(*) FROM non_existent_table").await;
     assert!(result.is_err());
@@ -64,6 +99,30 @@ async fn test_sql_error_handling(db: &PostgresDb) -> Result<()> {
 
 /// Test helper function for pool management
 async fn test_sql_pool_management(db: &PostgresDb) -> Result<()> {
+    // Create a test table for pool testing
+    let create_table = r#"
+        CREATE TABLE IF NOT EXISTS test_users (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            email VARCHAR(255) UNIQUE NOT NULL,
+            active BOOLEAN DEFAULT true,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    "#;
+
+    db.execute(create_table).await?;
+
+    // Run pool management tests and ensure cleanup happens even if tests fail
+    let result = run_pool_management_tests(db).await;
+    
+    // Always clean up the test table, even if tests failed
+    let _ = db.execute("DROP TABLE IF EXISTS test_users").await;
+    
+    result
+}
+
+/// Helper function that contains the actual pool management test logic
+async fn run_pool_management_tests(db: &PostgresDb) -> Result<()> {
     // Test pool statistics
     let stats = db.pool_stats();
     assert!(stats.max_size > 0);
@@ -195,22 +254,46 @@ async fn test_postgres_transaction_like_operations() -> Result<()> {
     if let Ok(postgres_url) = std::env::var("DATABASE_URL") {
         let db = PostgresDb::connect(&postgres_url).await?;
 
-        // Test multiple operations that simulate a transaction
-        // Insert multiple records
-        db.execute("INSERT INTO test_users (name, email, active) VALUES ('Transaction1', 'tx1@example.com', true)").await?;
-        db.execute("INSERT INTO test_users (name, email, active) VALUES ('Transaction2', 'tx2@example.com', true)").await?;
+        // Create a test table for transaction testing
+        let create_table = r#"
+            CREATE TABLE IF NOT EXISTS test_users (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                email VARCHAR(255) UNIQUE NOT NULL,
+                active BOOLEAN DEFAULT true,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        "#;
 
-        // Update records
-        db.execute("UPDATE test_users SET active = false WHERE name LIKE 'Transaction%'")
-            .await?;
+        db.execute(create_table).await?;
 
-        // Clean up
-        db.execute("DELETE FROM test_users WHERE name LIKE 'Transaction%'")
-            .await?;
-
-        Ok(())
+        // Run transaction tests and ensure cleanup happens even if tests fail
+        let result = run_transaction_tests(&db).await;
+        
+        // Always clean up the test table, even if tests failed
+        let _ = db.execute("DROP TABLE IF EXISTS test_users").await;
+        
+        result
     } else {
         println!("DATABASE_URL not set - skipping transaction test");
         Ok(())
     }
+}
+
+/// Helper function that contains the actual transaction test logic
+async fn run_transaction_tests(db: &PostgresDb) -> Result<()> {
+    // Test multiple operations that simulate a transaction
+    // Insert multiple records
+    db.execute("INSERT INTO test_users (name, email, active) VALUES ('Transaction1', 'tx1@example.com', true)").await?;
+    db.execute("INSERT INTO test_users (name, email, active) VALUES ('Transaction2', 'tx2@example.com', true)").await?;
+
+    // Update records
+    db.execute("UPDATE test_users SET active = false WHERE name LIKE 'Transaction%'")
+        .await?;
+
+    // Clean up
+    db.execute("DELETE FROM test_users WHERE name LIKE 'Transaction%'")
+        .await?;
+
+    Ok(())
 }
