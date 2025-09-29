@@ -5,6 +5,7 @@ use crate::service::token_service::TokenService;
 use crate::utils::rand::generate_random_string;
 use deadpool_redis::Pool as RedisPool;
 use deadpool_redis::redis::AsyncCommands;
+use secrecy::ExposeSecret;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -230,7 +231,7 @@ impl OAuthService {
 
         let mut params = vec![
             ("client_id", config.client_id.as_str()),
-            ("client_secret", config.client_secret.as_str()),
+            ("client_secret", config.client_secret.expose_secret()),
             ("code", code),
             ("redirect_uri", redirect_uri.as_str()),
             ("grant_type", "authorization_code"),

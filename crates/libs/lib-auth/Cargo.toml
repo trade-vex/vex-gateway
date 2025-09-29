@@ -34,6 +34,7 @@ base64 = "0.22.1"
 sha2 = "0.10.9"
 bcrypt = "0.17.1"
 validator = { version = "0.20", features = ["derive"] }
+secrecy = { version = "0.8", features = ["serde"] }
 
 [dev-dependencies]
 tokio = { workspace = true }

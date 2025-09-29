@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use secrecy::SecretString;
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
@@ -30,7 +31,7 @@ pub struct OAuthConfig {
 #[derive(Deserialize, Debug, Clone)]
 pub struct OAuthProviderConfig {
     pub client_id: String,
-    pub client_secret: String,
+    pub client_secret: SecretString,
     pub auth_url: String,
     pub token_url: String,
     pub user_info_url: String,
@@ -61,7 +62,7 @@ pub struct EmailConfig {
     pub smtp_host: String,
     pub smtp_port: u16,
     pub smtp_username: String,
-    pub smtp_password: String,
+    pub smtp_password: SecretString,
     pub from_email: String,
 }
 
@@ -110,7 +111,7 @@ impl AuthConfig {
                 smtp_host: "smtp.example.com".to_string(),
                 smtp_port: 587,
                 smtp_username: "user@example.com".to_string(),
-                smtp_password: "password".to_string(),
+                smtp_password: SecretString::new("password".to_string()),
                 from_email: "noreply@example.com".to_string(),
             },
             server: ServerConfig {
@@ -147,7 +148,7 @@ impl OAuthConfig {
                 "google".to_string(),
                 OAuthProviderConfig {
                     client_id,
-                    client_secret,
+                    client_secret: SecretString::new(client_secret),
                     auth_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
                     token_url: "https://oauth2.googleapis.com/token".to_string(),
                     user_info_url: "https://www.googleapis.com/oauth2/v2/userinfo".to_string(),
@@ -166,7 +167,7 @@ impl OAuthConfig {
                 "github".to_string(),
                 OAuthProviderConfig {
                     client_id,
-                    client_secret,
+                    client_secret: SecretString::new(client_secret),
                     auth_url: "https://github.com/login/oauth/authorize".to_string(),
                     token_url: "https://github.com/login/oauth/access_token".to_string(),
                     user_info_url: "https://api.github.com/user".to_string(),
@@ -185,7 +186,7 @@ impl OAuthConfig {
                 "twitter".to_string(),
                 OAuthProviderConfig {
                     client_id,
-                    client_secret,
+                    client_secret: SecretString::new(client_secret),
                     auth_url: "https://twitter.com/i/oauth2/authorize".to_string(),
                     token_url: "https://api.twitter.com/2/oauth2/token".to_string(),
                     user_info_url: "https://api.twitter.com/2/users/me".to_string(),
@@ -238,7 +239,7 @@ impl EmailConfig {
             smtp_host: env::var("SMTP_HOST")?,
             smtp_port: env::var("SMTP_PORT")?.parse()?,
             smtp_username: env::var("SMTP_USERNAME")?,
-            smtp_password: env::var("SMTP_PASSWORD")?,
+            smtp_password: SecretString::new(env::var("SMTP_PASSWORD")?),
             from_email: env::var("FROM_EMAIL")?,
         })
     }

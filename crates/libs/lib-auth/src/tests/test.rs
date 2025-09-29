@@ -17,6 +17,7 @@ use crate::{
     models::user::{Model, UserStatus},
     repository::UserRepository,
 };
+use secrecy::{ExposeSecret, SecretString};
 use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -216,7 +217,7 @@ pub fn setup_test_config() -> AuthConfig {
         "google".to_string(),
         OAuthProviderConfig {
             client_id: google_client_id,
-            client_secret: google_client_secret,
+            client_secret: SecretString::new(google_client_secret),
             auth_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
             token_url: "https://oauth2.googleapis.com/token".to_string(),
             user_info_url: "https://www.googleapis.com/oauth2/v2/userinfo".to_string(),
@@ -239,7 +240,7 @@ pub fn setup_test_config() -> AuthConfig {
         "github".to_string(),
         OAuthProviderConfig {
             client_id: github_client_id,
-            client_secret: github_client_secret,
+            client_secret: SecretString::new(github_client_secret),
             auth_url: "https://github.com/login/oauth/authorize".to_string(),
             token_url: "https://github.com/login/oauth/access_token".to_string(),
             user_info_url: "https://api.github.com/user".to_string(),
@@ -290,7 +291,7 @@ pub fn setup_test_config() -> AuthConfig {
                 .unwrap_or(587),
             smtp_username: env::var("SMTP_USERNAME")
                 .unwrap_or_else(|_| "test@example.com".to_string()),
-            smtp_password: env::var("SMTP_PASSWORD").unwrap_or_else(|_| "password".to_string()),
+            smtp_password: secrecy::SecretString::new(env::var("SMTP_PASSWORD").unwrap_or_else(|_| "password".to_string())),
             from_email: env::var("FROM_EMAIL")
                 .unwrap_or_else(|_| "noreply@vex-gateway.com".to_string()),
         },
@@ -809,7 +810,7 @@ mod tests {
                 "Provider '{}': client_id={}, has_secret={}",
                 name,
                 provider.client_id,
-                !provider.client_secret.is_empty()
+                !provider.client_secret.expose_secret().is_empty()
             );
         }
 
@@ -875,7 +876,7 @@ mod tests {
         // Create a minimal OAuth provider config to see what fields are required
         let provider_config = OAuthProviderConfig {
             client_id: google_client_id,
-            client_secret: google_client_secret,
+            client_secret: SecretString::new(google_client_secret),
             auth_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
             token_url: "https://oauth2.googleapis.com/token".to_string(),
             user_info_url: "https://www.googleapis.com/oauth2/v2/userinfo".to_string(),
