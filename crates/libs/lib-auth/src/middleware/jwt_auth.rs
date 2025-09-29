@@ -10,6 +10,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::future::{Ready, ready};
+use std::rc::Rc;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -73,7 +74,7 @@ impl JwtAuthentication {
 
 impl<S, B> Transform<S, ServiceRequest> for JwtAuthentication
 where
-    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error>,
+    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
     S::Future: 'static,
     B: MessageBody + 'static,
 {
@@ -85,7 +86,7 @@ where
 
     fn new_transform(&self, service: S) -> Self::Future {
         ready(Ok(JwtAuthenticationMiddleware {
-            service,
+            service: Rc::new(service),
             decoding_key: self.decoding_key.clone(),
             issuer: self.issuer.clone(),
             audience: self.audience.clone(),
@@ -96,7 +97,7 @@ where
 }
 
 pub struct JwtAuthenticationMiddleware<S> {
-    service: S,
+    service: Rc<S>,
     decoding_key: DecodingKey,
     issuer: String,
     audience: String,
@@ -106,7 +107,7 @@ pub struct JwtAuthenticationMiddleware<S> {
 
 impl<S, B> Service<ServiceRequest> for JwtAuthenticationMiddleware<S>
 where
-    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error>,
+    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
     S::Future: 'static,
     B: MessageBody + 'static,
 {
@@ -140,58 +141,51 @@ where
                 Ok(token_data) => {
                     if let Ok(user_id) = Uuid::parse_str(&token_data.claims.sub) {
                         let jti = token_data.claims.jti.clone();
-                        let authenticated_user = AuthenticatedUser { user_id };
+                        let authenticated_user: AuthenticatedUser = AuthenticatedUser { user_id };
 
                         // Store the authenticated user for later
                         req.extensions_mut().insert(authenticated_user.clone());
 
-                        // Continue with async blacklist check and service call
-                        let fut = self.service.call(req);
+                        // Clone the service handle to move into the async block
+                        let svc = self.service.clone();
 
                         return Box::pin(async move {
-                            // Check if token is blacklisted
+                            // Check if token is blacklisted BEFORE calling the inner service
                             let is_blacklisted = if let Ok(mut conn) = redis_pool.get().await {
                                 let blacklist_key = format!("blacklist:{}", jti);
                                 match conn.exists::<_, bool>(&blacklist_key).await {
                                     Ok(exists) => {
                                         if exists {
-                                            tracing::warn!(
-                                                "Attempted use of blacklisted token with JTI: {}",
-                                                jti
-                                            );
+                                            tracing::warn!("Attempted use of blacklisted token with JTI: {}", jti);
                                         }
                                         exists
                                     }
                                     Err(e) => {
                                         tracing::error!("Failed to check token blacklist: {}", e);
-                                        false // Fail open
+                                        false // Fail open for safety, but log the error
                                     }
                                 }
                             } else {
-                                tracing::error!(
-                                    "Failed to get Redis connection for blacklist check"
-                                );
-                                false // Fail open
+                                tracing::error!("Failed to get Redis connection for blacklist check");
+                                false // Fail open for safety, but log the error
                             };
 
                             if is_blacklisted {
-                                // Token is blacklisted, return unauthorized
-                                let res = fut.await?;
-                                let (req, _) = res.into_parts();
-                                let response =
-                                    HttpResponse::Unauthorized().json(serde_json::json!({
-                                        "error": {
-                                            "code": "token_revoked",
-                                            "message": "Token has been revoked",
-                                            "status": 401
-                                        }
-                                    }));
-                                Ok(ServiceResponse::new(req, response).map_into_boxed_body())
-                            } else {
-                                // Token is valid, continue with the request
-                                let res = fut.await?;
-                                Ok(res.map_into_boxed_body())
+                                // Token is blacklisted, short-circuit with an unauthorized response
+                                let (req, _) = req.into_parts();
+                                let response = HttpResponse::Unauthorized().json(serde_json::json!({
+                                    "error": {
+                                        "code": "token_revoked",
+                                        "message": "Token has been revoked",
+                                        "status": 401
+                                    }
+                                }));
+                                return Ok(ServiceResponse::new(req, response).map_into_boxed_body());
                             }
+
+                            // Token is valid and not blacklisted, proceed to the inner service
+                            let res = svc.call(req).await?;
+                            Ok(res.map_into_boxed_body())
                         });
                     }
                 }
@@ -256,6 +250,24 @@ mod tests {
         HttpResponse::Ok().json(json!({
             "user_id": user.user_id,
             "message": "Protected resource accessed"
+        }))
+    }
+
+    // Test handler that tracks if it was called using a thread-local approach
+    use std::cell::RefCell;
+    use std::sync::Arc;
+    
+    thread_local! {
+        static HANDLER_CALLED: RefCell<bool> = RefCell::new(false);
+    }
+    
+    async fn tracking_handler(user: AuthenticatedUser) -> HttpResponse {
+        HANDLER_CALLED.with(|called| {
+            *called.borrow_mut() = true;
+        });
+        HttpResponse::Ok().json(json!({
+            "user_id": user.user_id,
+            "message": "Handler was executed"
         }))
     }
 
@@ -513,5 +525,118 @@ mod tests {
         // Verify the error message
         let body: serde_json::Value = test::read_body_json(resp).await;
         assert_eq!(body["error"]["code"], "token_revoked");
+    }
+
+    #[tokio::test]
+    async fn test_jwt_middleware_blacklisted_token_does_not_execute_handler() {
+        let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
+        let redis_pool = create_test_redis_pool();
+        let middleware = JwtAuthentication::new_with_algorithm(
+            decoding_key,
+            "vex-gateway".to_string(),
+            "vex-api".to_string(),
+            Algorithm::HS256,
+            redis_pool.clone(),
+        );
+
+        // Reset the handler called flag
+        HANDLER_CALLED.with(|called| {
+            *called.borrow_mut() = false;
+        });
+
+        // Add a JTI to the blacklist
+        if let Ok(mut conn) = redis_pool.get().await {
+            let _: () = conn
+                .set_ex("blacklist:test-jti-no-exec", "1", 3600)
+                .await
+                .unwrap();
+        }
+
+        let app = test::init_service(
+            App::new()
+                .wrap(middleware)
+                .route("/protected", web::get().to(tracking_handler)),
+        )
+        .await;
+
+        let valid_token = create_test_jwt(
+            "123e4567-e89b-12d3-a456-426614174000",
+            false,
+            "test-jti-no-exec",
+        );
+
+        let req = test::TestRequest::get()
+            .uri("/protected")
+            .insert_header(("Authorization", format!("Bearer {}", valid_token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        
+        // Should get 401 because token is blacklisted
+        assert_eq!(resp.status(), 401);
+        
+        // Verify the error message
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["error"]["code"], "token_revoked");
+        
+        // Most importantly, verify the handler was NOT executed
+        let handler_was_called = HANDLER_CALLED.with(|called| *called.borrow());
+        assert_eq!(handler_was_called, false, 
+            "Handler should NOT have been executed for blacklisted token!");
+    }
+
+    #[tokio::test]
+    async fn test_jwt_middleware_valid_token_executes_handler() {
+        let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
+        let redis_pool = create_test_redis_pool();
+        let middleware = JwtAuthentication::new_with_algorithm(
+            decoding_key,
+            "vex-gateway".to_string(),
+            "vex-api".to_string(),
+            Algorithm::HS256,
+            redis_pool.clone(),
+        );
+
+        // Reset the handler called flag
+        HANDLER_CALLED.with(|called| {
+            *called.borrow_mut() = false;
+        });
+
+        // Clean up any existing blacklist entry
+        if let Ok(mut conn) = redis_pool.get().await {
+            let _: Result<(), _> = conn.del("blacklist:test-jti-exec").await;
+        }
+
+        let app = test::init_service(
+            App::new()
+                .wrap(middleware)
+                .route("/protected", web::get().to(tracking_handler)),
+        )
+        .await;
+
+        let valid_token = create_test_jwt(
+            "123e4567-e89b-12d3-a456-426614174000",
+            false,
+            "test-jti-exec",
+        );
+
+        let req = test::TestRequest::get()
+            .uri("/protected")
+            .insert_header(("Authorization", format!("Bearer {}", valid_token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        
+        // Should get 200 because token is valid and not blacklisted
+        assert_eq!(resp.status(), 200);
+        
+        // Verify the response
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["message"], "Handler was executed");
+        
+        // Verify the handler WAS executed
+        let handler_was_called = HANDLER_CALLED.with(|called| *called.borrow());
+        assert_eq!(handler_was_called, true, 
+            "Handler should have been executed for valid non-blacklisted token!");
     }
 }
