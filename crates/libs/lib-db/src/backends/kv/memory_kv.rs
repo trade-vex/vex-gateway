@@ -112,15 +112,18 @@ impl MemoryStoreRegistry {
 
     /// Get statistics for all stores
     pub async fn stats(&self) -> RegistryStats {
+        // First collect all store clones to avoid holding iteration guards across await
+        let stores: Vec<Arc<MemoryDb>> = self.stores.iter().map(|entry| entry.value().clone()).collect();
+        
         let mut total_entries = 0;
         let mut total_memory = 0;
-        let mut store_count = 0;
+        let store_count = stores.len();
 
-        for store in self.stores.iter() {
-            let stats = store.value().stats().await;
+        // Now iterate over the collected stores and compute stats
+        for store in stores {
+            let stats = store.stats().await;
             total_entries += stats.total_entries;
             total_memory += stats.memory_usage;
-            store_count += 1;
         }
 
         RegistryStats {
