@@ -85,8 +85,8 @@ impl UserRepository for PostgresUserRepository {
             avatar_url: Set(user.avatar_url.clone()),
             email_verified: Set(user.email_verified),
             status: Set(UserStatus::Pending), // Safe initial status
-            created_at: Set(now), // Server-assigned timestamp
-            updated_at: Set(now), // Server-assigned timestamp
+            created_at: Set(now),             // Server-assigned timestamp
+            updated_at: Set(now),             // Server-assigned timestamp
             last_login: Set(user.last_login), // Accept caller-supplied last_login if appropriate
         };
 

@@ -175,12 +175,12 @@ impl ResponseError for AuthError {
             AuthError::InvalidRequest => {
                 (400, "INVALID_REQUEST", "Invalid request format".to_string())
             }
-            AuthError::InvalidOtp => {
-                (400, "INVALID_OTP", "Invalid verification code".to_string())
-            }
-            AuthError::OtpExpired => {
-                (400, "OTP_EXPIRED", "Verification code has expired".to_string())
-            }
+            AuthError::InvalidOtp => (400, "INVALID_OTP", "Invalid verification code".to_string()),
+            AuthError::OtpExpired => (
+                400,
+                "OTP_EXPIRED",
+                "Verification code has expired".to_string(),
+            ),
             AuthError::Config(_) | AuthError::InternalError(_) => {
                 (500, "INTERNAL_ERROR", "Internal server error".to_string())
             }

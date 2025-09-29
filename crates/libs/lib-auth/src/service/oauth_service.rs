@@ -75,11 +75,7 @@ impl OAuthService {
             .map_err(|e| AuthError::Redis(format!("Failed to store state: {}", e)))?;
 
         // Build redirect URI
-        let redirect_uri = format!(
-            "{}/auth/{}/callback",
-            self.redirect_base,
-            provider
-        );
+        let redirect_uri = format!("{}/auth/{}/callback", self.redirect_base, provider);
 
         // Build authorization URL
         let mut auth_url = Url::parse(&provider_config.auth_url)
@@ -226,11 +222,7 @@ impl OAuthService {
         code: &str,
         state: &str, // Add state parameter
     ) -> Result<OAuthTokenResponse, AuthError> {
-        let redirect_uri = format!(
-            "{}/auth/{}/callback",
-            self.redirect_base,
-            provider
-        );
+        let redirect_uri = format!("{}/auth/{}/callback", self.redirect_base, provider);
 
         let mut params = vec![
             ("client_id", config.client_id.as_str()),
@@ -398,9 +390,7 @@ impl OAuthService {
         Ok(OAuthUserInfo {
             provider_id: data["sub"]
                 .as_str()
-                .ok_or_else(|| {
-                    AuthError::UserInfoFetchFailed("Missing Google sub".to_string())
-                })?
+                .ok_or_else(|| AuthError::UserInfoFetchFailed("Missing Google sub".to_string()))?
                 .to_string(),
             email: data["email"]
                 .as_str()
@@ -409,9 +399,7 @@ impl OAuthService {
             name: data["name"].as_str().unwrap_or("Unknown User").to_string(),
             username: None,
             avatar_url: data["picture"].as_str().map(|s| s.to_string()),
-            email_verified: data["email_verified"]
-                .as_bool()
-                .unwrap_or(false),
+            email_verified: data["email_verified"].as_bool().unwrap_or(false),
         })
     }
 
@@ -442,9 +430,7 @@ impl OAuthService {
                 .to_string(),
             username: data["login"].as_str().map(|s| s.to_string()),
             avatar_url: data["avatar_url"].as_str().map(|s| s.to_string()),
-            email_verified: data["email_verified"]
-                .as_bool()
-                .unwrap_or(false),
+            email_verified: data["email_verified"].as_bool().unwrap_or(false),
         })
     }
 
@@ -467,9 +453,7 @@ impl OAuthService {
             avatar_url: user_data["profile_image_url"]
                 .as_str()
                 .map(|s| s.to_string()),
-            email_verified: user_data["email_verified"]
-                .as_bool()
-                .unwrap_or(false),
+            email_verified: user_data["email_verified"].as_bool().unwrap_or(false),
         })
     }
 

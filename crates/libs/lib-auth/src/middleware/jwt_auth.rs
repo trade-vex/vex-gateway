@@ -156,7 +156,10 @@ where
                                 match conn.exists::<_, bool>(&blacklist_key).await {
                                     Ok(exists) => {
                                         if exists {
-                                            tracing::warn!("Attempted use of blacklisted token with JTI: {}", jti);
+                                            tracing::warn!(
+                                                "Attempted use of blacklisted token with JTI: {}",
+                                                jti
+                                            );
                                         }
                                         exists
                                     }
@@ -166,21 +169,26 @@ where
                                     }
                                 }
                             } else {
-                                tracing::error!("Failed to get Redis connection for blacklist check");
+                                tracing::error!(
+                                    "Failed to get Redis connection for blacklist check"
+                                );
                                 false // Fail open for safety, but log the error
                             };
 
                             if is_blacklisted {
                                 // Token is blacklisted, short-circuit with an unauthorized response
                                 let (req, _) = req.into_parts();
-                                let response = HttpResponse::Unauthorized().json(serde_json::json!({
-                                    "error": {
-                                        "code": "token_revoked",
-                                        "message": "Token has been revoked",
-                                        "status": 401
-                                    }
-                                }));
-                                return Ok(ServiceResponse::new(req, response).map_into_boxed_body());
+                                let response =
+                                    HttpResponse::Unauthorized().json(serde_json::json!({
+                                        "error": {
+                                            "code": "token_revoked",
+                                            "message": "Token has been revoked",
+                                            "status": 401
+                                        }
+                                    }));
+                                return Ok(
+                                    ServiceResponse::new(req, response).map_into_boxed_body()
+                                );
                             }
 
                             // Token is valid and not blacklisted, proceed to the inner service
@@ -256,11 +264,11 @@ mod tests {
     // Test handler that tracks if it was called using a thread-local approach
     use std::cell::RefCell;
     use std::sync::Arc;
-    
+
     thread_local! {
         static HANDLER_CALLED: RefCell<bool> = RefCell::new(false);
     }
-    
+
     async fn tracking_handler(user: AuthenticatedUser) -> HttpResponse {
         HANDLER_CALLED.with(|called| {
             *called.borrow_mut() = true;
@@ -571,18 +579,20 @@ mod tests {
             .to_request();
 
         let resp = test::call_service(&app, req).await;
-        
+
         // Should get 401 because token is blacklisted
         assert_eq!(resp.status(), 401);
-        
+
         // Verify the error message
         let body: serde_json::Value = test::read_body_json(resp).await;
         assert_eq!(body["error"]["code"], "token_revoked");
-        
+
         // Most importantly, verify the handler was NOT executed
         let handler_was_called = HANDLER_CALLED.with(|called| *called.borrow());
-        assert_eq!(handler_was_called, false, 
-            "Handler should NOT have been executed for blacklisted token!");
+        assert_eq!(
+            handler_was_called, false,
+            "Handler should NOT have been executed for blacklisted token!"
+        );
     }
 
     #[tokio::test]
@@ -626,17 +636,19 @@ mod tests {
             .to_request();
 
         let resp = test::call_service(&app, req).await;
-        
+
         // Should get 200 because token is valid and not blacklisted
         assert_eq!(resp.status(), 200);
-        
+
         // Verify the response
         let body: serde_json::Value = test::read_body_json(resp).await;
         assert_eq!(body["message"], "Handler was executed");
-        
+
         // Verify the handler WAS executed
         let handler_was_called = HANDLER_CALLED.with(|called| *called.borrow());
-        assert_eq!(handler_was_called, true, 
-            "Handler should have been executed for valid non-blacklisted token!");
+        assert_eq!(
+            handler_was_called, true,
+            "Handler should have been executed for valid non-blacklisted token!"
+        );
     }
 }

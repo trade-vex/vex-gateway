@@ -217,7 +217,9 @@ impl AppState {
     }
 
     /// Create EmailService using AppState dependencies
-    pub fn create_email_service(&self) -> Result<Arc<EmailService>, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn create_email_service(
+        &self,
+    ) -> Result<Arc<EmailService>, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Arc::new(EmailService::new(
             &self.auth_config.email,
             self.redis_pool.clone(),

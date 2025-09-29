@@ -17,8 +17,8 @@ use crate::{
     models::user::{Model, UserStatus},
     repository::UserRepository,
 };
-use secrecy::{ExposeSecret, SecretString};
 use chrono::Utc;
+use secrecy::{ExposeSecret, SecretString};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -114,7 +114,7 @@ impl UserRepository for MockUserRepository {
             // Assuming an appropriate error variant exists
             return Err(AuthError::EmailAlreadyExists);
         }
-        
+
         // Create user with server-assigned audit fields for integrity
         let now = Utc::now();
         let created_user = Model {
@@ -127,11 +127,11 @@ impl UserRepository for MockUserRepository {
             avatar_url: user.avatar_url.clone(),
             email_verified: user.email_verified,
             status: UserStatus::Pending, // Safe initial status
-            created_at: now, // Server-assigned timestamp
-            updated_at: now, // Server-assigned timestamp
+            created_at: now,             // Server-assigned timestamp
+            updated_at: now,             // Server-assigned timestamp
             last_login: user.last_login, // Accept caller-supplied last_login if appropriate
         };
-        
+
         users.insert(user.user_id, created_user.clone());
         Ok(created_user)
     }
@@ -314,7 +314,7 @@ pub fn setup_test_config() -> AuthConfig {
                 .parse()
                 .unwrap_or(30),
         },
-        oauth: OAuthConfig { 
+        oauth: OAuthConfig {
             providers,
             redirect_base: "http://localhost:8081".to_string(),
         },
@@ -326,7 +326,9 @@ pub fn setup_test_config() -> AuthConfig {
                 .unwrap_or(587),
             smtp_username: env::var("SMTP_USERNAME")
                 .unwrap_or_else(|_| "test@example.com".to_string()),
-            smtp_password: secrecy::SecretString::new(env::var("SMTP_PASSWORD").unwrap_or_else(|_| "password".to_string())),
+            smtp_password: secrecy::SecretString::new(
+                env::var("SMTP_PASSWORD").unwrap_or_else(|_| "password".to_string()),
+            ),
             from_email: env::var("FROM_EMAIL")
                 .unwrap_or_else(|_| "noreply@vex-gateway.com".to_string()),
         },
@@ -390,8 +392,8 @@ mod tests {
             avatar_url: None,
             email_verified: true,
             status: UserStatus::Active, // This will be ignored and set to Pending
-            created_at: Utc::now(), // This will be ignored and set to server time
-            updated_at: Utc::now(), // This will be ignored and set to server time
+            created_at: Utc::now(),     // This will be ignored and set to server time
+            updated_at: Utc::now(),     // This will be ignored and set to server time
             last_login: None,
         };
 
@@ -405,16 +407,20 @@ mod tests {
             .unwrap()
             .expect("User should be found in the mock repository"); // This will no longer panic.
         assert_eq!(fetched_user.user_id, new_user.user_id);
-        
+
         // Verify audit integrity - status should be Pending, not the caller-supplied Active
         assert_eq!(fetched_user.status, UserStatus::Pending);
-        
+
         // Verify that timestamps are server-assigned (should be recent)
         let now = Utc::now();
-        let time_diff = now.signed_duration_since(fetched_user.created_at).num_seconds();
+        let time_diff = now
+            .signed_duration_since(fetched_user.created_at)
+            .num_seconds();
         assert!(time_diff >= 0 && time_diff < 5); // Created within last 5 seconds
-        
-        let time_diff_updated = now.signed_duration_since(fetched_user.updated_at).num_seconds();
+
+        let time_diff_updated = now
+            .signed_duration_since(fetched_user.updated_at)
+            .num_seconds();
         assert!(time_diff_updated >= 0 && time_diff_updated < 5); // Updated within last 5 seconds
 
         // Delete

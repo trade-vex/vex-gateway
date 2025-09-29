@@ -24,7 +24,9 @@ pub fn create_app(
     // Create services using AppState
     let token_service = app_state.create_token_service();
     let oauth_service = app_state.create_oauth_service();
-    let email_service = app_state.create_email_service().expect("Failed to create email service");
+    let email_service = app_state
+        .create_email_service()
+        .expect("Failed to create email service");
 
     // Create JWT middleware
     let jwt_middleware = JwtAuthentication::new(

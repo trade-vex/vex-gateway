@@ -8,7 +8,9 @@ use validator::Validate;
 use crate::dto::auth_request_dto::{
     ChangePasswordRequest, LoginRequest, RefreshTokenRequest, SignupRequest, VerifyEmailRequest,
 };
-use crate::dto::auth_response_dto::{LoginResponse, RefreshTokenResponse, SignupResponse, UserInfo, UserProfile};
+use crate::dto::auth_response_dto::{
+    LoginResponse, RefreshTokenResponse, SignupResponse, UserInfo, UserProfile,
+};
 use crate::error::auth_error::AuthError;
 use crate::middleware::jwt_auth::AuthenticatedUser;
 use crate::models::user::{Model, UserStatus};
@@ -70,7 +72,8 @@ pub async fn signup(
     let user_info = UserInfo::from(created_user);
     let response = SignupResponse {
         user: user_info,
-        message: "User created successfully. Please check your email for the verification code.".to_string(),
+        message: "User created successfully. Please check your email for the verification code."
+            .to_string(),
     };
 
     Ok(HttpResponse::Created().json(response))

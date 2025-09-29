@@ -1,8 +1,8 @@
-use deadpool_redis::redis::AsyncCommands;
 use deadpool_redis::Pool;
+use deadpool_redis::redis::AsyncCommands;
 use lettre::{
-    message::header::ContentType, transport::smtp::authentication::Credentials, AsyncTransport,
-    AsyncSmtpTransport, Tokio1Executor,
+    AsyncSmtpTransport, AsyncTransport, Tokio1Executor, message::header::ContentType,
+    transport::smtp::authentication::Credentials,
 };
 use rand::Rng;
 use std::sync::Arc;
@@ -72,7 +72,8 @@ impl EmailService {
         let key = format!("{}{}", OTP_KEY_PREFIX, email);
         let expiry_seconds = self.otp_expiry_minutes * 60;
 
-        let _: () = conn.set_ex(&key, otp, expiry_seconds as u64)
+        let _: () = conn
+            .set_ex(&key, otp, expiry_seconds as u64)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to store OTP: {}", e)))?;
 
@@ -86,12 +87,12 @@ impl EmailService {
         recipient_name: &str,
     ) -> Result<(), AuthError> {
         let otp = self.generate_otp();
-        
+
         // Store OTP in Redis
         self.store_otp(recipient_email, &otp).await?;
 
         let subject = "Verify Your Email";
-        
+
         let text_content = format!(
             r#"Hello {},
 
@@ -145,8 +146,14 @@ The Team"#,
             recipient_name, otp, self.otp_expiry_minutes
         );
 
-        self.send_email(recipient_email, recipient_name, subject, &html_content, &text_content)
-            .await
+        self.send_email(
+            recipient_email,
+            recipient_name,
+            subject,
+            &html_content,
+            &text_content,
+        )
+        .await
     }
 
     /// Send email
@@ -200,7 +207,7 @@ The Team"#,
             .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
 
         let key = format!("{}{}", OTP_KEY_PREFIX, email);
-        
+
         let stored_otp: Option<String> = conn
             .get(&key)
             .await
@@ -209,7 +216,8 @@ The Team"#,
         match stored_otp {
             Some(otp) if otp == submitted_otp => {
                 // Delete OTP after successful verification
-                let _: () = conn.del(&key)
+                let _: () = conn
+                    .del(&key)
                     .await
                     .map_err(|e| AuthError::Redis(format!("Failed to delete OTP: {}", e)))?;
                 Ok(())

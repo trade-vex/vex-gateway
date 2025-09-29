@@ -1,5 +1,5 @@
-use serde::Deserialize;
 use secrecy::SecretString;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
@@ -210,9 +210,10 @@ impl OAuthConfig {
             );
         }
 
-        Ok(Self { 
+        Ok(Self {
             providers,
-            redirect_base: env::var("OAUTH_REDIRECT_BASE").unwrap_or_else(|_| "http://localhost:8081".to_string()),
+            redirect_base: env::var("OAUTH_REDIRECT_BASE")
+                .unwrap_or_else(|_| "http://localhost:8081".to_string()),
         })
     }
 }

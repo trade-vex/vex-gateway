@@ -31,7 +31,10 @@ pub async fn handle_oauth_callback(
     oauth_service: web::Data<Arc<OAuthService>>,
 ) -> Result<HttpResponse, AuthError> {
     // Validate that the OAuth code is present and non-empty
-    let code = query.code.as_deref().filter(|s| !s.is_empty())
+    let code = query
+        .code
+        .as_deref()
+        .filter(|s| !s.is_empty())
         .ok_or_else(|| AuthError::InvalidRequest)?;
 
     match oauth_service
