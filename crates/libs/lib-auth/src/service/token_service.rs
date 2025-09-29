@@ -51,6 +51,7 @@ impl TokenService {
             exp: access_exp.timestamp(),
             iss: self.jwt_config.issuer.clone(),
             aud: self.jwt_config.audience.clone(),
+            pwd: now.timestamp(), // Use current time as password timestamp
         };
 
         let access_token = encode(
@@ -190,6 +191,93 @@ impl TokenService {
             .set_ex(blacklist_key, "1", ttl_secs)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to blacklist JTI: {}", e)))?;
+
+        Ok(())
+    }
+
+    // Mint tokens with specific password timestamp (for session invalidation)
+    pub async fn mint_tokens_with_password_time(&self, user_id: Uuid, password_timestamp: i64) -> Result<JwtTokenResponse, AuthError> {
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+
+        let jti = Uuid::new_v4().to_string();
+        let now = Utc::now();
+
+        // Access Token
+        let access_exp = now + Duration::minutes(self.jwt_config.access_token_ttl_minutes);
+        let access_claims = AppClaims {
+            sub: user_id.to_string(),
+            jti: jti.clone(),
+            iat: now.timestamp(),
+            exp: access_exp.timestamp(),
+            iss: self.jwt_config.issuer.clone(),
+            aud: self.jwt_config.audience.clone(),
+            pwd: password_timestamp,
+        };
+
+        let access_token = encode(
+            &Header::new(Algorithm::RS256),
+            &access_claims,
+            &self.encoding_key,
+        )
+        .map_err(|e| AuthError::Validation(format!("JWT validation failed: {}", e)))?;
+
+        // Refresh Token
+        let refresh_token = Uuid::new_v4().to_string();
+        let refresh_ttl_secs = self.jwt_config.refresh_token_ttl_days * 24 * 3600;
+        let redis_key = format!("refresh:{}", refresh_token);
+        let redis_val = format!("{}:{}", user_id, jti);
+
+        let _: () = conn
+            .set_ex(redis_key, redis_val, refresh_ttl_secs as u64)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to store refresh token: {}", e)))?;
+
+        Ok(JwtTokenResponse {
+            access_token,
+            refresh_token,
+            expires_in: (self.jwt_config.access_token_ttl_minutes * 60) as u64,
+        })
+    }
+
+    // Revoke all sessions for a user by blacklisting all refresh tokens
+    pub async fn revoke_user_sessions(&self, user_id: Uuid) -> Result<(), AuthError> {
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+
+        // Find all refresh tokens for this user
+        let pattern = format!("refresh:*");
+        let keys: Vec<String> = conn
+            .keys(pattern)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to find refresh tokens: {}", e)))?;
+
+        // Check each refresh token and delete if it belongs to this user
+        for key in keys {
+            if let Ok(Some(val)) = conn.get::<String, Option<String>>(key.clone()).await {
+                let parts: Vec<&str> = val.split(':').collect();
+                if parts.len() == 2 && parts[0] == &user_id.to_string() {
+                    // Delete the refresh token
+                    let _: () = conn.del(key).await
+                        .map_err(|e| AuthError::Redis(format!("Failed to delete refresh token: {}", e)))?;
+                    
+                    // Blacklist the associated JTI
+                    let jti = parts[1];
+                    let blacklist_key = format!("blacklist:{}", jti);
+                    let blacklist_ttl = self.jwt_config.access_token_ttl_minutes * 60;
+                    let _: () = conn
+                        .set_ex(blacklist_key, "1", blacklist_ttl as u64)
+                        .await
+                        .map_err(|e| AuthError::Redis(format!("Failed to blacklist JTI: {}", e)))?;
+                }
+            }
+        }
 
         Ok(())
     }

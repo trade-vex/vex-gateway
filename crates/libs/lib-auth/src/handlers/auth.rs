@@ -287,6 +287,7 @@ pub async fn change_password(
     user: AuthenticatedUser,
     req: web::Json<ChangePasswordRequest>,
     user_repo: web::Data<Arc<dyn UserRepository>>,
+    token_service: web::Data<Arc<TokenService>>,
 ) -> Result<HttpResponse, AuthError> {
     // Validate the request
     req.validate()
@@ -328,6 +329,9 @@ pub async fn change_password(
     user_repo
         .update_password(user.user_id, &new_password_hash)
         .await?;
+
+    // Revoke all existing sessions for this user
+    token_service.revoke_user_sessions(user.user_id).await?;
 
     Ok(HttpResponse::Ok().json(json!({
         "message": "Password changed successfully",

@@ -27,6 +27,7 @@ struct JwtClaims {
     iss: String,
     aud: String,
     jti: String,
+    pwd: i64,    // password changed timestamp
 }
 
 #[derive(Clone)]
@@ -151,49 +152,68 @@ where
 
                         return Box::pin(async move {
                             // Check if token is blacklisted BEFORE calling the inner service
-                            let is_blacklisted = if let Ok(mut conn) = redis_pool.get().await {
-                                let blacklist_key = format!("blacklist:{}", jti);
-                                match conn.exists::<_, bool>(&blacklist_key).await {
-                                    Ok(exists) => {
-                                        if exists {
-                                            tracing::warn!(
-                                                "Attempted use of blacklisted token with JTI: {}",
-                                                jti
-                                            );
+                            let blacklist_result = match redis_pool.get().await {
+                                Ok(mut conn) => {
+                                    let blacklist_key = format!("blacklist:{}", jti);
+                                    match conn.exists::<_, bool>(&blacklist_key).await {
+                                        Ok(exists) => {
+                                            if exists {
+                                                tracing::warn!(
+                                                    "Attempted use of blacklisted token with JTI: {}",
+                                                    jti
+                                                );
+                                            }
+                                            Ok(exists)
                                         }
-                                        exists
-                                    }
-                                    Err(e) => {
-                                        tracing::error!("Failed to check token blacklist: {}", e);
-                                        false // Fail open for safety, but log the error
+                                        Err(e) => {
+                                            tracing::error!("Failed to check token blacklist: {}", e);
+                                            Err("Redis blacklist check failed")
+                                        }
                                     }
                                 }
-                            } else {
-                                tracing::error!(
-                                    "Failed to get Redis connection for blacklist check"
-                                );
-                                false // Fail open for safety, but log the error
+                                Err(e) => {
+                                    tracing::error!(
+                                        "Failed to get Redis connection for blacklist check: {}",
+                                        e
+                                    );
+                                    Err("Redis connection failed")
+                                }
                             };
 
-                            if is_blacklisted {
-                                // Token is blacklisted, short-circuit with an unauthorized response
-                                let (req, _) = req.into_parts();
-                                let response =
-                                    HttpResponse::Unauthorized().json(serde_json::json!({
+                            match blacklist_result {
+                                Ok(true) => {
+                                    // Token is blacklisted, short-circuit with an unauthorized response
+                                    let (req, _) = req.into_parts();
+                                    let response =
+                                        HttpResponse::Unauthorized().json(serde_json::json!({
+                                            "error": {
+                                                "code": "token_revoked",
+                                                "message": "Token has been revoked",
+                                                "status": 401
+                                            }
+                                        }));
+                                    return Ok(
+                                        ServiceResponse::new(req, response).map_into_boxed_body()
+                                    );
+                                }
+                                Ok(false) => {
+                                    // Token is valid and not blacklisted, proceed to the inner service
+                                    let res = svc.call(req).await?;
+                                    Ok(res.map_into_boxed_body())
+                                }
+                                Err(_) => {
+                                    // Redis failure - fail closed with service unavailable
+                                    let (req, _) = req.into_parts();
+                                    let response = HttpResponse::ServiceUnavailable().json(serde_json::json!({
                                         "error": {
-                                            "code": "token_revoked",
-                                            "message": "Token has been revoked",
-                                            "status": 401
+                                            "code": "service_unavailable",
+                                            "message": "Authentication service temporarily unavailable",
+                                            "status": 503
                                         }
                                     }));
-                                return Ok(
-                                    ServiceResponse::new(req, response).map_into_boxed_body()
-                                );
+                                    Ok(ServiceResponse::new(req, response).map_into_boxed_body())
+                                }
                             }
-
-                            // Token is valid and not blacklisted, proceed to the inner service
-                            let res = svc.call(req).await?;
-                            Ok(res.map_into_boxed_body())
                         });
                     }
                 }
@@ -294,6 +314,7 @@ mod tests {
             iss: "vex-gateway".to_string(),
             aud: "vex-api".to_string(),
             jti: jti.to_string(),
+            pwd: now as i64, // Use current time as password timestamp for tests
         };
 
         let header = Header::new(Algorithm::HS256);
