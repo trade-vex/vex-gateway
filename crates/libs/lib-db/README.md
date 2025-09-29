@@ -76,15 +76,20 @@ async fn main() -> Result<()> {
     let db = PostgresDb::connect("postgresql://user:pass@localhost/dbname").await?;
     
     // Execute a query
+    let mut args = PgArguments::default();
+    args.add("Alice");
+    args.add("alice@example.com");
     let affected = db.execute_with(
         "INSERT INTO users (name, email) VALUES ($1, $2)",
-        PgArguments::from(vec![("Alice", "alice@example.com")])
+        args
     ).await?;
     
     // Query multiple rows
+    let mut args = PgArguments::default();
+    args.add(true);
     let users: Vec<User> = db.query_with(
         "SELECT id, name, email FROM users WHERE active = $1",
-        PgArguments::from(vec![true])
+        args
     ).await?;
     
     // Get native pool for advanced operations
@@ -215,12 +220,16 @@ use lib_db::{
 };
 
 // Function that works with any SQL database
-async fn query_users<T: SqlDb>(db: &T) -> Result<Vec<User>> {
-    let users = db.query_with(
-        "SELECT id, name, email FROM users WHERE active = $1",
-        db.create_arguments(&[true])
-    ).await?;
-    Ok(users)
+async fn query_users<T: SqlDb>(db: &T) -> Result<Vec<User>> 
+where
+    T::Row: sqlx::FromRow<User>,
+{
+    // Note: The actual implementation would depend on how the trait
+    // handles parameterized queries generically. For PostgreSQL:
+    // let mut args = PgArguments::default();
+    // args.add(true);
+    // let users = db.query_with("SELECT id, name, email FROM users WHERE active = $1", args).await?;
+    todo!("Implementation depends on the actual SqlDb trait design")
 }
 
 // Function that uses escape hatch for advanced operations
