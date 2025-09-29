@@ -140,6 +140,10 @@ impl UserRepository for MockUserRepository {
         // .lock() is now an async operation.
         let mut users = self.users.lock().await;
         if let Some(user) = users.get_mut(&user_id) {
+            // Check if user is deleted - don't update deleted users
+            if user.status == UserStatus::Deleted {
+                return Err(AuthError::Database("User not found".to_string()));
+            }
             let now = Utc::now();
             user.last_login = Some(now);
             user.updated_at = now;
