@@ -34,8 +34,13 @@ pub async fn signup(
     }
 
     // Hash the password
-    let password_hash = hash(&req.password, DEFAULT_COST)
-        .map_err(|e| AuthError::Validation(format!("Password hashing failed: {}", e)))?;
+    let password_hash = tokio::task::spawn_blocking({
+        let pwd = req.password.clone();
+        move || hash(&pwd, DEFAULT_COST)
+    })
+    .await
+    .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
+    .map_err(|e| AuthError::Validation(format!("Password hashing failed: {}", e)))?;
 
     // Create new user
     let now = Utc::now();
@@ -104,8 +109,14 @@ pub async fn login(
         .clone()
         .ok_or(AuthError::InvalidCredentials)?;
 
-    if !verify(&req.password, &password_hash)
-        .map_err(|e| AuthError::Validation(format!("Password verification failed: {}", e)))?
+    if !tokio::task::spawn_blocking({
+        let p = req.password.clone();
+        let h = password_hash.clone();
+        move || verify(&p, &h)
+    })
+    .await
+    .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
+    .map_err(|e| AuthError::Validation(format!("Password verification failed: {}", e)))?
     {
         return Err(AuthError::InvalidCredentials);
     }
@@ -236,8 +247,14 @@ pub async fn change_password(
 
     // Verify old password
     if let Some(password_hash) = &user_record.password_hash {
-        if !verify(&req.old_password, password_hash)
-            .map_err(|e| AuthError::Validation(format!("Password verification failed: {}", e)))?
+        if !tokio::task::spawn_blocking({
+            let p = req.old_password.clone();
+            let h = password_hash.clone();
+            move || verify(&p, &h)
+        })
+        .await
+        .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
+        .map_err(|e| AuthError::Validation(format!("Password verification failed: {}", e)))?
         {
             return Err(AuthError::InvalidCredentials);
         }
@@ -246,8 +263,13 @@ pub async fn change_password(
     }
 
     // Hash new password
-    let new_password_hash = hash(&req.new_password, DEFAULT_COST)
-        .map_err(|e| AuthError::Validation(format!("Password hashing failed: {}", e)))?;
+    let new_password_hash = tokio::task::spawn_blocking({
+        let p = req.new_password.clone();
+        move || hash(&p, DEFAULT_COST)
+    })
+    .await
+    .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
+    .map_err(|e| AuthError::Validation(format!("Password hashing failed: {}", e)))?;
 
     // Update password
     user_repo
