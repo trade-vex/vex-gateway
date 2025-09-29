@@ -102,8 +102,9 @@ impl RedisDb {
         >,
     {
         let mut last_error = None;
+        let attempts = std::cmp::max(1, self.config.retry_count);
 
-        for _ in 0..self.config.retry_count {
+        for _ in 0..attempts {
             let mut conn = self.get_conn().await?;
 
             match f(&mut conn).await {
@@ -117,7 +118,13 @@ impl RedisDb {
             }
         }
 
-        Err(last_error.unwrap().into())
+        match last_error {
+            Some(e) => Err(e.into()),
+            None => Err(DbError::Connection {
+                message: "No attempts were made due to invalid retry configuration".to_string(),
+                source: None,
+            }),
+        }
     }
 
     /// Check if error is retryable
@@ -314,8 +321,9 @@ impl AdvancedKvStore for RedisDb {
             items.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
 
         let mut last_error = None;
+        let attempts = std::cmp::max(1, self.config.retry_count);
 
-        for _ in 0..self.config.retry_count {
+        for _ in 0..attempts {
             let mut conn = self.get_conn().await?;
 
             let result = {
@@ -338,7 +346,13 @@ impl AdvancedKvStore for RedisDb {
             }
         }
 
-        Err(last_error.unwrap().into())
+        match last_error {
+            Some(e) => Err(e.into()),
+            None => Err(DbError::Connection {
+                message: "No attempts were made due to invalid retry configuration".to_string(),
+                source: None,
+            }),
+        }
     }
 
     async fn mdel(&self, keys: &[&str]) -> Result<u64> {
