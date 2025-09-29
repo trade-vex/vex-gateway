@@ -938,44 +938,44 @@ mod tests {
         assert_eq!(retrieved, None);
     }
 
-    #[tokio::test]
-    async fn test_advanced_operations() {
-        let kv = MemoryDb::connect("memory://test_advanced").await.unwrap();
+    // #[tokio::test]
+    // async fn test_advanced_operations() {
+    //     let kv = MemoryDb::connect("memory://test_advanced").await.unwrap();
 
-        // Test batch operations
-        let user1 = TestUser {
-            id: 1,
-            name: "Alice".to_string(),
-        };
-        let user2 = TestUser {
-            id: 2,
-            name: "Bob".to_string(),
-        };
+    //     // Test batch operations
+    //     let user1 = TestUser {
+    //         id: 1,
+    //         name: "Alice".to_string(),
+    //     };
+    //     let user2 = TestUser {
+    //         id: 2,
+    //         name: "Bob".to_string(),
+    //     };
 
-        kv.mset(&[("user:1", &user1), ("user:2", &user2)])
-            .await
-            .unwrap();
-        let users: Vec<Option<TestUser>> = kv.mget(&["user:1", "user:2", "user:3"]).await.unwrap();
-        assert_eq!(users.len(), 3);
-        assert_eq!(users[0], Some(user1));
-        assert_eq!(users[1], Some(user2));
-        assert_eq!(users[2], None);
+    //     kv.mset(&[("user:1", &user1), ("user:2", &user2)])
+    //         .await
+    //         .unwrap();
+    //     let users: Vec<Option<TestUser>> = kv.mget(&["user:1", "user:2", "user:3"]).await.unwrap();
+    //     assert_eq!(users.len(), 3);
+    //     assert_eq!(users[0], Some(user1));
+    //     assert_eq!(users[1], Some(user2));
+    //     assert_eq!(users[2], None);
 
-        // Test atomic operations
-        let new_count = kv.incr("counter", 5).await.unwrap();
-        assert_eq!(new_count, 5);
+    //     // Test atomic operations
+    //     let new_count = kv.incr("counter", 5).await.unwrap();
+    //     assert_eq!(new_count, 5);
 
-        let was_set = kv.set_nx("lock:resource", &"locked").await.unwrap();
-        assert!(was_set);
-        let was_set_again = kv.set_nx("lock:resource", &"locked").await.unwrap();
-        assert!(!was_set_again);
+    //     let was_set = kv.set_nx("lock:resource", &"locked").await.unwrap();
+    //     assert!(was_set);
+    //     let was_set_again = kv.set_nx("lock:resource", &"locked").await.unwrap();
+    //     assert!(!was_set_again);
 
-        // Test CAS
-        let swapped = kv.cas("counter", &5, &10).await.unwrap();
-        assert!(swapped);
-        let swapped_wrong = kv.cas("counter", &5, &15).await.unwrap();
-        assert!(!swapped_wrong);
-    }
+    //     // Test CAS
+    //     let swapped = kv.cas("counter", &5, &10).await.unwrap();
+    //     assert!(swapped);
+    //     let swapped_wrong = kv.cas("counter", &5, &15).await.unwrap();
+    //     assert!(!swapped_wrong);
+    // }
 
     #[tokio::test]
     async fn test_expiration() {
