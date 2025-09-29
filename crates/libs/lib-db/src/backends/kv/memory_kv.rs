@@ -113,8 +113,12 @@ impl MemoryStoreRegistry {
     /// Get statistics for all stores
     pub async fn stats(&self) -> RegistryStats {
         // First collect all store clones to avoid holding iteration guards across await
-        let stores: Vec<Arc<MemoryDb>> = self.stores.iter().map(|entry| entry.value().clone()).collect();
-        
+        let stores: Vec<Arc<MemoryDb>> = self
+            .stores
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+
         let mut total_entries = 0;
         let mut total_memory = 0;
         let store_count = stores.len();
@@ -676,10 +680,11 @@ impl AtomicKvStore for MemoryDb {
             if Self::is_expired(&entry) {
                 let now = Instant::now();
                 let new_value = delta;
-                entry.data = bincode::serialize(&new_value).map_err(|e| DbError::Serialization {
-                    message: format!("Failed to serialize value: {}", e),
-                    source: Some(Box::new(e)),
-                })?;
+                entry.data =
+                    bincode::serialize(&new_value).map_err(|e| DbError::Serialization {
+                        message: format!("Failed to serialize value: {}", e),
+                        source: Some(Box::new(e)),
+                    })?;
                 entry.expires_at = self.config.default_ttl.map(|ttl| now + ttl);
                 entry.created_at = now;
                 entry.access_count = 0;
