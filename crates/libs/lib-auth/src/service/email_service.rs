@@ -63,6 +63,11 @@ impl EmailService {
 
     /// Store OTP in Redis
     async fn store_otp(&self, email: &str, otp: &str) -> Result<(), AuthError> {
+        // Validate otp_expiry_minutes is positive
+        if self.otp_expiry_minutes <= 0 {
+            return Err(AuthError::Validation("OTP expiry minutes must be positive".to_string()));
+        }
+
         let mut conn = self
             .redis_pool
             .get()
@@ -72,8 +77,13 @@ impl EmailService {
         let key = format!("{}{}", OTP_KEY_PREFIX, email);
         let expiry_seconds = self.otp_expiry_minutes * 60;
 
+        // Convert to u64 using fallible conversion to handle overflow
+        let expiry_seconds_u64 = expiry_seconds
+            .try_into()
+            .map_err(|_| AuthError::Validation("OTP expiry time is too large".to_string()))?;
+
         let _: () = conn
-            .set_ex(&key, otp, expiry_seconds as u64)
+            .set_ex(&key, otp, expiry_seconds_u64)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to store OTP: {}", e)))?;
 
