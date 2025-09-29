@@ -9,7 +9,7 @@ CREATE TYPE user_status AS ENUM ('active', 'pending', 'suspended', 'deleted');
 CREATE TABLE users (
     user_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email CITEXT NOT NULL UNIQUE,
-    username VARCHAR(100) NOT NULL,
+    username VARCHAR(100) NOT NULL UNIQUE,
     password_hash VARCHAR(255), -- NULL for OAuth users
     auth_provider VARCHAR(50) NOT NULL DEFAULT 'email',
     provider_id VARCHAR(255), -- OAuth provider user ID

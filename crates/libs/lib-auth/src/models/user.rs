@@ -7,7 +7,9 @@ use uuid::Uuid;
 pub struct Model {
     #[sea_orm(primary_key)]
     pub user_id: Uuid,
+    #[sea_orm(unique_key = "ux_users_email")]
     pub email: String,
+    #[sea_orm(unique_key = "ux_users_username")]
     pub username: String,
     pub password_hash: Option<String>,
     pub auth_provider: String,
