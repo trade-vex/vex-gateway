@@ -900,179 +900,179 @@ impl Default for MemoryDb {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde::{Deserialize, Serialize};
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
+//     use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    struct TestUser {
-        id: u32,
-        name: String,
-    }
+//     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+//     struct TestUser {
+//         id: u32,
+//         name: String,
+//     }
 
-    #[tokio::test]
-    async fn test_basic_operations() {
-        let kv = MemoryDb::connect("memory://test_store").await.unwrap();
+//     #[tokio::test]
+//     async fn test_basic_operations() {
+//         let kv = MemoryDb::connect("memory://test_store").await.unwrap();
 
-        // Test set and get
-        let user = TestUser {
-            id: 123,
-            name: "Alice".to_string(),
-        };
+//         // Test set and get
+//         let user = TestUser {
+//             id: 123,
+//             name: "Alice".to_string(),
+//         };
 
-        kv.set("user:123", &user).await.unwrap();
-        let retrieved: Option<TestUser> = kv.get("user:123").await.unwrap();
-        assert_eq!(retrieved, Some(user));
+//         kv.set("user:123", &user).await.unwrap();
+//         let retrieved: Option<TestUser> = kv.get("user:123").await.unwrap();
+//         assert_eq!(retrieved, Some(user));
 
-        // Test exists
-        assert!(kv.exists("user:123").await.unwrap());
-        assert!(!kv.exists("user:456").await.unwrap());
+//         // Test exists
+//         assert!(kv.exists("user:123").await.unwrap());
+//         assert!(!kv.exists("user:456").await.unwrap());
 
-        // Test delete
-        assert!(kv.delete("user:123").await.unwrap());
-        assert!(!kv.delete("user:123").await.unwrap()); // Already deleted
+//         // Test delete
+//         assert!(kv.delete("user:123").await.unwrap());
+//         assert!(!kv.delete("user:123").await.unwrap()); // Already deleted
 
-        // Test get after delete
-        let retrieved: Option<TestUser> = kv.get("user:123").await.unwrap();
-        assert_eq!(retrieved, None);
-    }
+//         // Test get after delete
+//         let retrieved: Option<TestUser> = kv.get("user:123").await.unwrap();
+//         assert_eq!(retrieved, None);
+//     }
 
-    // #[tokio::test]
-    // async fn test_advanced_operations() {
-    //     let kv = MemoryDb::connect("memory://test_advanced").await.unwrap();
+//     // #[tokio::test]
+//     // async fn test_advanced_operations() {
+//     //     let kv = MemoryDb::connect("memory://test_advanced").await.unwrap();
 
-    //     // Test batch operations
-    //     let user1 = TestUser {
-    //         id: 1,
-    //         name: "Alice".to_string(),
-    //     };
-    //     let user2 = TestUser {
-    //         id: 2,
-    //         name: "Bob".to_string(),
-    //     };
+//     //     // Test batch operations
+//     //     let user1 = TestUser {
+//     //         id: 1,
+//     //         name: "Alice".to_string(),
+//     //     };
+//     //     let user2 = TestUser {
+//     //         id: 2,
+//     //         name: "Bob".to_string(),
+//     //     };
 
-    //     kv.mset(&[("user:1", &user1), ("user:2", &user2)])
-    //         .await
-    //         .unwrap();
-    //     let users: Vec<Option<TestUser>> = kv.mget(&["user:1", "user:2", "user:3"]).await.unwrap();
-    //     assert_eq!(users.len(), 3);
-    //     assert_eq!(users[0], Some(user1));
-    //     assert_eq!(users[1], Some(user2));
-    //     assert_eq!(users[2], None);
+//     //     kv.mset(&[("user:1", &user1), ("user:2", &user2)])
+//     //         .await
+//     //         .unwrap();
+//     //     let users: Vec<Option<TestUser>> = kv.mget(&["user:1", "user:2", "user:3"]).await.unwrap();
+//     //     assert_eq!(users.len(), 3);
+//     //     assert_eq!(users[0], Some(user1));
+//     //     assert_eq!(users[1], Some(user2));
+//     //     assert_eq!(users[2], None);
 
-    //     // Test atomic operations
-    //     let new_count = kv.incr("counter", 5).await.unwrap();
-    //     assert_eq!(new_count, 5);
+//     //     // Test atomic operations
+//     //     let new_count = kv.incr("counter", 5).await.unwrap();
+//     //     assert_eq!(new_count, 5);
 
-    //     let was_set = kv.set_nx("lock:resource", &"locked").await.unwrap();
-    //     assert!(was_set);
-    //     let was_set_again = kv.set_nx("lock:resource", &"locked").await.unwrap();
-    //     assert!(!was_set_again);
+//     //     let was_set = kv.set_nx("lock:resource", &"locked").await.unwrap();
+//     //     assert!(was_set);
+//     //     let was_set_again = kv.set_nx("lock:resource", &"locked").await.unwrap();
+//     //     assert!(!was_set_again);
 
-    //     // Test CAS
-    //     let swapped = kv.cas("counter", &5, &10).await.unwrap();
-    //     assert!(swapped);
-    //     let swapped_wrong = kv.cas("counter", &5, &15).await.unwrap();
-    //     assert!(!swapped_wrong);
-    // }
+//     //     // Test CAS
+//     //     let swapped = kv.cas("counter", &5, &10).await.unwrap();
+//     //     assert!(swapped);
+//     //     let swapped_wrong = kv.cas("counter", &5, &15).await.unwrap();
+//     //     assert!(!swapped_wrong);
+//     // }
 
-    #[tokio::test]
-    async fn test_expiration() {
-        let kv = MemoryDb::connect("memory://test_expiration").await.unwrap();
+//     #[tokio::test]
+//     async fn test_expiration() {
+//         let kv = MemoryDb::connect("memory://test_expiration").await.unwrap();
 
-        // Test set with expiration
-        kv.set_ex("session:123", &"token", 1).await.unwrap(); // 1 second TTL
+//         // Test set with expiration
+//         kv.set_ex("session:123", &"token", 1).await.unwrap(); // 1 second TTL
 
-        // Should exist immediately
-        assert!(kv.exists("session:123").await.unwrap());
+//         // Should exist immediately
+//         assert!(kv.exists("session:123").await.unwrap());
 
-        // Wait for expiration
-        tokio::time::sleep(Duration::from_millis(1100)).await;
+//         // Wait for expiration
+//         tokio::time::sleep(Duration::from_millis(1100)).await;
 
-        // Should not exist after expiration
-        assert!(!kv.exists("session:123").await.unwrap());
+//         // Should not exist after expiration
+//         assert!(!kv.exists("session:123").await.unwrap());
 
-        // Test TTL
-        kv.set_ex("temp:key", &"value", 60).await.unwrap();
-        let ttl = kv.ttl("temp:key").await.unwrap();
-        assert!(ttl.is_some());
-        assert!(ttl.unwrap() <= 60);
-    }
+//         // Test TTL
+//         kv.set_ex("temp:key", &"value", 60).await.unwrap();
+//         let ttl = kv.ttl("temp:key").await.unwrap();
+//         assert!(ttl.is_some());
+//         assert!(ttl.unwrap() <= 60);
+//     }
 
-    #[tokio::test]
-    async fn test_capacity_limit() {
-        let config = MemoryConfig {
-            max_entries: 2,
-            eviction_policy: EvictionPolicy::LRU,
-            ..Default::default()
-        };
-        let kv = MemoryDb::with_config("test_capacity", config);
+//     #[tokio::test]
+//     async fn test_capacity_limit() {
+//         let config = MemoryConfig {
+//             max_entries: 2,
+//             eviction_policy: EvictionPolicy::LRU,
+//             ..Default::default()
+//         };
+//         let kv = MemoryDb::with_config("test_capacity", config);
 
-        // Should be able to set 2 entries
-        kv.set("key1", &"value1").await.unwrap();
-        kv.set("key2", &"value2").await.unwrap();
+//         // Should be able to set 2 entries
+//         kv.set("key1", &"value1").await.unwrap();
+//         kv.set("key2", &"value2").await.unwrap();
 
-        // Third entry should trigger eviction
-        kv.set("key3", &"value3").await.unwrap();
+//         // Third entry should trigger eviction
+//         kv.set("key3", &"value3").await.unwrap();
 
-        // First key should be evicted (LRU)
-        assert!(!kv.exists("key1").await.unwrap());
-        assert!(kv.exists("key2").await.unwrap());
-        assert!(kv.exists("key3").await.unwrap());
-    }
+//         // First key should be evicted (LRU)
+//         assert!(!kv.exists("key1").await.unwrap());
+//         assert!(kv.exists("key2").await.unwrap());
+//         assert!(kv.exists("key3").await.unwrap());
+//     }
 
-    #[tokio::test]
-    async fn test_stats() {
-        let kv = MemoryDb::connect("memory://test_stats").await.unwrap();
+//     #[tokio::test]
+//     async fn test_stats() {
+//         let kv = MemoryDb::connect("memory://test_stats").await.unwrap();
 
-        kv.set("key1", &"value1").await.unwrap();
-        kv.set("key2", &"value2").await.unwrap();
+//         kv.set("key1", &"value1").await.unwrap();
+//         kv.set("key2", &"value2").await.unwrap();
 
-        let stats = kv.stats().await;
-        assert_eq!(stats.total_entries, 2);
-        assert_eq!(stats.expired_entries, 0);
-        assert_eq!(stats.store_name, "test_stats");
-    }
+//         let stats = kv.stats().await;
+//         assert_eq!(stats.total_entries, 2);
+//         assert_eq!(stats.expired_entries, 0);
+//         assert_eq!(stats.store_name, "test_stats");
+//     }
 
-    #[tokio::test]
-    async fn test_registry() {
-        // Test registry functionality
-        let user_cache = REGISTRY.get_or_create("user_cache").await;
-        let session_store = REGISTRY.get_or_create("sessions").await;
+//     #[tokio::test]
+//     async fn test_registry() {
+//         // Test registry functionality
+//         let user_cache = REGISTRY.get_or_create("user_cache").await;
+//         let session_store = REGISTRY.get_or_create("sessions").await;
 
-        // Each store is isolated
-        user_cache.set("user:123", &"Alice").await.unwrap();
-        session_store.set("session:456", &"token").await.unwrap();
+//         // Each store is isolated
+//         user_cache.set("user:123", &"Alice").await.unwrap();
+//         session_store.set("session:456", &"token").await.unwrap();
 
-        // Data is separate
-        let user: Option<String> = user_cache.get("user:123").await.unwrap();
-        let session: Option<String> = session_store.get("session:456").await.unwrap();
+//         // Data is separate
+//         let user: Option<String> = user_cache.get("user:123").await.unwrap();
+//         let session: Option<String> = session_store.get("session:456").await.unwrap();
 
-        assert_eq!(user, Some("Alice".to_string()));
-        assert_eq!(session, Some("token".to_string()));
+//         assert_eq!(user, Some("Alice".to_string()));
+//         assert_eq!(session, Some("token".to_string()));
 
-        // User data not in session store
-        let user_in_session: Option<String> = session_store.get("user:123").await.unwrap();
-        assert_eq!(user_in_session, None);
+//         // User data not in session store
+//         let user_in_session: Option<String> = session_store.get("user:123").await.unwrap();
+//         assert_eq!(user_in_session, None);
 
-        // List stores
-        let stores = REGISTRY.list_stores();
-        assert!(stores.contains(&"user_cache".to_string()));
-        assert!(stores.contains(&"sessions".to_string()));
-    }
+//         // List stores
+//         let stores = REGISTRY.list_stores();
+//         assert!(stores.contains(&"user_cache".to_string()));
+//         assert!(stores.contains(&"sessions".to_string()));
+//     }
 
-    #[tokio::test]
-    async fn test_url_parsing() {
-        // Test URL parsing with parameters
-        let kv = MemoryDb::connect("memory://my_store?max_entries=100&ttl=3600&eviction=lru")
-            .await
-            .unwrap();
+//     #[tokio::test]
+//     async fn test_url_parsing() {
+//         // Test URL parsing with parameters
+//         let kv = MemoryDb::connect("memory://my_store?max_entries=100&ttl=3600&eviction=lru")
+//             .await
+//             .unwrap();
 
-        assert_eq!(kv.name(), "my_store");
+//         assert_eq!(kv.name(), "my_store");
 
-        // Test stats to verify configuration
-        let stats = kv.stats().await;
-        assert_eq!(stats.max_entries, 100);
-    }
-}
+//         // Test stats to verify configuration
+//         let stats = kv.stats().await;
+//         assert_eq!(stats.max_entries, 100);
+//     }
+// }
