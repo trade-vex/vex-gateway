@@ -167,7 +167,7 @@ impl OAuthService {
                     auth_provider: provider.to_string(),
                     provider_id: Some(user_info.provider_id.clone()),
                     avatar_url: user_info.avatar_url.clone(),
-                    email_verified: true, // OAuth emails are generally considered verified
+                    email_verified: user_info.email_verified,
                     status: UserStatus::Active,
                     created_at: now,
                     updated_at: now,
@@ -396,10 +396,10 @@ impl OAuthService {
 
     fn parse_google_user_info(&self, data: Value) -> Result<OAuthUserInfo, AuthError> {
         Ok(OAuthUserInfo {
-            provider_id: data["id"]
+            provider_id: data["sub"]
                 .as_str()
                 .ok_or_else(|| {
-                    AuthError::UserInfoFetchFailed("Missing Google user ID".to_string())
+                    AuthError::UserInfoFetchFailed("Missing Google sub".to_string())
                 })?
                 .to_string(),
             email: data["email"]
@@ -409,6 +409,9 @@ impl OAuthService {
             name: data["name"].as_str().unwrap_or("Unknown User").to_string(),
             username: None,
             avatar_url: data["picture"].as_str().map(|s| s.to_string()),
+            email_verified: data["email_verified"]
+                .as_bool()
+                .unwrap_or(false),
         })
     }
 
@@ -439,6 +442,9 @@ impl OAuthService {
                 .to_string(),
             username: data["login"].as_str().map(|s| s.to_string()),
             avatar_url: data["avatar_url"].as_str().map(|s| s.to_string()),
+            email_verified: data["email_verified"]
+                .as_bool()
+                .unwrap_or(false),
         })
     }
 
@@ -461,6 +467,9 @@ impl OAuthService {
             avatar_url: user_data["profile_image_url"]
                 .as_str()
                 .map(|s| s.to_string()),
+            email_verified: user_data["email_verified"]
+                .as_bool()
+                .unwrap_or(false),
         })
     }
 

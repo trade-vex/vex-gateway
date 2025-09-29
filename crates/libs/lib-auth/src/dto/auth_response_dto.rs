@@ -78,6 +78,7 @@ pub struct OAuthUserInfo {
     pub name: String,
     pub username: Option<String>,
     pub avatar_url: Option<String>,
+    pub email_verified: bool,
 }
 
 // Conversion from User model to UserInfo DTO
