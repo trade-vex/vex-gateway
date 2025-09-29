@@ -21,7 +21,7 @@ rand = "0.8"
 sqlx = { version = "0.8.4", optional = true }
 
 # Redis support 
-redis = { version = "0.25", optional = true }
+redis = { workspace = true, optional = true }
 
 # Redis-specific dependencies (only needed with Redis)
 bb8 = { version = "0.8", optional = true }
