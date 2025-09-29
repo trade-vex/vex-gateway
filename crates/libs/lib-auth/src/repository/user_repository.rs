@@ -120,10 +120,11 @@ impl UserRepository for PostgresUserRepository {
         let now = Utc::now();
         let update_result = Entity::update_many()
             .col_expr(Column::EmailVerified, Expr::value(true))
+            .col_expr(Column::Status, Expr::value(UserStatus::Active))
             .col_expr(Column::UpdatedAt, Expr::value(now))
             .filter(Column::UserId.eq(user_id))
             .filter(Column::Status.ne(UserStatus::Deleted)) // Exclude deleted users
-            .filter(Column::Status.eq(UserStatus::Pending)) // Only allow Pending→Active transition
+            .filter(Column::Status.is_in([UserStatus::Pending, UserStatus::Active])) // Allow Pending→Active or Active→Active (idempotent)
             .exec(&*self.db)
             .await
             .map_err(|e| AuthError::Database(format!("Failed to verify email: {}", e)))?;
