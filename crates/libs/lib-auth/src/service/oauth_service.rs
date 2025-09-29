@@ -21,6 +21,7 @@ pub struct OAuthService {
     oauth_providers: HashMap<String, OAuthProviderConfig>,
     token_service: Arc<TokenService>,
     user_repo: Arc<dyn UserRepository>,
+    redirect_base: String,
 }
 
 impl OAuthService {
@@ -30,6 +31,7 @@ impl OAuthService {
         oauth_providers: HashMap<String, OAuthProviderConfig>,
         token_service: Arc<TokenService>,
         user_repo: Arc<dyn UserRepository>,
+        redirect_base: String,
     ) -> Self {
         Self {
             redis_pool,
@@ -37,6 +39,7 @@ impl OAuthService {
             oauth_providers,
             token_service,
             user_repo,
+            redirect_base,
         }
     }
 
@@ -74,8 +77,8 @@ impl OAuthService {
         // Build redirect URI
         let redirect_uri = format!(
             "{}/auth/{}/callback",
-            "http://localhost:8081",
-            provider // TODO: Get from config
+            self.redirect_base,
+            provider
         );
 
         // Build authorization URL
@@ -225,8 +228,8 @@ impl OAuthService {
     ) -> Result<OAuthTokenResponse, AuthError> {
         let redirect_uri = format!(
             "{}/auth/{}/callback",
-            "http://localhost:8081",
-            provider // TODO: Get from config
+            self.redirect_base,
+            provider
         );
 
         let mut params = vec![

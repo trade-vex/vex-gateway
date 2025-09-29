@@ -27,6 +27,7 @@ pub struct AuthConfig {
 #[derive(Deserialize, Debug, Clone)]
 pub struct OAuthConfig {
     pub providers: HashMap<String, OAuthProviderConfig>,
+    pub redirect_base: String,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -114,6 +115,7 @@ impl AuthConfig {
             },
             oauth: OAuthConfig {
                 providers: std::collections::HashMap::new(), // Empty for development
+                redirect_base: "http://localhost:8081".to_string(),
             },
             email: EmailConfig {
                 smtp_host: "smtp.example.com".to_string(),
@@ -208,7 +210,10 @@ impl OAuthConfig {
             );
         }
 
-        Ok(Self { providers })
+        Ok(Self { 
+            providers,
+            redirect_base: env::var("OAUTH_REDIRECT_BASE").unwrap_or_else(|_| "http://localhost:8081".to_string()),
+        })
     }
 }
 

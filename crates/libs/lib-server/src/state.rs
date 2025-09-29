@@ -212,6 +212,7 @@ impl AppState {
             self.oauth_providers.clone(),
             token_service,
             self.user_repo.clone(),
+            self.auth_config.oauth.redirect_base.clone(),
         ))
     }
 

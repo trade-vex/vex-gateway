@@ -314,7 +314,10 @@ pub fn setup_test_config() -> AuthConfig {
                 .parse()
                 .unwrap_or(30),
         },
-        oauth: OAuthConfig { providers },
+        oauth: OAuthConfig { 
+            providers,
+            redirect_base: "http://localhost:8081".to_string(),
+        },
         email: EmailConfig {
             smtp_host: env::var("SMTP_HOST").unwrap_or_else(|_| "smtp.gmail.com".to_string()),
             smtp_port: env::var("SMTP_PORT")
