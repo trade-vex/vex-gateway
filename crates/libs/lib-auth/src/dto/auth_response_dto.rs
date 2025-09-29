@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct LoginResponse {
     pub access_token: String,
     pub refresh_token: String,
@@ -11,21 +11,21 @@ pub struct LoginResponse {
 }
 
 /// The response sent to the client after a successful login or token refresh.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize)]
 pub struct TokenResponse {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_in: u64, // TTL in seconds for the access token
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct RefreshTokenResponse {
     pub access_token: String,
     pub token_type: String,
     pub expires_in: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct OAuthLoginResponse {
     pub access_token: String,
     pub refresh_token: String,
@@ -33,7 +33,7 @@ pub struct OAuthLoginResponse {
     pub user: UserInfo,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct OAuthTokenResponse {
     pub access_token: String,
     pub token_type: String,
@@ -42,7 +42,7 @@ pub struct OAuthTokenResponse {
     pub scope: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct UserInfo {
     pub user_id: Uuid,
     pub email: String,
@@ -53,7 +53,7 @@ pub struct UserInfo {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct UserProfile {
     pub user_id: Uuid,
     pub email: String,
@@ -65,7 +65,7 @@ pub struct UserProfile {
     pub last_login: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OAuthUserInfo {
     pub provider_id: String,
     pub email: String,

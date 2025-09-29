@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use validator::Validate;
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Deserialize, Validate)]
 pub struct LoginRequest {
     #[validate(email)]
     pub email: String,
@@ -9,12 +9,12 @@ pub struct LoginRequest {
     pub password: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct RefreshTokenRequest {
     pub refresh_token: String,
 }
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Deserialize, Validate)]
 pub struct SignupRequest {
     #[validate(email)]
     pub email: String,
@@ -24,7 +24,7 @@ pub struct SignupRequest {
     pub password: String,
 }
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Deserialize, Validate)]
 pub struct ChangePasswordRequest {
     #[validate(length(min = 8))]
     pub old_password: String,
@@ -32,7 +32,7 @@ pub struct ChangePasswordRequest {
     pub new_password: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct OAuthCallbackQuery {
     pub code: Option<String>,
     pub state: String,

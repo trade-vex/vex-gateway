@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize)]
 pub struct TokenResponse {
     pub access_token: String,
     pub refresh_token: String,
@@ -8,7 +8,7 @@ pub struct TokenResponse {
 }
 
 /// The claims embedded within our application's JWT.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct AppClaims {
     // Standard claims
     pub sub: String, // Subject (our internal user ID)
