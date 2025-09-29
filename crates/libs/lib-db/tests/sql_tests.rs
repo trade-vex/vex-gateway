@@ -17,10 +17,10 @@ async fn test_basic_sql_operations(db: &PostgresDb) -> Result<()> {
 
     // Run the basic operations and ensure cleanup happens even if operations fail
     let result = run_basic_operations(db).await;
-    
+
     // Always clean up the test table, even if operations failed
     let _ = db.execute("DROP TABLE IF EXISTS test_users").await;
-    
+
     result
 }
 
@@ -71,10 +71,10 @@ async fn test_sql_error_handling(db: &PostgresDb) -> Result<()> {
 
     // Run error handling tests and ensure cleanup happens even if tests fail
     let result = run_error_handling_tests(db).await;
-    
+
     // Always clean up the test table, even if tests failed
     let _ = db.execute("DROP TABLE IF EXISTS test_users").await;
-    
+
     result
 }
 
@@ -114,10 +114,10 @@ async fn test_sql_pool_management(db: &PostgresDb) -> Result<()> {
 
     // Run pool management tests and ensure cleanup happens even if tests fail
     let result = run_pool_management_tests(db).await;
-    
+
     // Always clean up the test table, even if tests failed
     let _ = db.execute("DROP TABLE IF EXISTS test_users").await;
-    
+
     result
 }
 
@@ -269,10 +269,10 @@ async fn test_postgres_transaction_like_operations() -> Result<()> {
 
         // Run transaction tests and ensure cleanup happens even if tests fail
         let result = run_transaction_tests(&db).await;
-        
+
         // Always clean up the test table, even if tests failed
         let _ = db.execute("DROP TABLE IF EXISTS test_users").await;
-        
+
         result
     } else {
         println!("DATABASE_URL not set - skipping transaction test");
