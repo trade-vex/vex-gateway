@@ -91,14 +91,10 @@ impl MemoryStoreRegistry {
         name: &str,
         config: MemoryConfig,
     ) -> Arc<MemoryDb> {
-        match self.stores.entry(name.to_string()) {
-            Entry::Occupied(entry) => entry.get().clone(),
-            Entry::Vacant(entry) => {
-                let store = Arc::new(MemoryDb::with_config(name, config));
-                entry.insert(store.clone());
-                store
-            }
-        }
+        self.stores
+            .entry(name.to_string())
+            .or_insert_with(move || Arc::new(MemoryDb::with_config(name, config)))
+            .clone()
     }
 
     /// List all store names
