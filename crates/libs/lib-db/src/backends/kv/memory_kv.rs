@@ -722,38 +722,44 @@ impl AtomicKvStore for MemoryDb {
     where
         T: Serialize + Send + Sync,
     {
-        // Check if key exists and is not expired
-        if let Some(entry) = self.store.get(key) {
-            if !Self::is_expired(&entry) {
-                return Ok(false);
+        use dashmap::mapref::entry::Entry;
+        match self.store.entry(key.to_string()) {
+            Entry::Occupied(mut occ) => {
+                if Self::is_expired(occ.get()) {
+                    let now = Instant::now();
+                    let bytes = bincode::serialize(value).map_err(|e| DbError::Serialization {
+                        message: format!("Failed to serialize value: {}", e),
+                        source: Some(Box::new(e)),
+                    })?;
+                    occ.insert(MemoryEntry {
+                        data: bytes,
+                        expires_at: self.config.default_ttl.map(|ttl| now + ttl),
+                        created_at: now,
+                        access_count: 0,
+                        last_accessed: now,
+                    });
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            Entry::Vacant(vac) => {
+                self.ensure_capacity(1).await?;
+                let now = Instant::now();
+                let bytes = bincode::serialize(value).map_err(|e| DbError::Serialization {
+                    message: format!("Failed to serialize value: {}", e),
+                    source: Some(Box::new(e)),
+                })?;
+                vac.insert(MemoryEntry {
+                    data: bytes,
+                    expires_at: self.config.default_ttl.map(|ttl| now + ttl),
+                    created_at: now,
+                    access_count: 0,
+                    last_accessed: now,
+                });
+                Ok(true)
             }
         }
-
-        // Check capacity
-        if !self.store.contains_key(key) {
-            self.ensure_capacity(1).await?;
-        }
-
-        let bytes = bincode::serialize(value).map_err(|e| DbError::Serialization {
-            message: format!("Failed to serialize value: {}", e),
-            source: Some(Box::new(e)),
-        })?;
-
-        let expires_at = self.config.default_ttl.map(|ttl| Instant::now() + ttl);
-        let now = Instant::now();
-
-        self.store.insert(
-            key.to_string(),
-            MemoryEntry {
-                data: bytes,
-                expires_at,
-                created_at: now,
-                access_count: 0,
-                last_accessed: now,
-            },
-        );
-
-        Ok(true)
     }
 
     async fn cas<T>(&self, key: &str, old: &T, new: &T) -> Result<bool>
