@@ -266,7 +266,7 @@ mod tests {
     use std::sync::Arc;
 
     thread_local! {
-        static HANDLER_CALLED: RefCell<bool> = RefCell::new(false);
+        static HANDLER_CALLED: RefCell<bool> = const { RefCell::new(false) };
     }
 
     async fn tracking_handler(user: AuthenticatedUser) -> HttpResponse {
@@ -589,8 +589,8 @@ mod tests {
 
         // Most importantly, verify the handler was NOT executed
         let handler_was_called = HANDLER_CALLED.with(|called| *called.borrow());
-        assert_eq!(
-            handler_was_called, false,
+        assert!(
+            !handler_was_called,
             "Handler should NOT have been executed for blacklisted token!"
         );
     }
@@ -646,8 +646,8 @@ mod tests {
 
         // Verify the handler WAS executed
         let handler_was_called = HANDLER_CALLED.with(|called| *called.borrow());
-        assert_eq!(
-            handler_was_called, true,
+        assert!(
+            handler_was_called,
             "Handler should have been executed for valid non-blacklisted token!"
         );
     }

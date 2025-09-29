@@ -416,12 +416,12 @@ mod tests {
         let time_diff = now
             .signed_duration_since(fetched_user.created_at)
             .num_seconds();
-        assert!(time_diff >= 0 && time_diff < 5); // Created within last 5 seconds
+        assert!((0..5).contains(&time_diff)); // Created within last 5 seconds
 
         let time_diff_updated = now
             .signed_duration_since(fetched_user.updated_at)
             .num_seconds();
-        assert!(time_diff_updated >= 0 && time_diff_updated < 5); // Updated within last 5 seconds
+        assert!((0..5).contains(&time_diff_updated)); // Updated within last 5 seconds
 
         // Delete
         repo.delete_user(user_id).await.unwrap();

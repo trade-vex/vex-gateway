@@ -35,7 +35,7 @@ pub async fn handle_oauth_callback(
         .code
         .as_deref()
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| AuthError::InvalidRequest)?;
+        .ok_or(AuthError::InvalidRequest)?;
 
     match oauth_service
         .handle_callback(&provider, code, &query.state)
