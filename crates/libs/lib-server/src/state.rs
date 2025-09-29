@@ -6,7 +6,7 @@ use deadpool_redis::Pool as RedisPool;
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use lib_auth::config::{AuthConfig, OAuthProviderConfig};
 use lib_auth::repository::{PostgresUserRepository, UserRepository};
-use lib_auth::service::{OAuthService, TokenService};
+use lib_auth::service::{EmailService, OAuthService, TokenService};
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,6 +31,7 @@ pub struct AppState {
     pub encoding_key: EncodingKey,
     pub decoding_key: DecodingKey,
     pub oauth_providers: HashMap<String, OAuthProviderConfig>,
+    pub auth_config: AuthConfig,
 }
 
 impl AppState {
@@ -66,6 +67,7 @@ impl AppState {
             encoding_key,
             decoding_key,
             oauth_providers: config.oauth.providers.clone(),
+            auth_config: config.clone(),
         }))
     }
 
@@ -211,6 +213,16 @@ impl AppState {
             token_service,
             self.user_repo.clone(),
         ))
+    }
+
+    /// Create EmailService using AppState dependencies
+    pub fn create_email_service(&self) -> Result<Arc<EmailService>, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Arc::new(EmailService::new(
+            &self.auth_config.email,
+            self.redis_pool.clone(),
+            self.auth_config.otp.otp_length,
+            self.auth_config.otp.email_verification_expiry_minutes,
+        )?))
     }
 }
 

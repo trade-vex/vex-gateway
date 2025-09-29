@@ -6,21 +6,21 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::dto::auth_request_dto::{
-    ChangePasswordRequest, LoginRequest, RefreshTokenRequest, SignupRequest,
+    ChangePasswordRequest, LoginRequest, RefreshTokenRequest, SignupRequest, VerifyEmailRequest,
 };
-use crate::dto::auth_response_dto::{LoginResponse, RefreshTokenResponse, UserInfo, UserProfile};
+use crate::dto::auth_response_dto::{LoginResponse, RefreshTokenResponse, SignupResponse, UserInfo, UserProfile};
 use crate::error::auth_error::AuthError;
 use crate::middleware::jwt_auth::AuthenticatedUser;
 use crate::models::user::{Model, UserStatus};
 use crate::repository::UserRepository;
-use crate::service::token_service::TokenService;
+use crate::service::{EmailService, TokenService};
 use std::sync::Arc;
 
 // Signup handler
 pub async fn signup(
     req: web::Json<SignupRequest>,
     user_repo: web::Data<Arc<dyn UserRepository>>,
-    token_service: web::Data<Arc<TokenService>>,
+    email_service: web::Data<Arc<EmailService>>,
 ) -> Result<HttpResponse, AuthError> {
     // Validate the request
     req.validate()
@@ -62,19 +62,15 @@ pub async fn signup(
     // Save user to database
     let created_user = user_repo.create_user(&new_user).await?;
 
-    // Generate tokens
-    let tokens = token_service.mint_tokens(created_user.user_id).await?;
-
-    // Update last login
-    user_repo.update_last_login(created_user.user_id).await?;
+    // Send verification email
+    email_service
+        .send_verification_email(&created_user.email, &created_user.username)
+        .await?;
 
     let user_info = UserInfo::from(created_user);
-    let response = LoginResponse {
-        access_token: tokens.access_token,
-        refresh_token: tokens.refresh_token,
-        token_type: "Bearer".to_string(),
-        expires_in: tokens.expires_in,
+    let response = SignupResponse {
         user: user_info,
+        message: "User created successfully. Please check your email for the verification code.".to_string(),
     };
 
     Ok(HttpResponse::Created().json(response))
@@ -214,7 +210,61 @@ pub async fn refresh_token(
     Ok(HttpResponse::Ok().json(response))
 }
 
-// Verify email handler
+// Verify email with OTP handler (public endpoint)
+pub async fn verify_email_with_otp(
+    req: web::Json<VerifyEmailRequest>,
+    user_repo: web::Data<Arc<dyn UserRepository>>,
+    email_service: web::Data<Arc<EmailService>>,
+    token_service: web::Data<Arc<TokenService>>,
+) -> Result<HttpResponse, AuthError> {
+    // Validate the request
+    req.validate()
+        .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
+
+    tracing::debug!("Email verification request with OTP");
+
+    // Find user by email
+    let user = user_repo
+        .find_by_email(&req.email)
+        .await?
+        .ok_or(AuthError::UserNotFound)?;
+
+    // Check if already verified
+    if user.email_verified {
+        return Err(AuthError::Validation("Email already verified".to_string()));
+    }
+
+    // Verify OTP
+    email_service.verify_otp(&req.email, &req.otp).await?;
+
+    // Update user status to verified
+    user_repo.verify_email(user.user_id).await?;
+
+    // Generate tokens now that email is verified
+    let tokens = token_service.mint_tokens(user.user_id).await?;
+
+    // Update last login
+    user_repo.update_last_login(user.user_id).await?;
+
+    // Get updated user info
+    let updated_user = user_repo
+        .find_by_id(user.user_id)
+        .await?
+        .ok_or(AuthError::UserNotFound)?;
+
+    let user_info = UserInfo::from(updated_user);
+    let response = LoginResponse {
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        token_type: "Bearer".to_string(),
+        expires_in: tokens.expires_in,
+        user: user_info,
+    };
+
+    Ok(HttpResponse::Ok().json(response))
+}
+
+// Verify email handler (internal handler)
 pub async fn verify_email(
     user: AuthenticatedUser,
     user_repo: web::Data<Arc<dyn UserRepository>>,

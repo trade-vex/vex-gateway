@@ -24,6 +24,7 @@ pub fn create_app(
     // Create services using AppState
     let token_service = app_state.create_token_service();
     let oauth_service = app_state.create_oauth_service();
+    let email_service = app_state.create_email_service().expect("Failed to create email service");
 
     // Create JWT middleware
     let jwt_middleware = JwtAuthentication::new(
@@ -41,6 +42,7 @@ pub fn create_app(
         .app_data(web::Data::new(app_state.http_client.clone()))
         .app_data(web::Data::new(token_service))
         .app_data(web::Data::new(oauth_service))
+        .app_data(web::Data::new(email_service))
         // Configure public routes (no authentication required)
         .service(web::scope("").configure(lib_auth::configure_public_auth_services))
         // Configure lib-api routes (health check, etc.)

@@ -26,6 +26,12 @@ pub struct RefreshTokenResponse {
 }
 
 #[derive(Serialize)]
+pub struct SignupResponse {
+    pub user: UserInfo,
+    pub message: String,
+}
+
+#[derive(Serialize)]
 pub struct OAuthLoginResponse {
     pub access_token: String,
     pub refresh_token: String,

@@ -21,6 +21,7 @@ pub struct AuthConfig {
     pub oauth: OAuthConfig,
     pub server: ServerConfig,
     pub email: EmailConfig,
+    pub otp: OtpConfig,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -66,6 +67,12 @@ pub struct EmailConfig {
     pub from_email: String,
 }
 
+#[derive(Deserialize, Debug, Clone)]
+pub struct OtpConfig {
+    pub otp_length: usize,
+    pub email_verification_expiry_minutes: i64,
+}
+
 impl AuthConfig {
     pub fn init() -> Result<Self, ConfigError> {
         Ok(Self {
@@ -75,6 +82,7 @@ impl AuthConfig {
             oauth: OAuthConfig::from_env()?,
             server: ServerConfig::from_env()?,
             email: EmailConfig::from_env()?,
+            otp: OtpConfig::from_env()?,
         })
     }
 
@@ -117,6 +125,10 @@ impl AuthConfig {
             server: ServerConfig {
                 base_url: "http://localhost:8081".to_string(),
                 port: 8081,
+            },
+            otp: OtpConfig {
+                otp_length: 6,
+                email_verification_expiry_minutes: 15,
             },
         }
     }
@@ -241,6 +253,19 @@ impl EmailConfig {
             smtp_username: env::var("SMTP_USERNAME")?,
             smtp_password: SecretString::new(env::var("SMTP_PASSWORD")?),
             from_email: env::var("FROM_EMAIL")?,
+        })
+    }
+}
+
+impl OtpConfig {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Ok(Self {
+            otp_length: env::var("OTP_LENGTH")
+                .unwrap_or_else(|_| "6".to_string())
+                .parse()?,
+            email_verification_expiry_minutes: env::var("EMAIL_VERIFICATION_EXPIRY_MINUTES")
+                .unwrap_or_else(|_| "15".to_string())
+                .parse()?,
         })
     }
 }

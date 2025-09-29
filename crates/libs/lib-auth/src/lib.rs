@@ -37,7 +37,8 @@ pub fn configure_public_auth_services(cfg: &mut web::ServiceConfig) {
         // Public auth routes
         .route("/signup", web::post().to(handlers::auth::signup))
         .route("/login", web::post().to(handlers::auth::login))
-        .route("/refresh", web::post().to(handlers::auth::refresh_token));
+        .route("/refresh", web::post().to(handlers::auth::refresh_token))
+        .route("/verify-email", web::post().to(handlers::auth::verify_email_with_otp));
 }
 
 /// Configure protected routes for auth that require authentication

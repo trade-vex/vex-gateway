@@ -39,3 +39,11 @@ pub struct OAuthCallbackQuery {
     pub error: Option<String>,
     pub error_description: Option<String>,
 }
+
+#[derive(Deserialize, Validate)]
+pub struct VerifyEmailRequest {
+    #[validate(email)]
+    pub email: String,
+    #[validate(length(min = 6, max = 6))]
+    pub otp: String,
+}

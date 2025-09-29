@@ -11,7 +11,7 @@
 use crate::{
     config::{
         AuthConfig, DatabaseConfig, EmailConfig, JwtConfig, OAuthConfig, OAuthProviderConfig,
-        RedisConfig, ServerConfig,
+        OtpConfig, RedisConfig, ServerConfig,
     },
     error::auth_error::AuthError,
     models::user::{Model, UserStatus},
@@ -294,6 +294,10 @@ pub fn setup_test_config() -> AuthConfig {
             smtp_password: secrecy::SecretString::new(env::var("SMTP_PASSWORD").unwrap_or_else(|_| "password".to_string())),
             from_email: env::var("FROM_EMAIL")
                 .unwrap_or_else(|_| "noreply@vex-gateway.com".to_string()),
+        },
+        otp: OtpConfig {
+            otp_length: 6,
+            email_verification_expiry_minutes: 15,
         },
     }
 }
