@@ -1,9 +1,11 @@
 use lib_db::{
     error::Result,
     memory_kv::MemoryDb,
-    redis::RedisDb,
     traits::{AdvancedKvStore, AtomicKvStore, BasicKvStore, ExpiringKvStore, KvStore},
 };
+
+#[cfg(feature = "redis")]
+use lib_db::redis::RedisDb;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
