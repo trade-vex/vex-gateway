@@ -3,7 +3,7 @@ use crate::{
     traits::{AdvancedKvStore, AtomicKvStore, BasicKvStore, ExpiringKvStore, PoolStats},
 };
 use async_trait::async_trait;
-use dashmap::DashMap;
+use dashmap::{DashMap, mapref::entry::Entry};
 use once_cell::sync::Lazy;
 use serde::{Serialize, de::DeserializeOwned};
 use std::sync::Arc;
@@ -75,12 +75,13 @@ impl MemoryStoreRegistry {
 
     /// Get or create a named store with default configuration
     pub async fn get_or_create(&self, name: &str) -> Arc<MemoryDb> {
-        if let Some(store) = self.stores.get(name) {
-            store.clone()
-        } else {
-            let store = Arc::new(MemoryDb::with_config(name, self.default_config.clone()));
-            self.stores.insert(name.to_string(), store.clone());
-            store
+        match self.stores.entry(name.to_string()) {
+            Entry::Occupied(entry) => entry.get().clone(),
+            Entry::Vacant(entry) => {
+                let store = Arc::new(MemoryDb::with_config(name, self.default_config.clone()));
+                entry.insert(store.clone());
+                store
+            }
         }
     }
 
@@ -90,12 +91,13 @@ impl MemoryStoreRegistry {
         name: &str,
         config: MemoryConfig,
     ) -> Arc<MemoryDb> {
-        if let Some(store) = self.stores.get(name) {
-            store.clone()
-        } else {
-            let store = Arc::new(MemoryDb::with_config(name, config));
-            self.stores.insert(name.to_string(), store.clone());
-            store
+        match self.stores.entry(name.to_string()) {
+            Entry::Occupied(entry) => entry.get().clone(),
+            Entry::Vacant(entry) => {
+                let store = Arc::new(MemoryDb::with_config(name, config));
+                entry.insert(store.clone());
+                store
+            }
         }
     }
 
