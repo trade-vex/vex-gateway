@@ -52,6 +52,12 @@ impl ServerConfig {
             ));
         }
 
+        if self.keep_alive_timeout == 0 {
+            return Err(ConfigError::ValidationError(
+                "Keep-alive timeout cannot be 0".to_string(),
+            ));
+        }
+
         Ok(())
     }
 
