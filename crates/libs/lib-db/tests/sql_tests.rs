@@ -4,7 +4,8 @@ use uuid::Uuid;
 /// Test helper function for basic SQL operations
 async fn test_basic_sql_operations(db: &PostgresDb, table_name: &str) -> Result<()> {
     // Create a test table
-    let create_table = format!(r#"
+    let create_table = format!(
+        r#"
         CREATE TABLE IF NOT EXISTS {} (
             id SERIAL PRIMARY KEY,
             name VARCHAR(255) NOT NULL,
@@ -12,7 +13,9 @@ async fn test_basic_sql_operations(db: &PostgresDb, table_name: &str) -> Result<
             active BOOLEAN DEFAULT true,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
-    "#, table_name);
+    "#,
+        table_name
+    );
 
     db.execute(&create_table).await?;
 
@@ -20,7 +23,9 @@ async fn test_basic_sql_operations(db: &PostgresDb, table_name: &str) -> Result<
     let result = run_basic_operations(db, table_name).await;
 
     // Always clean up the test table, even if operations failed
-    let _ = db.execute(&format!("DROP TABLE IF EXISTS {}", table_name)).await;
+    let _ = db
+        .execute(&format!("DROP TABLE IF EXISTS {}", table_name))
+        .await;
 
     result
 }
@@ -28,10 +33,12 @@ async fn test_basic_sql_operations(db: &PostgresDb, table_name: &str) -> Result<
 /// Helper function that contains the actual test logic for basic SQL operations
 async fn run_basic_operations(db: &PostgresDb, table_name: &str) -> Result<()> {
     // Insert test data
-    let affected = db.execute(&format!(
-        "INSERT INTO {} (name, email, active) VALUES ('Alice', 'alice@example.com', true)",
-        table_name
-    )).await?;
+    let affected = db
+        .execute(&format!(
+            "INSERT INTO {} (name, email, active) VALUES ('Alice', 'alice@example.com', true)",
+            table_name
+        ))
+        .await?;
     assert_eq!(affected, 1);
 
     let affected = db
@@ -66,7 +73,8 @@ async fn run_basic_operations(db: &PostgresDb, table_name: &str) -> Result<()> {
 /// Test helper function for SQL error handling
 async fn test_sql_error_handling(db: &PostgresDb, table_name: &str) -> Result<()> {
     // Create a test table for error testing
-    let create_table = format!(r#"
+    let create_table = format!(
+        r#"
         CREATE TABLE IF NOT EXISTS {} (
             id SERIAL PRIMARY KEY,
             name VARCHAR(255) NOT NULL,
@@ -74,7 +82,9 @@ async fn test_sql_error_handling(db: &PostgresDb, table_name: &str) -> Result<()
             active BOOLEAN DEFAULT true,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
-    "#, table_name);
+    "#,
+        table_name
+    );
 
     db.execute(&create_table).await?;
 
@@ -82,7 +92,9 @@ async fn test_sql_error_handling(db: &PostgresDb, table_name: &str) -> Result<()
     let result = run_error_handling_tests(db, table_name).await;
 
     // Always clean up the test table, even if tests failed
-    let _ = db.execute(&format!("DROP TABLE IF EXISTS {}", table_name)).await;
+    let _ = db
+        .execute(&format!("DROP TABLE IF EXISTS {}", table_name))
+        .await;
 
     result
 }
@@ -95,17 +107,21 @@ async fn run_error_handling_tests(db: &PostgresDb, table_name: &str) -> Result<(
 
     // Test inserting duplicate unique key
     // First, insert the original row and assert it succeeds
-    let seed_result = db.execute(&format!(
-        "INSERT INTO {} (name, email, active) VALUES ('Alice', 'alice@example.com', true)",
-        table_name
-    )).await;
+    let seed_result = db
+        .execute(&format!(
+            "INSERT INTO {} (name, email, active) VALUES ('Alice', 'alice@example.com', true)",
+            table_name
+        ))
+        .await;
     assert!(seed_result.is_ok());
-    
+
     // Now attempt to insert a duplicate with the same unique key (email)
-    let duplicate_result = db.execute(&format!(
-        "INSERT INTO {} (name, email, active) VALUES ('Duplicate', 'alice@example.com', true)",
-        table_name
-    )).await;
+    let duplicate_result = db
+        .execute(&format!(
+            "INSERT INTO {} (name, email, active) VALUES ('Duplicate', 'alice@example.com', true)",
+            table_name
+        ))
+        .await;
     assert!(duplicate_result.is_err());
 
     // Test invalid SQL syntax
@@ -118,7 +134,8 @@ async fn run_error_handling_tests(db: &PostgresDb, table_name: &str) -> Result<(
 /// Test helper function for pool management
 async fn test_sql_pool_management(db: &PostgresDb, table_name: &str) -> Result<()> {
     // Create a test table for pool testing
-    let create_table = format!(r#"
+    let create_table = format!(
+        r#"
         CREATE TABLE IF NOT EXISTS {} (
             id SERIAL PRIMARY KEY,
             name VARCHAR(255) NOT NULL,
@@ -126,7 +143,9 @@ async fn test_sql_pool_management(db: &PostgresDb, table_name: &str) -> Result<(
             active BOOLEAN DEFAULT true,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
-    "#, table_name);
+    "#,
+        table_name
+    );
 
     db.execute(&create_table).await?;
 
@@ -134,7 +153,9 @@ async fn test_sql_pool_management(db: &PostgresDb, table_name: &str) -> Result<(
     let result = run_pool_management_tests(db, table_name).await;
 
     // Always clean up the test table, even if tests failed
-    let _ = db.execute(&format!("DROP TABLE IF EXISTS {}", table_name)).await;
+    let _ = db
+        .execute(&format!("DROP TABLE IF EXISTS {}", table_name))
+        .await;
 
     result
 }
@@ -188,7 +209,10 @@ async fn test_generic_sql_operations<T: SqlDb>(db: &T) -> Result<()> {
 async fn test_postgres_basic_operations() -> Result<()> {
     if let Ok(postgres_url) = std::env::var("DATABASE_URL") {
         let db = PostgresDb::connect(&postgres_url).await?;
-        let table_name = format!("test_users_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+        let table_name = format!(
+            "test_users_{}",
+            uuid::Uuid::new_v4().to_string().replace('-', "")
+        );
         test_basic_sql_operations(&db, &table_name).await
     } else {
         println!("DATABASE_URL not set - skipping PostgreSQL test");
