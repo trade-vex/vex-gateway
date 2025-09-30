@@ -182,16 +182,16 @@ impl SignatureVerifier {
         recv_window: u64,
         server_time: u64,
     ) -> Result<(), ApiKeyError> {
-        // Check if timestamp is in the future (with 1 second tolerance)
-        if timestamp > server_time + 1000 {
+        // Future-drift check with 1s tolerance (avoid overflow)
+        if timestamp > server_time.saturating_add(1000) {
             return Err(ApiKeyError::FutureTimestamp {
                 server_time,
                 request_time: timestamp,
             });
         }
 
-        // Check if request has expired according to recv_window
-        if server_time - timestamp > recv_window {
+        // Expired if server_time > timestamp + recv_window (avoid overflow)
+        if server_time > timestamp.saturating_add(recv_window) {
             return Err(ApiKeyError::RequestExpired {
                 server_time,
                 request_time: timestamp,
