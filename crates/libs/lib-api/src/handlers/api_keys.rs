@@ -43,6 +43,7 @@ pub struct CreateApiKeyRequest {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct UpdateApiKeyRequest {
     pub permissions: Vec<String>,
+    pub ip_blacklist: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -118,6 +119,43 @@ fn parse_key_material(key_type: &str, value: &str) -> Result<KeyMaterial, String
     }
 }
 
+/// validate IP address format (supports IPv4, IPv6, and CIDR notation)
+fn validate_ip_address(ip: &str) -> Result<(), String> {
+    use std::net::IpAddr;
+    
+    // Check for CIDR notation (e.g., 192.168.1.0/24)
+    if let Some((ip_part, cidr_part)) = ip.split_once('/') {
+        let ip_addr: IpAddr = ip_part.parse().map_err(|_| format!("Invalid IP address: {}", ip_part))?;
+        let prefix_len: u8 = cidr_part.parse().map_err(|_| format!("Invalid CIDR prefix: {}", cidr_part))?;
+        
+        match ip_addr {
+            IpAddr::V4(_) => {
+                if prefix_len > 32 {
+                    return Err(format!("Invalid IPv4 CIDR prefix: {}", prefix_len));
+                }
+            }
+            IpAddr::V6(_) => {
+                if prefix_len > 128 {
+                    return Err(format!("Invalid IPv6 CIDR prefix: {}", prefix_len));
+                }
+            }
+        }
+        return Ok(());
+    }
+    
+    // Check for single IP address
+    ip.parse::<IpAddr>().map_err(|_| format!("Invalid IP address: {}", ip))?;
+    Ok(())
+}
+
+/// validate IP blacklist entries
+fn validate_ip_blacklist(ip_list: &[String]) -> Result<(), String> {
+    for ip in ip_list {
+        validate_ip_address(ip)?;
+    }
+    Ok(())
+}
+
 /// create a new API key
 pub async fn create_api_key(
     req: web::Json<CreateApiKeyRequest>,
@@ -133,6 +171,13 @@ pub async fn create_api_key(
     let permissions = permissions.map_err(|e| {
         actix_web::error::ErrorBadRequest(format!("Invalid permissions: {}", e))
     })?;
+
+    // validate IP blacklist if provided
+    if let Some(ref ip_blacklist) = req.ip_blacklist {
+        validate_ip_blacklist(ip_blacklist).map_err(|e| {
+            actix_web::error::ErrorBadRequest(format!("Invalid IP blacklist: {}", e))
+        })?;
+    }
 
     // parse key material if provided
     let key_material = if let (Some(key_type), Some(key_value)) = 
@@ -281,6 +326,13 @@ pub async fn update_api_key(
         actix_web::error::ErrorBadRequest(format!("Invalid permissions: {}", e))
     })?;
 
+    // validate IP blacklist if provided
+    if let Some(ref ip_blacklist) = req.ip_blacklist {
+        validate_ip_blacklist(ip_blacklist).map_err(|e| {
+            actix_web::error::ErrorBadRequest(format!("Invalid IP blacklist: {}", e))
+        })?;
+    }
+
     // convert permissions to JSON for database storage
     let permissions_json = serde_json::to_value(
         permissions.iter()
@@ -293,11 +345,16 @@ pub async fn update_api_key(
             .collect::<Vec<_>>()
     ).unwrap_or(serde_json::json!(["none"]));
 
-    let updates = ActiveModel {
+    let mut updates = ActiveModel {
         id: sea_orm::Set(api_key_id),
         permissions: Set(permissions_json.into()),
         ..Default::default()
     };
+
+    // Update IP blacklist if provided
+    if let Some(ip_blacklist) = req.ip_blacklist.clone() {
+        updates.ip_blacklist = Set(ip_blacklist);
+    }
 
     match repo.update(api_key_id, updates).await {
         Ok(updated_key) => {
