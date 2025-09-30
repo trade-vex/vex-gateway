@@ -1,14 +1,13 @@
 //! lib-api/src/handlers/orders.rs
 
 use actix_web::{HttpResponse, web};
+use common::cmd::{OrderCommand, OrderCommandType};
+use common::model::enums::{OrderType, Side};
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 use std::sync::mpsc;
-use vex_networking::client::{VexGateway, OrderCommandHandler};
+use std::time::Duration;
 use vex_config::GatewayNetworkingConfig;
-use common::cmd::{OrderCommand , OrderCommandType};
-use common::model::enums::{Side, OrderType};
-
+use vex_networking::client::{OrderCommandHandler, VexGateway};
 
 #[derive(Debug, Deserialize)]
 pub struct OrderRequest {
@@ -30,8 +29,8 @@ pub struct OrderResponse {
 pub async fn order(req: web::Json<OrderRequest>) -> HttpResponse {
     // Extract order data from the request
     let order_data = req.into_inner();
-    
-    // Generate a unique order ID 
+
+    // Generate a unique order ID
     let order_id = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -80,37 +79,29 @@ pub async fn order(req: web::Json<OrderRequest>) -> HttpResponse {
                 Ok(()) => {
                     // Wait for the processed order response
                     match rx.recv_timeout(Duration::from_secs(5)) {
-                        Ok(processed_order) => {
-                            HttpResponse::Ok().json(OrderResponse {
-                                order_id,
-                                status: "success".to_string(),
-                                message: format!("Order processed successfully: {:?}", processed_order),
-                            })
-                        }
-                        Err(_) => {
-                            HttpResponse::RequestTimeout().json(OrderResponse {
-                                order_id,
-                                status: "timeout".to_string(),
-                                message: "Order processing timed out".to_string(),
-                            })
-                        }
+                        Ok(processed_order) => HttpResponse::Ok().json(OrderResponse {
+                            order_id,
+                            status: "success".to_string(),
+                            message: format!("Order processed successfully: {:?}", processed_order),
+                        }),
+                        Err(_) => HttpResponse::RequestTimeout().json(OrderResponse {
+                            order_id,
+                            status: "timeout".to_string(),
+                            message: "Order processing timed out".to_string(),
+                        }),
                     }
                 }
-                Err(e) => {
-                    HttpResponse::InternalServerError().json(OrderResponse {
-                        order_id,
-                        status: "error".to_string(),
-                        message: format!("Failed to send order command: {}", e),
-                    })
-                }
+                Err(e) => HttpResponse::InternalServerError().json(OrderResponse {
+                    order_id,
+                    status: "error".to_string(),
+                    message: format!("Failed to send order command: {}", e),
+                }),
             }
         }
-        Err(e) => {
-            HttpResponse::InternalServerError().json(OrderResponse {
-                order_id,
-                status: "error".to_string(),
-                message: format!("Failed to start gateway client: {}", e),
-            })
-        }
+        Err(e) => HttpResponse::InternalServerError().json(OrderResponse {
+            order_id,
+            status: "error".to_string(),
+            message: format!("Failed to start gateway client: {}", e),
+        }),
     }
 }
