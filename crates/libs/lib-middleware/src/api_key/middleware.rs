@@ -165,7 +165,7 @@ impl ApiKeyStore {
             if let Some(cached) = cache.get(api_key) {
                 if !cached.is_expired(self.config.l1_ttl) {
                     self.metrics.l1_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    debug!("L1 cache hit for key: {}", api_key);
+                    debug!("L1 cache hit for key: {}", ApiKeyStore::mask_api_key(&api_key));
                     return Some(cached.config.clone());
                 } else {
                     // Remove expired entry
@@ -190,18 +190,18 @@ impl ApiKeyStore {
                         let mut cache = self.l1_cache.write().await;
                         cache.put(api_key.to_string(), cached);
                         
-                        debug!("Database hit for key: {}", api_key);
+                        debug!("Database hit for key: {}", ApiKeyStore::mask_api_key(&api_key));
                         return Some(config_arc);
                     } else {
-                        debug!("API key found but invalid (disabled/expired): {}", api_key);
+                        debug!("API key found but invalid (disabled/expired): {}", ApiKeyStore::mask_api_key(&api_key));
                         return None;
                     }
                 }
                 Ok(None) => {
-                    debug!("API key not found in database: {}", api_key);
+                    debug!("API key not found in database: {}", ApiKeyStore::mask_api_key(&api_key));
                 }
                 Err(e) => {
-                    error!("Database error while fetching API key {}: {}", api_key, e);
+                    error!("Database error while fetching API key {}: {}", ApiKeyStore::mask_api_key(&api_key), e);
                 }
             }
         }
@@ -216,7 +216,7 @@ impl ApiKeyStore {
             let mut cache = self.l1_cache.write().await;
             cache.put(api_key.to_string(), cached);
             
-            debug!("Memory store hit for key: {}", api_key);
+            debug!("Memory store hit for key: {}", ApiKeyStore::mask_api_key(&api_key));
             return Some(config_arc);
         }
 
@@ -235,12 +235,23 @@ impl ApiKeyStore {
         let mut cache = self.l1_cache.write().await;
         cache.pop(api_key);
         // TODO: Invalidate Redis cache when implemented
-        info!("Invalidated cache for key: {}", api_key);
+        info!("Invalidated cache for key: {}", ApiKeyStore::mask_api_key(&api_key));
     }
 
     /// Get cache metrics for monitoring
     pub fn metrics(&self) -> &CacheMetrics {
         &self.metrics
+    }
+
+    /// Mask API key for secure logging
+    fn mask_api_key(api_key: &str) -> String {
+        if api_key.len() <= 4 {
+            // For very short keys, just show asterisks
+            "*".repeat(api_key.len())
+        } else {
+            // Show last 4 characters with asterisks
+            format!("{}...{}", "*".repeat(api_key.len().saturating_sub(4)), &api_key[api_key.len() - 4..])
+        }
     }
 }
 
@@ -415,6 +426,17 @@ impl ApiKeyMiddleware {
     /// Get raw query string
     fn get_raw_query_string(req: &HttpRequest) -> String {
         req.uri().query().unwrap_or("").to_string()
+    }
+
+    /// Mask API key for secure logging
+    fn mask_api_key(api_key: &str) -> String {
+        if api_key.len() <= 4 {
+            // For very short keys, just show asterisks
+            "*".repeat(api_key.len())
+        } else {
+            // Show last 4 characters with asterisks
+            format!("{}...{}", "*".repeat(api_key.len().saturating_sub(4)), &api_key[api_key.len() - 4..])
+        }
     }
 
     /// Parse body parameters from different content types
@@ -661,7 +683,7 @@ where
 
             info!(
                 "API key validation successful for key: {} (security: {}, ip: {})", 
-                api_key, required_security, client_ip
+                ApiKeyMiddleware::mask_api_key(&api_key), required_security, client_ip
             );
             
             // Forward the request to the next service
