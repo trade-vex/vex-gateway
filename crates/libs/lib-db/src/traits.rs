@@ -25,20 +25,26 @@
 //! ## Usage Examples
 //!
 //! ### SQL Database
-//! ```rust,no_run
+//! ```rust,ignore
 //! use lib_db::traits::SqlDb;
 //! use lib_db::postgres::PostgresDb;
 //! use lib_db::error::Result;
+//! use serde::Deserialize;
+//!
+//! #[derive(Deserialize)]
+//! struct Count {
+//!     count: i64,
+//! }
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<()> {
 //!     let db = PostgresDb::connect("postgres://user:pass@localhost/db").await?;
 //!     
-//!     // Execute query
+//!     // Execute INSERT/UPDATE/DELETE
 //!     let affected = db.execute("INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')").await?;
 //!     
-//!     // Query data
-//!     let count = db.execute("SELECT COUNT(*) FROM users WHERE active = true").await?;
+//!     // Query data with SELECT
+//!     let results: Vec<Count> = db.query("SELECT COUNT(*) as count FROM users WHERE active = true").await?;
 //!     
 //!     Ok(())
 //! }
@@ -162,18 +168,28 @@ pub struct PoolStats {
 /// - Direct access to native connection pools
 ///
 /// ## Example Usage
-/// ```rust,no_run
+/// ```rust,ignore
 /// use lib_db::traits::SqlDb;
 /// use lib_db::postgres::PostgresDb;
 /// use lib_db::error::Result;
+/// use serde::Deserialize;
+///
+/// #[derive(Deserialize)]
+/// struct User {
+///     id: i64,
+///     name: String,
+/// }
 ///
 /// #[tokio::main]
 /// async fn main() -> Result<()> {
 ///     // Connect to database (requires actual database setup)
 ///     let db = PostgresDb::connect("postgres://user:pass@localhost/db").await?;
 ///     
-///     // Insert a new user
+///     // Insert a new user (execute for INSERT/UPDATE/DELETE)
 ///     let affected = db.execute("INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')").await?;
+///     
+///     // Query users (query for SELECT)
+///     let users: Vec<User> = db.query("SELECT id, name FROM users").await?;
 ///     
 ///     // Monitor pool health
 ///     let stats = db.pool_stats();
@@ -210,7 +226,7 @@ pub trait SqlDb: Send + Sync + Clone + 'static {
     /// * `Err(DbError::Configuration)` - Invalid connection string
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// use lib_db::traits::SqlDb;
     /// use lib_db::postgres::PostgresDb;
     /// use lib_db::error::Result;
@@ -241,22 +257,23 @@ pub trait SqlDb: Send + Sync + Clone + 'static {
     /// * `Err(DbError::Connection)` - Connection error
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust,ignore
+    /// // For parameterless queries, use the convenience method execute() instead
+    /// // This example shows parameterized usage (requires sqlx types)
     /// use lib_db::traits::SqlDb;
     /// use lib_db::postgres::PostgresDb;
     /// use lib_db::error::Result;
+    /// use sqlx::Arguments;
     ///
     /// #[tokio::main]
     /// async fn main() -> Result<()> {
     ///     let db = PostgresDb::connect("postgres://user:pass@localhost/db").await?;
     ///     
-    ///     // Insert a new user
-    ///     let affected = db.execute("INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')").await?;
-    ///     println!("Inserted {} rows", affected);
-    ///     
-    ///     // Update user
-    ///     let affected = db.execute("UPDATE users SET active = true WHERE id = 123").await?;
-    ///     println!("Updated {} rows", affected);
+    ///     // With parameters (bind values to prevent SQL injection)
+    ///     let mut args = <PostgresDb as SqlDb>::Arguments::default();
+    ///     args.add("Alice");
+    ///     args.add("alice@example.com");
+    ///     let affected = db.execute_with("INSERT INTO users (name, email) VALUES ($1, $2)", args).await?;
     ///     
     ///     Ok(())
     /// }
@@ -278,17 +295,29 @@ pub trait SqlDb: Send + Sync + Clone + 'static {
     /// * `Err(DbError::Connection)` - Connection error
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust,ignore
+    /// // For parameterless queries, use the convenience method query() instead
+    /// // This example shows parameterized usage (requires sqlx types)
     /// use lib_db::traits::SqlDb;
     /// use lib_db::postgres::PostgresDb;
     /// use lib_db::error::Result;
+    /// use sqlx::Arguments;
+    /// use serde::Deserialize;
+    ///
+    /// #[derive(Deserialize)]
+    /// struct User {
+    ///     id: i64,
+    ///     name: String,
+    /// }
     ///
     /// #[tokio::main]
     /// async fn main() -> Result<()> {
     ///     let db = PostgresDb::connect("postgres://user:pass@localhost/db").await?;
     ///     
-    ///     let count = db.execute("SELECT COUNT(*) FROM users WHERE active = true").await?;
-    ///     println!("Found {} active users", count);
+    ///     // With parameters
+    ///     let mut args = <PostgresDb as SqlDb>::Arguments::default();
+    ///     args.add(true);
+    ///     let users: Vec<User> = db.query_with("SELECT id, name FROM users WHERE active = $1", args).await?;
     ///     
     ///     Ok(())
     /// }
@@ -315,17 +344,29 @@ pub trait SqlDb: Send + Sync + Clone + 'static {
     /// This method will return an error if the query returns more than one row.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust,ignore
+    /// // For parameterless queries, use the convenience method query_one() instead  
+    /// // This example shows parameterized usage (requires sqlx types)
     /// use lib_db::traits::SqlDb;
     /// use lib_db::postgres::PostgresDb;
     /// use lib_db::error::Result;
+    /// use sqlx::Arguments;
+    /// use serde::Deserialize;
+    ///
+    /// #[derive(Deserialize)]
+    /// struct User {
+    ///     id: i64,
+    ///     name: String,
+    /// }
     ///
     /// #[tokio::main]
     /// async fn main() -> Result<()> {
     ///     let db = PostgresDb::connect("postgres://user:pass@localhost/db").await?;
     ///     
-    ///     let count = db.execute("SELECT COUNT(*) FROM users WHERE id = 123").await?;
-    ///     println!("Found {} users with id 123", count);
+    ///     // With parameters
+    ///     let mut args = <PostgresDb as SqlDb>::Arguments::default();
+    ///     args.add(123i64);
+    ///     let user: User = db.query_one_with("SELECT id, name FROM users WHERE id = $1", args).await?;
     ///     
     ///     Ok(())
     /// }
@@ -353,22 +394,29 @@ pub trait SqlDb: Send + Sync + Clone + 'static {
     /// This method will return an error if the query returns more than one row.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust,ignore
+    /// // For parameterless queries, use the convenience method query_optional() instead
+    /// // This example shows parameterized usage (requires sqlx types)
     /// use lib_db::traits::SqlDb;
     /// use lib_db::postgres::PostgresDb;
     /// use lib_db::error::Result;
+    /// use sqlx::Arguments;
+    /// use serde::Deserialize;
+    ///
+    /// #[derive(Deserialize)]
+    /// struct User {
+    ///     id: i64,
+    ///     name: String,
+    /// }
     ///
     /// #[tokio::main]
     /// async fn main() -> Result<()> {
     ///     let db = PostgresDb::connect("postgres://user:pass@localhost/db").await?;
     ///     
-    ///     let count = db.execute("SELECT COUNT(*) FROM users WHERE email = 'alice@example.com'").await?;
-    ///     
-    ///     if count > 0 {
-    ///         println!("User found");
-    ///     } else {
-    ///         println!("User not found");
-    ///     }
+    ///     // With parameters
+    ///     let mut args = <PostgresDb as SqlDb>::Arguments::default();
+    ///     args.add("alice@example.com");
+    ///     let user: Option<User> = db.query_optional_with("SELECT id, name FROM users WHERE email = $1", args).await?;
     ///     
     ///     Ok(())
     /// }
@@ -390,7 +438,7 @@ pub trait SqlDb: Send + Sync + Clone + 'static {
     /// * `&Self::NativePool` - Reference to the native connection pool
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// use lib_db::traits::SqlDb;
     /// use lib_db::postgres::PostgresDb;
     /// use lib_db::error::Result;
@@ -421,7 +469,7 @@ pub trait SqlDb: Send + Sync + Clone + 'static {
     /// * `PoolStats` - Current pool statistics
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// use lib_db::traits::{SqlDb, PoolStats};
     /// use lib_db::postgres::PostgresDb;
     /// use lib_db::error::Result;
@@ -444,6 +492,158 @@ pub trait SqlDb: Send + Sync + Clone + 'static {
     /// }
     /// ```
     fn pool_stats(&self) -> PoolStats;
+
+    /// Convenience method: Execute a query without parameters
+    ///
+    /// This is a shorthand for `execute_with(sql, default_args)` for queries that don't
+    /// need parameters. Use for INSERT, UPDATE, DELETE statements.
+    ///
+    /// # Arguments
+    /// * `sql` - SQL statement without parameters
+    ///
+    /// # Returns
+    /// * `Ok(u64)` - Number of affected rows
+    /// * `Err(DbError)` - Query execution failed
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use lib_db::traits::SqlDb;
+    /// use lib_db::postgres::PostgresDb;
+    /// use lib_db::error::Result;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<()> {
+    ///     let db = PostgresDb::connect("postgres://user:pass@localhost/db").await?;
+    ///     let affected = db.execute("DELETE FROM sessions WHERE expires_at < NOW()").await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    async fn execute(&self, sql: &str) -> Result<u64>
+    where
+        Self::Arguments<'static>: Default,
+    {
+        self.execute_with(sql, Default::default()).await
+    }
+
+    /// Convenience method: Query multiple rows without parameters
+    ///
+    /// This is a shorthand for `query_with(sql, default_args)` for queries that don't
+    /// need parameters. Use for SELECT statements that return multiple rows.
+    ///
+    /// # Arguments
+    /// * `sql` - SQL SELECT statement without parameters
+    ///
+    /// # Returns
+    /// * `Ok(Vec<T>)` - All matching rows
+    /// * `Err(DbError)` - Query execution failed
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use lib_db::traits::SqlDb;
+    /// use lib_db::postgres::PostgresDb;
+    /// use lib_db::error::Result;
+    /// use serde::Deserialize;
+    ///
+    /// #[derive(Deserialize)]
+    /// struct User {
+    ///     id: i64,
+    ///     name: String,
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<()> {
+    ///     let db = PostgresDb::connect("postgres://user:pass@localhost/db").await?;
+    ///     let users: Vec<User> = db.query("SELECT id, name FROM users").await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    async fn query<T>(&self, sql: &str) -> Result<Vec<T>>
+    where
+        T: Send + Unpin + for<'r> From<&'r Self::Row>,
+        Self::Arguments<'static>: Default,
+    {
+        self.query_with(sql, Default::default()).await
+    }
+
+    /// Convenience method: Query single row without parameters
+    ///
+    /// This is a shorthand for `query_one_with(sql, default_args)` for queries that don't
+    /// need parameters. Use for SELECT statements that return exactly one row.
+    ///
+    /// # Arguments
+    /// * `sql` - SQL SELECT statement without parameters
+    ///
+    /// # Returns
+    /// * `Ok(T)` - The single row
+    /// * `Err(DbError)` - Query execution failed or no rows returned
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use lib_db::traits::SqlDb;
+    /// use lib_db::postgres::PostgresDb;
+    /// use lib_db::error::Result;
+    /// use serde::Deserialize;
+    ///
+    /// #[derive(Deserialize)]
+    /// struct Count {
+    ///     count: i64,
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<()> {
+    ///     let db = PostgresDb::connect("postgres://user:pass@localhost/db").await?;
+    ///     let result: Count = db.query_one("SELECT COUNT(*) as count FROM users").await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    async fn query_one<T>(&self, sql: &str) -> Result<T>
+    where
+        T: Send + Unpin + for<'r> From<&'r Self::Row>,
+        Self::Arguments<'static>: Default,
+    {
+        self.query_one_with(sql, Default::default()).await
+    }
+
+    /// Convenience method: Query optional single row without parameters
+    ///
+    /// This is a shorthand for `query_optional_with(sql, default_args)` for queries that don't
+    /// need parameters. Use for SELECT statements that return zero or one row.
+    ///
+    /// # Arguments
+    /// * `sql` - SQL SELECT statement without parameters
+    ///
+    /// # Returns
+    /// * `Ok(Some(T))` - Row found
+    /// * `Ok(None)` - No rows found
+    /// * `Err(DbError)` - Query execution failed
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use lib_db::traits::SqlDb;
+    /// use lib_db::postgres::PostgresDb;
+    /// use lib_db::error::Result;
+    /// use serde::Deserialize;
+    ///
+    /// #[derive(Deserialize)]
+    /// struct User {
+    ///     id: i64,
+    ///     name: String,
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<()> {
+    ///     let db = PostgresDb::connect("postgres://user:pass@localhost/db").await?;
+    ///     let user: Option<User> = db.query_optional("SELECT id, name FROM users WHERE id = 1").await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    async fn query_optional<T>(&self, sql: &str) -> Result<Option<T>>
+    where
+        T: Send + Unpin + for<'r> From<&'r Self::Row>,
+        Self::Arguments<'static>: Default,
+    {
+        self.query_optional_with(sql, Default::default()).await
+    }
 }
 
 // ============================================================================
