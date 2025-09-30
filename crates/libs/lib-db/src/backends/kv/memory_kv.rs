@@ -826,10 +826,11 @@ impl ExpiringKvStore for MemoryDb {
     }
 
     async fn expire(&self, key: &str, ttl_secs: u64) -> Result<bool> {
-        if let Some(mut entry) = self.store.get_mut(key)
-            && !Self::is_expired(&entry) {
-            entry.expires_at = Some(Instant::now() + Duration::from_secs(ttl_secs));
-            return Ok(true);
+        if let Some(mut entry) = self.store.get_mut(key) {
+            if !Self::is_expired(&entry) {
+                entry.expires_at = Some(Instant::now() + Duration::from_secs(ttl_secs));
+                return Ok(true);
+            }
         }
 
         Ok(false)
