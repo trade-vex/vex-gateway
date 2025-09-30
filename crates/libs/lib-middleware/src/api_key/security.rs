@@ -1,8 +1,18 @@
-use serde::{Deserialize, Serialize};
 use crate::api_key::signature::SignatureAlgorithm;
+use serde::{Deserialize, Serialize};
 
-/// Security types for API endpoints 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sea_orm::DeriveActiveEnum, sea_orm::EnumIter)]
+/// Security types for API endpoints
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    sea_orm::DeriveActiveEnum,
+    sea_orm::EnumIter,
+)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "security_type")]
 pub enum SecurityType {
     /// Endpoint can be accessed freely
@@ -168,7 +178,7 @@ impl ApiKeyConfig {
         if self.ip_whitelist.is_empty() {
             return true; // No whitelist means all IPs are allowed
         }
-        
+
         self.ip_whitelist.contains(&ip.to_string())
     }
 

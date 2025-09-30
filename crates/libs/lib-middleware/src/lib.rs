@@ -3,16 +3,12 @@ pub mod models;
 pub mod repository;
 
 pub use api_key::{
-    middleware::{ApiKeyMiddleware, RouteSecurityConfig, ApiKeyStore, CacheConfig, CacheMetrics},
-    security::{SecurityType, ApiKeyConfig, KeyMaterial},
     error::ApiKeyError,
-    signature::{SignatureVerifier, SignatureAlgorithm},
+    middleware::{ApiKeyMiddleware, ApiKeyStore, CacheConfig, CacheMetrics, RouteSecurityConfig},
+    security::{ApiKeyConfig, KeyMaterial, SecurityType},
+    signature::{SignatureAlgorithm, SignatureVerifier},
 };
 
-pub use models::{
-    api_key::{Model as ApiKeyModel, NewApiKey, KeyMaterialType},
-};
+pub use models::api_key::{KeyMaterialType, Model as ApiKeyModel, NewApiKey};
 
-pub use repository::{
-    api_key_repository::{ApiKeyRepository, PostgresApiKeyRepository},
-};
+pub use repository::api_key_repository::{ApiKeyRepository, PostgresApiKeyRepository};
