@@ -195,9 +195,7 @@ where
                                                 "status": 401
                                             }
                                         }));
-                                    Ok(
-                                        ServiceResponse::new(req, response).map_into_boxed_body()
-                                    )
+                                    Ok(ServiceResponse::new(req, response).map_into_boxed_body())
                                 }
                                 Ok(false) => {
                                     // Token is valid and not blacklisted, proceed to the inner service
