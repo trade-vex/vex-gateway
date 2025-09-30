@@ -13,16 +13,49 @@ jobs:
   test:
     name: Build and Test
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: myuser
+          POSTGRES_PASSWORD: mypassword
+          POSTGRES_DB: mydb
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
     env:
-      APP_ENV: testing
-      SERVER_HOST: ${{ secrets.SERVER_HOST }}
-      SERVER_PORT: ${{ secrets.SERVER_PORT }}
+      CI: true
+      SERVER_HOST: ${{ secrets.SERVER_HOST || '127.0.0.1' }}
+      SERVER_PORT: ${{ secrets.SERVER_PORT || '8000' }}
+      DATABASE_URL: postgres://myuser:mypassword@postgres:5432/mydb
+      REDIS_URL: redis://redis:6379
+      JWT_PRIVATE_KEY_PATH: crates/libs/lib-auth/src/keys/private_key.pem
+      JWT_PUBLIC_KEY_PATH: crates/libs/lib-auth/src/keys/public_key.pem
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Generate test keys
+        run: |
+          mkdir -p crates/libs/lib-auth/src/keys
+          openssl genrsa -out crates/libs/lib-auth/src/keys/private_key.pem 2048
+          openssl rsa -in crates/libs/lib-auth/src/keys/private_key.pem -pubout -out crates/libs/lib-auth/src/keys/public_key.pem
 
       - name: Build workspace
         run: cargo build --workspace
@@ -31,7 +64,7 @@ jobs:
         run: cargo build --workspace --release
 
       - name: Run tests
-        run: cargo test
+        run: cargo test --workspace
 
   fmt:
     name: Rustfmt
@@ -64,20 +97,61 @@ jobs:
   coverage:
     name: Code coverage
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: myuser
+          POSTGRES_PASSWORD: mypassword
+          POSTGRES_DB: mydb
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
     container:
       image: xd009642/tarpaulin
       options: --security-opt seccomp=unconfined
     env:
-      APP_ENV: testing
-      SERVER_HOST: ${{ secrets.SERVER_HOST }}
-      SERVER_PORT: ${{ secrets.SERVER_PORT }}
+      CI: true
+      SERVER_HOST: ${{ secrets.SERVER_HOST || '127.0.0.1' }}
+      SERVER_PORT: ${{ secrets.SERVER_PORT || '8000' }}
+      DATABASE_URL: postgres://myuser:mypassword@postgres:5432/mydb
+      REDIS_URL: redis://redis:6379
+      JWT_PRIVATE_KEY_PATH: crates/libs/lib-auth/src/keys/private_key.pem
+      JWT_PUBLIC_KEY_PATH: crates/libs/lib-auth/src/keys/public_key.pem
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Generate test keys
+        run: |
+          mkdir -p crates/libs/lib-auth/src/keys
+          openssl genrsa -out crates/libs/lib-auth/src/keys/private_key.pem 2048
+          openssl rsa -in crates/libs/lib-auth/src/keys/private_key.pem -pubout -out crates/libs/lib-auth/src/keys/public_key.pem
+
       - name: Generate code coverage
         run: |
-          cargo tarpaulin --verbose --workspace
+          cargo tarpaulin --verbose --workspace --timeout 300 --out Html --output-dir coverage
+
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 30
 
   audit:
     name: Security audit

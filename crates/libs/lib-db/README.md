@@ -76,6 +76,22 @@ async fn main() -> Result<()> {
     let db = PostgresDb::connect("postgresql://user:pass@localhost/dbname").await?;
     
     // Execute a query
+<<<<<<< HEAD
+    let mut args = PgArguments::default();
+    args.add("Alice");
+    args.add("alice@example.com");
+    let affected = db.execute_with(
+        "INSERT INTO users (name, email) VALUES ($1, $2)",
+        args
+    ).await?;
+    
+    // Query multiple rows
+    let mut args = PgArguments::default();
+    args.add(true);
+    let users: Vec<User> = db.query_with(
+        "SELECT id, name, email FROM users WHERE active = $1",
+        args
+=======
     let affected = db.execute_with(
         "INSERT INTO users (name, email) VALUES ($1, $2)",
         PgArguments::from(vec![("Alice", "alice@example.com")])
@@ -85,6 +101,7 @@ async fn main() -> Result<()> {
     let users: Vec<User> = db.query_with(
         "SELECT id, name, email FROM users WHERE active = $1",
         PgArguments::from(vec![true])
+>>>>>>> 89933b2 (chore : update lib-db)
     ).await?;
     
     // Get native pool for advanced operations
@@ -215,12 +232,25 @@ use lib_db::{
 };
 
 // Function that works with any SQL database
+<<<<<<< HEAD
+async fn query_users<T: SqlDb>(db: &T) -> Result<Vec<User>> 
+where
+    for<'r> T::Row: sqlx::FromRow<'r, T::Row>,
+{
+    // Note: The actual implementation would depend on how the trait
+    // handles parameterized queries generically. For PostgreSQL:
+    // let mut args = PgArguments::default();
+    // args.add(true);
+    // let users = db.query_with("SELECT id, name, email FROM users WHERE active = $1", args).await?;
+    todo!("Implementation depends on the actual SqlDb trait design")
+=======
 async fn query_users<T: SqlDb>(db: &T) -> Result<Vec<User>> {
     let users = db.query_with(
         "SELECT id, name, email FROM users WHERE active = $1",
         db.create_arguments(&[true])
     ).await?;
     Ok(users)
+>>>>>>> 89933b2 (chore : update lib-db)
 }
 
 // Function that uses escape hatch for advanced operations
@@ -235,7 +265,11 @@ async fn complex_transaction<T: SqlDb>(db: &T) -> Result<()> {
 
 ```rust
 use lib_db::{
+<<<<<<< HEAD
+    memory_kv::MemoryDb,
+=======
     memory::MemoryDb,
+>>>>>>> 89933b2 (chore : update lib-db)
     redis::RedisDb,
     traits::{BasicKvStore, AdvancedKvStore, AtomicKvStore, ExpiringKvStore},
 };
@@ -291,6 +325,15 @@ async fn session_management<T: BasicKvStore + ExpiringKvStore>(kv: &T) -> Result
 ### Database-Specific Examples
 
 ```rust
+<<<<<<< HEAD
+use lib_db::{
+    postgres::PostgresDb,
+    memory_kv::MemoryDb,
+    redis::RedisDb,
+};
+
+=======
+>>>>>>> 89933b2 (chore : update lib-db)
 // PostgreSQL
 let postgres_db = PostgresDb::connect("postgresql://user:pass@localhost/dbname").await?;
 query_users(&postgres_db).await?;

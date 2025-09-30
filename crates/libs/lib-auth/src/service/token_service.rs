@@ -1,5 +1,5 @@
 use crate::config::JwtConfig;
-use crate::dto::auth::{AppClaims, TokenResponse};
+use crate::dto::jwt_response_dto::{AppClaims, JwtTokenResponse};
 use crate::error::auth_error::AuthError;
 use chrono::{Duration, Utc};
 use deadpool_redis::Pool;
@@ -31,7 +31,7 @@ impl TokenService {
         }
     }
 
-    pub async fn mint_tokens(&self, user_id: Uuid) -> Result<TokenResponse, AuthError> {
+    pub async fn mint_tokens(&self, user_id: Uuid) -> Result<JwtTokenResponse, AuthError> {
         // Fix the Redis connection error handling
         let mut conn = self
             .redis_pool
@@ -47,10 +47,11 @@ impl TokenService {
         let access_claims = AppClaims {
             sub: user_id.to_string(),
             jti: jti.clone(),
-            iat: now.timestamp() as usize,
-            exp: access_exp.timestamp() as usize,
+            iat: now.timestamp(),
+            exp: access_exp.timestamp(),
             iss: self.jwt_config.issuer.clone(),
             aud: self.jwt_config.audience.clone(),
+            pwd: now.timestamp(), // Use current time as password timestamp
         };
 
         let access_token = encode(
@@ -66,15 +67,24 @@ impl TokenService {
         let redis_key = format!("refresh:{}", refresh_token);
         let redis_val = format!("{}:{}", user_id, jti);
 
+        // Convert to u64 using fallible conversion to handle overflow
+        let refresh_ttl_secs_u64 = refresh_ttl_secs
+            .try_into()
+            .map_err(|_| AuthError::Validation("Refresh token TTL is too large".to_string()))?;
+
         let _: () = conn
-            .set_ex(redis_key, redis_val, refresh_ttl_secs as usize)
+            .set_ex(redis_key, redis_val, refresh_ttl_secs_u64)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to store refresh token: {}", e)))?;
 
-        Ok(TokenResponse {
+        let expires_in = (self.jwt_config.access_token_ttl_minutes * 60)
+            .try_into()
+            .map_err(|_| AuthError::Validation("Access token TTL is too large".to_string()))?;
+
+        Ok(JwtTokenResponse {
             access_token,
             refresh_token,
-            expires_in: (self.jwt_config.access_token_ttl_minutes * 60) as u64,
+            expires_in,
         })
     }
 
@@ -82,7 +92,7 @@ impl TokenService {
     pub async fn refresh_tokens(
         &self,
         old_refresh_token: &str,
-    ) -> Result<TokenResponse, AuthError> {
+    ) -> Result<JwtTokenResponse, AuthError> {
         let mut conn = self
             .redis_pool
             .get()
@@ -109,8 +119,11 @@ impl TokenService {
             // Blacklist the old access token's JTI
             let blacklist_key = format!("blacklist:{}", old_jti);
             let blacklist_ttl = self.jwt_config.access_token_ttl_minutes * 60;
+            let blacklist_ttl_u64 = blacklist_ttl
+                .try_into()
+                .map_err(|_| AuthError::Validation("Blacklist TTL is too large".to_string()))?;
             let _: () = conn
-                .set_ex(blacklist_key, "1", blacklist_ttl as usize)
+                .set_ex(blacklist_key, "1", blacklist_ttl_u64)
                 .await
                 .map_err(|e| AuthError::Redis(format!("Failed to blacklist token: {}", e)))?;
 
@@ -162,17 +175,141 @@ impl TokenService {
 
         // Calculate TTL until token expires
         let current_time = Utc::now().timestamp();
-        let ttl = if claims.exp > current_time as usize {
-            (claims.exp - current_time as usize) as u64
+        let ttl = if claims.exp > current_time {
+            claims.exp - current_time
         } else {
             return Ok(()); // Token already expired, no need to blacklist
         };
 
         let blacklist_key = format!("blacklist:{}", claims.jti);
+        let ttl_u64 = ttl
+            .try_into()
+            .map_err(|_| AuthError::Validation("Token TTL is too large".to_string()))?;
         let _: () = conn
-            .set_ex(blacklist_key, "1", ttl as usize)
+            .set_ex(blacklist_key, "1", ttl_u64)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to blacklist token: {}", e)))?;
+
+        Ok(())
+    }
+
+    // Blacklist a JTI with specific TTL
+    pub async fn blacklist_jti(&self, jti: &str, ttl_secs: u64) -> Result<(), AuthError> {
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+
+        let blacklist_key = format!("blacklist:{}", jti);
+        let _: () = conn
+            .set_ex(blacklist_key, "1", ttl_secs)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to blacklist JTI: {}", e)))?;
+
+        Ok(())
+    }
+
+    // Mint tokens with specific password timestamp (for session invalidation)
+    pub async fn mint_tokens_with_password_time(
+        &self,
+        user_id: Uuid,
+        password_timestamp: i64,
+    ) -> Result<JwtTokenResponse, AuthError> {
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+
+        let jti = Uuid::new_v4().to_string();
+        let now = Utc::now();
+
+        // Access Token
+        let access_exp = now + Duration::minutes(self.jwt_config.access_token_ttl_minutes);
+        let access_claims = AppClaims {
+            sub: user_id.to_string(),
+            jti: jti.clone(),
+            iat: now.timestamp(),
+            exp: access_exp.timestamp(),
+            iss: self.jwt_config.issuer.clone(),
+            aud: self.jwt_config.audience.clone(),
+            pwd: password_timestamp,
+        };
+
+        let access_token = encode(
+            &Header::new(Algorithm::RS256),
+            &access_claims,
+            &self.encoding_key,
+        )
+        .map_err(|e| AuthError::Validation(format!("JWT validation failed: {}", e)))?;
+
+        // Refresh Token
+        let refresh_token = Uuid::new_v4().to_string();
+        let refresh_ttl_secs = self.jwt_config.refresh_token_ttl_days * 24 * 3600;
+        let redis_key = format!("refresh:{}", refresh_token);
+        let redis_val = format!("{}:{}", user_id, jti);
+
+        // Convert to u64 using fallible conversion to handle overflow
+        let refresh_ttl_secs_u64 = refresh_ttl_secs
+            .try_into()
+            .map_err(|_| AuthError::Validation("Refresh token TTL is too large".to_string()))?;
+
+        let _: () = conn
+            .set_ex(redis_key, redis_val, refresh_ttl_secs_u64)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to store refresh token: {}", e)))?;
+
+        let expires_in = (self.jwt_config.access_token_ttl_minutes * 60)
+            .try_into()
+            .map_err(|_| AuthError::Validation("Access token TTL is too large".to_string()))?;
+
+        Ok(JwtTokenResponse {
+            access_token,
+            refresh_token,
+            expires_in,
+        })
+    }
+
+    // Revoke all sessions for a user by blacklisting all refresh tokens
+    pub async fn revoke_user_sessions(&self, user_id: Uuid) -> Result<(), AuthError> {
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+
+        // Find all refresh tokens for this user
+        let pattern = "refresh:*".to_string();
+        let keys: Vec<String> = conn
+            .keys(pattern)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to find refresh tokens: {}", e)))?;
+
+        // Check each refresh token and delete if it belongs to this user
+        for key in keys {
+            if let Ok(Some(val)) = conn.get::<String, Option<String>>(key.clone()).await {
+                let parts: Vec<&str> = val.split(':').collect();
+                if parts.len() == 2 && parts[0] == user_id.to_string() {
+                    // Delete the refresh token
+                    let _: () = conn.del(key).await.map_err(|e| {
+                        AuthError::Redis(format!("Failed to delete refresh token: {}", e))
+                    })?;
+
+                    // Blacklist the associated JTI
+                    let jti = parts[1];
+                    let blacklist_key = format!("blacklist:{}", jti);
+                    let blacklist_ttl = self.jwt_config.access_token_ttl_minutes * 60;
+                    let blacklist_ttl_u64 = blacklist_ttl.try_into().map_err(|_| {
+                        AuthError::Validation("Blacklist TTL is too large".to_string())
+                    })?;
+                    let _: () = conn
+                        .set_ex(blacklist_key, "1", blacklist_ttl_u64)
+                        .await
+                        .map_err(|e| AuthError::Redis(format!("Failed to blacklist JTI: {}", e)))?;
+                }
+            }
+        }
 
         Ok(())
     }

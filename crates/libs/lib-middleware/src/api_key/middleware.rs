@@ -1,23 +1,24 @@
 use actix_web::{
     dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform},
-    Error, HttpMessage, HttpRequest, web,
+    error::PayloadError,
+    web, Error, HttpMessage, HttpRequest,
 };
 use futures_util::future::{ready, LocalBoxFuture, Ready};
+use futures_util::stream;
 use std::{
     collections::HashMap,
+    pin::Pin,
     rc::Rc,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH, Duration},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 use crate::api_key::{
     error::ApiKeyError,
-    security::{ApiKeyConfig, SecurityType, KeyMaterial},
+    security::{ApiKeyConfig, KeyMaterial, SecurityType},
     signature::SignatureVerifier,
-    cache::{ApiKeyCache, CacheStats},
-    redis_cache::{RedisApiKeyCache, RedisCacheConfig},
 };
 use crate::repository::api_key_repository::ApiKeyRepository;
 
@@ -30,17 +31,15 @@ pub struct RouteSecurityConfig {
 }
 
 /// API Key Store with multi-level caching
-/// 
+///
 /// Cache Hierarchy:
 /// 1. L1 (In-Memory LRU)
-/// 2. L2 (Redis) - Distributed cache
-/// 3. L3 (Database) - Persistent storage
+/// 2. L2 (Redis) - TODO
+/// 3. L3 (Database)
 #[derive(Clone)]
 pub struct ApiKeyStore {
     /// L1 Cache: In-memory LRU for hot keys
     l1_cache: Arc<RwLock<lru::LruCache<String, CachedApiKey>>>,
-    /// L2 Cache: Redis for distributed caching
-    l2_cache: Option<Arc<dyn ApiKeyCache>>,
     /// Database repository for persistent storage
     api_key_repo: Option<Arc<dyn ApiKeyRepository>>,
     /// Fallback: In-memory HashMap for development
@@ -71,22 +70,18 @@ impl CachedApiKey {
     }
 }
 
-/// Cache configuration 
+/// Cache configuration
 #[derive(Clone)]
 pub struct CacheConfig {
     pub l1_max_size: usize,
     pub l1_ttl: Duration,
-    pub l2_ttl: Duration,
-    pub l2_enabled: bool,
 }
 
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
-            l1_max_size: 100_000,  // 100K hot keys in memory
-            l1_ttl: Duration::from_secs(300),  // 5 minute TTL
-            l2_ttl: Duration::from_secs(1800), // 30 minute TTL for Redis
-            l2_enabled: false,     // Disabled by default
+            l1_max_size: 100_000,             // 100K hot keys in memory
+            l1_ttl: Duration::from_secs(300), // 5 minute TTL
         }
     }
 }
@@ -95,9 +90,6 @@ impl Default for CacheConfig {
 pub struct CacheMetrics {
     pub l1_hits: std::sync::atomic::AtomicU64,
     pub l1_misses: std::sync::atomic::AtomicU64,
-    pub l2_hits: std::sync::atomic::AtomicU64,
-    pub l2_misses: std::sync::atomic::AtomicU64,
-    pub l2_errors: std::sync::atomic::AtomicU64,
     pub db_queries: std::sync::atomic::AtomicU64,
 }
 
@@ -106,9 +98,6 @@ impl CacheMetrics {
         Self {
             l1_hits: std::sync::atomic::AtomicU64::new(0),
             l1_misses: std::sync::atomic::AtomicU64::new(0),
-            l2_hits: std::sync::atomic::AtomicU64::new(0),
-            l2_misses: std::sync::atomic::AtomicU64::new(0),
-            l2_errors: std::sync::atomic::AtomicU64::new(0),
             db_queries: std::sync::atomic::AtomicU64::new(0),
         }
     }
@@ -117,44 +106,23 @@ impl CacheMetrics {
     pub fn get_l1_hit_rate(&self) -> f64 {
         let hits = self.l1_hits.load(std::sync::atomic::Ordering::Relaxed);
         let misses = self.l1_misses.load(std::sync::atomic::Ordering::Relaxed);
-        if hits + misses == 0 { 0.0 } else { hits as f64 / (hits + misses) as f64 }
-    }
-
-    /// Get L2 cache hit rate for monitoring
-    pub fn get_l2_hit_rate(&self) -> f64 {
-        let hits = self.l2_hits.load(std::sync::atomic::Ordering::Relaxed);
-        let misses = self.l2_misses.load(std::sync::atomic::Ordering::Relaxed);
-        if hits + misses == 0 { 0.0 } else { hits as f64 / (hits + misses) as f64 }
-    }
-
-    /// Get overall cache statistics
-    pub fn get_cache_stats(&self) -> CacheStats {
-        CacheStats {
-            hits: self.l1_hits.load(std::sync::atomic::Ordering::Relaxed) + 
-                  self.l2_hits.load(std::sync::atomic::Ordering::Relaxed),
-            misses: self.l1_misses.load(std::sync::atomic::Ordering::Relaxed) + 
-                    self.l2_misses.load(std::sync::atomic::Ordering::Relaxed),
-            errors: self.l2_errors.load(std::sync::atomic::Ordering::Relaxed),
-            sets: 0, // Not tracked in this metrics struct
-            deletes: 0, // Not tracked in this metrics struct
-            size: None,
+        if hits + misses == 0 {
+            0.0
+        } else {
+            hits as f64 / (hits + misses) as f64
         }
     }
 }
 
 impl ApiKeyStore {
-    /// Create new store 
+    /// Create new store
     pub fn new(config: CacheConfig) -> Self {
-        let l1_cache = Arc::new(RwLock::new(
-            lru::LruCache::new(
-                std::num::NonZeroUsize::new(config.l1_max_size)
-                    .expect("L1 cache size must be > 0")
-            )
-        ));
+        let l1_cache = Arc::new(RwLock::new(lru::LruCache::new(
+            std::num::NonZeroUsize::new(config.l1_max_size).expect("L1 cache size must be > 0"),
+        )));
 
         Self {
             l1_cache,
-            l2_cache: None,
             api_key_repo: None,
             memory_store: Arc::new(HashMap::new()),
             config,
@@ -163,54 +131,18 @@ impl ApiKeyStore {
     }
 
     /// Create store with database repository
-    pub fn with_repository(
-        config: CacheConfig,
-        api_key_repo: Arc<dyn ApiKeyRepository>,
-    ) -> Self {
-        let l1_cache = Arc::new(RwLock::new(
-            lru::LruCache::new(
-                std::num::NonZeroUsize::new(config.l1_max_size)
-                    .expect("L1 cache size must be > 0")
-            )
-        ));
+    pub fn with_repository(config: CacheConfig, api_key_repo: Arc<dyn ApiKeyRepository>) -> Self {
+        let l1_cache = Arc::new(RwLock::new(lru::LruCache::new(
+            std::num::NonZeroUsize::new(config.l1_max_size).expect("L1 cache size must be > 0"),
+        )));
 
         Self {
             l1_cache,
-            l2_cache: None,
             api_key_repo: Some(api_key_repo),
             memory_store: Arc::new(HashMap::new()),
             config,
             metrics: Arc::new(CacheMetrics::new()),
         }
-    }
-
-    pub async fn with_redis_cache(
-        config: CacheConfig,
-        redis_config: RedisCacheConfig,
-        api_key_repo: Option<Arc<dyn ApiKeyRepository>>,
-    ) -> Result<Self, ApiKeyError> {
-        let l1_cache = Arc::new(RwLock::new(
-            lru::LruCache::new(
-                std::num::NonZeroUsize::new(config.l1_max_size)
-                    .expect("L1 cache size must be > 0")
-            )
-        ));
-
-        let l2_cache = if config.l2_enabled {
-            let redis_cache = RedisApiKeyCache::new(redis_config).await?;
-            Some(Arc::new(redis_cache) as Arc<dyn ApiKeyCache>)
-        } else {
-            None
-        };
-
-        Ok(Self {
-            l1_cache,
-            l2_cache,
-            api_key_repo,
-            memory_store: Arc::new(HashMap::new()),
-            config,
-            metrics: Arc::new(CacheMetrics::new()),
-        })
     }
 
     /// Add API keys for development
@@ -225,13 +157,18 @@ impl ApiKeyStore {
 
     /// Fast API key lookup with caching
     pub async fn get_api_key(&self, api_key: &str) -> Option<Arc<ApiKeyConfig>> {
-        // L1 Cache: Check in-memory LRU first 
+        // L1 Cache: Check in-memory LRU first
         {
             let mut cache = self.l1_cache.write().await;
             if let Some(cached) = cache.get(api_key) {
                 if !cached.is_expired(self.config.l1_ttl) {
-                    self.metrics.l1_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    debug!("L1 cache hit for key: {}", api_key);
+                    self.metrics
+                        .l1_hits
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    debug!(
+                        "L1 cache hit for key: {}",
+                        ApiKeyStore::mask_api_key(&api_key)
+                    );
                     return Some(cached.config.clone());
                 } else {
                     // Remove expired entry
@@ -239,91 +176,80 @@ impl ApiKeyStore {
                 }
             }
         }
-        
-        self.metrics.l1_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // check in l2 redis if available
-        if let Some(l2_cache) = &self.l2_cache {
-            match l2_cache.get(api_key).await {
-                Ok(Some(config)) => {
-                    self.metrics.l2_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let config_arc = Arc::new(config.clone());
-                    
-                    // Update L1 cache
-                    let cached = CachedApiKey::new(config);
-                    let mut cache = self.l1_cache.write().await;
-                    cache.put(api_key.to_string(), cached);
-                    
-                    debug!("L2 cache hit for key: {}", api_key);
-                    return Some(config_arc);
-                }
-                Ok(None) => {
-                    self.metrics.l2_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    debug!("L2 cache miss for key: {}", api_key);
-                }
-                Err(e) => {
-                    self.metrics.l2_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    warn!("L2 cache error for key {}: {}", api_key, e);
-                }
-            }
-        }
+        self.metrics
+            .l1_misses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+        // L3: Check database first (if available)
         if let Some(repo) = &self.api_key_repo {
             match repo.find_by_api_key(api_key).await {
                 Ok(Some(model)) => {
                     if model.is_valid() {
-                        self.metrics.db_queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        self.metrics
+                            .db_queries
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let config = model.to_api_key_config();
                         let config_arc = Arc::new(config.clone());
-                        
+
                         // Update L1 cache
-                        let cached = CachedApiKey::new(config.clone());
+                        let cached = CachedApiKey::new(config);
                         let mut cache = self.l1_cache.write().await;
                         cache.put(api_key.to_string(), cached);
-                        
-                        // Update L2 cache if available
-                        if let Some(l2_cache) = &self.l2_cache {
-                            if let Err(e) = l2_cache.set(api_key, &config, self.config.l2_ttl).await {
-                                warn!("Failed to update L2 cache for key {}: {}", api_key, e);
-                            }
-                        }
-                        
-                        debug!("Database hit for key: {}", api_key);
+
+                        debug!(
+                            "Database hit for key: {}",
+                            ApiKeyStore::mask_api_key(&api_key)
+                        );
                         return Some(config_arc);
                     } else {
-                        debug!("API key found but invalid (disabled/expired): {}", api_key);
+                        debug!(
+                            "API key found but invalid (disabled/expired): {}",
+                            ApiKeyStore::mask_api_key(&api_key)
+                        );
                         return None;
                     }
                 }
                 Ok(None) => {
-                    debug!("API key not found in database: {}", api_key);
+                    debug!(
+                        "API key not found in database: {}",
+                        ApiKeyStore::mask_api_key(&api_key)
+                    );
                 }
                 Err(e) => {
-                    error!("Database error while fetching API key {}: {}", api_key, e);
+                    error!(
+                        "Database error while fetching API key {}: {}",
+                        ApiKeyStore::mask_api_key(&api_key),
+                        e
+                    );
                 }
             }
         }
 
         // Fallback: Check memory store (for development/testing)
         if let Some(config) = self.memory_store.get(api_key) {
-            self.metrics.db_queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.metrics
+                .db_queries
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let config_arc = Arc::new(config.clone());
-            
+
             // Update L1 cache
             let cached = CachedApiKey::new(config.clone());
             let mut cache = self.l1_cache.write().await;
             cache.put(api_key.to_string(), cached);
-            
-            // Update L2 cache if available)
-            if let Some(l2_cache) = &self.l2_cache {
-                if let Err(e) = l2_cache.set(api_key, config, self.config.l2_ttl).await {
-                    warn!("Failed to update L2 cache for key {}: {}", api_key, e);
-                }
-            }
-            
-            debug!("Memory store hit for key: {}", api_key);
+
+            debug!(
+                "Memory store hit for key: {}",
+                ApiKeyStore::mask_api_key(&api_key)
+            );
             return Some(config_arc);
         }
+
+        // TODO: Add Redis (L2) lookup between L1 and L3
+        // if let Some(config) = self.check_redis(api_key).await {
+        //     self.update_l1_cache(api_key, config.clone()).await;
+        //     return Some(config);
+        // }
 
         warn!("API key not found: {}", api_key);
         None
@@ -333,23 +259,34 @@ impl ApiKeyStore {
     pub async fn invalidate(&self, api_key: &str) {
         let mut cache = self.l1_cache.write().await;
         cache.pop(api_key);
-        
-        if let Some(l2_cache) = &self.l2_cache {
-            if let Err(e) = l2_cache.delete(api_key).await {
-                warn!("Failed to invalidate L2 cache for key {}: {}", api_key, e);
-            }
-        }
-        
-        info!("Invalidated cache for key: {}", api_key);
+        // TODO: Invalidate Redis cache when implemented
+        info!(
+            "Invalidated cache for key: {}",
+            ApiKeyStore::mask_api_key(&api_key)
+        );
     }
 
     /// Get cache metrics for monitoring
     pub fn metrics(&self) -> &CacheMetrics {
         &self.metrics
     }
+
+    /// Mask API key for secure logging
+    fn mask_api_key(api_key: &str) -> String {
+        if api_key.len() <= 4 {
+            // For very short keys, just show asterisks
+            "*".repeat(api_key.len())
+        } else {
+            // Show last 4 characters with asterisks
+            format!(
+                "{}...{}",
+                "*".repeat(api_key.len().saturating_sub(4)),
+                &api_key[api_key.len() - 4..]
+            )
+        }
+    }
 }
 
-#[derive(Clone)]
 pub struct ApiKeyMiddleware {
     api_key_store: ApiKeyStore,
     default_security: SecurityType,
@@ -358,7 +295,7 @@ pub struct ApiKeyMiddleware {
 }
 
 impl ApiKeyMiddleware {
-    /// Create new middleware 
+    /// Create new middleware
     pub fn new() -> Self {
         Self {
             api_key_store: ApiKeyStore::new(CacheConfig::default()),
@@ -374,16 +311,6 @@ impl ApiKeyMiddleware {
         self
     }
 
-    pub async fn with_redis_cache(
-        mut self,
-        cache_config: CacheConfig,
-        redis_config: RedisCacheConfig,
-        api_key_repo: Option<Arc<dyn ApiKeyRepository>>,
-    ) -> Result<Self, ApiKeyError> {
-        self.api_key_store = ApiKeyStore::with_redis_cache(cache_config, redis_config, api_key_repo).await?;
-        Ok(self)
-    }
-
     /// Add single API key (for development)
     pub fn with_api_key(mut self, config: ApiKeyConfig) -> Self {
         self.api_key_store = self.api_key_store.with_api_keys(vec![config]);
@@ -393,11 +320,6 @@ impl ApiKeyMiddleware {
     /// Add multiple API keys (for development/testing)
     pub fn with_api_keys(mut self, configs: Vec<ApiKeyConfig>) -> Self {
         self.api_key_store = self.api_key_store.with_api_keys(configs);
-        self
-    }
-
-    pub fn with_repository(mut self, api_key_repo: Arc<dyn ApiKeyRepository>) -> Self {
-        self.api_key_store = ApiKeyStore::with_repository(CacheConfig::default(), api_key_repo);
         self
     }
 
@@ -454,7 +376,7 @@ impl ApiKeyMiddleware {
                 }
             }
         }
-        
+
         // Check X-Real-IP header (nginx)
         if let Some(real_ip) = req.headers().get("X-Real-IP") {
             if let Ok(real_ip_str) = real_ip.to_str() {
@@ -482,16 +404,19 @@ impl ApiKeyMiddleware {
             .or_else(|| body_params.get("signature"))
             .ok_or(ApiKeyError::MissingSignature)?;
 
-        let key_material = api_config
-            .get_key_material()
-            .ok_or_else(|| ApiKeyError::InvalidApiKey("No key material configured for signed endpoint".to_string()))?;
+        let key_material = api_config.get_key_material().ok_or_else(|| {
+            ApiKeyError::InvalidApiKey("No key material configured for signed endpoint".to_string())
+        })?;
 
         // Build payload based on whether we have mixed query/body or separate parameters
         let payload = if !raw_query.is_empty() && !raw_body.is_empty() {
             // Mixed case as per Binance example 3
             SignatureVerifier::build_mixed_payload(raw_query, raw_body)
+        } else if !raw_body.is_empty() {
+            // JSON-only signed requests - use raw body as payload
+            SignatureVerifier::build_mixed_payload("", raw_body)
         } else {
-            // Standard case
+            // Standard case - fall back to parsed parameters
             SignatureVerifier::build_payload(query_params, body_params)
         };
 
@@ -535,8 +460,25 @@ impl ApiKeyMiddleware {
         req.uri().query().unwrap_or("").to_string()
     }
 
+    /// Mask API key for secure logging
+    fn mask_api_key(api_key: &str) -> String {
+        if api_key.len() <= 4 {
+            // For very short keys, just show asterisks
+            "*".repeat(api_key.len())
+        } else {
+            // Show last 4 characters with asterisks
+            format!(
+                "{}...{}",
+                "*".repeat(api_key.len().saturating_sub(4)),
+                &api_key[api_key.len() - 4..]
+            )
+        }
+    }
+
     /// Parse body parameters from different content types
-    async fn parse_body_params(req: &mut ServiceRequest) -> Result<(HashMap<String, String>, String), ApiKeyError> {
+    async fn parse_body_params(
+        req: &mut ServiceRequest,
+    ) -> Result<(HashMap<String, String>, String), ApiKeyError> {
         let content_type = req
             .headers()
             .get("content-type")
@@ -547,15 +489,25 @@ impl ApiKeyMiddleware {
         // Read the body
         let mut body = web::BytesMut::new();
         let mut payload = req.take_payload();
-        
+
         use futures_util::StreamExt;
         while let Some(chunk) = payload.next().await {
-            let chunk = chunk.map_err(|e| ApiKeyError::Internal(format!("Failed to read body: {}", e)))?;
+            let chunk =
+                chunk.map_err(|e| ApiKeyError::Internal(format!("Failed to read body: {}", e)))?;
             body.extend_from_slice(&chunk);
         }
 
-        let body_string = String::from_utf8(body.to_vec())
+        let body_bytes = body.freeze();
+        let body_string = String::from_utf8(body_bytes.to_vec())
             .map_err(|e| ApiKeyError::Internal(format!("Invalid UTF-8 in body: {}", e)))?;
+
+        // Restore the payload for downstream handlers
+        let new_payload = {
+            let stream = stream::once(async move { Ok::<_, PayloadError>(body_bytes) });
+            let boxed_stream: Pin<Box<dyn futures_util::Stream<Item = Result<actix_web::web::Bytes, PayloadError>>>> = Box::pin(stream);
+            actix_web::dev::Payload::from(boxed_stream)
+        };
+        req.set_payload(new_payload);
 
         let body_params = if content_type.starts_with("application/x-www-form-urlencoded") {
             url::form_urlencoded::parse(body_string.as_bytes())
@@ -597,13 +549,18 @@ impl ApiKeyMiddleware {
         // Additional strict validation if enabled
         if strict {
             // Ensure recvWindow parameter is present and valid
-            if let Some(recv_window_str) = query_params.get("recvWindow").or_else(|| body_params.get("recvWindow")) {
-                let provided_recv_window = recv_window_str
-                    .parse::<u64>()
-                    .map_err(|_| ApiKeyError::InvalidTimestamp("Invalid recvWindow format".to_string()))?;
-                
+            if let Some(recv_window_str) = query_params
+                .get("recvWindow")
+                .or_else(|| body_params.get("recvWindow"))
+            {
+                let provided_recv_window = recv_window_str.parse::<u64>().map_err(|_| {
+                    ApiKeyError::InvalidTimestamp("Invalid recvWindow format".to_string())
+                })?;
+
                 if provided_recv_window > 60000 {
-                    return Err(ApiKeyError::InvalidTimestamp("recvWindow cannot exceed 60000ms".to_string()));
+                    return Err(ApiKeyError::InvalidTimestamp(
+                        "recvWindow cannot exceed 60000ms".to_string(),
+                    ));
                 }
             }
         }
@@ -657,7 +614,7 @@ where
 
     fn call(&self, mut req: ServiceRequest) -> Self::Future {
         let api_key_store = self.api_key_store.clone();
-        let _default_security = self.default_security;
+        let default_security = self.default_security;
         let route_configs = self.route_configs.clone();
         let strict_timestamp_validation = self.strict_timestamp_validation;
         let service = Rc::clone(&self.service);
@@ -665,11 +622,13 @@ where
         Box::pin(async move {
             // Determine required security level for this route
             let path = req.uri().path();
-            let required_security = ApiKeyMiddleware::get_route_security_type(
-                &ApiKeyMiddleware::new(),
-                path,
-                &route_configs,
-            );
+            let middleware = ApiKeyMiddleware {
+                api_key_store: api_key_store.clone(),
+                default_security,
+                route_configs: route_configs.clone(),
+                strict_timestamp_validation,
+            };
+            let required_security = middleware.get_route_security_type(path, &route_configs);
 
             // For NONE security type, skip validation
             if required_security == SecurityType::None {
@@ -682,7 +641,8 @@ where
                 Err(e) => {
                     error!("API key extraction failed: {}", e);
                     return Err(actix_web::error::ErrorUnauthorized(format!(
-                        "API key required: {}", e
+                        "API key required: {}",
+                        e
                     )));
                 }
             };
@@ -699,14 +659,16 @@ where
             // Validate API key state
             if !api_config.is_valid() {
                 warn!("API key is disabled or expired: {}", api_key);
-                return Err(actix_web::error::ErrorUnauthorized("API key is disabled or expired"));
+                return Err(actix_web::error::ErrorUnauthorized(
+                    "API key is disabled or expired",
+                ));
             }
 
-            // Validate IP whitelist
+            // Validate IP blacklist
             let client_ip = ApiKeyMiddleware::extract_client_ip(req.request());
             if !api_config.is_ip_allowed(&client_ip) {
-                warn!("IP {} not in whitelist for API key: {}", client_ip, api_key);
-                return Err(actix_web::error::ErrorForbidden("IP address not allowed"));
+                warn!("IP {} is blacklisted for API key: {}", client_ip, api_key);
+                return Err(actix_web::error::ErrorForbidden("IP address is blacklisted"));
             }
 
             // Check permissions
@@ -722,41 +684,45 @@ where
             if api_config.requires_signature(required_security) {
                 let query_params = ApiKeyMiddleware::parse_query_params(req.request());
                 let raw_query = ApiKeyMiddleware::get_raw_query_string(req.request());
-                
-                let (body_params, raw_body) = match ApiKeyMiddleware::parse_body_params(&mut req).await {
-                    Ok(result) => result,
-                    Err(e) => {
-                        error!("Failed to parse body: {}", e);
-                        return Err(actix_web::error::ErrorBadRequest(format!(
-                            "Failed to parse request body: {}", e
-                        )));
-                    }
-                };
+
+                let (body_params, raw_body) =
+                    match ApiKeyMiddleware::parse_body_params(&mut req).await {
+                        Ok(result) => result,
+                        Err(e) => {
+                            error!("Failed to parse body: {}", e);
+                            return Err(actix_web::error::ErrorBadRequest(format!(
+                                "Failed to parse request body: {}",
+                                e
+                            )));
+                        }
+                    };
 
                 // Validate timestamp
                 if let Err(e) = ApiKeyMiddleware::validate_timestamp_with_recv_window(
-                    &query_params, 
-                    &body_params, 
+                    &query_params,
+                    &body_params,
                     api_config.recv_window,
-                    strict_timestamp_validation
+                    strict_timestamp_validation,
                 ) {
                     error!("Timestamp validation failed: {}", e);
                     return Err(actix_web::error::ErrorBadRequest(format!(
-                        "Timestamp validation failed: {}", e
+                        "Timestamp validation failed: {}",
+                        e
                     )));
                 }
 
                 // Validate signature
                 if let Err(e) = ApiKeyMiddleware::validate_signature(
-                    &api_config, 
-                    &query_params, 
+                    &api_config,
+                    &query_params,
                     &body_params,
                     &raw_query,
-                    &raw_body
+                    &raw_body,
                 ) {
                     error!("Signature validation failed: {}", e);
                     return Err(actix_web::error::ErrorBadRequest(format!(
-                        "Signature validation failed: {}", e
+                        "Signature validation failed: {}",
+                        e
                     )));
                 }
             }
@@ -765,10 +731,12 @@ where
             req.extensions_mut().insert(api_config.clone());
 
             info!(
-                "API key validation successful for key: {} (security: {}, ip: {})", 
-                api_key, required_security, client_ip
+                "API key validation successful for key: {} (security: {}, ip: {})",
+                ApiKeyMiddleware::mask_api_key(&api_key),
+                required_security,
+                client_ip
             );
-            
+
             // Forward the request to the next service
             service.call(req).await
         })

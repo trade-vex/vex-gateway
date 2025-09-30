@@ -237,7 +237,7 @@ impl From<redis::RedisError> for DbError {
             },
 
             // Busy/Loading errors
-            ErrorKind::BusyLoadingError => DbError::QueryExecution {
+            ErrorKind::BusyLoadingError => DbError::Connection {
                 message: "server is busy loading dataset".to_string(),
                 source: Some(Box::new(err)),
             },
@@ -334,6 +334,7 @@ impl DbError {
                 | DbError::QueryExecution { .. }
                 | DbError::Serialization { .. }
                 | DbError::FeatureNotEnabled { .. }
+                | DbError::RateLimited { .. }
         )
     }
 

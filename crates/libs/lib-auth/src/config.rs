@@ -1,3 +1,4 @@
+use secrecy::SecretString;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::env;
@@ -20,17 +21,19 @@ pub struct AuthConfig {
     pub oauth: OAuthConfig,
     pub server: ServerConfig,
     pub email: EmailConfig,
+    pub otp: OtpConfig,
 }
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct OAuthConfig {
     pub providers: HashMap<String, OAuthProviderConfig>,
+    pub redirect_base: String,
 }
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct OAuthProviderConfig {
     pub client_id: String,
-    pub client_secret: String,
+    pub client_secret: SecretString,
     pub auth_url: String,
     pub token_url: String,
     pub user_info_url: String,
@@ -61,8 +64,14 @@ pub struct EmailConfig {
     pub smtp_host: String,
     pub smtp_port: u16,
     pub smtp_username: String,
-    pub smtp_password: String,
+    pub smtp_password: SecretString,
     pub from_email: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct OtpConfig {
+    pub otp_length: usize,
+    pub email_verification_expiry_minutes: i64,
 }
 
 impl AuthConfig {
@@ -74,6 +83,7 @@ impl AuthConfig {
             oauth: OAuthConfig::from_env()?,
             server: ServerConfig::from_env()?,
             email: EmailConfig::from_env()?,
+            otp: OtpConfig::from_env()?,
         })
     }
 
@@ -138,17 +148,22 @@ impl AuthConfig {
             },
             oauth: OAuthConfig {
                 providers: std::collections::HashMap::new(), // Empty for development
+                redirect_base: "http://localhost:8081".to_string(),
             },
             email: EmailConfig {
                 smtp_host: "smtp.example.com".to_string(),
                 smtp_port: 587,
                 smtp_username: "user@example.com".to_string(),
-                smtp_password: "password".to_string(),
+                smtp_password: SecretString::new("password".to_string()),
                 from_email: "noreply@example.com".to_string(),
             },
             server: ServerConfig {
                 base_url: "http://localhost:8081".to_string(),
                 port: 8081,
+            },
+            otp: OtpConfig {
+                otp_length: 6,
+                email_verification_expiry_minutes: 15,
             },
         }
     }
@@ -180,7 +195,7 @@ impl OAuthConfig {
                 "google".to_string(),
                 OAuthProviderConfig {
                     client_id,
-                    client_secret,
+                    client_secret: SecretString::new(client_secret),
                     auth_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
                     token_url: "https://oauth2.googleapis.com/token".to_string(),
                     user_info_url: "https://www.googleapis.com/oauth2/v2/userinfo".to_string(),
@@ -199,7 +214,7 @@ impl OAuthConfig {
                 "github".to_string(),
                 OAuthProviderConfig {
                     client_id,
-                    client_secret,
+                    client_secret: SecretString::new(client_secret),
                     auth_url: "https://github.com/login/oauth/authorize".to_string(),
                     token_url: "https://github.com/login/oauth/access_token".to_string(),
                     user_info_url: "https://api.github.com/user".to_string(),
@@ -218,7 +233,7 @@ impl OAuthConfig {
                 "twitter".to_string(),
                 OAuthProviderConfig {
                     client_id,
-                    client_secret,
+                    client_secret: SecretString::new(client_secret),
                     auth_url: "https://twitter.com/i/oauth2/authorize".to_string(),
                     token_url: "https://api.twitter.com/2/oauth2/token".to_string(),
                     user_info_url: "https://api.twitter.com/2/users/me".to_string(),
@@ -228,7 +243,11 @@ impl OAuthConfig {
             );
         }
 
-        Ok(Self { providers })
+        Ok(Self {
+            providers,
+            redirect_base: env::var("OAUTH_REDIRECT_BASE")
+                .unwrap_or_else(|_| "http://localhost:8081".to_string()),
+        })
     }
 }
 
@@ -271,8 +290,21 @@ impl EmailConfig {
             smtp_host: env::var("SMTP_HOST")?,
             smtp_port: env::var("SMTP_PORT")?.parse()?,
             smtp_username: env::var("SMTP_USERNAME")?,
-            smtp_password: env::var("SMTP_PASSWORD")?,
+            smtp_password: SecretString::new(env::var("SMTP_PASSWORD")?),
             from_email: env::var("FROM_EMAIL")?,
+        })
+    }
+}
+
+impl OtpConfig {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Ok(Self {
+            otp_length: env::var("OTP_LENGTH")
+                .unwrap_or_else(|_| "6".to_string())
+                .parse()?,
+            email_verification_expiry_minutes: env::var("EMAIL_VERIFICATION_EXPIRY_MINUTES")
+                .unwrap_or_else(|_| "15".to_string())
+                .parse()?,
         })
     }
 }

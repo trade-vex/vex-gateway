@@ -3,9 +3,9 @@ pub mod dto;
 pub mod error;
 pub mod handlers;
 pub mod middleware;
+pub mod models;
 pub mod repository;
 pub mod service;
-pub mod state;
 #[cfg(test)]
 pub mod tests;
 pub mod utils;
@@ -14,23 +14,48 @@ use actix_web::web;
 
 pub use config::AuthConfig;
 pub use error::auth_error::AuthError;
-pub use state::AppState;
 
-pub fn configure_services(cfg: &mut web::ServiceConfig) {
-    cfg.service(
-        web::scope("/auth")
-            // Remove /oauth/ prefix to match your URLs
-            .route(
-                "/{provider}",
-                web::get().to(handlers::oauth::initiate_oauth),
-            )
-            .route(
-                "/{provider}/callback",
-                web::get().to(handlers::oauth::handle_oauth_callback),
-            )
-            .route(
-                "/providers",
-                web::get().to(handlers::oauth::get_oauth_providers),
-            ),
-    );
+/// Configure public routes for auth that don't require authentication
+pub fn configure_public_auth_services(cfg: &mut web::ServiceConfig) {
+    cfg
+        // OAuth strategy routes (all public)
+        .service(
+            web::scope("/oauth")
+                .route(
+                    "/providers",
+                    web::get().to(handlers::oauth::get_oauth_providers),
+                )
+                .route(
+                    "/{provider}",
+                    web::get().to(handlers::oauth::initiate_oauth),
+                )
+                .route(
+                    "/{provider}/callback",
+                    web::get().to(handlers::oauth::handle_oauth_callback),
+                ),
+        )
+        // Public auth routes
+        .route("/signup", web::post().to(handlers::auth::signup))
+        .route("/login", web::post().to(handlers::auth::login))
+        .route("/refresh", web::post().to(handlers::auth::refresh_token))
+        .route(
+            "/verify-email",
+            web::post().to(handlers::auth::verify_email_with_otp),
+        );
+}
+
+/// Configure protected routes for auth that require authentication
+pub fn configure_protected_auth_services(cfg: &mut web::ServiceConfig) {
+    cfg
+        // Protected auth routes
+        .route("/logout", web::post().to(handlers::auth::logout))
+        .route("/profile", web::get().to(handlers::auth::get_profile))
+        .route(
+            "/verify-email",
+            web::post().to(handlers::auth::verify_email),
+        )
+        .route(
+            "/change-password",
+            web::post().to(handlers::auth::change_password),
+        );
 }

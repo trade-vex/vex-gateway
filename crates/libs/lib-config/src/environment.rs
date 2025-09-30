@@ -1,6 +1,6 @@
 //! lib-config/src/environment.rs
 
-use crate::error::ConfigError;
+use crate::ConfigError;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 

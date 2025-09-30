@@ -4,7 +4,7 @@ use sea_orm::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::api_key::security::{SecurityType, KeyMaterial};
+use crate::api_key::security::{KeyMaterial, SecurityType};
 
 #[derive(Debug, Clone, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "api_keys")]
@@ -66,15 +66,18 @@ impl ActiveModelBehavior for ActiveModel {}
 impl Model {
     /// Convert database model to API key configuration
     pub fn to_api_key_config(&self) -> crate::api_key::security::ApiKeyConfig {
-        let key_material = if let (Some(key_type), Some(key_value)) = 
-            (&self.key_material_type, &self.key_material_value) {
+        let key_material = if let (Some(key_type), Some(key_value)) =
+            (&self.key_material_type, &self.key_material_value)
+        {
             Some(key_type.to_key_material(key_value))
         } else {
             None
         };
 
         // Parse permissions from JSON
-        let permissions = self.permissions.as_array()
+        let permissions = self
+            .permissions
+            .as_array()
             .and_then(|arr| {
                 arr.iter()
                     .filter_map(|v| v.as_str())
@@ -104,13 +107,14 @@ impl Model {
 
     /// Check if the API key is currently valid (enabled and not expired)
     pub fn is_valid(&self) -> bool {
-        self.enabled && 
-        (self.expires_at.is_none() || self.expires_at.unwrap() > Utc::now())
+        self.enabled && (self.expires_at.is_none() || self.expires_at.unwrap() > Utc::now())
     }
 
     /// Check if the API key has the required permission
     pub fn has_permission(&self, required_permission: &SecurityType) -> bool {
-        let permissions = self.permissions.as_array()
+        let permissions = self
+            .permissions
+            .as_array()
             .and_then(|arr| {
                 arr.iter()
                     .filter_map(|v| v.as_str())
@@ -124,14 +128,18 @@ impl Model {
                     .collect::<Option<Vec<_>>>()
             })
             .unwrap_or_else(|| vec![SecurityType::None]);
-            
-        permissions.contains(required_permission) || 
-        permissions.contains(&SecurityType::None)
+
+        permissions.contains(required_permission) || permissions.contains(&SecurityType::None)
     }
 
-    /// Check if the IP address is blacklisted (empty blacklist means all IPs allowed)
+    /// Check if the IP address is blacklisted (blocked)
     pub fn is_ip_blacklisted(&self, ip: &str) -> bool {
-        !self.ip_blacklist.is_empty() && self.ip_blacklist.contains(&ip.to_string())
+        self.ip_blacklist.contains(&ip.to_string())
+    }
+
+    /// Check if the IP address is allowed (not blacklisted)
+    pub fn is_ip_allowed(&self, ip: &str) -> bool {
+        !self.is_ip_blacklisted(ip)
     }
 }
 
@@ -163,30 +171,36 @@ impl NewApiKey {
     }
 
     pub fn to_active_model(self) -> ActiveModel {
-        let (key_material_type, key_material_value) = if let Some(key_material) = &self.key_material {
-            (Some(KeyMaterialType::from(key_material)), Some(match key_material {
-                KeyMaterial::HmacSecret(secret) => secret.clone(),
-                KeyMaterial::RsaPublicKey(key) => key.clone(),
-                KeyMaterial::Ed25519PublicKey(key) => key.clone(),
-            }))
+        let (key_material_type, key_material_value) = if let Some(key_material) = &self.key_material
+        {
+            (
+                Some(KeyMaterialType::from(key_material)),
+                Some(match key_material {
+                    KeyMaterial::HmacSecret(secret) => secret.clone(),
+                    KeyMaterial::RsaPublicKey(key) => key.clone(),
+                    KeyMaterial::Ed25519PublicKey(key) => key.clone(),
+                }),
+            )
         } else {
             (None, None)
         };
 
         // Convert permissions to JSON
         let permissions_json = serde_json::to_value(
-            self.permissions.iter()
+            self.permissions
+                .iter()
                 .map(|p| match p {
                     SecurityType::None => "none",
                     SecurityType::Trade => "trade",
                     SecurityType::UserData => "user_data",
                     SecurityType::UserStream => "user_stream",
                 })
-                .collect::<Vec<_>>()
-        ).unwrap_or(serde_json::json!(["none"]));
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or(serde_json::json!(["none"]));
 
         let now = Utc::now();
-        
+
         ActiveModel {
             id: Set(Uuid::new_v4()),
             api_key: Set(self.api_key),

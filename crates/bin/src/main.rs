@@ -4,7 +4,6 @@
 //! It initializes the server configuration and starts the HTTP server.
 
 use lib_config::Config;
-use lib_server;
 use tracing::{error, info};
 use tracing_subscriber::{filter::LevelFilter, fmt};
 
@@ -33,6 +32,12 @@ async fn main() -> std::io::Result<()> {
         Config::load_development_defaults()
     });
 
+    // Validate configuration before using any config values
+    if let Err(e) = config.validate() {
+        error!("Configuration validation failed: {}", e);
+        std::process::exit(1);
+    }
+
     // Initialize logging
     fmt()
         .with_max_level(
@@ -50,7 +55,7 @@ async fn main() -> std::io::Result<()> {
     // Initialize and start the server
     let (_app_state, server) = lib_server::initialize_server(&config)
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
 
     info!("Server startup complete");
     server.await

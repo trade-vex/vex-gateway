@@ -81,6 +81,12 @@ pub enum AuthError {
 
     #[error("Invalid request")]
     InvalidRequest,
+
+    #[error("Invalid OTP")]
+    InvalidOtp,
+
+    #[error("OTP expired")]
+    OtpExpired,
 }
 
 impl ResponseError for AuthError {
@@ -121,7 +127,9 @@ impl ResponseError for AuthError {
                 "INVALID_CALLBACK",
                 "Invalid OAuth callback parameters".to_string(),
             ),
-            AuthError::ProviderError(_) => (400, "PROVIDER_ERROR", self.to_string()),
+            AuthError::ProviderError(_) => {
+                (400, "PROVIDER_ERROR", "Upstream provider error".to_string())
+            }
             AuthError::EmailAlreadyExists => (
                 409,
                 "EMAIL_EXISTS",
@@ -167,6 +175,12 @@ impl ResponseError for AuthError {
             AuthError::InvalidRequest => {
                 (400, "INVALID_REQUEST", "Invalid request format".to_string())
             }
+            AuthError::InvalidOtp => (400, "INVALID_OTP", "Invalid verification code".to_string()),
+            AuthError::OtpExpired => (
+                400,
+                "OTP_EXPIRED",
+                "Verification code has expired".to_string(),
+            ),
             AuthError::Config(_) | AuthError::InternalError(_) => {
                 (500, "INTERNAL_ERROR", "Internal server error".to_string())
             }

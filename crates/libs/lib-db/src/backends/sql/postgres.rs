@@ -107,25 +107,7 @@ impl SqlDb for PostgresDb {
 
     async fn connect(url: &str) -> Result<Self> {
         let config = DbConfig::default();
-
-        let pool = PgPoolOptions::new()
-            .max_connections(config.max_connections)
-            .min_connections(config.min_connections)
-            .acquire_timeout(std::time::Duration::from_millis(config.acquire_timeout_ms))
-            .idle_timeout(std::time::Duration::from_secs(config.idle_timeout_secs))
-            .max_lifetime(std::time::Duration::from_secs(config.max_lifetime_secs))
-            .test_before_acquire(false) // Skip for performance, rely on keepalive
-            .connect(url)
-            .await
-            .map_err(|e| DbError::Connection {
-                message: format!("Failed to connect to PostgreSQL: {}", e),
-                source: Some(Box::new(e)),
-            })?;
-
-        Ok(Self {
-            pool,
-            config: Arc::new(config),
-        })
+        Self::with_config(url, config).await
     }
 
     async fn execute_with<'a>(&self, sql: &str, args: Self::Arguments<'a>) -> Result<u64> {

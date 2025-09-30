@@ -15,3 +15,8 @@ config/production.toml
 **/target
 .DS_Store
 .sqlx/**
+
+# Security - JWT keys
+crates/libs/lib-auth/src/keys/
+*.pem
+

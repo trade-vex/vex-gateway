@@ -1,8 +1,18 @@
-use serde::{Deserialize, Serialize};
 use crate::api_key::signature::SignatureAlgorithm;
+use serde::{Deserialize, Serialize};
 
-/// Security types for API endpoints 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sea_orm::DeriveActiveEnum, sea_orm::EnumIter)]
+/// Security types for API endpoints
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    sea_orm::DeriveActiveEnum,
+    sea_orm::EnumIter,
+)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "security_type")]
 pub enum SecurityType {
     /// Endpoint can be accessed freely
@@ -37,7 +47,7 @@ impl std::fmt::Display for SecurityType {
 }
 
 /// Key material for different signature algorithms
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum KeyMaterial {
     /// HMAC secret key
     HmacSecret(String),
@@ -58,7 +68,7 @@ impl KeyMaterial {
 }
 
 /// API Key configuration and permissions
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ApiKeyConfig {
     pub api_key: String,
     pub key_material: Option<KeyMaterial>,
@@ -76,12 +86,7 @@ impl ApiKeyConfig {
         Self {
             api_key,
             key_material: None,
-            permissions: vec![
-                SecurityType::None,
-                SecurityType::Trade,
-                SecurityType::UserData,
-                SecurityType::UserStream,
-            ],
+            permissions: vec![SecurityType::None],
             recv_window: 5000,
             enabled: true,
             description: None,
@@ -168,12 +173,9 @@ impl ApiKeyConfig {
         true
     }
 
-    /// Check if the request IP is allowed
+    /// Check if the request IP is allowed (not blacklisted)
     pub fn is_ip_allowed(&self, ip: &str) -> bool {
-        if self.ip_blacklist.is_empty() {
-            return true; // No blacklist means all IPs are allowed
-        }
-        
+        // If IP is in blacklist, it's not allowed
         !self.ip_blacklist.contains(&ip.to_string())
     }
 
