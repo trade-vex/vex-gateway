@@ -76,12 +76,7 @@ impl ApiKeyConfig {
         Self {
             api_key,
             key_material: None,
-            permissions: vec![
-                SecurityType::None,
-                SecurityType::Trade,
-                SecurityType::UserData,
-                SecurityType::UserStream,
-            ],
+            permissions: vec![SecurityType::None],
             recv_window: 5000,
             enabled: true,
             description: None,
