@@ -244,7 +244,7 @@ async fn complex_transaction<T: SqlDb>(db: &T) -> Result<()> {
 
 ```rust
 use lib_db::{
-    memory::MemoryDb,
+    memory_kv::MemoryDb,
     redis::RedisDb,
     traits::{BasicKvStore, AdvancedKvStore, AtomicKvStore, ExpiringKvStore},
 };
@@ -300,6 +300,12 @@ async fn session_management<T: BasicKvStore + ExpiringKvStore>(kv: &T) -> Result
 ### Database-Specific Examples
 
 ```rust
+use lib_db::{
+    postgres::PostgresDb,
+    memory_kv::MemoryDb,
+    redis::RedisDb,
+};
+
 // PostgreSQL
 let postgres_db = PostgresDb::connect("postgresql://user:pass@localhost/dbname").await?;
 query_users(&postgres_db).await?;
