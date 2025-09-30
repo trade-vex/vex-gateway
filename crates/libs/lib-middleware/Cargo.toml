@@ -18,10 +18,9 @@ base64 = "0.21"
 url = "2.4"
 rsa = { version = "0.9", features = ["sha2"] }
 ed25519-dalek = { version = "2.0", features = ["pkcs8"] }
-pkcs8 = { version = "0.10", features = ["pem"] }
-sha1 = "0.10"
+pkcs8 = { version = "0.10", features = ["pem"] } 
 subtle = "2.5"
-tokio = { version = "1.0", features = ["sync"] }
+tokio = { workspace = true }
 lru = "0.12"
 
 # Database dependencies
