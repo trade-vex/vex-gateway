@@ -241,6 +241,81 @@ where
         debug!("Deleted cached data for user ID: {}", user_id);
         Ok(())
     }
+
+    async fn get_data_by_key(&self, key: &str) -> Result<Option<T>, TradingError> {
+        let cache_key = format!("{}:{}", self.key_prefix, key);
+        
+        let result: Result<Option<Vec<u8>>, TradingError> = self.execute_with_retry(|conn| {
+            let cache_key = cache_key.clone();
+            Box::pin(async move {
+                let data: Option<Vec<u8>> = conn.get(&cache_key).await?;
+                Ok(data)
+            })
+        }).await;
+
+        match result? {
+            Some(data) => {
+                self.stats.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                match bincode::deserialize::<T>(&data) {
+                    Ok(data) => {
+                        debug!("Cache hit for key: {}", key);
+                        Ok(Some(data))
+                    }
+                    Err(e) => {
+                        warn!("Failed to deserialize cached data for key {}: {}", key, e);
+                        self.stats.misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        Ok(None)
+                    }
+                }
+            }
+            None => {
+                self.stats.misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                debug!("Cache miss for key: {}", key);
+                Ok(None)
+            }
+        }
+    }
+
+    async fn set_data_by_key(&self, key: &str, data: &T, ttl: Duration) -> Result<(), TradingError> {
+        let cache_key = format!("{}:{}", self.key_prefix, key);
+        
+        let serialized = bincode::serialize(data)
+            .map_err(|e| TradingError::Database(format!("Failed to serialize data: {}", e)))?;
+
+        self.execute_with_retry(|conn| {
+            let cache_key = cache_key.clone();
+            let serialized = serialized.clone();
+            let ttl_secs = ttl.as_secs() as u64;
+            Box::pin(async move {
+                if ttl_secs > 0 {
+                    conn.set_ex::<_, _, ()>(&cache_key, serialized, ttl_secs).await?;
+                } else {
+                    conn.set::<_, _, ()>(&cache_key, serialized).await?;
+                }
+                Ok(())
+            })
+        }).await?;
+
+        self.stats.sets.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        debug!("Cached data for key: {}", key);
+        Ok(())
+    }
+
+    async fn delete_data_by_key(&self, key: &str) -> Result<(), TradingError> {
+        let cache_key = format!("{}:{}", self.key_prefix, key);
+        
+        self.execute_with_retry(|conn| {
+            let cache_key = cache_key.clone();
+            Box::pin(async move {
+                let _: i32 = conn.del(&cache_key).await?;
+                Ok(())
+            })
+        }).await?;
+
+        self.stats.deletes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        debug!("Deleted cached data for key: {}", key);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -248,16 +323,16 @@ impl<T> Cache<T> for RedisCache<T>
 where
     T: Clone + Send + Sync + Serialize + for<'de> Deserialize<'de> + 'static,
 {
-    async fn get_by_id(&self, user_id: &Uuid) -> Result<Option<T>, TradingError> {
-        self.get_data(user_id).await
+    async fn get_by_id(&self, key: &str) -> Result<Option<T>, TradingError> {
+        self.get_data_by_key(key).await
     }
 
-    async fn set_by_id(&self, user_id: &Uuid, data: &T, ttl: Duration) -> Result<(), TradingError> {
-        self.set_data(user_id, data, ttl).await
+    async fn set_by_id(&self, key: &str, data: &T, ttl: Duration) -> Result<(), TradingError> {
+        self.set_data_by_key(key, data, ttl).await
     }
 
-    async fn delete_by_id(&self, user_id: &Uuid) -> Result<(), TradingError> {
-        self.delete_data(user_id).await
+    async fn delete_by_id(&self, key: &str) -> Result<(), TradingError> {
+        self.delete_data_by_key(key).await
     }
 
     async fn ping(&self) -> Result<(), TradingError> {

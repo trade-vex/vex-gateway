@@ -14,5 +14,5 @@ pub use trading::{
 pub use repository::{TradingRepository, PostgresTradingRepository, TradingError};
 pub use cache::{Cache, CacheStats};
 pub use redis_cache::{RedisCache, RedisCacheConfig};
-pub use order_store::{OrderStore, OrderCacheConfig};
+pub use order_store::{OrderStore, OrderCacheConfig, OrderCacheStats, IndividualOrderCacheStats, UserOrdersCacheStats, DatabaseStats};
 pub use user_store::{UserBalanceStore, UserBalanceCacheConfig};

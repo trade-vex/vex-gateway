@@ -7,11 +7,11 @@ pub trait Cache<T>: Send + Sync + 'static
 where
     T: Clone + Send + Sync + 'static,
 {
-    async fn get_by_id(&self, user_id: &uuid::Uuid) -> Result<Option<T>, TradingError>;
+    async fn get_by_id(&self, key: &str) -> Result<Option<T>, TradingError>;
     
-    async fn set_by_id(&self, user_id: &uuid::Uuid, data: &T, ttl: Duration) -> Result<(), TradingError>;
+    async fn set_by_id(&self, key: &str, data: &T, ttl: Duration) -> Result<(), TradingError>;
     
-    async fn delete_by_id(&self, user_id: &uuid::Uuid) -> Result<(), TradingError>;
+    async fn delete_by_id(&self, key: &str) -> Result<(), TradingError>;
     
     async fn ping(&self) -> Result<(), TradingError>;
     fn stats(&self) -> CacheStats;
@@ -58,16 +58,16 @@ impl<T> Cache<T> for NoOpCache<T>
 where
     T: Clone + Send + Sync + 'static,
 {
-    async fn get_by_id(&self, _user_id: &uuid::Uuid) -> Result<Option<T>, TradingError> {
+    async fn get_by_id(&self, _key: &str) -> Result<Option<T>, TradingError> {
         self.stats.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(None)
     }
 
-    async fn set_by_id(&self, _user_id: &uuid::Uuid, _data: &T, _ttl: Duration) -> Result<(), TradingError> {
+    async fn set_by_id(&self, _key: &str, _data: &T, _ttl: Duration) -> Result<(), TradingError> {
         Ok(())
     }
 
-    async fn delete_by_id(&self, _user_id: &uuid::Uuid) -> Result<(), TradingError> {
+    async fn delete_by_id(&self, _key: &str) -> Result<(), TradingError> {
         Ok(())
     }
 

@@ -96,7 +96,7 @@ impl UserBalanceStore {
     pub async fn get_user_balance_by_id(&self, user_id: Uuid) -> Result<Option<UserBalanceModel>, TradingError> {
         if self.config.enabled {
             if let Some(cache) = &self.cache {
-                match cache.get_by_id(&user_id).await {
+                match cache.get_by_id(&user_id.to_string()).await {
                     Ok(Some(balance)) => {
                         self.metrics.cache_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         debug!("Cache hit for user balance ID: {}", user_id);
@@ -122,7 +122,7 @@ impl UserBalanceStore {
                     // Update cache if available
                     if self.config.enabled {
                         if let Some(cache) = &self.cache {
-                            if let Err(e) = cache.set_by_id(&user_id, &balance, self.config.ttl).await {
+                            if let Err(e) = cache.set_by_id(&user_id.to_string(), &balance, self.config.ttl).await {
                                 warn!("Failed to update cache for user balance ID {}: {}", user_id, e);
                             }
                         }
@@ -151,7 +151,7 @@ impl UserBalanceStore {
         // Remove from cache if available
         if self.config.enabled {
             if let Some(cache) = &self.cache {
-                if let Err(e) = cache.delete_by_id(&user_id).await {
+                if let Err(e) = cache.delete_by_id(&user_id.to_string()).await {
                     warn!("Failed to invalidate cache for user balance ID {}: {}", user_id, e);
                 }
             }

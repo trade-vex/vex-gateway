@@ -15,3 +15,8 @@ lru = "0.12"
 redis = { version = "0.24", features = ["tokio-comp", "connection-manager"] }
 tokio = { version = "1", features = ["sync"] }
 tracing = "0.1"
+
+[dev-dependencies]
+actix-web = "4.4"
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
