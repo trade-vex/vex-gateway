@@ -369,8 +369,11 @@ impl ApiKeyMiddleware {
         let payload = if !raw_query.is_empty() && !raw_body.is_empty() {
             // Mixed case as per Binance example 3
             SignatureVerifier::build_mixed_payload(raw_query, raw_body)
+        } else if !raw_body.is_empty() {
+            // JSON-only signed requests - use raw body as payload
+            SignatureVerifier::build_mixed_payload("", raw_body)
         } else {
-            // Standard case
+            // Standard case - fall back to parsed parameters
             SignatureVerifier::build_payload(query_params, body_params)
         };
 
