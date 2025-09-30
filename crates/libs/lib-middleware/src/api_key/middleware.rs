@@ -436,8 +436,16 @@ impl ApiKeyMiddleware {
             body.extend_from_slice(&chunk);
         }
 
-        let body_string = String::from_utf8(body.to_vec())
+        let body_bytes = body.freeze();
+        let body_string = String::from_utf8(body_bytes.to_vec())
             .map_err(|e| ApiKeyError::Internal(format!("Invalid UTF-8 in body: {}", e)))?;
+
+        // Restore the payload for downstream handlers
+        let new_payload = {
+            let stream = futures::stream::once(async move { Ok::<_, actix_web::Error>(body_bytes) });
+            actix_web::dev::Payload::from(stream)
+        };
+        req.set_payload(new_payload);
 
         let body_params = if content_type.starts_with("application/x-www-form-urlencoded") {
             url::form_urlencoded::parse(body_string.as_bytes())
