@@ -30,7 +30,7 @@ thiserror = { workspace = true }
 
 # Database & Cache
 deadpool-redis = "0.13"
-redis = { version = "0.23", features = ["tokio-comp"] }
+redis = { version = "0.24", features = ["tokio-comp", "connection-manager"] }
 
 # Logging
 log = "0.4"

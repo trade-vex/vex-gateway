@@ -2579,7 +2579,7 @@ dependencies = [
  "once_cell",
  "openidconnect",
  "rand 0.8.5",
- "redis 0.23.3",
+ "redis 0.24.0",
  "reqwest 0.11.27",
  "rsa",
  "sea-orm",
@@ -2693,9 +2693,15 @@ name = "lib-trading"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bb8",
+ "bincode",
  "chrono",
+ "lru",
+ "redis 0.24.0",
  "sea-orm",
  "serde",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -3753,8 +3759,6 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "ryu",
- "sha1_smol",
- "socket2 0.4.10",
  "tokio",
  "tokio-util",
  "url",

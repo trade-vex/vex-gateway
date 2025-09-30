@@ -315,13 +315,8 @@ fn create_l2_cache_config() -> CacheConfig {
 async fn test_l2_cache_basic_operations() {
     // Needs a running Redis instance
     let redis_config = create_test_redis_config();
-    let redis_cache = match RedisApiKeyCache::new(redis_config).await {
-        Ok(cache) => cache,
-        Err(_) => {
-            println!("Skipping L2 cache test - Redis not available");
-            return;
-        }
-    };
+    let redis_cache = RedisApiKeyCache::new(redis_config).await
+        .expect("❌ Redis connection failed - Redis must be running for this test!");
 
     let api_key = create_test_api_key();
     let key = "test_key_123";
@@ -341,7 +336,7 @@ async fn test_l2_cache_basic_operations() {
     let delete_result = redis_cache.delete(key).await;
     assert!(delete_result.is_ok(), "Failed to delete API key from Redis cache");
 
-    // Make sure it’s gone
+    // Make sure it's gone
     let after_delete = redis_cache.get(key).await;
     assert!(after_delete.is_ok(), "Failed to check after deletion");
     assert!(after_delete.unwrap().is_none(), "API key should be deleted");
@@ -350,13 +345,8 @@ async fn test_l2_cache_basic_operations() {
 #[tokio::test]
 async fn test_l2_cache_ttl_expiration() {
     let redis_config = create_test_redis_config();
-    let redis_cache = match RedisApiKeyCache::new(redis_config).await {
-        Ok(cache) => cache,
-        Err(_) => {
-            println!("Skipping L2 cache TTL test - Redis not available");
-            return;
-        }
-    };
+    let redis_cache = RedisApiKeyCache::new(redis_config).await
+        .expect("❌ Redis connection failed - Redis must be running for this test!");
 
     let api_key = create_test_api_key();
     let key = "ttl_test_key";
@@ -382,13 +372,8 @@ async fn test_l2_cache_ttl_expiration() {
 #[tokio::test]
 async fn test_l2_cache_stats_tracking() {
     let redis_config = create_test_redis_config();
-    let redis_cache = match RedisApiKeyCache::new(redis_config).await {
-        Ok(cache) => cache,
-        Err(_) => {
-            println!("Skipping L2 cache stats test - Redis not available");
-            return;
-        }
-    };
+    let redis_cache = RedisApiKeyCache::new(redis_config).await
+        .expect("❌ Redis connection failed - Redis must be running for this test!");
 
     let api_key = create_test_api_key();
     let key = "stats_test_key";
@@ -424,13 +409,8 @@ async fn test_l2_cache_stats_tracking() {
 #[tokio::test]
 async fn test_l2_cache_serialization_roundtrip() {
     let redis_config = create_test_redis_config();
-    let redis_cache = match RedisApiKeyCache::new(redis_config).await {
-        Ok(cache) => cache,
-        Err(_) => {
-            println!("Skipping L2 cache serialization test - Redis not available");
-            return;
-        }
-    };
+    let redis_cache = RedisApiKeyCache::new(redis_config).await
+        .expect("❌ Redis connection failed - Redis must be running for this test!");
 
     // Try different API key configs to ensure proper serialization
     let test_cases = vec![
@@ -552,13 +532,8 @@ async fn test_l2_cache_error_handling() {
 #[tokio::test]
 async fn test_l2_cache_ping_health_check() {
     let redis_config = create_test_redis_config();
-    let redis_cache = match RedisApiKeyCache::new(redis_config).await {
-        Ok(cache) => cache,
-        Err(_) => {
-            println!("Skipping L2 cache ping test - Redis not available");
-            return;
-        }
-    };
+    let redis_cache = RedisApiKeyCache::new(redis_config).await
+        .expect("❌ Redis connection failed - Redis must be running for this test!");
 
     // Ping should work with a live Redis
     let ping_result = redis_cache.ping().await;
@@ -578,13 +553,8 @@ async fn test_l2_cache_key_prefixing() {
         retry_count: 3,
     };
 
-    let redis_cache = match RedisApiKeyCache::new(redis_config).await {
-        Ok(cache) => cache,
-        Err(_) => {
-            println!("Skipping L2 cache key prefixing test - Redis not available");
-            return;
-        }
-    };
+    let redis_cache = RedisApiKeyCache::new(redis_config).await
+        .expect("❌ Redis connection failed - Redis must be running for this test!");
 
     let api_key = create_test_api_key();
     let key = "prefix_test_key";
@@ -610,13 +580,8 @@ async fn test_cache_hierarchy_l1_l2_l3() {
     let cache_config = create_l2_cache_config();
     let redis_config = create_test_redis_config();
     
-    let store = match ApiKeyStore::with_redis_cache(cache_config, redis_config, None).await {
-        Ok(store) => store,
-        Err(_) => {
-            println!("Skipping cache hierarchy test - Redis not available");
-            return;
-        }
-    };
+    let store = ApiKeyStore::with_redis_cache(cache_config, redis_config, None).await
+        .expect("❌ Redis connection failed - Redis must be running for this test!");
 
     let api_key = create_test_api_key();
     let key = "test_key_123";
@@ -647,13 +612,8 @@ async fn test_cache_invalidation_l1_l2() {
     let cache_config = create_l2_cache_config();
     let redis_config = create_test_redis_config();
     
-    let store = match ApiKeyStore::with_redis_cache(cache_config, redis_config, None).await {
-        Ok(store) => store,
-        Err(_) => {
-            println!("Skipping cache invalidation test - Redis not available");
-            return;
-        }
-    };
+    let store = ApiKeyStore::with_redis_cache(cache_config, redis_config, None).await
+        .expect("❌ Redis connection failed - Redis must be running for this test!");
 
     let api_key = create_test_api_key();
     let key = "test_key_123";
