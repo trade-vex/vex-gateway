@@ -278,7 +278,10 @@ mod tests {
     // Helper function to create a test Redis pool
     fn create_test_redis_pool() -> Arc<Pool> {
         use deadpool_redis::Config as RedisPoolConfig;
-        let redis_cfg = RedisPoolConfig::from_url("redis://127.0.0.1/");
+        // Use environment variable for Redis URL, fallback to localhost for local testing
+        let redis_url = std::env::var("REDIS_URL")
+            .unwrap_or_else(|_| "redis://127.0.0.1/".to_string());
+        let redis_cfg = RedisPoolConfig::from_url(redis_url);
         Arc::new(
             redis_cfg
                 .create_pool(Some(deadpool_redis::Runtime::Tokio1))
