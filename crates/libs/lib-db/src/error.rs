@@ -334,6 +334,7 @@ impl DbError {
                 | DbError::QueryExecution { .. }
                 | DbError::Serialization { .. }
                 | DbError::FeatureNotEnabled { .. }
+                | DbError::RateLimited { .. }
         )
     }
 
