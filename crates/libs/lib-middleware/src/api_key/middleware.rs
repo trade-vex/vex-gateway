@@ -1,10 +1,13 @@
 use actix_web::{
     dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform},
+    error::PayloadError,
     web, Error, HttpMessage, HttpRequest,
 };
 use futures_util::future::{ready, LocalBoxFuture, Ready};
+use futures_util::stream;
 use std::{
     collections::HashMap,
+    pin::Pin,
     rc::Rc,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -500,9 +503,9 @@ impl ApiKeyMiddleware {
 
         // Restore the payload for downstream handlers
         let new_payload = {
-            let stream =
-                futures::stream::once(async move { Ok::<_, actix_web::Error>(body_bytes) });
-            actix_web::dev::Payload::from(stream)
+            let stream = stream::once(async move { Ok::<_, PayloadError>(body_bytes) });
+            let boxed_stream: Pin<Box<dyn futures_util::Stream<Item = Result<actix_web::web::Bytes, PayloadError>>>> = Box::pin(stream);
+            actix_web::dev::Payload::from(boxed_stream)
         };
         req.set_payload(new_payload);
 
