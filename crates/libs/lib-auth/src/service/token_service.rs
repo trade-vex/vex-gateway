@@ -67,15 +67,24 @@ impl TokenService {
         let redis_key = format!("refresh:{}", refresh_token);
         let redis_val = format!("{}:{}", user_id, jti);
 
+        // Convert to u64 using fallible conversion to handle overflow
+        let refresh_ttl_secs_u64 = refresh_ttl_secs
+            .try_into()
+            .map_err(|_| AuthError::Validation("Refresh token TTL is too large".to_string()))?;
+
         let _: () = conn
-            .set_ex(redis_key, redis_val, refresh_ttl_secs as u64)
+            .set_ex(redis_key, redis_val, refresh_ttl_secs_u64)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to store refresh token: {}", e)))?;
+
+        let expires_in = (self.jwt_config.access_token_ttl_minutes * 60)
+            .try_into()
+            .map_err(|_| AuthError::Validation("Access token TTL is too large".to_string()))?;
 
         Ok(JwtTokenResponse {
             access_token,
             refresh_token,
-            expires_in: (self.jwt_config.access_token_ttl_minutes * 60) as u64,
+            expires_in,
         })
     }
 
@@ -110,8 +119,11 @@ impl TokenService {
             // Blacklist the old access token's JTI
             let blacklist_key = format!("blacklist:{}", old_jti);
             let blacklist_ttl = self.jwt_config.access_token_ttl_minutes * 60;
+            let blacklist_ttl_u64 = blacklist_ttl
+                .try_into()
+                .map_err(|_| AuthError::Validation("Blacklist TTL is too large".to_string()))?;
             let _: () = conn
-                .set_ex(blacklist_key, "1", blacklist_ttl as u64)
+                .set_ex(blacklist_key, "1", blacklist_ttl_u64)
                 .await
                 .map_err(|e| AuthError::Redis(format!("Failed to blacklist token: {}", e)))?;
 
@@ -170,8 +182,11 @@ impl TokenService {
         };
 
         let blacklist_key = format!("blacklist:{}", claims.jti);
+        let ttl_u64 = ttl
+            .try_into()
+            .map_err(|_| AuthError::Validation("Token TTL is too large".to_string()))?;
         let _: () = conn
-            .set_ex(blacklist_key, "1", ttl as u64)
+            .set_ex(blacklist_key, "1", ttl_u64)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to blacklist token: {}", e)))?;
 
@@ -235,15 +250,24 @@ impl TokenService {
         let redis_key = format!("refresh:{}", refresh_token);
         let redis_val = format!("{}:{}", user_id, jti);
 
+        // Convert to u64 using fallible conversion to handle overflow
+        let refresh_ttl_secs_u64 = refresh_ttl_secs
+            .try_into()
+            .map_err(|_| AuthError::Validation("Refresh token TTL is too large".to_string()))?;
+
         let _: () = conn
-            .set_ex(redis_key, redis_val, refresh_ttl_secs as u64)
+            .set_ex(redis_key, redis_val, refresh_ttl_secs_u64)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to store refresh token: {}", e)))?;
+
+        let expires_in = (self.jwt_config.access_token_ttl_minutes * 60)
+            .try_into()
+            .map_err(|_| AuthError::Validation("Access token TTL is too large".to_string()))?;
 
         Ok(JwtTokenResponse {
             access_token,
             refresh_token,
-            expires_in: (self.jwt_config.access_token_ttl_minutes * 60) as u64,
+            expires_in,
         })
     }
 
@@ -276,8 +300,11 @@ impl TokenService {
                     let jti = parts[1];
                     let blacklist_key = format!("blacklist:{}", jti);
                     let blacklist_ttl = self.jwt_config.access_token_ttl_minutes * 60;
+                    let blacklist_ttl_u64 = blacklist_ttl.try_into().map_err(|_| {
+                        AuthError::Validation("Blacklist TTL is too large".to_string())
+                    })?;
                     let _: () = conn
-                        .set_ex(blacklist_key, "1", blacklist_ttl as u64)
+                        .set_ex(blacklist_key, "1", blacklist_ttl_u64)
                         .await
                         .map_err(|e| AuthError::Redis(format!("Failed to blacklist JTI: {}", e)))?;
                 }
