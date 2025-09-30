@@ -547,7 +547,7 @@ where
 
     fn call(&self, mut req: ServiceRequest) -> Self::Future {
         let api_key_store = self.api_key_store.clone();
-        let _default_security = self.default_security;
+        let default_security = self.default_security;
         let route_configs = self.route_configs.clone();
         let strict_timestamp_validation = self.strict_timestamp_validation;
         let service = Rc::clone(&self.service);
@@ -555,8 +555,13 @@ where
         Box::pin(async move {
             // Determine required security level for this route
             let path = req.uri().path();
-            let required_security = ApiKeyMiddleware::get_route_security_type(
-                &ApiKeyMiddleware::new(),
+            let middleware = ApiKeyMiddleware {
+                api_key_store: api_key_store.clone(),
+                default_security,
+                route_configs: route_configs.clone(),
+                strict_timestamp_validation,
+            };
+            let required_security = middleware.get_route_security_type(
                 path,
                 &route_configs,
             );
