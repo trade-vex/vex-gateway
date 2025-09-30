@@ -17,8 +17,10 @@
 //! #[cfg(feature = "postgres")]
 //! use lib_db::backends::sql::postgres;
 //!
+//! use lib_db::backends::kv::memory_kv;
+//!
 //! #[cfg(feature = "redis")]
-//! use lib_db::backends::kv::{redis, memory_kv};
+//! use lib_db::backends::kv::redis;
 //! ```
 //!
 //! ## Architecture
