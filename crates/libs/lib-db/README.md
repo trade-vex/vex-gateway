@@ -222,7 +222,7 @@ use lib_db::{
 // Function that works with any SQL database
 async fn query_users<T: SqlDb>(db: &T) -> Result<Vec<User>> 
 where
-    T::Row: sqlx::FromRow<User>,
+    for<'r> T::Row: sqlx::FromRow<'r, T::Row>,
 {
     // Note: The actual implementation would depend on how the trait
     // handles parameterized queries generically. For PostgreSQL:
