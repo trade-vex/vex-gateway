@@ -131,8 +131,20 @@ where
 
         if let Some(auth_value) = auth_header
             && let Ok(auth_str) = auth_value.to_str()
-            && let Some(token) = auth_str.strip_prefix("Bearer ")
+            && {
+                let parts: Vec<&str> = auth_str.split_whitespace().collect();
+                parts.len() == 2 && parts[0].eq_ignore_ascii_case("bearer")
+            }
+            && {
+                let parts: Vec<&str> = auth_str.split_whitespace().collect();
+                let token = parts[1];
+                !token.is_empty()
+            }
         {
+            // Extract token from header
+            let parts: Vec<&str> = auth_str.split_whitespace().collect();
+            let token = parts[1];
+
             // Validate JWT
             let mut validation = Validation::new(algorithm);
             validation.set_issuer(&[issuer]);
