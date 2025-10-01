@@ -1,0 +1,698 @@
+openapi: 3.0.3
+info:
+  title: Vex Gateway Trading API
+  description: |
+    A comprehensive trading API for order management, user balances, and authentication.
+    
+    ## Authentication
+    
+    This API supports two authentication methods:
+    
+    ### JWT Authentication
+    Include the JWT token in the Authorization header:
+    ```
+    Authorization: Bearer <your-jwt-token>
+    ```
+    
+    ### API Key Authentication
+    Include your API key in the X-API-Key header:
+    ```
+    X-API-Key: <your-api-key>
+    ```
+    
+    ## Rate Limiting
+    
+    API requests are rate limited. Check response headers for current limits:
+    - `X-RateLimit-Limit`: Maximum requests per window
+    - `X-RateLimit-Remaining`: Remaining requests in current window
+    - `X-RateLimit-Reset`: Time when the rate limit resets
+    
+    ## Error Handling
+    
+    All errors follow a consistent format:
+    ```json
+    {
+      "error": "Error type",
+      "message": "Detailed error message",
+      "code": 400
+    }
+    ```
+    
+  version: 1.0.0
+  contact:
+    name: Vex Gateway API Support
+    email: support@vex-gateway.com
+    url: https://vex-gateway.com/support
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: https://api.vex-gateway.com
+    description: Production server
+  - url: https://staging-api.vex-gateway.com
+    description: Staging server
+  - url: http://localhost:8080
+    description: Local development server
+
+security:
+  - JWT: []
+  - ApiKey: []
+
+paths:
+  # Health Check
+  /health:
+    get:
+      summary: Health Check
+      description: Check if the API service is healthy and running
+      operationId: healthCheck
+      tags:
+        - System
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "healthy"
+                  timestamp:
+                    type: string
+                    format: date-time
+                    example: "2023-01-01T00:00:00Z"
+              example:
+                status: "healthy"
+                timestamp: "2023-01-01T00:00:00Z"
+
+  # Authentication Endpoints
+  /auth/oauth/{provider}:
+    get:
+      summary: Initiate OAuth Login
+      description: Start OAuth authentication flow with the specified provider
+      operationId: initiateOAuth
+      tags:
+        - Authentication
+      security: []
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [google, github, microsoft]
+          example: "google"
+      responses:
+        '302':
+          description: Redirect to OAuth provider
+        '400':
+          description: Invalid provider
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/oauth/{provider}/callback:
+    get:
+      summary: OAuth Callback
+      description: Handle OAuth callback from provider
+      operationId: handleOAuthCallback
+      tags:
+        - Authentication
+      security: []
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [google, github, microsoft]
+          example: "google"
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Authorization code from OAuth provider
+        - name: state
+          in: query
+          schema:
+            type: string
+          description: State parameter for CSRF protection
+      responses:
+        '200':
+          description: Authentication successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          description: Invalid callback parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/oauth/providers:
+    get:
+      summary: Get Available OAuth Providers
+      description: List all available OAuth authentication providers
+      operationId: getOAuthProviders
+      tags:
+        - Authentication
+      security: []
+      responses:
+        '200':
+          description: List of available providers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  providers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                          example: "google"
+                        display_name:
+                          type: string
+                          example: "Google"
+                        auth_url:
+                          type: string
+                          example: "/auth/oauth/google"
+
+  # Protected API Endpoints
+  /api/me:
+    get:
+      summary: Get Current User Info
+      description: Get information about the currently authenticated user
+      operationId: getCurrentUser
+      tags:
+        - User
+      responses:
+        '200':
+          description: User information retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Hello authenticated user!"
+                  user_id:
+                    type: string
+                    format: uuid
+                    example: "550e8400-e29b-41d4-a716-446655440000"
+                  timestamp:
+                    type: string
+                    format: date-time
+                    example: "2023-01-01T00:00:00Z"
+        '401':
+          description: Unauthorized - Invalid or missing authentication
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/profile:
+    get:
+      summary: Get User Profile
+      description: Get detailed profile information for the authenticated user
+      operationId: getUserProfile
+      tags:
+        - User
+      responses:
+        '200':
+          description: Profile retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # User Balances and Orders
+  /api/users/balances:
+    get:
+      summary: Get User Balances
+      description: Retrieve available and locked balances for the authenticated user
+      operationId: getUserBalances
+      tags:
+        - Trading
+      responses:
+        '200':
+          description: User balances retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BalancesListResponse'
+              example:
+                balances:
+                  - user_id: "550e8400-e29b-41d4-a716-446655440000"
+                    available: 10000
+                    locked: 5000
+                    total: 15000
+                    last_updated: "2023-01-01T00:00:00Z"
+                total_assets: 1
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/users/orders/open:
+    get:
+      summary: Get User Open Orders
+      description: Retrieve all open orders for the authenticated user
+      operationId: getUserOpenOrders
+      tags:
+        - Trading
+      responses:
+        '200':
+          description: Open orders retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrdersListResponse'
+              example:
+                orders:
+                  - order_id: 12345
+                    user_id: "550e8400-e29b-41d4-a716-446655440000"
+                    price: 50000
+                    size: 1000
+                    side: "Bid"
+                    timestamp: 1640995200000
+                total: 1
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # Order Management
+  /order:
+    post:
+      summary: Place Order
+      description: Place a new trading order
+      operationId: placeOrder
+      tags:
+        - Trading
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderRequest'
+            example:
+              price: 50000
+              volume: 1000
+              symbol_id: 1
+              side: "Bid"
+              order_type: "Gtc"
+      responses:
+        '200':
+          description: Order placed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+              example:
+                order_id: 12345
+                status: "success"
+                message: "Order processed successfully"
+        '400':
+          description: Invalid order request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '408':
+          description: Order processing timeout
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+              example:
+                order_id: 12345
+                status: "timeout"
+                message: "Order processing timed out"
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /cancel:
+    post:
+      summary: Cancel Order
+      description: Cancel an existing trading order
+      operationId: cancelOrder
+      tags:
+        - Trading
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelOrderRequest'
+            example:
+              order_id: 12345
+              symbol_id: 1
+      responses:
+        '200':
+          description: Order cancelled successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+              example:
+                order_id: 12345
+                status: "success"
+                message: "Order cancelled successfully"
+        '400':
+          description: Invalid cancel request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '408':
+          description: Order cancellation timeout
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+              example:
+                order_id: 12345
+                status: "timeout"
+                message: "Order cancellation timed out"
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  securitySchemes:
+    JWT:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token obtained from OAuth authentication
+    ApiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key for programmatic access
+
+  schemas:
+    # Trading Models
+    Order:
+      type: object
+      properties:
+        order_id:
+          type: integer
+          format: int64
+          description: Unique order identifier
+          example: 12345
+        user_id:
+          type: string
+          format: uuid
+          description: User who placed the order
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        price:
+          type: integer
+          format: int64
+          description: Order price in cents
+          example: 50000
+        size:
+          type: integer
+          format: int64
+          description: Order size/quantity
+          example: 1000
+        side:
+          type: string
+          enum: [Bid, Ask]
+          description: Order side (Bid = buy, Ask = sell)
+          example: "Bid"
+        timestamp:
+          type: integer
+          format: int64
+          description: Order timestamp in milliseconds since Unix epoch
+          example: 1640995200000
+
+    UserBalance:
+      type: object
+      properties:
+        user_id:
+          type: string
+          format: uuid
+          description: User identifier
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        available:
+          type: integer
+          format: int64
+          description: Available balance in cents
+          example: 10000
+        locked:
+          type: integer
+          format: int64
+          description: Locked balance in cents
+          example: 5000
+        total:
+          type: integer
+          format: int64
+          description: Total balance (available + locked) in cents
+          example: 15000
+        last_updated:
+          type: string
+          format: date-time
+          description: Last update timestamp
+          example: "2023-01-01T00:00:00Z"
+
+    # Request/Response DTOs
+    OrderRequest:
+      type: object
+      required:
+        - price
+        - volume
+        - symbol_id
+        - side
+        - order_type
+      properties:
+        price:
+          type: integer
+          format: int64
+          description: Order price in cents
+          example: 50000
+          minimum: 1
+        volume:
+          type: integer
+          format: int64
+          description: Order volume/quantity
+          example: 1000
+          minimum: 1
+        symbol_id:
+          type: integer
+          format: int32
+          description: Trading symbol identifier
+          example: 1
+          minimum: 1
+        side:
+          type: string
+          enum: [Bid, Ask]
+          description: Order side (Bid = buy, Ask = sell)
+          example: "Bid"
+        order_type:
+          type: string
+          enum: [Gtc, Ioc, Fok]
+          description: Order type (GTC = Good Till Cancel, IOC = Immediate or Cancel, FOK = Fill or Kill)
+          example: "Gtc"
+
+    CancelOrderRequest:
+      type: object
+      required:
+        - order_id
+        - symbol_id
+      properties:
+        order_id:
+          type: integer
+          format: int64
+          description: Order ID to cancel
+          example: 12345
+          minimum: 1
+        symbol_id:
+          type: integer
+          format: int32
+          description: Trading symbol identifier
+          example: 1
+          minimum: 1
+
+    OrderResponse:
+      type: object
+      properties:
+        order_id:
+          type: integer
+          format: int64
+          description: Order identifier
+          example: 12345
+        status:
+          type: string
+          enum: [success, error, timeout]
+          description: Order processing status
+          example: "success"
+        message:
+          type: string
+          description: Status message
+          example: "Order processed successfully"
+
+    BalancesListResponse:
+      type: object
+      properties:
+        balances:
+          type: array
+          items:
+            $ref: '#/components/schemas/UserBalance'
+          description: List of user balances
+        total_assets:
+          type: integer
+          description: Total number of assets
+          example: 1
+
+    OrdersListResponse:
+      type: object
+      properties:
+        orders:
+          type: array
+          items:
+            $ref: '#/components/schemas/Order'
+          description: List of orders
+        total:
+          type: integer
+          description: Total number of orders
+          example: 1
+
+    # Authentication Models
+    AuthResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+          description: JWT access token
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+        refresh_token:
+          type: string
+          description: JWT refresh token
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+        token_type:
+          type: string
+          example: "Bearer"
+        expires_in:
+          type: integer
+          description: Token expiration time in seconds
+          example: 3600
+        user:
+          $ref: '#/components/schemas/UserProfile'
+
+    UserProfile:
+      type: object
+      properties:
+        user_id:
+          type: string
+          format: uuid
+          description: Unique user identifier
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        username:
+          type: string
+          description: Username
+          example: "john_doe"
+        email:
+          type: string
+          format: email
+          description: User email address
+          example: "john@example.com"
+        created_at:
+          type: string
+          format: date-time
+          description: Account creation timestamp
+          example: "2023-01-01T00:00:00Z"
+        last_login:
+          type: string
+          format: date-time
+          description: Last login timestamp
+          example: "2023-01-01T00:00:00Z"
+
+    # Error Models
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error type
+          example: "validation_error"
+        message:
+          type: string
+          description: Detailed error message
+          example: "Invalid order parameters"
+        code:
+          type: integer
+          description: HTTP status code
+          example: 400
+        details:
+          type: object
+          description: Additional error details
+          additionalProperties: true
+
+tags:
+  - name: System
+    description: System health and status endpoints
+  - name: Authentication
+    description: User authentication and authorization
+  - name: User
+    description: User profile and account information
+  - name: Trading
+    description: Trading operations including orders and balances
