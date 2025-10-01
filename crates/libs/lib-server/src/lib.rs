@@ -22,6 +22,8 @@ pub async fn initialize_server(
     let auth_config = config.auth.clone();
 
     // Initialize AppState with all dependencies
+    // Currently app state is reading from auth config , it should be reading from global config
+    // Auth config can be moved to global config
     let app_state = AppState::new(&auth_config).await?;
 
     // Create TCP listener
