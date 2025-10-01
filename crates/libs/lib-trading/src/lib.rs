@@ -1,7 +1,6 @@
 pub mod cache;
 pub mod order_store;
 pub mod orders;
-pub mod redis_cache;
 pub mod repository;
 pub mod trading;
 pub mod user_balances;
@@ -13,6 +12,5 @@ pub use trading::{
 };
 pub use repository::{TradingRepository, PostgresTradingRepository, TradingError};
 pub use cache::{Cache, CacheStats};
-pub use redis_cache::{RedisCache, RedisCacheConfig};
 pub use order_store::{OrderStore, OrderCacheConfig, OrderCacheStats, IndividualOrderCacheStats, UserOrdersCacheStats, DatabaseStats};
 pub use user_store::{UserBalanceStore, UserBalanceCacheConfig};
