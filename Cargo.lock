@@ -2392,10 +2392,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lib-core"
-version = "0.1.0"
-
-[[package]]
 name = "lib-db"
 version = "0.1.0"
 dependencies = [
