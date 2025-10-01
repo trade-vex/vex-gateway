@@ -16,7 +16,7 @@ tracing = { workspace = true }
 lib-middleware = { path = "../lib-middleware" }
 lib-auth = { path = "../lib-auth" }
 lib-utils = { path = "../lib-utils" }
-lib-trading = { path = "../lib-trading" }
+lib-core = { path = "../lib-core" }
 vex-networking ={ git = "https://github.com/trade-vex/vex-core" , rev = "8a09622"}
 vex-config = { git = "https://github.com/trade-vex/vex-core" , rev = "8a09622"}
 common = { git = "https://github.com/trade-vex/vex-core" , rev = "8a09622"}

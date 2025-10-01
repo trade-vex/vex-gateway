@@ -2332,8 +2332,8 @@ dependencies = [
  "common",
  "futures-util",
  "lib-auth",
+ "lib-core",
  "lib-middleware",
- "lib-trading",
  "lib-utils",
  "sea-orm",
  "serde",
@@ -2389,6 +2389,25 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tracing",
+]
+
+[[package]]
+name = "lib-core"
+version = "0.1.0"
+dependencies = [
+ "actix-web",
+ "async-trait",
+ "bb8",
+ "bincode",
+ "chrono",
+ "lru",
+ "redis 0.24.0",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -2456,25 +2475,6 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
-]
-
-[[package]]
-name = "lib-trading"
-version = "0.1.0"
-dependencies = [
- "actix-web",
- "async-trait",
- "bb8",
- "bincode",
- "chrono",
- "lru",
- "redis 0.24.0",
- "sea-orm",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "uuid",
 ]
 
 [[package]]
