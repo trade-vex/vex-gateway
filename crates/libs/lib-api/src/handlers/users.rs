@@ -2,7 +2,7 @@
 
 use actix_web::{web, HttpResponse, Result};
 use lib_utils::auth_extractors::AuthenticatedUserId;
-use lib_trading::{TradingRepository, BalancesListResponse, OrdersListResponse, UserBalanceResponse, OrderResponse};
+use lib_core::{TradingRepository, BalancesListResponse, OrdersListResponse, UserBalanceResponse, OrderResponse};
 use std::sync::Arc;
 
 pub async fn get_balances(

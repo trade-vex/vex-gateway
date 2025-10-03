@@ -2400,6 +2400,7 @@ dependencies = [
  "bb8",
  "bincode",
  "chrono",
+ "lib-db",
  "lru",
  "redis 0.24.0",
  "sea-orm",

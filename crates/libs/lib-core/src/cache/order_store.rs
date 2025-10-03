@@ -1,6 +1,7 @@
-use crate::cache::Cache;
-use crate::repository::{TradingRepository, TradingError};
-use crate::orders::Model as OrderModel;
+use crate::repository::repository::{TradingRepository, TradingError};
+use crate::model::orders::Model as OrderModel;
+use lib_db::backends::kv::redis::RedisDb;
+use lib_db::traits::{BasicKvStore, ExpiringKvStore};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -39,8 +40,8 @@ pub struct OrderCacheStats {
 
 #[derive(Clone)]
 pub struct OrderStore {
-    cache: Option<Arc<dyn Cache<OrderModel>>>,
-    user_orders_cache: Option<Arc<dyn Cache<Vec<OrderModel>>>>,
+    cache: Option<RedisDb>,
+    user_orders_cache: Option<RedisDb>,
     trading_repo: Option<Arc<dyn TradingRepository>>,
     config: OrderCacheConfig,
     metrics: Arc<OrderCacheMetrics>,
@@ -118,19 +119,21 @@ impl OrderStore {
 
     pub async fn with_redis_cache(
         config: OrderCacheConfig,
-        redis_config: crate::redis_cache::RedisCacheConfig,
+        redis_url: String,
         trading_repo: Option<Arc<dyn TradingRepository>>,
     ) -> Result<Self, TradingError> {
         let cache = if config.enabled {
-            let redis_cache = crate::redis_cache::RedisCache::<OrderModel>::new(redis_config.clone()).await?;
-            Some(Arc::new(redis_cache) as Arc<dyn Cache<OrderModel>>)
+            let redis_db = RedisDb::connect(&redis_url).await
+                .map_err(|e| TradingError::Database(format!("Failed to connect to Redis: {}", e)))?;
+            Some(redis_db.clone())
         } else {
             None
         };
 
         let user_orders_cache = if config.enabled {
-            let redis_cache = crate::redis_cache::RedisCache::<Vec<OrderModel>>::new(redis_config).await?;
-            Some(Arc::new(redis_cache) as Arc<dyn Cache<Vec<OrderModel>>>)
+            let redis_db = RedisDb::connect(&redis_url).await
+                .map_err(|e| TradingError::Database(format!("Failed to connect to Redis: {}", e)))?;
+            Some(redis_db)
         } else {
             None
         };
@@ -148,7 +151,8 @@ impl OrderStore {
         // Cache: Check Redis if available
         if self.config.enabled {
             if let Some(cache) = &self.cache {
-                match cache.get_by_id(&order_id.to_string()).await {
+                let key = format!("order:{}", order_id);
+                match cache.get(&key).await {
                     Ok(Some(order)) => {
                         self.metrics.individual_cache_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         debug!("Individual order cache hit for order ID: {}", order_id);
@@ -175,7 +179,9 @@ impl OrderStore {
                     // Update cache if available
                     if self.config.enabled {
                         if let Some(cache) = &self.cache {
-                            if let Err(e) = cache.set_by_id(&order_id.to_string(), &order, self.config.ttl).await {
+                            let key = format!("order:{}", order_id);
+                            let ttl_secs = self.config.ttl.as_secs();
+                            if let Err(e) = cache.set_ex(&key, &order, ttl_secs).await {
                                 warn!("Failed to update cache for order ID {}: {}", order_id, e);
                             }
                         }
@@ -204,7 +210,8 @@ impl OrderStore {
         // Cache: Check Redis if available
         if self.config.enabled {
             if let Some(cache) = &self.user_orders_cache {
-                match cache.get_by_id(&user_id.to_string()).await {
+                let key = format!("user_orders:{}", user_id);
+                match cache.get(&key).await {
                     Ok(Some(orders)) => {
                         self.metrics.user_orders_cache_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         debug!("User orders cache hit for user: {}", user_id);
@@ -231,7 +238,9 @@ impl OrderStore {
                     // Cache: Store in Redis if available
                     if self.config.enabled {
                         if let Some(cache) = &self.user_orders_cache {
-                            if let Err(e) = cache.set_by_id(&user_id.to_string(), &orders, self.config.ttl).await {
+                            let key = format!("user_orders:{}", user_id);
+                            let ttl_secs = self.config.ttl.as_secs();
+                            if let Err(e) = cache.set_ex(&key, &orders, ttl_secs).await {
                                 warn!("Failed to cache user orders for user {}: {}", user_id, e);
                             }
                         }
@@ -254,13 +263,15 @@ impl OrderStore {
         // Remove from cache if available
         if self.config.enabled {
             if let Some(cache) = &self.cache {
-                if let Err(e) = cache.delete_by_id(&order_id.to_string()).await {
+                let key = format!("order:{}", order_id);
+                if let Err(e) = cache.delete(&key).await {
                     warn!("Failed to invalidate cache for order ID {}: {}", order_id, e);
                 }
             }
             
             if let Some(cache) = &self.user_orders_cache {
-                if let Err(e) = cache.delete_by_id(&user_id.to_string()).await {
+                let key = format!("user_orders:{}", user_id);
+                if let Err(e) = cache.delete(&key).await {
                     warn!("Failed to invalidate user orders cache for user {}: {}", user_id, e);
                 }
             }
@@ -272,32 +283,13 @@ impl OrderStore {
     pub async fn invalidate_user_orders(&self, user_id: Uuid) {
         if self.config.enabled {
             if let Some(cache) = &self.user_orders_cache {
-                if let Err(e) = cache.delete_by_id(&user_id.to_string()).await {
+                let key = format!("user_orders:{}", user_id);
+                if let Err(e) = cache.delete(&key).await {
                     warn!("Failed to invalidate user orders cache for user {}: {}", user_id, e);
                 }
             }
         }
 
         debug!("Invalidated user orders cache for user: {}", user_id);
-    }
-
-    /// Get cache statistics
-    pub fn get_stats(&self) -> OrderCacheStats {
-        OrderCacheStats {
-            individual_cache: IndividualOrderCacheStats {
-                hits: self.metrics.individual_cache_hits.load(std::sync::atomic::Ordering::Relaxed),
-                misses: self.metrics.individual_cache_misses.load(std::sync::atomic::Ordering::Relaxed),
-                errors: self.metrics.individual_cache_errors.load(std::sync::atomic::Ordering::Relaxed),
-            },
-            user_orders_cache: UserOrdersCacheStats {
-                hits: self.metrics.user_orders_cache_hits.load(std::sync::atomic::Ordering::Relaxed),
-                misses: self.metrics.user_orders_cache_misses.load(std::sync::atomic::Ordering::Relaxed),
-                errors: self.metrics.user_orders_cache_errors.load(std::sync::atomic::Ordering::Relaxed),
-            },
-            database: DatabaseStats {
-                hits: self.metrics.db_hits.load(std::sync::atomic::Ordering::Relaxed),
-                errors: self.metrics.db_errors.load(std::sync::atomic::Ordering::Relaxed),
-            },
-        }
     }
 }

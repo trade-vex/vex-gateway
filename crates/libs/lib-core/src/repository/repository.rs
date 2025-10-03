@@ -3,8 +3,8 @@ use sea_orm::prelude::*;
 use sea_orm::*;
 use std::sync::Arc;
 use uuid::Uuid;
-use crate::orders::{Model as OrderModel, Entity as OrderEntity, Column as OrderColumn, ActiveModel as OrderActiveModel};
-use crate::user_balances::{Model as UserBalanceModel, Entity as UserBalanceEntity, Column as UserBalanceColumn, ActiveModel as UserBalanceActiveModel};
+use crate::model::orders::{Model as OrderModel, Entity as OrderEntity, Column as OrderColumn, ActiveModel as OrderActiveModel};
+use crate::model::user_balances::{Model as UserBalanceModel, Entity as UserBalanceEntity, Column as UserBalanceColumn, ActiveModel as UserBalanceActiveModel};
 
 // Error type for trading operations
 #[derive(Debug)]

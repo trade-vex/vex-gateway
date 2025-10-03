@@ -1,6 +1,7 @@
-use crate::cache::{Cache, CacheStats};
-use crate::repository::{TradingRepository, TradingError};
-use crate::user_balances::Model as UserBalanceModel;
+use crate::repository::repository::{TradingRepository, TradingError};
+use crate::model::user_balances::Model as UserBalanceModel;
+use lib_db::backends::kv::redis::RedisDb;
+use lib_db::traits::{BasicKvStore, ExpiringKvStore};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -9,7 +10,7 @@ use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct UserBalanceStore {
-    cache: Option<Arc<dyn Cache<UserBalanceModel>>>,
+    cache: Option<RedisDb>,
     trading_repo: Option<Arc<dyn TradingRepository>>,
     config: UserBalanceCacheConfig,
     metrics: Arc<UserBalanceCacheMetrics>,
@@ -75,12 +76,13 @@ impl UserBalanceStore {
 
     pub async fn with_redis_cache(
         config: UserBalanceCacheConfig,
-        redis_config: crate::redis_cache::RedisCacheConfig,
+        redis_url: String,
         trading_repo: Option<Arc<dyn TradingRepository>>,
     ) -> Result<Self, TradingError> {
         let cache = if config.enabled {
-            let redis_cache = crate::redis_cache::RedisCache::<UserBalanceModel>::new(redis_config).await?;
-            Some(Arc::new(redis_cache) as Arc<dyn Cache<UserBalanceModel>>)
+            let redis_db = RedisDb::connect(&redis_url).await
+                .map_err(|e| TradingError::Database(format!("Failed to connect to Redis: {}", e)))?;
+            Some(redis_db)
         } else {
             None
         };
@@ -96,7 +98,8 @@ impl UserBalanceStore {
     pub async fn get_user_balance_by_id(&self, user_id: Uuid) -> Result<Option<UserBalanceModel>, TradingError> {
         if self.config.enabled {
             if let Some(cache) = &self.cache {
-                match cache.get_by_id(&user_id.to_string()).await {
+                let key = format!("user_balance:{}", user_id);
+                match cache.get(&key).await {
                     Ok(Some(balance)) => {
                         self.metrics.cache_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         debug!("Cache hit for user balance ID: {}", user_id);
@@ -122,7 +125,9 @@ impl UserBalanceStore {
                     // Update cache if available
                     if self.config.enabled {
                         if let Some(cache) = &self.cache {
-                            if let Err(e) = cache.set_by_id(&user_id.to_string(), &balance, self.config.ttl).await {
+                            let key = format!("user_balance:{}", user_id);
+                            let ttl_secs = self.config.ttl.as_secs();
+                            if let Err(e) = cache.set_ex(&key, &balance, ttl_secs).await {
                                 warn!("Failed to update cache for user balance ID {}: {}", user_id, e);
                             }
                         }
@@ -151,24 +156,13 @@ impl UserBalanceStore {
         // Remove from cache if available
         if self.config.enabled {
             if let Some(cache) = &self.cache {
-                if let Err(e) = cache.delete_by_id(&user_id.to_string()).await {
+                let key = format!("user_balance:{}", user_id);
+                if let Err(e) = cache.delete(&key).await {
                     warn!("Failed to invalidate cache for user balance ID {}: {}", user_id, e);
                 }
             }
         }
 
         debug!("Invalidated cache for user balance: {}", user_id);
-    }
-
-    /// Get cache statistics
-    pub fn get_stats(&self) -> CacheStats {
-        CacheStats {
-            hits: self.metrics.cache_hits.load(std::sync::atomic::Ordering::Relaxed),
-            misses: self.metrics.cache_misses.load(std::sync::atomic::Ordering::Relaxed),
-            errors: self.metrics.cache_errors.load(std::sync::atomic::Ordering::Relaxed),
-            sets: 0, // Not tracked in this implementation
-            deletes: 0, // Not tracked in this implementation
-            size: None, // Not available
-        }
     }
 }

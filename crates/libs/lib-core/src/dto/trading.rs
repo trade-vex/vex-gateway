@@ -3,8 +3,8 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 // Re-export models from separate modules
-pub use crate::orders::Model as OrderModel;
-pub use crate::user_balances::Model as UserBalanceModel;
+pub use crate::model::orders::Model as OrderModel;
+pub use crate::model::user_balances::Model as UserBalanceModel;
 
 // Simple types as specified
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
