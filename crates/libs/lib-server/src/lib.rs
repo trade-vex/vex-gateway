@@ -7,7 +7,7 @@ pub mod combined_auth;
 #[cfg(test)]
 mod tests;
 
-use actix_web::{
+use actix_web::{ 
     dev::Server,
     web, App, HttpResponse, HttpServer,
 };
@@ -18,6 +18,7 @@ use lib_auth::{
     middleware::jwt_auth::{AuthenticatedUser, JwtAuthentication},
     state::AppState,
 };
+use lib_rate_limit::{RateLimitConfig, RateLimitMiddleware};
 use lib_config::Config;
 use lib_middleware::{api_key::middleware::ApiKeyMiddleware, repository::api_key_repository::PostgresApiKeyRepository,};
 use crate::combined_auth::CombinedAuthMiddleware;
@@ -30,6 +31,7 @@ pub fn create_app(
     combined_auth: CombinedAuthMiddleware,
     api_key_repository: Arc<dyn lib_middleware::repository::api_key_repository::ApiKeyRepository>,
     trading_repository: Arc<dyn TradingRepository>,
+    rate_limit_middleware: RateLimitMiddleware,
 ) -> App<
     impl actix_web::dev::ServiceFactory<
         actix_web::dev::ServiceRequest,
@@ -67,6 +69,7 @@ pub fn create_app(
                 )
                 .service(
                     web::scope("/users")
+                        .wrap(rate_limit_middleware.clone())
                         .configure(routes::users::configure)
                 ),
         )
@@ -74,9 +77,10 @@ pub fn create_app(
         .route("/health", web::get().to(health_check))
         // Other API routes
         .service(web::scope("").configure(routes::health_check_route::configure))
-        // Orders routes with combined authentication
+        // Orders routes with combined authentication + rate limiting
         .service(
             web::scope("")
+                .wrap(rate_limit_middleware.clone())
                 .wrap(combined_auth.clone())
                 .configure(routes::orders::configure)
         )
@@ -129,6 +133,12 @@ pub async fn initialize_server(config: &Config) -> Result<(Arc<AppState>, Server
         api_key_middleware,
     );
 
+    let rate_limit_config = RateLimitConfig::requests_per_minute(1000);
+    let rate_limit_middleware = RateLimitMiddleware::with_redis(
+        &config.auth.redis.url,
+        rate_limit_config,
+    ).await.map_err(|e| format!("Failed to create rate limiting middleware: {}", e))?;
+
     // Create TCP listener
     let listener = TcpListener::bind(config.server_address()?)?;
     tracing::info!("Server listening on {}", listener.local_addr().unwrap());
@@ -138,9 +148,16 @@ pub async fn initialize_server(config: &Config) -> Result<(Arc<AppState>, Server
     let combined_auth_clone = combined_auth.clone();
     let api_key_repo_clone = api_key_repository.clone();
     let trading_repo_clone = trading_repository.clone();
+    let rate_limit_middleware_clone = rate_limit_middleware.clone();
     
     let server = HttpServer::new(move || {
-        create_app(app_state_clone.clone(), combined_auth_clone.clone(), api_key_repo_clone.clone(), trading_repo_clone.clone())
+        create_app(
+            app_state_clone.clone(), 
+            combined_auth_clone.clone(), 
+            api_key_repo_clone.clone(), 
+            trading_repo_clone.clone(),
+            rate_limit_middleware_clone.clone()
+        )
     })
     .listen(listener)?
     .run();

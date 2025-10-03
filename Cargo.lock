@@ -2669,6 +2669,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "lib-rate-limit"
+version = "0.1.0"
+dependencies = [
+ "actix-web",
+ "async-trait",
+ "bb8",
+ "chrono",
+ "futures-util",
+ "lib-utils",
+ "redis 0.24.0",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "lib-server"
 version = "0.1.0"
 dependencies = [
@@ -2680,6 +2699,7 @@ dependencies = [
  "lib-auth",
  "lib-config",
  "lib-middleware",
+ "lib-rate-limit",
  "lib-trading",
  "lib-utils",
  "serde_json",
