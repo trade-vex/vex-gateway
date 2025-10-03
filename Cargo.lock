@@ -2466,16 +2466,19 @@ dependencies = [
  "actix-web",
  "chrono",
  "deadpool-redis",
+ "futures-util",
  "jsonwebtoken",
  "lib-api",
  "lib-auth",
  "lib-config",
+ "lib-middleware",
  "reqwest 0.11.27",
  "sea-orm",
  "serde_json",
  "tokio",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]

@@ -8,6 +8,7 @@ use lib_auth::middleware::jwt_auth::JwtAuthentication;
 use std::sync::Arc;
 
 use crate::state::AppState;
+use crate::combined_auth::CombinedAuthMiddleware;
 
 /// Application factory that creates the Actix-web application with all routes and middleware
 pub fn create_app(
@@ -36,6 +37,12 @@ pub fn create_app(
         app_state.redis_pool.clone(),
     );
 
+    // Create API key middleware
+    let api_key_middleware = app_state.create_api_key_middleware();
+
+    // Create combined auth middleware
+    let combined_auth_middleware = CombinedAuthMiddleware::new(jwt_middleware, api_key_middleware);
+
     App::new()
         .app_data(web::Data::new(app_state.clone()))
         .app_data(web::Data::new(app_state.user_repo.clone()))
@@ -49,10 +56,10 @@ pub fn create_app(
         .service(web::scope("").configure(lib_auth::configure_public_auth_services))
         // Configure lib-api routes (health check, etc.)
         .service(web::scope("").configure(routes::health_check_route::configure))
-        // Configure protected routes with JWT middleware
+        // Configure protected routes with combined auth middleware
         .service(
             web::scope("")
-                .wrap(jwt_middleware)
+                .wrap(combined_auth_middleware)
                 .configure(lib_auth::configure_protected_auth_services),
         )
 }

@@ -14,8 +14,11 @@ deadpool-redis = {workspace = true}
 jsonwebtoken = {workspace = true}
 reqwest = {workspace = true}
 url = {workspace = true}
+futures-util = {workspace = true}
+uuid = {workspace = true}
 
 #  Internal crate dependencies
 lib-api = {path = "../lib-api"}
 lib-auth = {path = "../lib-auth"}
 lib-config = {path = "../lib-config"}
+lib-middleware = {path = "../lib-middleware"}

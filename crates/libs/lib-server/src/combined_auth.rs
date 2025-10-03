@@ -1,19 +1,17 @@
 use actix_web::{
     dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform},
-    Error, HttpMessage, HttpRequest,
+    Error, HttpRequest,
 };
 use futures_util::future::{ready, LocalBoxFuture, Ready};
-use std::{rc::Rc};
-use tracing::{error, info};
+use std::{rc::Rc, sync::Arc};
+use tracing::error;
 use lib_middleware::api_key::{middleware::ApiKeyMiddleware};
-use lib_auth::middleware::jwt_auth::{JwtAuthentication, AuthenticatedUser, JwtClaims};
-use jsonwebtoken;
-use uuid;
+use lib_auth::middleware::jwt_auth::JwtAuthentication;
 
 #[derive(Clone)]
 pub struct CombinedAuthMiddleware {
     jwt_middleware: JwtAuthentication,
-    api_key_middleware: ApiKeyMiddleware,
+    api_key_middleware: Arc<ApiKeyMiddleware>,
 }
 
 impl CombinedAuthMiddleware {
@@ -23,7 +21,7 @@ impl CombinedAuthMiddleware {
     ) -> Self {
         Self {
             jwt_middleware,
-            api_key_middleware,
+            api_key_middleware: Arc::new(api_key_middleware),
         }
     }
 
@@ -55,9 +53,9 @@ impl<S, B> Transform<S, ServiceRequest> for CombinedAuthMiddleware
 where
     S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
     S::Future: 'static,
-    B: 'static,
+    B: 'static + actix_web::body::MessageBody,
 {
-    type Response = ServiceResponse<B>;
+    type Response = ServiceResponse<actix_web::body::BoxBody>;
     type Error = Error;
     type Transform = CombinedAuthMiddlewareService<S>;
     type InitError = ();
@@ -67,7 +65,7 @@ where
         ready(Ok(CombinedAuthMiddlewareService {
             service: Rc::new(service),
             jwt_middleware: self.jwt_middleware.clone(),
-            api_key_middleware: self.api_key_middleware.clone(),
+            api_key_middleware: Arc::clone(&self.api_key_middleware),
         }))
     }
 }
@@ -75,66 +73,40 @@ where
 pub struct CombinedAuthMiddlewareService<S> {
     service: Rc<S>,
     jwt_middleware: JwtAuthentication,
-    api_key_middleware: ApiKeyMiddleware,
+    api_key_middleware: Arc<ApiKeyMiddleware>,
 }
 
 impl<S, B> Service<ServiceRequest> for CombinedAuthMiddlewareService<S>
 where
     S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
     S::Future: 'static,
-    B: 'static,
+    B: 'static + actix_web::body::MessageBody,
 {
-    type Response = ServiceResponse<B>;
+    type Response = ServiceResponse<actix_web::body::BoxBody>;
     type Error = Error;
     type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
 
     forward_ready!(service);
 
-    fn call(&self, mut req: ServiceRequest) -> Self::Future {
+    fn call(&self, req: ServiceRequest) -> Self::Future {
         let jwt_middleware = self.jwt_middleware.clone();
-        let api_key_middleware = self.api_key_middleware.clone();
+        let api_key_middleware = Arc::clone(&self.api_key_middleware);
         let service = Rc::clone(&self.service);
 
         Box::pin(async move {
             let auth_type = CombinedAuthMiddleware::detect_auth_type(req.request());
 
             match auth_type {
-                AuthType::Jwt => {                    
-                    let auth_header = req.headers().get("authorization");
-                    
-                    if let Some(auth_value) = auth_header {
-                        if let Ok(auth_str) = auth_value.to_str() {
-                            if let Some(token) = auth_str.strip_prefix("Bearer ") {
-                                let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
-                                validation.set_issuer(&[&jwt_middleware.issuer]);
-                                validation.set_audience(&[&jwt_middleware.audience]);
-
-                                match jsonwebtoken::decode::<JwtClaims>(token, &jwt_middleware.decoding_key, &validation) {
-                                    Ok(token_data) => {
-                                        if let Ok(user_id) = uuid::Uuid::parse_str(&token_data.claims.sub) {
-                                            let authenticated_user = AuthenticatedUser { user_id };
-                                            req.extensions_mut().insert(authenticated_user);
-
-                                            info!("JWT authentication successful for user: {}", user_id);
-                                            return service.call(req).await;
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("JWT validation failed: {}", e);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    
-                    error!("JWT authentication failed");
-                    return Err(actix_web::error::ErrorUnauthorized("Invalid or missing JWT token"));
+                AuthType::Jwt => {
+                    // Use the JWT middleware's transform to handle JWT validation
+                    let jwt_service = jwt_middleware.new_transform(service.clone()).await.unwrap();
+                    return jwt_service.call(req).await;
                 }
 
                 AuthType::ApiKey => {
                     let api_key_service = api_key_middleware.new_transform(service.clone()).await.unwrap();
-                    
-                    return api_key_service.call(req).await;
+                    let response = api_key_service.call(req).await?;
+                    return Ok(response.map_into_boxed_body());
                 }
 
                 AuthType::None => {

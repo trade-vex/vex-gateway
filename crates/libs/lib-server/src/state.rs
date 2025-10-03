@@ -7,6 +7,7 @@ use jsonwebtoken::{DecodingKey, EncodingKey};
 use lib_auth::config::{AuthConfig, OAuthProviderConfig};
 use lib_auth::repository::{PostgresUserRepository, UserRepository};
 use lib_auth::service::{EmailService, OAuthService, TokenService};
+use lib_middleware::{ApiKeyMiddleware, ApiKeyConfig, SecurityType};
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -226,6 +227,20 @@ impl AppState {
             self.auth_config.otp.otp_length,
             self.auth_config.otp.email_verification_expiry_minutes,
         )?))
+    }
+
+    /// Create ApiKeyMiddleware using AppState dependencies
+    pub fn create_api_key_middleware(&self) -> ApiKeyMiddleware {
+        // Create a basic API key configuration for development
+        // In production, this should be loaded from database or configuration
+        let api_key_config = ApiKeyConfig::new("dev-api-key".to_string())
+            .with_hmac_secret("dev-secret-key".to_string())
+            .with_permissions(vec![SecurityType::Trade, SecurityType::UserData])
+            .with_description("Development API key".to_string());
+
+        ApiKeyMiddleware::new()
+            .with_api_key(api_key_config)
+            .with_default_security(SecurityType::Trade)
     }
 }
 

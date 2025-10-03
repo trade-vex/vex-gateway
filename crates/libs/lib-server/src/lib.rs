@@ -10,9 +10,11 @@ use std::sync::Arc;
 
 mod app;
 mod state;
+mod combined_auth;
 
 pub use app::create_app;
 pub use state::AppState;
+pub use combined_auth::CombinedAuthMiddleware;
 
 /// Initialize the HTTP server with proper configuration
 pub async fn initialize_server(
