@@ -1,5 +1,5 @@
 // //! Order Store Tests
-// //! 
+// //!
 // //! These tests verify that our OrderStore works correctly with dual caching (individual orders + user order lists),
 // //! database operations, and error handling. We test both cache types and their interactions.
 
@@ -24,7 +24,7 @@
 //     // Use the same database URL as the main app, or fall back to localhost
 //     let database_url = std::env::var("DATABASE_URL")
 //         .unwrap_or_else(|_| "postgresql://vex:1234@localhost:5432/vex_gateway".to_string());
-    
+
 //     Database::connect(&database_url)
 //         .await
 //         .expect("Failed to connect to test database")
@@ -34,11 +34,11 @@
 // /// This only runs once per test suite to avoid conflicts
 // async fn setup_test_db_with_schema() -> DatabaseConnection {
 //     let db = setup_test_db().await;
-    
+
 //     // Make sure we only create the schema once, even with multiple concurrent tests
 //     if !SCHEMA_INITIALIZED.load(std::sync::atomic::Ordering::SeqCst) {
 //         let _guard = SCHEMA_MUTEX.lock().unwrap();
-        
+
 //         // Double-check pattern - another test might have initialized it while we waited
 //         if !SCHEMA_INITIALIZED.load(std::sync::atomic::Ordering::SeqCst) {
 //             // Build the complete database schema for our tests
@@ -53,10 +53,10 @@
 //                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 //                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 //                 );
-                
+
 //                 -- Clean slate - drop existing tables to avoid conflicts
 //                 DROP TABLE IF EXISTS orders CASCADE;
-                
+
 //                 -- Orders table for trading operations
 //                 CREATE TABLE orders (
 //                     order_id BIGSERIAL PRIMARY KEY,
@@ -66,21 +66,21 @@
 //                     side TEXT NOT NULL CHECK (side IN ('Bid', 'Ask')),
 //                     timestamp BIGINT NOT NULL
 //                 );
-                
+
 //                 -- Add some indexes to speed up queries
 //                 CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id);
 //                 CREATE INDEX IF NOT EXISTS idx_orders_timestamp ON orders(timestamp);
 //             "#;
-            
+
 //             db.execute_unprepared(create_schema_sql)
 //                 .await
 //                 .expect("Failed to create test database schema");
-            
+
 //             // Mark as initialized so other tests don't try to recreate it
 //             SCHEMA_INITIALIZED.store(true, std::sync::atomic::Ordering::SeqCst);
 //         }
 //     }
-    
+
 //     db
 // }
 
@@ -146,7 +146,7 @@
 //     }
 // }
 
-// #[cfg(test)] 
+// #[cfg(test)]
 // mod tests {
 //     use super::*;
 //     use std::sync::Once;
@@ -159,7 +159,7 @@
 //         CLEANUP.call_once(|| {
 //             println!("Cleaning up global test environment...");
 //         });
-        
+
 //         let db = setup_test_db().await;
 //         cleanup_test_data(&db).await;
 //     }
@@ -170,7 +170,7 @@
 //     fn test_order_store_new() {
 //         let config = OrderCacheConfig::default();
 //         let store = OrderStore::new(config);
-        
+
 //         // Store should be created successfully
 //         // We can't access private fields directly, but we can test that it was created
 //         assert_eq!(store.get_stats().individual_cache.hits, 0);
@@ -187,9 +187,9 @@
 //         let db = setup_test_db_with_schema().await;
 //         let repo = Arc::new(PostgresTradingRepository::new(Arc::new(db)));
 //         let config = OrderCacheConfig::default();
-        
+
 //         let store = OrderStore::with_repository(config, repo);
-        
+
 //         // Store should be created successfully
 //         // We can't access private fields directly, but we can test that it was created
 //         assert_eq!(store.get_stats().individual_cache.hits, 0);
@@ -205,7 +205,7 @@
 //     async fn test_order_store_with_redis_cache() {
 //         let redis_config = create_test_redis_config();
 //         let cache_config = create_enabled_cache_config();
-        
+
 //         let store = OrderStore::with_redis_cache(cache_config, redis_config, None).await
 //             .expect("❌ Redis connection failed - Redis must be running for this test!");
 
@@ -226,7 +226,7 @@
 //         let repo = Arc::new(PostgresTradingRepository::new(Arc::new(db)));
 //         let redis_config = create_test_redis_config();
 //         let cache_config = create_enabled_cache_config();
-        
+
 //         let store = OrderStore::with_redis_cache(cache_config, redis_config, Some(repo)).await
 //             .expect("❌ Redis connection failed - Redis must be running for this test!");
 
@@ -249,7 +249,7 @@
 //         let order_id = 12345;
 
 //         let result = store.get_order_by_id(order_id, user_id).await;
-        
+
 //         match result {
 //             Ok(None) => {
 //                 // This is expected - no repository means no data
@@ -272,7 +272,7 @@
 //         let user_id = create_test_user_id();
 
 //         let result = store.get_user_orders(user_id).await;
-        
+
 //         match result {
 //             Ok(orders) => {
 //                 // Should return empty vector
@@ -362,12 +362,12 @@
 //         match result {
 //             Ok(orders) => {
 //                 assert_eq!(orders.len(), 2);
-                
+
 //                 // Make sure both orders are in the result
 //                 let order_ids: Vec<i64> = orders.iter().map(|o| o.order_id).collect();
 //                 assert!(order_ids.contains(&(order1_id as i64)));
 //                 assert!(order_ids.contains(&(order2_id as i64)));
-                
+
 //                 // Verify the order details are correct
 //                 for order in &orders {
 //                     assert_eq!(order.user_id, user_id);
@@ -446,7 +446,7 @@
 //         let repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
 //         let redis_config = create_test_redis_config();
 //         let cache_config = create_enabled_cache_config();
-        
+
 //         let store = OrderStore::with_redis_cache(cache_config, redis_config, Some(repo.clone())).await
 //             .expect("❌ Redis connection failed - Redis must be running for this test!");
 
@@ -493,7 +493,7 @@
 //         let repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
 //         let redis_config = create_test_redis_config();
 //         let cache_config = create_enabled_cache_config();
-        
+
 //         let store = OrderStore::with_redis_cache(cache_config, redis_config, Some(repo.clone())).await
 //             .expect("❌ Redis connection failed - Redis must be running for this test!");
 
@@ -551,7 +551,7 @@
 //         let repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
 //         let redis_config = create_test_redis_config();
 //         let cache_config = create_enabled_cache_config();
-        
+
 //         let store = OrderStore::with_redis_cache(cache_config, redis_config, Some(repo)).await
 //             .expect("❌ Redis connection failed - Redis must be running for this test!");
 
@@ -582,7 +582,7 @@
 //         let repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
 //         let redis_config = create_test_redis_config();
 //         let cache_config = create_enabled_cache_config();
-        
+
 //         let store = OrderStore::with_redis_cache(cache_config, redis_config, Some(repo)).await
 //             .expect("❌ Redis connection failed - Redis must be running for this test!");
 
@@ -612,7 +612,7 @@
 //         let repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
 //         let redis_config = create_test_redis_config();
 //         let cache_config = create_enabled_cache_config();
-        
+
 //         let store = OrderStore::with_redis_cache(cache_config, redis_config, Some(repo.clone())).await
 //             .expect("❌ Redis connection failed - Redis must be running for this test!");
 
@@ -637,7 +637,7 @@
 //         // First call should be a cache miss (data not in cache yet)
 //         let result1 = store.get_order_by_id(order_id, user_id).await.unwrap();
 //         assert!(result1.is_some());
-        
+
 //         let after_first_call_stats = store.get_stats();
 //         assert_eq!(after_first_call_stats.individual_cache.misses, 1, "First call should be a cache miss");
 //         assert_eq!(after_first_call_stats.individual_cache.hits, 0, "No hits yet");
@@ -645,7 +645,7 @@
 //         // Second call should be a cache hit (data now in cache)
 //         let result2 = store.get_order_by_id(order_id, user_id).await.unwrap();
 //         assert!(result2.is_some());
-        
+
 //         let after_second_call_stats = store.get_stats();
 //         assert_eq!(after_second_call_stats.individual_cache.misses, 1, "Still only 1 miss");
 //         assert_eq!(after_second_call_stats.individual_cache.hits, 1, "Second call should be a cache hit");
@@ -656,7 +656,7 @@
 //         // Third call should be a cache miss again (cache was invalidated)
 //         let result3 = store.get_order_by_id(order_id, user_id).await.unwrap();
 //         assert!(result3.is_some());
-        
+
 //         let after_invalidation_stats = store.get_stats();
 //         assert_eq!(after_invalidation_stats.individual_cache.misses, 2, "Third call should be a cache miss after invalidation");
 //         assert_eq!(after_invalidation_stats.individual_cache.hits, 1, "Still only 1 hit");
@@ -674,7 +674,7 @@
 //         let repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
 //         let redis_config = create_test_redis_config();
 //         let cache_config = create_enabled_cache_config();
-        
+
 //         let store = OrderStore::with_redis_cache(cache_config, redis_config, Some(repo.clone())).await
 //             .expect("❌ Redis connection failed - Redis must be running for this test!");
 
@@ -709,7 +709,7 @@
 //         // First call should be a cache miss (data not in cache yet)
 //         let result1 = store.get_user_orders(user_id).await.unwrap();
 //         assert_eq!(result1.len(), 2);
-        
+
 //         let after_first_call_stats = store.get_stats();
 //         assert_eq!(after_first_call_stats.user_orders_cache.misses, 1, "First call should be a cache miss");
 //         assert_eq!(after_first_call_stats.user_orders_cache.hits, 0, "No hits yet");
@@ -717,7 +717,7 @@
 //         // Second call should be a cache hit (data now in cache)
 //         let result2 = store.get_user_orders(user_id).await.unwrap();
 //         assert_eq!(result2.len(), 2);
-        
+
 //         let after_second_call_stats = store.get_stats();
 //         assert_eq!(after_second_call_stats.user_orders_cache.misses, 1, "Still only 1 miss");
 //         assert_eq!(after_second_call_stats.user_orders_cache.hits, 1, "Second call should be a cache hit");
@@ -728,7 +728,7 @@
 //         // Third call should be a cache miss again (cache was invalidated)
 //         let result3 = store.get_user_orders(user_id).await.unwrap();
 //         assert_eq!(result3.len(), 2);
-        
+
 //         let after_invalidation_stats = store.get_stats();
 //         assert_eq!(after_invalidation_stats.user_orders_cache.misses, 2, "Third call should be a cache miss after invalidation");
 //         assert_eq!(after_invalidation_stats.user_orders_cache.hits, 1, "Still only 1 hit");
@@ -746,7 +746,7 @@
 //         let repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
 //         let redis_config = create_test_redis_config();
 //         let cache_config = create_enabled_cache_config();
-        
+
 //         let store = OrderStore::with_redis_cache(cache_config, redis_config, Some(repo.clone())).await
 //             .expect("❌ Redis connection failed - Redis must be running for this test!");
 
@@ -783,7 +783,7 @@
 //         // Cache both individual order and user orders (first calls = cache misses)
 //         let _ = store.get_order_by_id(order1_id, user_id).await.unwrap();
 //         let _ = store.get_user_orders(user_id).await.unwrap();
-        
+
 //         let after_first_calls_stats = store.get_stats();
 //         assert_eq!(after_first_calls_stats.individual_cache.misses, 1, "Individual order first call should be cache miss");
 //         assert_eq!(after_first_calls_stats.user_orders_cache.misses, 1, "User orders first call should be cache miss");
@@ -791,7 +791,7 @@
 //         // Second calls should be cache hits
 //         let _ = store.get_order_by_id(order1_id, user_id).await.unwrap();
 //         let _ = store.get_user_orders(user_id).await.unwrap();
-        
+
 //         let after_second_calls_stats = store.get_stats();
 //         assert_eq!(after_second_calls_stats.individual_cache.hits, 1, "Individual order second call should be cache hit");
 //         assert_eq!(after_second_calls_stats.user_orders_cache.hits, 1, "User orders second call should be cache hit");
@@ -805,7 +805,7 @@
 
 //         let user_orders_result = store.get_user_orders(user_id).await.unwrap();
 //         assert_eq!(user_orders_result.len(), 2);
-        
+
 //         let after_invalidation_stats = store.get_stats();
 //         assert_eq!(after_invalidation_stats.individual_cache.misses, 2, "Individual order should be cache miss after invalidation");
 //         assert_eq!(after_invalidation_stats.user_orders_cache.misses, 2, "User orders should be cache miss after invalidation");
@@ -821,7 +821,7 @@
 //         let repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
 //         let redis_config = create_test_redis_config();
 //         let cache_config = create_enabled_cache_config();
-        
+
 //         let store = OrderStore::with_redis_cache(cache_config, redis_config, Some(repo.clone())).await
 //             .expect("❌ Redis connection failed - Redis must be running for this test!");
 
@@ -878,7 +878,7 @@
 //         let repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
 //         let redis_config = create_test_redis_config();
 //         let cache_config = create_enabled_cache_config();
-        
+
 //         let store = Arc::new(OrderStore::with_redis_cache(cache_config, redis_config, Some(repo.clone())).await
 //             .expect("❌ Redis connection failed - Redis must be running for this test!"));
 
@@ -911,7 +911,7 @@
 //                 assert_eq!(order_model.size, 1000);
 //                 assert_eq!(order_model.side, "Bid");
 //             });
-            
+
 //             handles.push(handle);
 //         }
 
@@ -925,7 +925,7 @@
 //                 assert_eq!(orders.len(), 1);
 //                 assert_eq!(orders[0].user_id, user_id);
 //             });
-            
+
 //             handles.push(handle);
 //         }
 
@@ -942,7 +942,7 @@
 //         // Ensure OrderStore is Send + Sync for async usage
 //         fn assert_send<T: Send>() {}
 //         fn assert_sync<T: Sync>() {}
-        
+
 //         assert_send::<OrderStore>();
 //         assert_sync::<OrderStore>();
 //     }

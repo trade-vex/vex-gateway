@@ -1,9 +1,9 @@
 //! Authentication extractors for handlers
-//! 
+//!
 //! This module provides extractors that can be used in handlers to get authenticated user information
 //! from either JWT tokens or API keys.
 
-use actix_web::{web, FromRequest, HttpRequest, dev::Payload, Error as ActixError, HttpMessage};
+use actix_web::{dev::Payload, web, Error as ActixError, FromRequest, HttpMessage, HttpRequest};
 use futures_util::future::{ready, Ready};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -38,20 +38,20 @@ impl FromRequest for AuthenticatedUserId {
         if let Some(jwt_user) = req.extensions().get::<AuthenticatedUser>() {
             return ready(Ok(AuthenticatedUserId::from(jwt_user)));
         }
-        
+
         // If no JWT user, try to get API key config and extract user info
         if let Some(_api_config) = req.extensions().get::<Arc<ApiKeyConfig>>() {
             // For API key authentication, we need to get the user_id from the request
             // This could be from query params, headers, or request body
             // For now, we'll return an error indicating that user_id must be provided
             return ready(Err(ActixError::from(actix_web::error::ErrorBadRequest(
-                "API key authentication requires user_id to be provided in request"
+                "API key authentication requires user_id to be provided in request",
             ))));
         }
-        
+
         // No authentication found
         ready(Err(ActixError::from(actix_web::error::ErrorUnauthorized(
-            "Authentication required"
+            "Authentication required",
         ))))
     }
 }
@@ -72,15 +72,15 @@ impl FromRequest for AuthContext {
         if let Some(jwt_user) = req.extensions().get::<AuthenticatedUser>() {
             return ready(Ok(AuthContext::Jwt(jwt_user.clone())));
         }
-        
+
         // If no JWT user, try to get API key config
         if let Some(api_config) = req.extensions().get::<Arc<ApiKeyConfig>>() {
             return ready(Ok(AuthContext::ApiKey(api_config.clone())));
         }
-        
+
         // No authentication found
         ready(Err(ActixError::from(actix_web::error::ErrorUnauthorized(
-            "Authentication required"
+            "Authentication required",
         ))))
     }
 }
@@ -130,35 +130,42 @@ pub fn extract_user_id_from_request(
     if let Some(jwt_user) = req.extensions().get::<AuthenticatedUser>() {
         return Ok(jwt_user.user_id);
     }
-    
+
     // If no JWT user, try to get from API key authentication with fallback
     if req.extensions().get::<Arc<ApiKeyConfig>>().is_some() {
         if let Some(user_id) = fallback_user_id {
             return Ok(user_id);
         }
         return Err(ActixError::from(actix_web::error::ErrorBadRequest(
-            "API key authentication requires user_id to be provided"
+            "API key authentication requires user_id to be provided",
         )));
     }
-    
+
     // No authentication found
     Err(ActixError::from(actix_web::error::ErrorUnauthorized(
-        "Authentication required"
+        "Authentication required",
     )))
 }
 
 /// Helper function to extract user ID from query parameters
-pub fn extract_user_id_from_query(
-    req: &HttpRequest,
-) -> Result<Uuid, ActixError> {
-    let query = web::Query::<std::collections::HashMap<String, String>>::from_query(req.query_string())
-        .map_err(|_| ActixError::from(actix_web::error::ErrorBadRequest("Invalid query parameters")))?;
-    
-    let user_id_str = query.get("user_id")
-        .ok_or_else(|| ActixError::from(actix_web::error::ErrorBadRequest("user_id query parameter required")))?;
-    
-    let user_id = Uuid::parse_str(user_id_str)
-        .map_err(|_| ActixError::from(actix_web::error::ErrorBadRequest("Invalid user_id format")))?;
-    
+pub fn extract_user_id_from_query(req: &HttpRequest) -> Result<Uuid, ActixError> {
+    let query =
+        web::Query::<std::collections::HashMap<String, String>>::from_query(req.query_string())
+            .map_err(|_| {
+                ActixError::from(actix_web::error::ErrorBadRequest(
+                    "Invalid query parameters",
+                ))
+            })?;
+
+    let user_id_str = query.get("user_id").ok_or_else(|| {
+        ActixError::from(actix_web::error::ErrorBadRequest(
+            "user_id query parameter required",
+        ))
+    })?;
+
+    let user_id = Uuid::parse_str(user_id_str).map_err(|_| {
+        ActixError::from(actix_web::error::ErrorBadRequest("Invalid user_id format"))
+    })?;
+
     Ok(user_id)
 }

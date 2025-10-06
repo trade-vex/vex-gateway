@@ -4,11 +4,11 @@
 //! It initializes the server configuration and starts the HTTP server.
 
 use lib_config::Config;
+use std::sync::mpsc;
 use tracing::{error, info};
 use tracing_subscriber::{filter::LevelFilter, fmt};
-use vex_networking::client::{VexGateway, OrderCommandHandler};
 use vex_config::GatewayNetworkingConfig;
-use std::sync::mpsc;
+use vex_networking::client::{OrderCommandHandler, VexGateway};
 
 /// Main entry point for the VEX Gateway Service
 ///
@@ -67,7 +67,8 @@ async fn main() -> std::io::Result<()> {
 
     // Start the gateway client and get the publisher
     info!("Starting VexGateway client");
-    let publisher = gateway_client.start(handler)
+    let publisher = gateway_client
+        .start(handler)
         .map_err(|e| std::io::Error::other(format!("Failed to start VexGateway: {}", e)))?;
     info!("VexGateway client started successfully");
 

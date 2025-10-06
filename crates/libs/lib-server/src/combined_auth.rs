@@ -1,12 +1,12 @@
 use actix_web::{
-    dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform},
     Error, HttpRequest,
+    dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready},
 };
-use futures_util::future::{ready, LocalBoxFuture, Ready};
+use futures_util::future::{LocalBoxFuture, Ready, ready};
+use lib_auth::middleware::jwt_auth::JwtAuthentication;
+use lib_middleware::api_key::middleware::ApiKeyMiddleware;
 use std::{rc::Rc, sync::Arc};
 use tracing::error;
-use lib_middleware::api_key::{middleware::ApiKeyMiddleware};
-use lib_auth::middleware::jwt_auth::JwtAuthentication;
 
 #[derive(Clone)]
 pub struct CombinedAuthMiddleware {
@@ -15,10 +15,7 @@ pub struct CombinedAuthMiddleware {
 }
 
 impl CombinedAuthMiddleware {
-    pub fn new(
-        jwt_middleware: JwtAuthentication,
-        api_key_middleware: ApiKeyMiddleware,
-    ) -> Self {
+    pub fn new(jwt_middleware: JwtAuthentication, api_key_middleware: ApiKeyMiddleware) -> Self {
         Self {
             jwt_middleware,
             api_key_middleware: Arc::new(api_key_middleware),
@@ -33,11 +30,11 @@ impl CombinedAuthMiddleware {
                 }
             }
         }
-        
+
         if req.headers().get("X-MBX-APIKEY").is_some() {
             return AuthType::ApiKey;
         }
-        
+
         AuthType::None
     }
 }
@@ -104,14 +101,19 @@ where
                 }
 
                 AuthType::ApiKey => {
-                    let api_key_service = api_key_middleware.new_transform(service.clone()).await.unwrap();
+                    let api_key_service = api_key_middleware
+                        .new_transform(service.clone())
+                        .await
+                        .unwrap();
                     let response = api_key_service.call(req).await?;
                     return Ok(response.map_into_boxed_body());
                 }
 
                 AuthType::None => {
                     error!("No authentication provided");
-                    return Err(actix_web::error::ErrorUnauthorized("Authentication required"));
+                    return Err(actix_web::error::ErrorUnauthorized(
+                        "Authentication required",
+                    ));
                 }
             }
         })

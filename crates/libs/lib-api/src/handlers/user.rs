@@ -1,8 +1,11 @@
 //! lib-api/src/handlers/users.rs
 
-use actix_web::{web, HttpResponse, Result};
+use actix_web::{HttpResponse, Result, web};
+use lib_core::{
+    BalancesListResponse, OrderResponse, OrderStore, OrdersListResponse, UserBalanceResponse,
+    UserBalanceStore,
+};
 use lib_utils::auth_extractors::AuthenticatedUserId;
-use lib_core::{UserBalanceStore, OrderStore, BalancesListResponse, OrdersListResponse, UserBalanceResponse, OrderResponse};
 use std::sync::Arc;
 
 pub async fn get_balances(
@@ -14,10 +17,8 @@ pub async fn get_balances(
     match balance_store.get_user_balances(user_id).await {
         Ok(balances) => {
             let total_assets = balances.len();
-            let balance_responses: Vec<UserBalanceResponse> = balances
-                .into_iter()
-                .map(|balance| balance.into())
-                .collect();
+            let balance_responses: Vec<UserBalanceResponse> =
+                balances.into_iter().map(|balance| balance.into()).collect();
 
             let response = BalancesListResponse {
                 balances: balance_responses,
@@ -45,10 +46,8 @@ pub async fn get_open_orders(
     match order_store.get_user_orders(user_id).await {
         Ok(orders) => {
             let total = orders.len();
-            let order_responses: Vec<OrderResponse> = orders
-                .into_iter()
-                .map(|order| order.into())
-                .collect();
+            let order_responses: Vec<OrderResponse> =
+                orders.into_iter().map(|order| order.into()).collect();
 
             let response = OrdersListResponse {
                 orders: order_responses,
@@ -66,4 +65,3 @@ pub async fn get_open_orders(
         }
     }
 }
-

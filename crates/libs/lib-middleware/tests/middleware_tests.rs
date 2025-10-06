@@ -13,7 +13,7 @@
 //         path_pattern: "/api/v1/orders".to_string(),
 //         security_type: SecurityType::Trade,
 //     };
-    
+
 //     assert_eq!(config.path_pattern, "/api/v1/orders");
 //     assert_eq!(config.security_type, SecurityType::Trade);
 // }
@@ -24,7 +24,7 @@
 //         path_pattern: "/api/v1/user".to_string(),
 //         security_type: SecurityType::UserData,
 //     };
-    
+
 //     let cloned = original.clone();
 //     assert_eq!(original.path_pattern, cloned.path_pattern);
 //     assert_eq!(original.security_type, cloned.security_type);
@@ -36,7 +36,7 @@
 //         path_pattern: "/api/v1/stream".to_string(),
 //         security_type: SecurityType::UserStream,
 //     };
-    
+
 //     let debug_str = format!("{:?}", config);
 //     assert!(debug_str.contains("/api/v1/stream"));
 //     assert!(debug_str.contains("UserStream"));
@@ -45,7 +45,7 @@
 // #[test]
 // fn test_cache_config_default() {
 //     let config = CacheConfig::default();
-    
+
 //     assert_eq!(config.l1_max_size, 100_000);
 //     assert_eq!(config.l1_ttl, Duration::from_secs(300)); // 5 minutes
 // }
@@ -58,7 +58,7 @@
 //         l2_ttl: Duration::from_secs(1800),
 //         l2_enabled: false,
 //     };
-    
+
 //     assert_eq!(config.l1_max_size, 2000);
 //     assert_eq!(config.l1_ttl, Duration::from_secs(600));
 // }
@@ -71,7 +71,7 @@
 //         l2_ttl: Duration::from_secs(1800),
 //         l2_enabled: false,
 //     };
-    
+
 //     let cloned = config.clone();
 //     assert_eq!(config.l1_max_size, cloned.l1_max_size);
 //     assert_eq!(config.l1_ttl, cloned.l1_ttl);
@@ -80,7 +80,7 @@
 // #[test]
 // fn test_cache_metrics_new() {
 //     let metrics = CacheMetrics::new();
-    
+
 //     assert_eq!(metrics.l1_hits.load(std::sync::atomic::Ordering::Relaxed), 0);
 //     assert_eq!(metrics.l1_misses.load(std::sync::atomic::Ordering::Relaxed), 0);
 //     assert_eq!(metrics.db_queries.load(std::sync::atomic::Ordering::Relaxed), 0);
@@ -89,12 +89,12 @@
 // #[test]
 // fn test_cache_metrics_operations() {
 //     let metrics = CacheMetrics::new();
-    
+
 //     // Test increment operations
 //     metrics.l1_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 //     metrics.l1_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 //     metrics.db_queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    
+
 //     assert_eq!(metrics.l1_hits.load(std::sync::atomic::Ordering::Relaxed), 1);
 //     assert_eq!(metrics.l1_misses.load(std::sync::atomic::Ordering::Relaxed), 1);
 //     assert_eq!(metrics.db_queries.load(std::sync::atomic::Ordering::Relaxed), 1);
@@ -103,7 +103,7 @@
 // #[test]
 // fn test_cache_metrics_hit_ratios() {
 //     let metrics = CacheMetrics::new();
-    
+
 //     // Add some hits and misses
 //     for _ in 0..7 {
 //         metrics.l1_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -111,16 +111,16 @@
 //     for _ in 0..3 {
 //         metrics.l1_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 //     }
-    
+
 //     let l1_ratio = metrics.get_l1_hit_rate();
-    
+
 //     assert!((l1_ratio - 0.7).abs() < 0.01); // 7/10 = 0.7
 // }
 
 // #[test]
 // fn test_cache_metrics_hit_ratio_no_requests() {
 //     let metrics = CacheMetrics::new();
-    
+
 //     // With no requests, hit ratio should be 0.0
 //     assert_eq!(metrics.get_l1_hit_rate(), 0.0);
 // }
@@ -128,16 +128,16 @@
 // #[test]
 // fn test_cache_metrics_basic_usage() {
 //     let metrics = CacheMetrics::new();
-    
+
 //     // Add some sample data
 //     metrics.l1_hits.fetch_add(2, std::sync::atomic::Ordering::Relaxed);
 //     metrics.l1_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 //     metrics.db_queries.fetch_add(2, std::sync::atomic::Ordering::Relaxed);
-    
+
 //     assert_eq!(metrics.l1_hits.load(std::sync::atomic::Ordering::Relaxed), 2);
 //     assert_eq!(metrics.l1_misses.load(std::sync::atomic::Ordering::Relaxed), 1);
 //     assert_eq!(metrics.db_queries.load(std::sync::atomic::Ordering::Relaxed), 2);
-    
+
 //     let hit_rate = metrics.get_l1_hit_rate();
 //     assert!((hit_rate - 0.6666666666666666).abs() < 0.01); // 2/3
 // }
@@ -147,15 +147,15 @@
 //     let api_key_config = ApiKeyConfig::new("test-key".to_string())
 //         .with_hmac_secret("secret".to_string())
 //         .with_permissions(vec![SecurityType::Trade]);
-    
+
 //     let config = CacheConfig::default();
 //     let store = ApiKeyStore::new(config)
 //         .with_api_keys(vec![api_key_config.clone()]);
-    
+
 //     // Verify the API key was added to memory store
 //     let result = store.get_api_key("test-key").await;
 //     assert!(result.is_some());
-    
+
 //     let retrieved_config = result.unwrap();
 //     assert_eq!(retrieved_config.api_key, "test-key");
 //     assert_eq!(retrieved_config.permissions, vec![SecurityType::Trade]);
@@ -165,7 +165,7 @@
 // async fn test_api_key_store_get_not_found() {
 //     let config = CacheConfig::default();
 //     let store = ApiKeyStore::new(config);
-    
+
 //     let result = store.get_api_key("non-existent-key").await;
 //     assert!(result.is_none());
 // }
@@ -174,9 +174,9 @@
 // async fn test_api_key_store_concurrent_access() {
 //     let config = CacheConfig::default();
 //     let store = Arc::new(ApiKeyStore::new(config));
-    
+
 //     let mut handles = vec![];
-    
+
 //     // Spawn multiple tasks that try to get the same non-existent key concurrently
 //     for i in 0..10 {
 //         let store_clone = Arc::clone(&store);
@@ -185,10 +185,10 @@
 //             let result = store_clone.get_api_key(&key).await;
 //             assert!(result.is_none());
 //         });
-        
+
 //         handles.push(handle);
 //     }
-    
+
 //     // Wait for all tasks to complete
 //     for handle in handles {
 //         handle.await.unwrap();
@@ -202,14 +202,14 @@
 //         .with_permissions(vec![SecurityType::Trade, SecurityType::UserData])
 //         .with_recv_window(10000)
 //         .with_description("Test API key".to_string());
-    
+
 //     let config = CacheConfig::default();
 //     let store = ApiKeyStore::new(config)
 //         .with_api_keys(vec![api_key_config]);
-    
+
 //     let result = store.get_api_key("valid-key").await;
 //     assert!(result.is_some());
-    
+
 //     let retrieved = result.unwrap();
 //     assert_eq!(retrieved.api_key, "valid-key");
 //     assert_eq!(retrieved.recv_window, 10000);
@@ -223,7 +223,7 @@
 // async fn test_api_key_store_cache_behavior() {
 //     let api_key_config = ApiKeyConfig::new("cache-test".to_string())
 //         .with_hmac_secret("cache-secret".to_string());
-    
+
 //     let config = CacheConfig {
 //         l1_max_size: 10,
 //         l1_ttl: Duration::from_secs(1), // Short TTL for testing
@@ -232,15 +232,15 @@
 //     };
 //     let store = ApiKeyStore::new(config)
 //         .with_api_keys(vec![api_key_config]);
-    
+
 //     // First access should cache the key
 //     let result1 = store.get_api_key("cache-test").await;
 //     assert!(result1.is_some());
-    
+
 //     // Second access should hit cache
 //     let result2 = store.get_api_key("cache-test").await;
 //     assert!(result2.is_some());
-    
+
 //     // Both results should be the same
 //     assert_eq!(result1.unwrap().api_key, result2.unwrap().api_key);
 // }
@@ -249,10 +249,10 @@
 // fn test_api_key_store_clone() {
 //     let config = CacheConfig::default();
 //     let store = ApiKeyStore::new(config);
-    
+
 //     // Store should be cloneable (Arc-based internals)
 //     let _cloned_store = store.clone();
-    
+
 //     // This test just ensures the clone compiles and works
 // }
 
@@ -261,7 +261,7 @@
 //     // Ensure ApiKeyStore is Send + Sync for async usage
 //     fn assert_send<T: Send>() {}
 //     fn assert_sync<T: Sync>() {}
-    
+
 //     assert_send::<ApiKeyStore>();
 //     assert_sync::<ApiKeyStore>();
 // }
@@ -271,7 +271,7 @@
 //     // Ensure CacheMetrics is Send + Sync for async usage
 //     fn assert_send<T: Send>() {}
 //     fn assert_sync<T: Sync>() {}
-    
+
 //     assert_send::<CacheMetrics>();
 //     assert_sync::<CacheMetrics>();
 // }
@@ -419,19 +419,19 @@
 //             .with_hmac_secret("hmac_secret".to_string())
 //             .with_permissions(vec![SecurityType::Trade])
 //             .with_recv_window(5000),
-        
+
 //         // RSA key
 //         ApiKeyConfig::new("rsa_key".to_string())
 //             .with_rsa_public_key("-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA...\n-----END PUBLIC KEY-----".to_string())
 //             .with_permissions(vec![SecurityType::UserData])
 //             .with_recv_window(10000),
-        
+
 //         // Ed25519 key
 //         ApiKeyConfig::new("ed25519_key".to_string())
 //             .with_ed25519_public_key("-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA...\n-----END PUBLIC KEY-----".to_string())
 //             .with_permissions(vec![SecurityType::UserStream])
 //             .with_recv_window(60000),
-        
+
 //         // Key with IP blacklist
 //         ApiKeyConfig::new("blacklist_key".to_string())
 //             .with_hmac_secret("blacklist_secret".to_string())
@@ -442,7 +442,7 @@
 
 //     for (i, api_key) in test_cases.into_iter().enumerate() {
 //         let key = format!("serialization_test_{}", i);
-        
+
 //         // Store the key
 //         let set_result = redis_cache.set(&key, &api_key, Duration::from_secs(60)).await;
 //         assert!(set_result.is_ok(), "Failed to set API key {}: {:?}", i, set_result);
@@ -450,12 +450,12 @@
 //         // Fetch it back
 //         let get_result = redis_cache.get(&key).await;
 //         assert!(get_result.is_ok(), "Failed to get API key {}: {:?}", i, get_result);
-        
+
 //         let retrieved = get_result.unwrap();
 //         assert!(retrieved.is_some(), "API key {} not found after roundtrip", i);
-        
+
 //         let retrieved_key = retrieved.unwrap();
-        
+
 //         // Fields should match
 //         assert_eq!(retrieved_key.api_key, api_key.api_key);
 //         assert_eq!(retrieved_key.permissions, api_key.permissions);
@@ -463,7 +463,7 @@
 //         assert_eq!(retrieved_key.enabled, api_key.enabled);
 //         assert_eq!(retrieved_key.description, api_key.description);
 //         assert_eq!(retrieved_key.ip_blacklist, api_key.ip_blacklist);
-        
+
 //         // Key material should also match
 //         match (&retrieved_key.key_material, &api_key.key_material) {
 //             (Some(ret), Some(orig)) => {
@@ -579,7 +579,7 @@
 //     // Requires Redis, skips DB for now.
 //     let cache_config = create_l2_cache_config();
 //     let redis_config = create_test_redis_config();
-    
+
 //     let store = ApiKeyStore::with_redis_cache(cache_config, redis_config, None).await
 //         .expect("❌ Redis connection failed - Redis must be running for this test!");
 
@@ -611,7 +611,7 @@
 // async fn test_cache_invalidation_l1_l2() {
 //     let cache_config = create_l2_cache_config();
 //     let redis_config = create_test_redis_config();
-    
+
 //     let store = ApiKeyStore::with_redis_cache(cache_config, redis_config, None).await
 //         .expect("❌ Redis connection failed - Redis must be running for this test!");
 

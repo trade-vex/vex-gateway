@@ -1,8 +1,8 @@
-use lib_middleware::models::api_key::{Model, NewApiKey, KeyMaterialType};
-use lib_middleware::api_key::security::{SecurityType, KeyMaterial};
-use chrono::{Utc, Duration};
-use uuid::Uuid;
+use chrono::{Duration, Utc};
+use lib_middleware::api_key::security::{KeyMaterial, SecurityType};
+use lib_middleware::models::api_key::{KeyMaterialType, Model, NewApiKey};
 use serde_json::json;
+use uuid::Uuid;
 
 #[test]
 fn test_model_creation() {
@@ -22,7 +22,7 @@ fn test_model_creation() {
         expires_at: Some(Utc::now() + Duration::days(30)),
         last_used_at: None,
     };
-    
+
     assert_eq!(model.api_key, "test-api-key");
     assert_eq!(model.key_material_type, Some(KeyMaterialType::HmacSecret));
     assert_eq!(model.key_material_value, Some("secret-value".to_string()));
@@ -53,7 +53,7 @@ fn test_model_clone() {
         expires_at: None,
         last_used_at: None,
     };
-    
+
     let cloned = original.clone();
     assert_eq!(original.id, cloned.id);
     assert_eq!(original.api_key, cloned.api_key);
@@ -79,10 +79,10 @@ fn test_model_serialization() {
         expires_at: Some(Utc::now() + Duration::hours(1)),
         last_used_at: Some(Utc::now() - Duration::minutes(30)),
     };
-    
+
     let serialized = serde_json::to_string(&model).unwrap();
     let deserialized: Model = serde_json::from_str(&serialized).unwrap();
-    
+
     assert_eq!(model.id, deserialized.id);
     assert_eq!(model.api_key, deserialized.api_key);
     assert_eq!(model.key_material_type, deserialized.key_material_type);
@@ -93,20 +93,35 @@ fn test_model_serialization() {
 fn test_key_material_type_variants() {
     // KeyMaterialType doesn't implement Display, so we test debug format instead
     assert_eq!(format!("{:?}", KeyMaterialType::HmacSecret), "HmacSecret");
-    assert_eq!(format!("{:?}", KeyMaterialType::RsaPublicKey), "RsaPublicKey");
-    assert_eq!(format!("{:?}", KeyMaterialType::Ed25519PublicKey), "Ed25519PublicKey");
+    assert_eq!(
+        format!("{:?}", KeyMaterialType::RsaPublicKey),
+        "RsaPublicKey"
+    );
+    assert_eq!(
+        format!("{:?}", KeyMaterialType::Ed25519PublicKey),
+        "Ed25519PublicKey"
+    );
 }
 
 #[test]
 fn test_key_material_type_from_key_material() {
     let hmac_material = KeyMaterial::HmacSecret("secret".to_string());
-    assert_eq!(KeyMaterialType::from(&hmac_material), KeyMaterialType::HmacSecret);
-    
+    assert_eq!(
+        KeyMaterialType::from(&hmac_material),
+        KeyMaterialType::HmacSecret
+    );
+
     let rsa_material = KeyMaterial::RsaPublicKey("pem".to_string());
-    assert_eq!(KeyMaterialType::from(&rsa_material), KeyMaterialType::RsaPublicKey);
-    
+    assert_eq!(
+        KeyMaterialType::from(&rsa_material),
+        KeyMaterialType::RsaPublicKey
+    );
+
     let ed25519_material = KeyMaterial::Ed25519PublicKey("pem".to_string());
-    assert_eq!(KeyMaterialType::from(&ed25519_material), KeyMaterialType::Ed25519PublicKey);
+    assert_eq!(
+        KeyMaterialType::from(&ed25519_material),
+        KeyMaterialType::Ed25519PublicKey
+    );
 }
 
 #[test]
@@ -114,14 +129,14 @@ fn test_key_material_type_serialization() {
     let hmac_type = KeyMaterialType::HmacSecret;
     let serialized = serde_json::to_string(&hmac_type).unwrap();
     assert_eq!(serialized, "\"HmacSecret\"");
-    
+
     let deserialized: KeyMaterialType = serde_json::from_str(&serialized).unwrap();
     assert_eq!(deserialized, KeyMaterialType::HmacSecret);
-    
+
     // Test actual sea_orm string values separately
     let rsa_type = KeyMaterialType::RsaPublicKey;
     let ed25519_type = KeyMaterialType::Ed25519PublicKey;
-    
+
     // Test that the enum variants exist and can be serialized
     let _rsa_serialized = serde_json::to_string(&rsa_type).unwrap();
     let _ed25519_serialized = serde_json::to_string(&ed25519_type).unwrap();
@@ -132,7 +147,9 @@ fn test_new_api_key_creation() {
     let user_id = Uuid::new_v4();
     let new_api_key = NewApiKey {
         api_key: "new-test-key".to_string(),
-        key_material: Some(KeyMaterial::Ed25519PublicKey("ed25519-pem-data".to_string())),
+        key_material: Some(KeyMaterial::Ed25519PublicKey(
+            "ed25519-pem-data".to_string(),
+        )),
         permissions: vec![SecurityType::Trade, SecurityType::UserData],
         recv_window: 15000,
         description: Some("Trading bot key".to_string()),
@@ -140,10 +157,16 @@ fn test_new_api_key_creation() {
         user_id: Some(user_id),
         expires_at: Some(Utc::now() + Duration::days(90)),
     };
-    
+
     assert_eq!(new_api_key.api_key, "new-test-key");
-    assert!(matches!(new_api_key.key_material, Some(KeyMaterial::Ed25519PublicKey(_))));
-    assert_eq!(new_api_key.permissions, vec![SecurityType::Trade, SecurityType::UserData]);
+    assert!(matches!(
+        new_api_key.key_material,
+        Some(KeyMaterial::Ed25519PublicKey(_))
+    ));
+    assert_eq!(
+        new_api_key.permissions,
+        vec![SecurityType::Trade, SecurityType::UserData]
+    );
     assert_eq!(new_api_key.recv_window, 15000);
     assert_eq!(new_api_key.description, Some("Trading bot key".to_string()));
     assert_eq!(new_api_key.ip_blacklist, vec!["10.0.0.0/8".to_string()]);
@@ -163,7 +186,7 @@ fn test_new_api_key_defaults() {
         user_id: None,
         expires_at: None,
     };
-    
+
     assert_eq!(new_api_key.api_key, "minimal-key");
     assert!(new_api_key.key_material.is_none());
     assert_eq!(new_api_key.permissions, vec![SecurityType::UserStream]);
@@ -185,10 +208,13 @@ fn test_new_api_key_clone() {
         user_id: Some(Uuid::new_v4()),
         expires_at: Some(Utc::now()),
     };
-    
+
     let cloned = original.clone();
     assert_eq!(original.api_key, cloned.api_key);
-    assert!(matches!(original.key_material, Some(KeyMaterial::HmacSecret(_))));
+    assert!(matches!(
+        original.key_material,
+        Some(KeyMaterial::HmacSecret(_))
+    ));
     assert_eq!(original.permissions, cloned.permissions);
     assert_eq!(original.user_id, cloned.user_id);
 }
@@ -205,7 +231,7 @@ fn test_new_api_key_debug() {
         user_id: None,
         expires_at: None,
     };
-    
+
     let debug_str = format!("{:?}", new_api_key);
     assert!(debug_str.contains("debug-test"));
     assert!(debug_str.contains("recv_window: 5000"));
@@ -229,7 +255,7 @@ fn test_model_with_empty_permissions() {
         expires_at: None,
         last_used_at: None,
     };
-    
+
     assert_eq!(model.permissions, json!([]));
 }
 
@@ -246,7 +272,7 @@ fn test_model_with_complex_permissions() {
             }
         }
     ]);
-    
+
     let model = Model {
         id: Uuid::new_v4(),
         api_key: "complex-perms".to_string(),
@@ -263,7 +289,7 @@ fn test_model_with_complex_permissions() {
         expires_at: None,
         last_used_at: None,
     };
-    
+
     assert_eq!(model.permissions, complex_permissions);
 }
 
@@ -274,10 +300,10 @@ fn test_model_with_multiple_ip_blacklist() {
         "10.0.0.0/8".to_string(),
         "172.16.0.0/12".to_string(),
         "127.0.0.1".to_string(),
-        "::1".to_string(), // IPv6 localhost
+        "::1".to_string(),           // IPv6 localhost
         "2001:db8::/32".to_string(), // IPv6 range
     ];
-    
+
     let model = Model {
         id: Uuid::new_v4(),
         api_key: "multi-ip".to_string(),
@@ -294,7 +320,7 @@ fn test_model_with_multiple_ip_blacklist() {
         expires_at: None,
         last_used_at: None,
     };
-    
+
     assert_eq!(model.ip_blacklist, ip_list);
     assert_eq!(model.ip_blacklist.len(), 6);
 }
@@ -318,9 +344,9 @@ fn test_model_edge_cases() {
         expires_at: None,
         last_used_at: None,
     };
-    
+
     assert_eq!(max_window_model.recv_window, 60000);
-    
+
     // Test with very long description
     let long_description = "A".repeat(1000);
     let long_desc_model = Model {
@@ -339,7 +365,7 @@ fn test_model_edge_cases() {
         expires_at: None,
         last_used_at: None,
     };
-    
+
     assert_eq!(long_desc_model.description, Some(long_description));
 }
 
@@ -347,7 +373,7 @@ fn test_model_edge_cases() {
 fn test_uuid_consistency() {
     let id = Uuid::new_v4();
     let user_id = Uuid::new_v4();
-    
+
     let model = Model {
         id,
         api_key: "uuid-test".to_string(),
@@ -364,10 +390,10 @@ fn test_uuid_consistency() {
         expires_at: None,
         last_used_at: None,
     };
-    
+
     assert_eq!(model.id, id);
     assert_eq!(model.user_id, Some(user_id));
-    
+
     // Ensure UUIDs are valid
     assert!(model.id.to_string().len() == 36);
     assert!(model.user_id.unwrap().to_string().len() == 36);

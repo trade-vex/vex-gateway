@@ -1,10 +1,10 @@
-use lib_middleware::repository::api_key_repository::ApiKeyRepository;
-use lib_middleware::models::api_key::{NewApiKey, KeyMaterialType};
-use lib_middleware::api_key::security::{SecurityType, KeyMaterial};
+use chrono::{Duration, Utc};
 use lib_middleware::api_key::error::ApiKeyError;
-use chrono::{Utc, Duration};
-use uuid::Uuid;
+use lib_middleware::api_key::security::{KeyMaterial, SecurityType};
+use lib_middleware::models::api_key::{KeyMaterialType, NewApiKey};
+use lib_middleware::repository::api_key_repository::ApiKeyRepository;
 use std::sync::Arc;
+use uuid::Uuid;
 
 // Mock implementation for testing
 #[derive(Clone)]
@@ -20,7 +20,7 @@ impl MockApiKeyRepository {
             not_found: false,
         }
     }
-    
+
     fn with_failure() -> Self {
         Self {
             should_fail: true,
@@ -31,15 +31,18 @@ impl MockApiKeyRepository {
 
 #[async_trait::async_trait]
 impl ApiKeyRepository for MockApiKeyRepository {
-    async fn find_by_api_key(&self, api_key: &str) -> Result<Option<lib_middleware::models::api_key::Model>, ApiKeyError> {
+    async fn find_by_api_key(
+        &self,
+        api_key: &str,
+    ) -> Result<Option<lib_middleware::models::api_key::Model>, ApiKeyError> {
         if self.should_fail {
             return Err(ApiKeyError::Database("Mock database error".to_string()));
         }
-        
+
         if self.not_found || api_key == "not-found" {
             return Ok(None);
         }
-        
+
         Ok(Some(lib_middleware::models::api_key::Model {
             id: Uuid::new_v4(),
             api_key: api_key.to_string(),
@@ -57,16 +60,19 @@ impl ApiKeyRepository for MockApiKeyRepository {
             last_used_at: None,
         }))
     }
-    
-    async fn find_by_id(&self, id: Uuid) -> Result<Option<lib_middleware::models::api_key::Model>, ApiKeyError> {
+
+    async fn find_by_id(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<lib_middleware::models::api_key::Model>, ApiKeyError> {
         if self.should_fail {
             return Err(ApiKeyError::Database("Mock database error".to_string()));
         }
-        
+
         if self.not_found {
             return Ok(None);
         }
-        
+
         Ok(Some(lib_middleware::models::api_key::Model {
             id,
             api_key: "mock-key".to_string(),
@@ -84,16 +90,19 @@ impl ApiKeyRepository for MockApiKeyRepository {
             last_used_at: None,
         }))
     }
-    
-    async fn find_by_user_id(&self, user_id: Uuid) -> Result<Vec<lib_middleware::models::api_key::Model>, ApiKeyError> {
+
+    async fn find_by_user_id(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<lib_middleware::models::api_key::Model>, ApiKeyError> {
         if self.should_fail {
             return Err(ApiKeyError::Database("Mock database error".to_string()));
         }
-        
+
         if self.not_found {
             return Ok(vec![]);
         }
-        
+
         Ok(vec![
             lib_middleware::models::api_key::Model {
                 id: Uuid::new_v4(),
@@ -129,19 +138,28 @@ impl ApiKeyRepository for MockApiKeyRepository {
             },
         ])
     }
-    
-    async fn create(&self, new_api_key: NewApiKey) -> Result<lib_middleware::models::api_key::Model, ApiKeyError> {
+
+    async fn create(
+        &self,
+        new_api_key: NewApiKey,
+    ) -> Result<lib_middleware::models::api_key::Model, ApiKeyError> {
         if self.should_fail {
             return Err(ApiKeyError::Database("Mock database error".to_string()));
         }
-        
+
         let (key_material_type, key_material_value) = match &new_api_key.key_material {
-            Some(KeyMaterial::HmacSecret(secret)) => (Some(KeyMaterialType::HmacSecret), Some(secret.clone())),
-            Some(KeyMaterial::RsaPublicKey(key)) => (Some(KeyMaterialType::RsaPublicKey), Some(key.clone())),
-            Some(KeyMaterial::Ed25519PublicKey(key)) => (Some(KeyMaterialType::Ed25519PublicKey), Some(key.clone())),
+            Some(KeyMaterial::HmacSecret(secret)) => {
+                (Some(KeyMaterialType::HmacSecret), Some(secret.clone()))
+            }
+            Some(KeyMaterial::RsaPublicKey(key)) => {
+                (Some(KeyMaterialType::RsaPublicKey), Some(key.clone()))
+            }
+            Some(KeyMaterial::Ed25519PublicKey(key)) => {
+                (Some(KeyMaterialType::Ed25519PublicKey), Some(key.clone()))
+            }
             None => (None, None),
         };
-        
+
         let now = Utc::now();
         Ok(lib_middleware::models::api_key::Model {
             id: Uuid::new_v4(),
@@ -160,16 +178,20 @@ impl ApiKeyRepository for MockApiKeyRepository {
             last_used_at: None,
         })
     }
-    
-    async fn update(&self, id: Uuid, _updates: lib_middleware::models::api_key::ActiveModel) -> Result<lib_middleware::models::api_key::Model, ApiKeyError> {
+
+    async fn update(
+        &self,
+        id: Uuid,
+        _updates: lib_middleware::models::api_key::ActiveModel,
+    ) -> Result<lib_middleware::models::api_key::Model, ApiKeyError> {
         if self.should_fail {
             return Err(ApiKeyError::Database("Mock database error".to_string()));
         }
-        
+
         if self.not_found {
             return Err(ApiKeyError::NotFound);
         }
-        
+
         Ok(lib_middleware::models::api_key::Model {
             id,
             api_key: "updated-key".to_string(),
@@ -187,48 +209,55 @@ impl ApiKeyRepository for MockApiKeyRepository {
             last_used_at: None,
         })
     }
-    
+
     async fn set_enabled(&self, _id: Uuid, _enabled: bool) -> Result<(), ApiKeyError> {
         if self.should_fail {
             return Err(ApiKeyError::Database("Mock database error".to_string()));
         }
-        
+
         if self.not_found {
             return Err(ApiKeyError::NotFound);
         }
-        
+
         Ok(())
     }
-    
-    async fn update_last_used(&self, _id: Uuid, _timestamp: chrono::DateTime<Utc>) -> Result<(), ApiKeyError> {
+
+    async fn update_last_used(
+        &self,
+        _id: Uuid,
+        _timestamp: chrono::DateTime<Utc>,
+    ) -> Result<(), ApiKeyError> {
         if self.should_fail {
             return Err(ApiKeyError::Database("Mock database error".to_string()));
         }
-        
+
         if self.not_found {
             return Err(ApiKeyError::NotFound);
         }
-        
+
         Ok(())
     }
-    
+
     async fn delete(&self, _id: Uuid) -> Result<(), ApiKeyError> {
         if self.should_fail {
             return Err(ApiKeyError::Database("Mock database error".to_string()));
         }
-        
+
         if self.not_found {
             return Err(ApiKeyError::NotFound);
         }
-        
+
         Ok(())
     }
-    
-    async fn find_active_keys(&self, limit: Option<u64>) -> Result<Vec<lib_middleware::models::api_key::Model>, ApiKeyError> {
+
+    async fn find_active_keys(
+        &self,
+        limit: Option<u64>,
+    ) -> Result<Vec<lib_middleware::models::api_key::Model>, ApiKeyError> {
         if self.should_fail {
             return Err(ApiKeyError::Database("Mock database error".to_string()));
         }
-        
+
         let active_keys = vec![
             lib_middleware::models::api_key::Model {
                 id: Uuid::new_v4(),
@@ -263,72 +292,74 @@ impl ApiKeyRepository for MockApiKeyRepository {
                 last_used_at: Some(Utc::now() - Duration::hours(1)),
             },
         ];
-        
+
         if let Some(limit) = limit {
             Ok(active_keys.into_iter().take(limit as usize).collect())
         } else {
             Ok(active_keys)
         }
     }
-    
-    async fn find_expiring_keys(&self, _days: i64) -> Result<Vec<lib_middleware::models::api_key::Model>, ApiKeyError> {
+
+    async fn find_expiring_keys(
+        &self,
+        _days: i64,
+    ) -> Result<Vec<lib_middleware::models::api_key::Model>, ApiKeyError> {
         if self.should_fail {
             return Err(ApiKeyError::Database("Mock database error".to_string()));
         }
-        
-        Ok(vec![
-            lib_middleware::models::api_key::Model {
-                id: Uuid::new_v4(),
-                api_key: "expiring-key".to_string(),
-                key_material_type: Some(KeyMaterialType::RsaPublicKey),
-                key_material_value: Some("expiring-rsa-key".to_string()),
-                permissions: serde_json::json!(["TRADE", "USER_DATA"]),
-                recv_window: 5000,
-                enabled: true,
-                description: Some("About to expire".to_string()),
-                ip_blacklist: vec![],
-                user_id: Some(Uuid::new_v4()),
-                created_at: Utc::now() - Duration::days(60),
-                updated_at: Utc::now() - Duration::days(1),
-                expires_at: Some(Utc::now() + Duration::days(2)), // Expires in 2 days
-                last_used_at: Some(Utc::now() - Duration::hours(6)),
-            },
-        ])
+
+        Ok(vec![lib_middleware::models::api_key::Model {
+            id: Uuid::new_v4(),
+            api_key: "expiring-key".to_string(),
+            key_material_type: Some(KeyMaterialType::RsaPublicKey),
+            key_material_value: Some("expiring-rsa-key".to_string()),
+            permissions: serde_json::json!(["TRADE", "USER_DATA"]),
+            recv_window: 5000,
+            enabled: true,
+            description: Some("About to expire".to_string()),
+            ip_blacklist: vec![],
+            user_id: Some(Uuid::new_v4()),
+            created_at: Utc::now() - Duration::days(60),
+            updated_at: Utc::now() - Duration::days(1),
+            expires_at: Some(Utc::now() + Duration::days(2)), // Expires in 2 days
+            last_used_at: Some(Utc::now() - Duration::hours(6)),
+        }])
     }
-    
+
     async fn count_by_user(&self, _user_id: Uuid) -> Result<u64, ApiKeyError> {
         if self.should_fail {
             return Err(ApiKeyError::Database("Mock database error".to_string()));
         }
-        
+
         Ok(3) // Mock count
     }
-    
-    async fn find_by_permission(&self, permission: SecurityType) -> Result<Vec<lib_middleware::models::api_key::Model>, ApiKeyError> {
+
+    async fn find_by_permission(
+        &self,
+        permission: SecurityType,
+    ) -> Result<Vec<lib_middleware::models::api_key::Model>, ApiKeyError> {
         if self.should_fail {
             return Err(ApiKeyError::Database("Mock database error".to_string()));
         }
-        
+
         let permission_str = permission.to_string();
-        
-        Ok(vec![
-            lib_middleware::models::api_key::Model {
-                id: Uuid::new_v4(),
-                api_key: format!("key-with-{}", permission_str.to_lowercase()),
-                key_material_type: Some(KeyMaterialType::HmacSecret),
-                key_material_value: Some("permission-test-secret".to_string()),
-                permissions: serde_json::json!([permission_str]),
-                recv_window: 5000,
-                enabled: true,
-                description: Some(format!("Key with {} permission", permission_str)),
-                ip_blacklist: vec![],
-                user_id: Some(Uuid::new_v4()),
-                created_at: Utc::now() - Duration::days(1),
-                updated_at: Utc::now(),
-                expires_at: None,
-                last_used_at: None,
-            },
-        ])
+
+        Ok(vec![lib_middleware::models::api_key::Model {
+            id: Uuid::new_v4(),
+            api_key: format!("key-with-{}", permission_str.to_lowercase()),
+            key_material_type: Some(KeyMaterialType::HmacSecret),
+            key_material_value: Some("permission-test-secret".to_string()),
+            permissions: serde_json::json!([permission_str]),
+            recv_window: 5000,
+            enabled: true,
+            description: Some(format!("Key with {} permission", permission_str)),
+            ip_blacklist: vec![],
+            user_id: Some(Uuid::new_v4()),
+            created_at: Utc::now() - Duration::days(1),
+            updated_at: Utc::now(),
+            expires_at: None,
+            last_used_at: None,
+        }])
     }
 }
 
@@ -336,7 +367,7 @@ impl ApiKeyRepository for MockApiKeyRepository {
 async fn test_repository_find_by_api_key_success() {
     let repo = MockApiKeyRepository::new();
     let result = repo.find_by_api_key("test-key").await.unwrap();
-    
+
     assert!(result.is_some());
     let model = result.unwrap();
     assert_eq!(model.api_key, "test-key");
@@ -348,7 +379,7 @@ async fn test_repository_find_by_api_key_success() {
 async fn test_repository_find_by_api_key_not_found() {
     let repo = MockApiKeyRepository::new();
     let result = repo.find_by_api_key("not-found").await.unwrap();
-    
+
     assert!(result.is_none());
 }
 
@@ -356,7 +387,7 @@ async fn test_repository_find_by_api_key_not_found() {
 async fn test_repository_find_by_api_key_database_error() {
     let repo = MockApiKeyRepository::with_failure();
     let result = repo.find_by_api_key("any-key").await;
-    
+
     assert!(result.is_err());
     match result.unwrap_err() {
         ApiKeyError::Database(msg) => assert_eq!(msg, "Mock database error"),
@@ -367,10 +398,12 @@ async fn test_repository_find_by_api_key_database_error() {
 #[tokio::test]
 async fn test_repository_create() {
     let repo = MockApiKeyRepository::new();
-    
+
     let new_api_key = NewApiKey {
         api_key: "new-test-key".to_string(),
-        key_material: Some(KeyMaterial::Ed25519PublicKey("ed25519-key-data".to_string())),
+        key_material: Some(KeyMaterial::Ed25519PublicKey(
+            "ed25519-key-data".to_string(),
+        )),
         permissions: vec![SecurityType::Trade, SecurityType::UserData],
         recv_window: 10000,
         description: Some("Test key creation".to_string()),
@@ -378,11 +411,14 @@ async fn test_repository_create() {
         user_id: Some(Uuid::new_v4()),
         expires_at: Some(Utc::now() + Duration::days(90)),
     };
-    
+
     let result = repo.create(new_api_key.clone()).await.unwrap();
-    
+
     assert_eq!(result.api_key, new_api_key.api_key);
-    assert_eq!(result.key_material_type, Some(KeyMaterialType::Ed25519PublicKey));
+    assert_eq!(
+        result.key_material_type,
+        Some(KeyMaterialType::Ed25519PublicKey)
+    );
     assert_eq!(result.recv_window, new_api_key.recv_window as i64);
     assert!(result.enabled); // Mock always creates enabled keys
     assert_eq!(result.description, new_api_key.description);
@@ -394,10 +430,10 @@ async fn test_repository_create() {
 async fn test_repository_trait_object() {
     // Test that the repository can be used as a trait object
     let repo: Arc<dyn ApiKeyRepository> = Arc::new(MockApiKeyRepository::new());
-    
+
     let result = repo.find_by_api_key("trait-test").await.unwrap();
     assert!(result.is_some());
-    
+
     let count = repo.count_by_user(Uuid::new_v4()).await.unwrap();
     assert_eq!(count, 3);
 }
@@ -407,7 +443,7 @@ fn test_repository_send_sync() {
     // Ensure repository traits are Send + Sync for async usage
     fn assert_send<T: Send>() {}
     fn assert_sync<T: Sync>() {}
-    
+
     assert_send::<MockApiKeyRepository>();
     assert_sync::<MockApiKeyRepository>();
     assert_send::<Box<dyn ApiKeyRepository>>();

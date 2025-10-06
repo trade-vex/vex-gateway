@@ -1,14 +1,14 @@
 //! lib-api/src/handlers/api_keys.rs
 
-use actix_web::{web, HttpResponse, Result};
+use actix_web::{HttpResponse, Result, web};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, Serializer};
 use uuid::Uuid;
-use chrono::{DateTime, Utc};
 
 use lib_middleware::{
+    api_key::security::{KeyMaterial, SecurityType},
+    models::api_key::{ActiveModel, Model as ApiKeyModel, NewApiKey},
     repository::api_key_repository::ApiKeyRepository,
-    models::api_key::{NewApiKey, ActiveModel, Model as ApiKeyModel},
-    api_key::security::{SecurityType, KeyMaterial},
 };
 use sea_orm::Set;
 
@@ -71,15 +71,15 @@ pub struct ApiKeyListResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateApiKeyResponse {
-    pub api_key: String,  // Plaintext key - only returned during creation
-    pub key_info: ApiKeyResponse,  // Masked key info for consistency
+    pub api_key: String,          // Plaintext key - only returned during creation
+    pub key_info: ApiKeyResponse, // Masked key info for consistency
 }
 
 impl From<ApiKeyModel> for ApiKeyResponse {
     fn from(model: ApiKeyModel) -> Self {
         // parsing permissions from JSON
-        let permissions: Vec<String> = serde_json::from_value(model.permissions)
-            .unwrap_or_else(|_| vec!["none".to_string()]);
+        let permissions: Vec<String> =
+            serde_json::from_value(model.permissions).unwrap_or_else(|_| vec!["none".to_string()]);
 
         Self {
             id: model.id,
@@ -122,12 +122,16 @@ fn parse_key_material(key_type: &str, value: &str) -> Result<KeyMaterial, String
 /// validate IP address format (supports IPv4, IPv6, and CIDR notation)
 fn validate_ip_address(ip: &str) -> Result<(), String> {
     use std::net::IpAddr;
-    
+
     // Check for CIDR notation (e.g., 192.168.1.0/24)
     if let Some((ip_part, cidr_part)) = ip.split_once('/') {
-        let ip_addr: IpAddr = ip_part.parse().map_err(|_| format!("Invalid IP address: {}", ip_part))?;
-        let prefix_len: u8 = cidr_part.parse().map_err(|_| format!("Invalid CIDR prefix: {}", cidr_part))?;
-        
+        let ip_addr: IpAddr = ip_part
+            .parse()
+            .map_err(|_| format!("Invalid IP address: {}", ip_part))?;
+        let prefix_len: u8 = cidr_part
+            .parse()
+            .map_err(|_| format!("Invalid CIDR prefix: {}", cidr_part))?;
+
         match ip_addr {
             IpAddr::V4(_) => {
                 if prefix_len > 32 {
@@ -142,9 +146,10 @@ fn validate_ip_address(ip: &str) -> Result<(), String> {
         }
         return Ok(());
     }
-    
+
     // Check for single IP address
-    ip.parse::<IpAddr>().map_err(|_| format!("Invalid IP address: {}", ip))?;
+    ip.parse::<IpAddr>()
+        .map_err(|_| format!("Invalid IP address: {}", ip))?;
     Ok(())
 }
 
@@ -163,14 +168,14 @@ pub async fn create_api_key(
     auth_user: lib_auth::middleware::jwt_auth::AuthenticatedUser,
 ) -> Result<HttpResponse> {
     // parse permissions
-    let permissions: Result<Vec<SecurityType>, String> = req.permissions
+    let permissions: Result<Vec<SecurityType>, String> = req
+        .permissions
         .iter()
         .map(|p| parse_security_type(p))
         .collect();
-    
-    let permissions = permissions.map_err(|e| {
-        actix_web::error::ErrorBadRequest(format!("Invalid permissions: {}", e))
-    })?;
+
+    let permissions = permissions
+        .map_err(|e| actix_web::error::ErrorBadRequest(format!("Invalid permissions: {}", e)))?;
 
     // validate IP blacklist if provided
     if let Some(ref ip_blacklist) = req.ip_blacklist {
@@ -180,8 +185,9 @@ pub async fn create_api_key(
     }
 
     // parse key material if provided
-    let key_material = if let (Some(key_type), Some(key_value)) = 
-        (&req.key_material_type, &req.key_material_value) {
+    let key_material = if let (Some(key_type), Some(key_value)) =
+        (&req.key_material_type, &req.key_material_value)
+    {
         Some(parse_key_material(key_type, key_value).map_err(|e| {
             actix_web::error::ErrorBadRequest(format!("Invalid key material: {}", e))
         })?)
@@ -208,8 +214,8 @@ pub async fn create_api_key(
         Ok(created_key) => {
             let key_info = ApiKeyResponse::from(created_key);
             let response = CreateApiKeyResponse {
-                api_key: api_key.clone(),  // Plaintext key - only returned during creation
-                key_info,  // Masked key info
+                api_key: api_key.clone(), // Plaintext key - only returned during creation
+                key_info,                 // Masked key info
             };
             Ok(HttpResponse::Created().json(response))
         }
@@ -268,11 +274,9 @@ pub async fn get_api_key(
             let response = ApiKeyResponse::from(api_key);
             Ok(HttpResponse::Ok().json(response))
         }
-        Ok(None) => {
-            Ok(HttpResponse::NotFound().json(serde_json::json!({
-                "error": "API key not found"
-            })))
-        }
+        Ok(None) => Ok(HttpResponse::NotFound().json(serde_json::json!({
+            "error": "API key not found"
+        }))),
         Err(e) => {
             tracing::error!("Failed to get API key: {}", e);
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
@@ -317,14 +321,14 @@ pub async fn update_api_key(
     }
 
     // parsing permissions
-    let permissions: Result<Vec<SecurityType>, String> = req.permissions
+    let permissions: Result<Vec<SecurityType>, String> = req
+        .permissions
         .iter()
         .map(|p| parse_security_type(p))
         .collect();
-    
-    let permissions = permissions.map_err(|e| {
-        actix_web::error::ErrorBadRequest(format!("Invalid permissions: {}", e))
-    })?;
+
+    let permissions = permissions
+        .map_err(|e| actix_web::error::ErrorBadRequest(format!("Invalid permissions: {}", e)))?;
 
     // validate IP blacklist if provided
     if let Some(ref ip_blacklist) = req.ip_blacklist {
@@ -335,15 +339,17 @@ pub async fn update_api_key(
 
     // convert permissions to JSON for database storage
     let permissions_json = serde_json::to_value(
-        permissions.iter()
+        permissions
+            .iter()
             .map(|p| match p {
                 SecurityType::None => "none",
                 SecurityType::Trade => "trade",
                 SecurityType::UserData => "user_data",
                 SecurityType::UserStream => "user_stream",
             })
-            .collect::<Vec<_>>()
-    ).unwrap_or(serde_json::json!(["none"]));
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or(serde_json::json!(["none"]));
 
     let mut updates = ActiveModel {
         id: sea_orm::Set(api_key_id),
@@ -404,11 +410,9 @@ pub async fn delete_api_key(
     }
 
     match repo.delete(api_key_id).await {
-        Ok(_) => {
-            Ok(HttpResponse::Ok().json(serde_json::json!({
-                "message": "API key deleted successfully"
-            })))
-        }
+        Ok(_) => Ok(HttpResponse::Ok().json(serde_json::json!({
+            "message": "API key deleted successfully"
+        }))),
         Err(e) => {
             tracing::error!("Failed to delete API key: {}", e);
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
@@ -427,7 +431,8 @@ pub async fn toggle_api_key(
     auth_user: lib_auth::middleware::jwt_auth::AuthenticatedUser,
 ) -> Result<HttpResponse> {
     let api_key_id = path.into_inner();
-    let enabled = req.get("enabled")
+    let enabled = req
+        .get("enabled")
         .and_then(|v| v.as_bool())
         .ok_or_else(|| actix_web::error::ErrorBadRequest("Missing or invalid 'enabled' field"))?;
 

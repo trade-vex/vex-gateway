@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use sea_orm::prelude::*;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

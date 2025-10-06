@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 // Re-export models from separate modules
@@ -24,7 +24,7 @@ impl std::fmt::Display for Side {
 
 impl std::str::FromStr for Side {
     type Err = String;
-    
+
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "Bid" => Ok(Side::Bid),

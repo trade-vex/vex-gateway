@@ -1,5 +1,5 @@
 // //! User Balance Store Tests
-// //! 
+// //!
 // //! These tests verify that our UserBalanceStore works correctly with caching, database operations,
 // //! and error handling. We test both the cache-only and cache+repository configurations.
 
@@ -22,7 +22,7 @@
 //     // Use the same database URL as the main app, or fall back to localhost
 //     let database_url = std::env::var("DATABASE_URL")
 //         .unwrap_or_else(|_| "postgresql://vex:1234@localhost:5432/vex_gateway".to_string());
-    
+
 //     Database::connect(&database_url)
 //         .await
 //         .expect("Failed to connect to test database")
@@ -32,11 +32,11 @@
 // /// This only runs once per test suite to avoid conflicts
 // async fn setup_test_db_with_schema() -> DatabaseConnection {
 //     let db = setup_test_db().await;
-    
+
 //     // Make sure we only create the schema once, even with multiple concurrent tests
 //     if !SCHEMA_INITIALIZED.load(std::sync::atomic::Ordering::SeqCst) {
 //         let _guard = SCHEMA_MUTEX.lock().unwrap();
-        
+
 //         // Double-check pattern - another test might have initialized it while we waited
 //         if !SCHEMA_INITIALIZED.load(std::sync::atomic::Ordering::SeqCst) {
 //             // Build the complete database schema for our tests
@@ -51,10 +51,10 @@
 //                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 //                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 //                 );
-                
+
 //                 -- Clean slate - drop existing tables to avoid conflicts
 //                 DROP TABLE IF EXISTS user_balances CASCADE;
-                
+
 //                 -- User balances table for account management
 //                 CREATE TABLE user_balances (
 //                     user_id UUID PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
@@ -62,20 +62,20 @@
 //                     locked BIGINT NOT NULL DEFAULT 0,
 //                     last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW()
 //                 );
-                
+
 //                 -- Add some indexes to speed up queries
 //                 CREATE INDEX IF NOT EXISTS idx_user_balances_user_id ON user_balances(user_id);
 //             "#;
-            
+
 //             db.execute_unprepared(create_schema_sql)
 //                 .await
 //                 .expect("Failed to create test database schema");
-            
+
 //             // Mark as initialized so other tests don't try to recreate it
 //             SCHEMA_INITIALIZED.store(true, std::sync::atomic::Ordering::SeqCst);
 //         }
 //     }
-    
+
 //     db
 // }
 
@@ -129,7 +129,7 @@
 //     }
 // }
 
-// #[cfg(test)] 
+// #[cfg(test)]
 // mod tests {
 //     use super::*;
 //     use std::sync::Once;
@@ -142,7 +142,7 @@
 //         CLEANUP.call_once(|| {
 //             println!("Cleaning up global test environment...");
 //         });
-        
+
 //         let db = setup_test_db().await;
 //         cleanup_test_data(&db).await;
 //     }
@@ -153,7 +153,7 @@
 //     fn test_user_balance_store_new() {
 //         let config = UserBalanceCacheConfig::default();
 //         let store = UserBalanceStore::new(config);
-        
+
 //         // Store should be created successfully
 //         // We can't access private fields directly, but we can test that it was created
 //         assert_eq!(store.get_stats().hits, 0);
@@ -167,9 +167,9 @@
 //         let db = setup_test_db_with_schema().await;
 //         let repo = Arc::new(PostgresTradingRepository::new(Arc::new(db)));
 //         let config = UserBalanceCacheConfig::default();
-        
+
 //         let store = UserBalanceStore::with_repository(config, repo);
-        
+
 //         // Store should be created successfully
 //         // We can't access private fields directly, but we can test that it was created
 //         assert_eq!(store.get_stats().hits, 0);
@@ -182,7 +182,7 @@
 //     async fn test_user_balance_store_with_redis_cache() {
 //         let redis_config = create_test_redis_config();
 //         let cache_config = create_enabled_cache_config();
-        
+
 //         let store = UserBalanceStore::with_redis_cache(cache_config, redis_config, None).await
 //             .expect("❌ Redis connection failed - Redis must be running for this test!");
 
@@ -200,7 +200,7 @@
 //         let repo = Arc::new(PostgresTradingRepository::new(Arc::new(db)));
 //         let redis_config = create_test_redis_config();
 //         let cache_config = create_enabled_cache_config();
-        
+
 //         let store = UserBalanceStore::with_redis_cache(cache_config, redis_config, Some(repo)).await
 //             .expect("❌ Redis connection failed - Redis must be running for this test!");
 
@@ -219,7 +219,7 @@
 //         let user_id = create_test_user_id();
 
 //         let result = store.get_user_balance_by_id(user_id).await;
-        
+
 //         match result {
 //             Ok(None) => {
 //                 // This is expected - no repository means no data
@@ -304,7 +304,7 @@
 //         let repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
 //         let redis_config = create_test_redis_config();
 //         let cache_config = create_enabled_cache_config();
-        
+
 //         let store = UserBalanceStore::with_redis_cache(cache_config, redis_config, Some(repo.clone())).await
 //             .expect("❌ Redis connection failed - Redis must be running for this test!");
 
@@ -348,7 +348,7 @@
 //         let repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
 //         let redis_config = create_test_redis_config();
 //         let cache_config = create_enabled_cache_config();
-        
+
 //         let store = UserBalanceStore::with_redis_cache(cache_config, redis_config, Some(repo)).await
 //             .expect("❌ Redis connection failed - Redis must be running for this test!");
 
@@ -378,7 +378,7 @@
 //         let repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
 //         let redis_config = create_test_redis_config();
 //         let cache_config = create_enabled_cache_config();
-        
+
 //         let store = UserBalanceStore::with_redis_cache(cache_config, redis_config, Some(repo.clone())).await
 //             .expect("❌ Redis connection failed - Redis must be running for this test!");
 
@@ -402,7 +402,7 @@
 //         // First call should be a cache miss (data not in cache yet)
 //         let result1 = store.get_user_balance_by_id(user_id).await.unwrap();
 //         assert!(result1.is_some());
-        
+
 //         let after_first_call_stats = store.get_stats();
 //         assert_eq!(after_first_call_stats.misses, 1, "First call should be a cache miss");
 //         assert_eq!(after_first_call_stats.hits, 0, "No hits yet");
@@ -410,7 +410,7 @@
 //         // Second call should be a cache hit (data now in cache)
 //         let result2 = store.get_user_balance_by_id(user_id).await.unwrap();
 //         assert!(result2.is_some());
-        
+
 //         let after_second_call_stats = store.get_stats();
 //         assert_eq!(after_second_call_stats.misses, 1, "Still only 1 miss");
 //         assert_eq!(after_second_call_stats.hits, 1, "Second call should be a cache hit");
@@ -421,7 +421,7 @@
 //         // Third call should be a cache miss again (cache was invalidated)
 //         let result3 = store.get_user_balance_by_id(user_id).await.unwrap();
 //         assert!(result3.is_some());
-        
+
 //         let after_invalidation_stats = store.get_stats();
 //         assert_eq!(after_invalidation_stats.misses, 2, "Third call should be a cache miss after invalidation");
 //         assert_eq!(after_invalidation_stats.hits, 1, "Still only 1 hit");
@@ -439,7 +439,7 @@
 //         let repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
 //         let redis_config = create_test_redis_config();
 //         let cache_config = create_enabled_cache_config();
-        
+
 //         let store = UserBalanceStore::with_redis_cache(cache_config, redis_config, Some(repo.clone())).await
 //             .expect("❌ Redis connection failed - Redis must be running for this test!");
 
@@ -486,7 +486,7 @@
 //         // Try to get a balance for a user that doesn't exist
 //         // This should return None, not an error
 //         let result = store.get_user_balance_by_id(user_id).await;
-        
+
 //         match result {
 //             Ok(None) => {
 //                 // This is expected - user doesn't exist
@@ -508,7 +508,7 @@
 //         let repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
 //         let redis_config = create_test_redis_config();
 //         let cache_config = create_enabled_cache_config();
-        
+
 //         let store = Arc::new(UserBalanceStore::with_redis_cache(cache_config, redis_config, Some(repo.clone())).await
 //             .expect("❌ Redis connection failed - Redis must be running for this test!"));
 
@@ -539,7 +539,7 @@
 //                 assert_eq!(balance_model.available, 35000);
 //                 assert_eq!(balance_model.locked, 7000);
 //             });
-            
+
 //             handles.push(handle);
 //         }
 
@@ -556,7 +556,7 @@
 //         // Ensure UserBalanceStore is Send + Sync for async usage
 //         fn assert_send<T: Send>() {}
 //         fn assert_sync<T: Sync>() {}
-        
+
 //         assert_send::<UserBalanceStore>();
 //         assert_sync::<UserBalanceStore>();
 //     }

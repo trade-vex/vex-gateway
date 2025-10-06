@@ -1,12 +1,11 @@
 //! lib-api/src/handlers/orders.rs
 
 use actix_web::{HttpResponse, web};
+use common::{OrderCommand, OrderCommandType, Side, Status, TimeInForce, UserBalance};
+use lib_core::Publisher;
+use lib_utils::AuthenticatedUserId;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-use common::{Side, TimeInForce, OrderCommand, OrderCommandType, Status, UserBalance};
-use lib_utils::AuthenticatedUserId;
-use lib_core::Publisher;
-
 
 #[derive(Debug, Deserialize)]
 pub struct OrderRequest {
@@ -38,7 +37,7 @@ pub async fn place_order(
     // Use folded hash to preserve all UUID bits in u64
     let raw = auth_user.0.as_u128();
     let user_id = ((raw >> 64) as u64) ^ (raw as u64);
-    
+
     let order_data = order_data.into_inner();
 
     // Inline order processing to avoid extra stack frames
@@ -96,7 +95,7 @@ pub async fn cancel_order(
     // Use folded hash to preserve all UUID bits in u64
     let raw = auth_user.0.as_u128();
     let user_id = ((raw >> 64) as u64) ^ (raw as u64);
-    
+
     let cancel_data = cancel_data.into_inner();
 
     // Inline cancel processing to avoid extra stack frames

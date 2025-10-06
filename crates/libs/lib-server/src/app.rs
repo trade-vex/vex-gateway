@@ -7,8 +7,8 @@ use lib_api::routes;
 use lib_auth::middleware::jwt_auth::JwtAuthentication;
 use std::sync::Arc;
 
-use crate::state::AppState;
 use crate::combined_auth::CombinedAuthMiddleware;
+use crate::state::AppState;
 
 /// Application factory that creates the Actix-web application with all routes and middleware
 pub fn create_app(

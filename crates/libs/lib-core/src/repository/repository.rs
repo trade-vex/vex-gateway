@@ -1,10 +1,16 @@
+use crate::model::orders::{
+    ActiveModel as OrderActiveModel, Column as OrderColumn, Entity as OrderEntity,
+    Model as OrderModel,
+};
+use crate::model::user_balances::{
+    ActiveModel as UserBalanceActiveModel, Column as UserBalanceColumn,
+    Entity as UserBalanceEntity, Model as UserBalanceModel,
+};
 use async_trait::async_trait;
 use sea_orm::prelude::*;
 use sea_orm::*;
 use std::sync::Arc;
 use uuid::Uuid;
-use crate::model::orders::{Model as OrderModel, Entity as OrderEntity, Column as OrderColumn, ActiveModel as OrderActiveModel};
-use crate::model::user_balances::{Model as UserBalanceModel, Entity as UserBalanceEntity, Column as UserBalanceColumn, ActiveModel as UserBalanceActiveModel};
 
 // Error type for trading operations
 #[derive(Debug)]
@@ -39,7 +45,7 @@ pub trait TradingRepository: Send + Sync {
     async fn get_user_balance(&self, user_id: Uuid) -> Result<Option<UserBalanceModel>>;
     async fn update_user_balance(&self, user_id: Uuid, available: u64, locked: u64) -> Result<()>;
     async fn create_user_balance(&self, user_id: Uuid, available: u64, locked: u64) -> Result<()>;
-    
+
     // Order operations
     async fn get_open_orders(&self, user_id: Uuid) -> Result<Vec<OrderModel>>;
     async fn get_order_by_id(&self, order_id: u64, user_id: Uuid) -> Result<Option<OrderModel>>;
@@ -115,8 +121,9 @@ impl TradingRepository for PostgresTradingRepository {
     async fn get_order_by_id(&self, order_id: u64, user_id: Uuid) -> Result<Option<OrderModel>> {
         OrderEntity::find()
             .filter(
-                OrderColumn::OrderId.eq(order_id as i64)
-                    .and(OrderColumn::UserId.eq(user_id))
+                OrderColumn::OrderId
+                    .eq(order_id as i64)
+                    .and(OrderColumn::UserId.eq(user_id)),
             )
             .one(&*self.db)
             .await

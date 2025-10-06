@@ -1,5 +1,5 @@
 // //! Trading Repository Tests
-// //! 
+// //!
 // //! These tests verify that our PostgresTradingRepository works correctly with real database operations.
 // //! We test all the CRUD operations for both user balances and orders.
 
@@ -20,7 +20,7 @@
 //     // Use the same database URL as the main app, or fall back to localhost
 //     let database_url = std::env::var("DATABASE_URL")
 //         .unwrap_or_else(|_| "postgresql://vex:1234@localhost:5432/vex_gateway".to_string());
-    
+
 //     Database::connect(&database_url)
 //         .await
 //         .expect("Failed to connect to test database")
@@ -30,11 +30,11 @@
 // /// This only runs once per test suite to avoid conflicts
 // async fn setup_test_db_with_schema() -> DatabaseConnection {
 //     let db = setup_test_db().await;
-    
+
 //     // Make sure we only create the schema once, even with multiple concurrent tests
 //     if !SCHEMA_INITIALIZED.load(std::sync::atomic::Ordering::SeqCst) {
 //         let _guard = SCHEMA_MUTEX.lock().unwrap();
-        
+
 //         // Double-check pattern - another test might have initialized it while we waited
 //         if !SCHEMA_INITIALIZED.load(std::sync::atomic::Ordering::SeqCst) {
 //             // Build the complete database schema for our tests
@@ -49,11 +49,11 @@
 //                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 //                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 //                 );
-                
+
 //                 -- Clean slate - drop existing tables to avoid conflicts
 //                 DROP TABLE IF EXISTS orders CASCADE;
 //                 DROP TABLE IF EXISTS user_balances CASCADE;
-                
+
 //                 -- Orders table for trading operations
 //                 CREATE TABLE orders (
 //                     order_id BIGSERIAL PRIMARY KEY,
@@ -63,7 +63,7 @@
 //                     side TEXT NOT NULL CHECK (side IN ('Bid', 'Ask')),
 //                     timestamp BIGINT NOT NULL
 //                 );
-                
+
 //                 -- User balances table for account management
 //                 CREATE TABLE user_balances (
 //                     user_id UUID PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
@@ -71,22 +71,22 @@
 //                     locked BIGINT NOT NULL DEFAULT 0,
 //                     last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW()
 //                 );
-                
+
 //                 -- Add some indexes to speed up queries
 //                 CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id);
 //                 CREATE INDEX IF NOT EXISTS idx_orders_timestamp ON orders(timestamp);
 //                 CREATE INDEX IF NOT EXISTS idx_user_balances_user_id ON user_balances(user_id);
 //             "#;
-            
+
 //             db.execute_unprepared(create_schema_sql)
 //                 .await
 //                 .expect("Failed to create test database schema");
-            
+
 //             // Mark as initialized so other tests don't try to recreate it
 //             SCHEMA_INITIALIZED.store(true, std::sync::atomic::Ordering::SeqCst);
 //         }
 //     }
-    
+
 //     db
 // }
 
@@ -125,8 +125,7 @@
 //     }
 // }
 
-
-// #[cfg(test)] 
+// #[cfg(test)]
 // mod tests {
 //     use super::*;
 //     use std::sync::Once;
@@ -139,7 +138,7 @@
 //         CLEANUP.call_once(|| {
 //             println!("Cleaning up global test environment...");
 //         });
-        
+
 //         let db = setup_test_db().await;
 //         cleanup_test_data(&db).await;
 //     }
@@ -287,12 +286,12 @@
 //         // Test creating an order
 //         let order = create_test_order(user_id);
 //         let create_result = repo.create_order(order).await;
-        
+
 //         match create_result {
 //             Ok(order_id) => {
 //                 // Should get back a valid order ID
 //                 assert!(order_id > 0, "Order ID should be positive");
-                
+
 //                 // Test retrieving the order we just created
 //                 let get_result = repo.get_order_by_id(order_id, user_id).await;
 //                 match get_result {
@@ -403,7 +402,7 @@
 //             side: "Bid".to_string(),
 //             timestamp: Utc::now().timestamp_millis(),
 //         };
-        
+
 //         let order2 = OrderModel {
 //             order_id: 0,
 //             user_id,
@@ -423,12 +422,12 @@
 //             Ok(orders) => {
 //                 // Should have both orders
 //                 assert_eq!(orders.len(), 2);
-                
+
 //                 // Make sure both orders are in the result
 //                 let order_ids: Vec<i64> = orders.iter().map(|o| o.order_id).collect();
 //                 assert!(order_ids.contains(&(order1_id as i64)));
 //                 assert!(order_ids.contains(&(order2_id as i64)));
-                
+
 //                 // Verify the order details are correct
 //                 for order in &orders {
 //                     assert_eq!(order.user_id, user_id);
@@ -556,7 +555,6 @@
 //             }
 //         }
 //     }
-
 
 //     #[tokio::test]
 //     async fn zzz_cleanup_after_all_tests() {

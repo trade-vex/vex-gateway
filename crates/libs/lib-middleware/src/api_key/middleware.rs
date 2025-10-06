@@ -504,7 +504,9 @@ impl ApiKeyMiddleware {
         // Restore the payload for downstream handlers
         let new_payload = {
             let stream = stream::once(async move { Ok::<_, PayloadError>(body_bytes) });
-            let boxed_stream: Pin<Box<dyn futures_util::Stream<Item = Result<actix_web::web::Bytes, PayloadError>>>> = Box::pin(stream);
+            let boxed_stream: Pin<
+                Box<dyn futures_util::Stream<Item = Result<actix_web::web::Bytes, PayloadError>>>,
+            > = Box::pin(stream);
             actix_web::dev::Payload::from(boxed_stream)
         };
         req.set_payload(new_payload);
@@ -668,7 +670,9 @@ where
             let client_ip = ApiKeyMiddleware::extract_client_ip(req.request());
             if !api_config.is_ip_allowed(&client_ip) {
                 warn!("IP {} is blacklisted for API key: {}", client_ip, api_key);
-                return Err(actix_web::error::ErrorForbidden("IP address is blacklisted"));
+                return Err(actix_web::error::ErrorForbidden(
+                    "IP address is blacklisted",
+                ));
             }
 
             // Check permissions

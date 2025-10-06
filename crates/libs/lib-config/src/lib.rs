@@ -242,7 +242,8 @@ impl Config {
                 colored: true,
                 file_path: None,
             },
-            auth: AuthConfig::from_env_with_oauth().unwrap_or_else(|_| AuthConfig::development_defaults()),
+            auth: AuthConfig::from_env_with_oauth()
+                .unwrap_or_else(|_| AuthConfig::development_defaults()),
         }
     }
 

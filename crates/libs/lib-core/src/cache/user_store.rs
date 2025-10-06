@@ -1,12 +1,11 @@
-use crate::repository::repository::{TradingRepository, TradingError};
 use crate::model::user_balances::Model as UserBalanceModel;
+use crate::repository::repository::{TradingError, TradingRepository};
 use lib_db::backends::kv::redis::RedisDb;
 use lib_db::traits::{BasicKvStore, ExpiringKvStore};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
 use uuid::Uuid;
-
 
 #[derive(Clone)]
 pub struct UserBalanceStore {
@@ -31,7 +30,7 @@ impl Default for UserBalanceCacheConfig {
 }
 
 impl UserBalanceStore {
-    /// Create new store 
+    /// Create new store
     pub fn new(config: UserBalanceCacheConfig) -> Self {
         Self {
             cache: None,
@@ -57,8 +56,9 @@ impl UserBalanceStore {
         trading_repo: Option<Arc<dyn TradingRepository>>,
     ) -> Result<Self, TradingError> {
         let cache = if config.enabled {
-            let redis_db = RedisDb::connect(&redis_url).await
-                .map_err(|e| TradingError::Database(format!("Failed to connect to Redis: {}", e)))?;
+            let redis_db = RedisDb::connect(&redis_url).await.map_err(|e| {
+                TradingError::Database(format!("Failed to connect to Redis: {}", e))
+            })?;
             Some(redis_db)
         } else {
             None
@@ -71,7 +71,10 @@ impl UserBalanceStore {
         })
     }
 
-    pub async fn get_user_balances(&self, user_id: Uuid) -> Result<Vec<UserBalanceModel>, TradingError> {
+    pub async fn get_user_balances(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<UserBalanceModel>, TradingError> {
         if self.config.enabled {
             if let Some(cache) = &self.cache {
                 let key = format!("user_balances:{}", user_id);
@@ -99,11 +102,14 @@ impl UserBalanceStore {
                             let key = format!("user_balances:{}", user_id);
                             let ttl_secs = self.config.ttl.as_secs();
                             if let Err(e) = cache.set_ex(&key, &balances, ttl_secs).await {
-                                warn!("Failed to update cache for user balances ID {}: {}", user_id, e);
+                                warn!(
+                                    "Failed to update cache for user balances ID {}: {}",
+                                    user_id, e
+                                );
                             }
                         }
                     }
-                    
+
                     debug!("Database hit for user balances ID: {}", user_id);
                     return Ok(balances);
                 }
@@ -123,7 +129,10 @@ impl UserBalanceStore {
             if let Some(cache) = &self.cache {
                 let key = format!("user_balances:{}", user_id);
                 if let Err(e) = cache.delete(&key).await {
-                    warn!("Failed to invalidate cache for user balances ID {}: {}", user_id, e);
+                    warn!(
+                        "Failed to invalidate cache for user balances ID {}: {}",
+                        user_id, e
+                    );
                 }
             }
         }

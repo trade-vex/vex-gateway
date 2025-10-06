@@ -90,12 +90,12 @@ impl AuthConfig {
     /// Create configuration from environment variables with proper OAuth setup
     pub fn from_env_with_oauth() -> Result<Self, ConfigError> {
         let mut config = Self::development_defaults();
-        
+
         // Override with environment variables if present
         if let Ok(db_url) = env::var("DATABASE_URL") {
             config.database.url = db_url;
         }
-        
+
         if let Ok(redis_url) = env::var("REDIS_URL") {
             config.redis.url = redis_url;
         }
