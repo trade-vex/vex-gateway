@@ -2,7 +2,7 @@
 
 use actix_web::{web, HttpResponse, Result};
 use lib_utils::auth_extractors::AuthenticatedUserId;
-use lib_core::{TradingRepository, UserBalanceStore, BalancesListResponse, OrdersListResponse, UserBalanceResponse, OrderResponse};
+use lib_core::{UserBalanceStore, OrderStore, BalancesListResponse, OrdersListResponse, UserBalanceResponse, OrderResponse};
 use std::sync::Arc;
 
 pub async fn get_balances(
@@ -38,11 +38,11 @@ pub async fn get_balances(
 
 pub async fn get_open_orders(
     user: AuthenticatedUserId,
-    repo: web::Data<Arc<dyn TradingRepository>>,
+    order_store: web::Data<Arc<OrderStore>>,
 ) -> Result<HttpResponse> {
     let user_id = user.0;
 
-    match repo.get_open_orders(user_id).await {
+    match order_store.get_user_orders(user_id).await {
         Ok(orders) => {
             let total = orders.len();
             let order_responses: Vec<OrderResponse> = orders

@@ -23,3 +23,9 @@ pub use cache::user_store::{
     UserBalanceCacheConfig,
     UserBalanceCacheMetrics,
 };
+
+pub use cache::order_store::{
+    OrderStore,
+    OrderCacheConfig,
+    OrderCacheMetrics,
+};
