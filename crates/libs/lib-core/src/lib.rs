@@ -17,3 +17,9 @@ pub use repository::repository::{
     Result as TradingResult,
     PostgresTradingRepository,
 };
+
+pub use cache::user_store::{
+    UserBalanceStore,
+    UserBalanceCacheConfig,
+    UserBalanceCacheMetrics,
+};

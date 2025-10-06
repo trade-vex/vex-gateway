@@ -95,50 +95,46 @@ impl UserBalanceStore {
         })
     }
 
-    pub async fn get_user_balance_by_id(&self, user_id: Uuid) -> Result<Option<UserBalanceModel>, TradingError> {
+    pub async fn get_user_balances(&self, user_id: Uuid) -> Result<Vec<UserBalanceModel>, TradingError> {
         if self.config.enabled {
             if let Some(cache) = &self.cache {
-                let key = format!("user_balance:{}", user_id);
+                let key = format!("user_balances:{}", user_id);
                 match cache.get(&key).await {
-                    Ok(Some(balance)) => {
+                    Ok(Some(balances)) => {
                         self.metrics.cache_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        debug!("Cache hit for user balance ID: {}", user_id);
-                        return Ok(Some(balance));
+                        debug!("Cache hit for user balances ID: {}", user_id);
+                        return Ok(balances);
                     }
                     Ok(None) => {
                         self.metrics.cache_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        debug!("Cache miss for user balance ID: {}", user_id);
+                        debug!("Cache miss for user balances ID: {}", user_id);
                     }
                     Err(e) => {
                         self.metrics.cache_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        warn!("Cache error for user balance ID {}: {}", user_id, e);
+                        warn!("Cache error for user balances ID {}: {}", user_id, e);
                     }
                 }
             }
         }
 
         if let Some(repo) = &self.trading_repo {
-            match repo.get_user_balance(user_id).await {
-                Ok(Some(balance)) => {
+            match repo.get_user_balances(user_id).await {
+                Ok(balances) => {
                     self.metrics.db_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     
                     // Update cache if available
                     if self.config.enabled {
                         if let Some(cache) = &self.cache {
-                            let key = format!("user_balance:{}", user_id);
+                            let key = format!("user_balances:{}", user_id);
                             let ttl_secs = self.config.ttl.as_secs();
-                            if let Err(e) = cache.set_ex(&key, &balance, ttl_secs).await {
-                                warn!("Failed to update cache for user balance ID {}: {}", user_id, e);
+                            if let Err(e) = cache.set_ex(&key, &balances, ttl_secs).await {
+                                warn!("Failed to update cache for user balances ID {}: {}", user_id, e);
                             }
                         }
                     }
                     
-                    debug!("Database hit for user balance ID: {}", user_id);
-                    return Ok(Some(balance));
-                }
-                Ok(None) => {
-                    debug!("User balance not found in database: {}", user_id);
-                    return Ok(None);
+                    debug!("Database hit for user balances ID: {}", user_id);
+                    return Ok(balances);
                 }
                 Err(e) => {
                     self.metrics.db_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -147,22 +143,21 @@ impl UserBalanceStore {
             }
         }
 
-        debug!("User balance not found: {}", user_id);
-        Ok(None)
+        debug!("User balances not found: {}", user_id);
+        Ok(vec![])
     }
 
-
-    pub async fn invalidate_user_balance(&self, user_id: Uuid) {
+    pub async fn invalidate_user_balances(&self, user_id: Uuid) {
         // Remove from cache if available
         if self.config.enabled {
             if let Some(cache) = &self.cache {
-                let key = format!("user_balance:{}", user_id);
+                let key = format!("user_balances:{}", user_id);
                 if let Err(e) = cache.delete(&key).await {
-                    warn!("Failed to invalidate cache for user balance ID {}: {}", user_id, e);
+                    warn!("Failed to invalidate cache for user balances ID {}: {}", user_id, e);
                 }
             }
         }
 
-        debug!("Invalidated cache for user balance: {}", user_id);
+        debug!("Invalidated cache for user balances: {}", user_id);
     }
 }

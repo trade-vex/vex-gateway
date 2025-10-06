@@ -2,16 +2,16 @@
 
 use actix_web::{web, HttpResponse, Result};
 use lib_utils::auth_extractors::AuthenticatedUserId;
-use lib_core::{TradingRepository, BalancesListResponse, OrdersListResponse, UserBalanceResponse, OrderResponse};
+use lib_core::{TradingRepository, UserBalanceStore, BalancesListResponse, OrdersListResponse, UserBalanceResponse, OrderResponse};
 use std::sync::Arc;
 
 pub async fn get_balances(
     user: AuthenticatedUserId,
-    repo: web::Data<Arc<dyn TradingRepository>>,
+    balance_store: web::Data<Arc<UserBalanceStore>>,
 ) -> Result<HttpResponse> {
     let user_id = user.0;
 
-    match repo.get_user_balances(user_id).await {
+    match balance_store.get_user_balances(user_id).await {
         Ok(balances) => {
             let total_assets = balances.len();
             let balance_responses: Vec<UserBalanceResponse> = balances
