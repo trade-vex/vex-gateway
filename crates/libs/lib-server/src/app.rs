@@ -22,11 +22,6 @@ pub fn create_app(
         InitError = (),
     >,
 > {
-    // Use services directly from AppState
-    let token_service = app_state.token_service.clone();
-    let oauth_service = app_state.oauth_service.clone();
-    let email_service = app_state.email_service.clone();
-
     // Create JWT middleware
     let jwt_middleware = JwtAuthentication::new(
         app_state.decoding_key.clone(),
@@ -47,17 +42,21 @@ pub fn create_app(
         .app_data(web::Data::new(app_state.db.clone()))
         .app_data(web::Data::new(app_state.redis_pool.clone()))
         .app_data(web::Data::new(app_state.http_client.clone()))
-        .app_data(web::Data::new(token_service))
-        .app_data(web::Data::new(oauth_service))
-        .app_data(web::Data::new(email_service))
+        .app_data(web::Data::new(app_state.token_service.clone()))
+        .app_data(web::Data::new(app_state.oauth_service.clone()))
+        .app_data(web::Data::new(app_state.email_service.clone()))
         // Configure public routes (no authentication required)
-        .service(web::scope("").configure(lib_auth::configure_public_auth_services))
+        .service(web::scope("/api").configure(lib_auth::configure_public_auth_services))
         // Configure lib-api routes (health check, etc.)
-        .service(web::scope("").configure(routes::health_check_route::configure))
+        .service(web::scope("/api").configure(routes::health_check_route::configure))
         // Configure protected routes with combined auth middleware
         .service(
-            web::scope("")
+            web::scope("/api")
                 .wrap(combined_auth_middleware)
-                .configure(lib_auth::configure_protected_auth_services),
+                .configure(lib_auth::configure_protected_auth_services)
+                // Configure API routes
+                .service(web::scope("/api-key").configure(routes::api_keys::configure))
+                .service(web::scope("/order").configure(routes::orders::configure))
+                .service(web::scope("/user").configure(routes::users::configure)),
         )
 }
