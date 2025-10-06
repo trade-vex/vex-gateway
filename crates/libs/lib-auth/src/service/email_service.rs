@@ -13,6 +13,7 @@ use secrecy::ExposeSecret;
 
 const OTP_KEY_PREFIX: &str = "otp:verification:";
 
+#[derive(Clone)]
 pub struct EmailService {
     smtp_transport: AsyncSmtpTransport<Tokio1Executor>,
     redis_pool: Arc<Pool>,

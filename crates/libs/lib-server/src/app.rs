@@ -22,12 +22,10 @@ pub fn create_app(
         InitError = (),
     >,
 > {
-    // Create services using AppState
-    let token_service = app_state.create_token_service();
-    let oauth_service = app_state.create_oauth_service();
-    let email_service = app_state
-        .create_email_service()
-        .expect("Failed to create email service");
+    // Use services directly from AppState
+    let token_service = app_state.token_service.clone();
+    let oauth_service = app_state.oauth_service.clone();
+    let email_service = app_state.email_service.clone();
 
     // Create JWT middleware
     let jwt_middleware = JwtAuthentication::new(
@@ -38,7 +36,7 @@ pub fn create_app(
     );
 
     // Create API key middleware
-    let api_key_middleware = app_state.create_api_key_middleware();
+    let api_key_middleware = app_state.init_api_key_middleware();
 
     // Create combined auth middleware
     let combined_auth_middleware = CombinedAuthMiddleware::new(jwt_middleware, api_key_middleware);

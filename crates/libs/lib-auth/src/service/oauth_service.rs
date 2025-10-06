@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::models::user::{Model, UserStatus};
 use crate::repository::UserRepository;
 
+#[derive(Clone)]
 pub struct OAuthService {
     redis_pool: Arc<RedisPool>,
     http_client: reqwest::Client,

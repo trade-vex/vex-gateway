@@ -4,7 +4,7 @@
 
 use deadpool_redis::Pool as RedisPool;
 use jsonwebtoken::{DecodingKey, EncodingKey};
-use lib_auth::config::{AuthConfig, OAuthProviderConfig};
+use lib_auth::config::{AuthConfig, OAuthProviderConfig , JwtConfig};
 use lib_auth::repository::{PostgresUserRepository, UserRepository};
 use lib_auth::service::{EmailService, OAuthService, TokenService};
 use lib_middleware::{ApiKeyMiddleware, ApiKeyConfig, SecurityType};
@@ -28,11 +28,14 @@ pub struct AppState {
     pub user_repo: Arc<dyn UserRepository>,
 
     // Auth configuration
-    pub jwt_config: lib_auth::config::JwtConfig,
+    pub jwt_config: JwtConfig,
     pub encoding_key: EncodingKey,
     pub decoding_key: DecodingKey,
     pub oauth_providers: HashMap<String, OAuthProviderConfig>,
     pub auth_config: AuthConfig,
+    pub token_service: TokenService,
+    pub oauth_service: OAuthService,
+    pub email_service: EmailService
 }
 
 impl AppState {
@@ -57,6 +60,30 @@ impl AppState {
         // Initialize auth-specific services
         let user_repo = Arc::new(PostgresUserRepository::new(Arc::new(db.clone())));
 
+        // Initialize services
+        let token_service = TokenService::new(
+            Arc::new(config.jwt.clone()),
+            Arc::new(redis_pool.clone()),
+            Arc::new(encoding_key.clone()),
+            Arc::new(decoding_key.clone()),
+        );
+
+        let oauth_service = OAuthService::new(
+            Arc::new(redis_pool.clone()),
+            http_client.clone(),
+            config.oauth.providers.clone(),
+            Arc::new(token_service.clone()),
+            user_repo.clone(),
+            config.oauth.redirect_base.clone(),
+        );
+
+        let email_service = EmailService::new(
+            &config.email,
+            Arc::new(redis_pool.clone()),
+            config.otp.otp_length,
+            config.otp.email_verification_expiry_minutes,
+        )?;
+
         tracing::info!("AppState initialization completed successfully");
 
         Ok(Arc::new(Self {
@@ -69,6 +96,9 @@ impl AppState {
             decoding_key,
             oauth_providers: config.oauth.providers.clone(),
             auth_config: config.clone(),
+            token_service,
+            oauth_service,
+            email_service,
         }))
     }
 
@@ -194,43 +224,8 @@ impl AppState {
             .map_err(|e| format!("Failed to create HTTP client: {}", e).into())
     }
 
-    /// Create TokenService using AppState dependencies
-    pub fn create_token_service(&self) -> Arc<TokenService> {
-        Arc::new(TokenService::new(
-            Arc::new(self.jwt_config.clone()),
-            self.redis_pool.clone(),
-            Arc::new(self.encoding_key.clone()),
-            Arc::new(self.decoding_key.clone()),
-        ))
-    }
-
-    /// Create OAuthService using AppState dependencies
-    pub fn create_oauth_service(&self) -> Arc<OAuthService> {
-        let token_service = self.create_token_service();
-        Arc::new(OAuthService::new(
-            self.redis_pool.clone(),
-            self.http_client.clone(),
-            self.oauth_providers.clone(),
-            token_service,
-            self.user_repo.clone(),
-            self.auth_config.oauth.redirect_base.clone(),
-        ))
-    }
-
-    /// Create EmailService using AppState dependencies
-    pub fn create_email_service(
-        &self,
-    ) -> Result<Arc<EmailService>, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(Arc::new(EmailService::new(
-            &self.auth_config.email,
-            self.redis_pool.clone(),
-            self.auth_config.otp.otp_length,
-            self.auth_config.otp.email_verification_expiry_minutes,
-        )?))
-    }
-
     /// Create ApiKeyMiddleware using AppState dependencies
-    pub fn create_api_key_middleware(&self) -> ApiKeyMiddleware {
+    pub fn init_api_key_middleware(&self) -> ApiKeyMiddleware {
         // Create a basic API key configuration for development
         // In production, this should be loaded from database or configuration
         let api_key_config = ApiKeyConfig::new("dev-api-key".to_string())
