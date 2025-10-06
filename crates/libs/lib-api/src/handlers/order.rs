@@ -2,28 +2,25 @@
 
 use actix_web::{HttpResponse, web};
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
-use std::sync::mpsc;
-use vex_networking::client::{VexGateway, OrderCommandHandler};
-use vex_config::GatewayNetworkingConfig;
-use common::model::enums::{Side, OrderType};
-use common::cmd::{OrderCommand, OrderCommandType};
+use std::sync::{Arc, Mutex};
+use common::{Side, TimeInForce, OrderCommand, OrderCommandType, Status, UserBalance};
 use lib_utils::AuthenticatedUserId;
+use lib_core::Publisher;
 
 
 #[derive(Debug, Deserialize)]
 pub struct OrderRequest {
     pub price: u64,
     pub volume: u64,
-    pub symbol_id: u32,
+    pub market_id: u32,
     pub side: Side,
-    pub order_type: OrderType,
+    pub time_in_force: TimeInForce,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CancelOrderRequest {
     pub order_id: u64,
-    pub symbol_id: u32,
+    pub market_id: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -36,6 +33,7 @@ pub struct OrderResponse {
 pub async fn place_order(
     order_data: web::Json<OrderRequest>,
     auth_user: AuthenticatedUserId,
+    publisher: web::Data<Arc<Mutex<Publisher>>>,
 ) -> HttpResponse {
     // Use folded hash to preserve all UUID bits in u64
     let raw = auth_user.0.as_u128();
@@ -46,61 +44,46 @@ pub async fn place_order(
     // Inline order processing to avoid extra stack frames
     let order_id = 0;
     let command = OrderCommand {
-        command: OrderCommandType::PlaceLimitOrder,
+        command: OrderCommandType::PlaceOrder,
         order_id,
-        symbol_id: order_data.symbol_id,
+        market_id: order_data.market_id,
         user_id,
         price: order_data.price,
-        reserve_bid_price: order_data.price,
         size: order_data.volume,
         side: order_data.side.clone(),
-        order_type: order_data.order_type.clone(),
+        time_in_force: order_data.time_in_force.clone(),
         timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64,
-        matcher_event: None,
+        status: Status::Processing,
+        events: None,
+        balance: [UserBalance::default(); 2],
+        l2_data: None,
     };
 
-    let client_config = GatewayNetworkingConfig::test_defaults();
-    let mut client = match VexGateway::new(client_config) {
-        Ok(client) => client,
+    // Send order command using the publisher from app state
+    let mut publisher = match publisher.lock() {
+        Ok(guard) => guard,
         Err(e) => {
             return HttpResponse::InternalServerError().json(OrderResponse {
                 order_id,
                 status: "error".to_string(),
-                message: format!("Failed to initialize gateway: {}", e),
+                message: format!("Failed to acquire publisher lock: {}", e),
             });
         }
     };
 
-    let (sx, rx) = mpsc::channel();
-    let handler = OrderCommandHandler::new(client.gateway_id().to_string(), sx);
-
-    match client.start(handler) {
-        Ok(()) => match client.send_order_command(&command) {
-            Ok(()) => match rx.recv_timeout(Duration::from_secs(5)) {
-                Ok(processed_order) => HttpResponse::Ok().json(OrderResponse {
-                    order_id,
-                    status: "success".to_string(),
-                    message: format!("Order processed successfully: {:?}", processed_order),
-                }),
-                Err(_) => HttpResponse::RequestTimeout().json(OrderResponse {
-                    order_id,
-                    status: "timeout".to_string(),
-                    message: "Order processing timed out".to_string(),
-                }),
-            },
-            Err(e) => HttpResponse::InternalServerError().json(OrderResponse {
-                order_id,
-                status: "error".to_string(),
-                message: format!("Failed to send order command: {}", e),
-            }),
-        },
+    match publisher.send_order_command(&command) {
+        Ok(()) => HttpResponse::Ok().json(OrderResponse {
+            order_id,
+            status: "success".to_string(),
+            message: "Order sent successfully".to_string(),
+        }),
         Err(e) => HttpResponse::InternalServerError().json(OrderResponse {
             order_id,
             status: "error".to_string(),
-            message: format!("Failed to start gateway client: {}", e),
+            message: format!("Failed to send order command: {}", e),
         }),
     }
 }
@@ -108,6 +91,7 @@ pub async fn place_order(
 pub async fn cancel_order(
     cancel_data: web::Json<CancelOrderRequest>,
     auth_user: AuthenticatedUserId,
+    publisher: web::Data<Arc<Mutex<Publisher>>>,
 ) -> HttpResponse {
     // Use folded hash to preserve all UUID bits in u64
     let raw = auth_user.0.as_u128();
@@ -119,59 +103,44 @@ pub async fn cancel_order(
     let command = OrderCommand {
         command: OrderCommandType::CancelOrder,
         order_id: cancel_data.order_id,
-        symbol_id: cancel_data.symbol_id,
+        market_id: cancel_data.market_id,
         user_id,
         price: 0,
-        reserve_bid_price: 0,
         size: 0,
-        side: Side::Bid,
-        order_type: OrderType::Gtc,
+        side: Side::Bid, // Default side for cancel
+        time_in_force: TimeInForce::Gtc,
         timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64,
-        matcher_event: None,
+        status: Status::Processing,
+        events: None,
+        balance: [UserBalance::default(); 2],
+        l2_data: None,
     };
 
-    let client_config = GatewayNetworkingConfig::test_defaults();
-    let mut client = match VexGateway::new(client_config) {
-        Ok(client) => client,
+    // Send cancel order command using the publisher from app state
+    let mut publisher = match publisher.lock() {
+        Ok(guard) => guard,
         Err(e) => {
             return HttpResponse::InternalServerError().json(OrderResponse {
                 order_id: cancel_data.order_id,
                 status: "error".to_string(),
-                message: format!("Failed to initialize gateway: {}", e),
+                message: format!("Failed to acquire publisher lock: {}", e),
             });
         }
     };
 
-    let (sx, rx) = mpsc::channel();
-    let handler = OrderCommandHandler::new(client.gateway_id().to_string(), sx);
-
-    match client.start(handler) {
-        Ok(()) => match client.send_order_command(&command) {
-            Ok(()) => match rx.recv_timeout(Duration::from_secs(5)) {
-                Ok(processed_order) => HttpResponse::Ok().json(OrderResponse {
-                    order_id: cancel_data.order_id,
-                    status: "success".to_string(),
-                    message: format!("Order cancelled successfully: {:?}", processed_order),
-                }),
-                Err(_) => HttpResponse::RequestTimeout().json(OrderResponse {
-                    order_id: cancel_data.order_id,
-                    status: "timeout".to_string(),
-                    message: "Order cancellation timed out".to_string(),
-                }),
-            },
-            Err(e) => HttpResponse::InternalServerError().json(OrderResponse {
-                order_id: cancel_data.order_id,
-                status: "error".to_string(),
-                message: format!("Failed to send cancel order command: {}", e),
-            }),
-        },
+    match publisher.send_order_command(&command) {
+        Ok(()) => HttpResponse::Ok().json(OrderResponse {
+            order_id: cancel_data.order_id,
+            status: "success".to_string(),
+            message: "Cancel order sent successfully".to_string(),
+        }),
         Err(e) => HttpResponse::InternalServerError().json(OrderResponse {
             order_id: cancel_data.order_id,
             status: "error".to_string(),
-            message: format!("Failed to start gateway client: {}", e),
+            message: format!("Failed to send cancel order command: {}", e),
         }),
     }
 }

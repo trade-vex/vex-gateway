@@ -21,4 +21,10 @@ uuid = {workspace = true}
 lib-api = {path = "../lib-api"}
 lib-auth = {path = "../lib-auth"}
 lib-config = {path = "../lib-config"}
+lib-core = {path = "../lib-core"}
 lib-middleware = {path = "../lib-middleware"}
+
+# Vex dependencies
+vex-networking = {workspace = true}
+vex-config = {workspace = true}
+common = {workspace = true}

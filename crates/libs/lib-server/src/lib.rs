@@ -19,6 +19,7 @@ pub use combined_auth::CombinedAuthMiddleware;
 /// Initialize the HTTP server with proper configuration
 pub async fn initialize_server(
     config: &Config,
+    gateway_publisher: lib_core::Publisher,
 ) -> Result<(Arc<AppState>, Server), Box<dyn std::error::Error + Send + Sync>> {
     // Use the auth configuration from lib-config
     let auth_config = config.auth.clone();
@@ -26,7 +27,7 @@ pub async fn initialize_server(
     // Initialize AppState with all dependencies
     // Currently app state is reading from auth config , it should be reading from global config
     // Auth config can be moved to global config
-    let app_state = AppState::new(&auth_config).await?;
+    let app_state = AppState::new(&auth_config, gateway_publisher).await?;
 
     // Create TCP listener
     let listener = TcpListener::bind(config.server_address()?)?;

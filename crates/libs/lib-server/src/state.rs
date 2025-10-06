@@ -8,10 +8,12 @@ use lib_auth::config::{AuthConfig, OAuthProviderConfig , JwtConfig};
 use lib_auth::repository::{PostgresUserRepository, UserRepository};
 use lib_auth::service::{EmailService, OAuthService, TokenService};
 use lib_middleware::{ApiKeyMiddleware, ApiKeyConfig, SecurityType};
+use lib_core::Publisher;
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
 use url::Url;
+use std::sync::Mutex;
 
 /// Central application state containing all dependencies
 ///
@@ -35,13 +37,17 @@ pub struct AppState {
     pub auth_config: AuthConfig,
     pub token_service: TokenService,
     pub oauth_service: OAuthService,
-    pub email_service: EmailService
+    pub email_service: EmailService,
+
+    // Gateway publisher for order processing
+    pub gateway_publisher: Arc<Mutex<Publisher>>,
 }
 
 impl AppState {
     /// Create a new AppState with all dependencies initialized
     pub async fn new(
         config: &AuthConfig,
+        gateway_publisher: Publisher,
     ) -> Result<Arc<Self>, Box<dyn std::error::Error + Send + Sync>> {
         tracing::info!("Initializing AppState with configuration");
 
@@ -99,6 +105,7 @@ impl AppState {
             token_service,
             oauth_service,
             email_service,
+            gateway_publisher: Arc::new(Mutex::new(gateway_publisher)),
         }))
     }
 

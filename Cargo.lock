@@ -218,6 +218,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
 dependencies = [
  "cfg-if",
+ "getrandom 0.3.3",
  "once_cell",
  "version_check",
  "zerocopy",
@@ -706,15 +707,15 @@ dependencies = [
 [[package]]
 name = "common"
 version = "0.1.0"
-source = "git+https://github.com/trade-vex/vex-core?rev=8a09622#8a09622b4ec136e489b833eb76688de7ac9ce08c"
+source = "git+https://github.com/trade-vex/vex-core?rev=9e91e27521ecc7e70712906259edc82591de826c#9e91e27521ecc7e70712906259edc82591de826c"
 dependencies = [
+ "ahash 0.8.12",
  "borsh",
  "hashbrown 0.15.5",
- "num_enum",
- "sbe-order",
+ "parking_lot",
+ "sbe_order",
  "serde",
  "thiserror 2.0.17",
- "tracing",
 ]
 
 [[package]]
@@ -1174,9 +1175,8 @@ dependencies = [
 
 [[package]]
 name = "disruptor"
-version = "3.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1eb865e5530dc4c314f08a2503a978b18b6df7c9f40b8a2048b31f76d2e8c9fe"
+version = "3.6.0"
+source = "git+https://github.com/esciiee/disruptor-rs.git?rev=39e2f1d#39e2f1d01dfcf93797553e411dac285ae7b9f129"
 dependencies = [
  "core_affinity",
  "crossbeam-utils",
@@ -1550,6 +1550,7 @@ version = "0.1.0"
 dependencies = [
  "actix-web",
  "chrono",
+ "common",
  "deadpool-redis",
  "dotenvy",
  "jsonwebtoken",
@@ -1560,6 +1561,8 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "vex-config",
+ "vex-networking",
 ]
 
 [[package]]
@@ -1687,6 +1690,7 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash",
+ "serde",
 ]
 
 [[package]]
@@ -2409,6 +2413,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "vex-networking",
 ]
 
 [[package]]
@@ -2465,12 +2470,14 @@ version = "0.1.0"
 dependencies = [
  "actix-web",
  "chrono",
+ "common",
  "deadpool-redis",
  "futures-util",
  "jsonwebtoken",
  "lib-api",
  "lib-auth",
  "lib-config",
+ "lib-core",
  "lib-middleware",
  "reqwest 0.11.27",
  "sea-orm",
@@ -2479,6 +2486,8 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "vex-config",
+ "vex-networking",
 ]
 
 [[package]]
@@ -2778,28 +2787,6 @@ checksum = "91df4bbde75afed763b708b7eee1e8e7651e02d97f6d5dd763e89367e957b23b"
 dependencies = [
  "hermit-abi",
  "libc",
-]
-
-[[package]]
-name = "num_enum"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a973b4e44ce6cad84ce69d797acf9a044532e4184c4f267913d1b546a0727b7a"
-dependencies = [
- "num_enum_derive",
- "rustversion",
-]
-
-[[package]]
-name = "num_enum_derive"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77e878c846a8abae00dd069496dbe8751b16ac1c3d6bd2a7283a938e8228f90d"
-dependencies = [
- "proc-macro-crate",
- "proc-macro2",
- "quote",
- "syn 2.0.106",
 ]
 
 [[package]]
@@ -3871,9 +3858,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "sbe-order"
+name = "sbe_order"
 version = "0.1.0"
-source = "git+https://github.com/trade-vex/vex-core?rev=8a09622#8a09622b4ec136e489b833eb76688de7ac9ce08c"
+source = "git+https://github.com/trade-vex/vex-core?rev=9e91e27521ecc7e70712906259edc82591de826c#9e91e27521ecc7e70712906259edc82591de826c"
 
 [[package]]
 name = "schannel"
@@ -5300,9 +5287,11 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vex-config"
 version = "0.1.0"
-source = "git+https://github.com/trade-vex/vex-core?rev=8a09622#8a09622b4ec136e489b833eb76688de7ac9ce08c"
+source = "git+https://github.com/trade-vex/vex-core?rev=9e91e27521ecc7e70712906259edc82591de826c#9e91e27521ecc7e70712906259edc82591de826c"
 dependencies = [
+ "common",
  "config",
+ "hashbrown 0.15.5",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -5314,7 +5303,7 @@ dependencies = [
 [[package]]
 name = "vex-networking"
 version = "0.1.0"
-source = "git+https://github.com/trade-vex/vex-core?rev=8a09622#8a09622b4ec136e489b833eb76688de7ac9ce08c"
+source = "git+https://github.com/trade-vex/vex-core?rev=9e91e27521ecc7e70712906259edc82591de826c#9e91e27521ecc7e70712906259edc82591de826c"
 dependencies = [
  "common",
  "crossbeam",

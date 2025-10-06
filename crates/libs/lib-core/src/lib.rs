@@ -27,3 +27,7 @@ pub use cache::order_store::{
     OrderStore,
     OrderCacheConfig,
 };
+
+// Type alias for the Publisher from vex-networking
+// Shared across the application to avoid circular dependencies
+pub type Publisher = vex_networking::client::Publisher;

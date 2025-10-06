@@ -45,6 +45,7 @@ pub fn create_app(
         .app_data(web::Data::new(app_state.token_service.clone()))
         .app_data(web::Data::new(app_state.oauth_service.clone()))
         .app_data(web::Data::new(app_state.email_service.clone()))
+        .app_data(web::Data::new(app_state.gateway_publisher.clone()))
         // Configure public routes (no authentication required)
         .service(web::scope("/api").configure(lib_auth::configure_public_auth_services))
         // Configure lib-api routes (health check, etc.)

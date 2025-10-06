@@ -13,6 +13,11 @@ serde_json = { workspace = true }
 # Internal crate dependencies
 lib-server = {path = "../libs/lib-server"}
 lib-config = {path = "../libs/lib-config"}
+
+# Vex dependencies
+vex-networking = {workspace = true}
+vex-config = {workspace = true}
+common = {workspace = true}
 lib-auth = {path = "../libs/lib-auth"}
 chrono = { workspace = true }
 jsonwebtoken = { workspace = true }

@@ -17,9 +17,9 @@ lib-middleware = { path = "../lib-middleware" }
 lib-auth = { path = "../lib-auth" }
 lib-utils = { path = "../lib-utils" }
 lib-core = { path = "../lib-core" }
-vex-networking ={ git = "https://github.com/trade-vex/vex-core" , rev = "8a09622"}
-vex-config = { git = "https://github.com/trade-vex/vex-core" , rev = "8a09622"}
-common = { git = "https://github.com/trade-vex/vex-core" , rev = "8a09622"}
+vex-networking ={ workspace = true }
+vex-config = { workspace = true}
+common = { workspace = true}
 
 [dev-dependencies]
 tokio-test = "0.4"

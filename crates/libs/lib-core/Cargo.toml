@@ -16,6 +16,7 @@ redis = { version = "0.24", features = ["tokio-comp", "connection-manager"] }
 tokio = { version = "1", features = ["sync"] }
 tracing = "0.1"
 lib-db = { path = "../lib-db" }
+vex-networking = { workspace = true }
 
 [dev-dependencies]
 actix-web = "4.4"
