@@ -55,8 +55,8 @@ pub fn create_app(
                 .wrap(combined_auth_middleware)
                 .configure(lib_auth::configure_protected_auth_services)
                 // Configure API routes
-                .service(web::scope("/api-key").configure(routes::api_keys::configure))
-                .service(web::scope("/order").configure(routes::orders::configure))
-                .service(web::scope("/user").configure(routes::users::configure)),
+                .service(web::scope("/api-key").configure(routes::api_key_routes::configure))
+                .service(web::scope("/order").configure(routes::order_route::configure))
+                .service(web::scope("/user").configure(routes::user_route::configure)),
         )
 }
