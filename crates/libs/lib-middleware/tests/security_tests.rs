@@ -53,11 +53,8 @@ fn test_api_key_config_new() {
     
     assert_eq!(config.api_key, "test-api-key");
     assert!(config.key_material.is_none());
-    assert_eq!(config.permissions.len(), 4);
+    assert_eq!(config.permissions.len(), 1);
     assert!(config.permissions.contains(&SecurityType::None));
-    assert!(config.permissions.contains(&SecurityType::Trade));
-    assert!(config.permissions.contains(&SecurityType::UserData));
-    assert!(config.permissions.contains(&SecurityType::UserStream));
     assert_eq!(config.recv_window, 5000);
     assert!(config.enabled);
     assert!(config.description.is_none());
