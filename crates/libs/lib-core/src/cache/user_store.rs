@@ -13,7 +13,6 @@ pub struct UserBalanceStore {
     cache: Option<RedisDb>,
     trading_repo: Option<Arc<dyn TradingRepository>>,
     config: UserBalanceCacheConfig,
-    metrics: Arc<UserBalanceCacheMetrics>,
 }
 
 #[derive(Clone)]
@@ -31,26 +30,6 @@ impl Default for UserBalanceCacheConfig {
     }
 }
 
-pub struct UserBalanceCacheMetrics {
-    pub cache_hits: std::sync::atomic::AtomicU64,
-    pub cache_misses: std::sync::atomic::AtomicU64,
-    pub cache_errors: std::sync::atomic::AtomicU64,
-    pub db_hits: std::sync::atomic::AtomicU64,
-    pub db_errors: std::sync::atomic::AtomicU64,
-}
-
-impl Default for UserBalanceCacheMetrics {
-    fn default() -> Self {
-        Self {
-            cache_hits: std::sync::atomic::AtomicU64::new(0),
-            cache_misses: std::sync::atomic::AtomicU64::new(0),
-            cache_errors: std::sync::atomic::AtomicU64::new(0),
-            db_hits: std::sync::atomic::AtomicU64::new(0),
-            db_errors: std::sync::atomic::AtomicU64::new(0),
-        }
-    }
-}
-
 impl UserBalanceStore {
     /// Create new store 
     pub fn new(config: UserBalanceCacheConfig) -> Self {
@@ -58,7 +37,6 @@ impl UserBalanceStore {
             cache: None,
             trading_repo: None,
             config,
-            metrics: Arc::new(UserBalanceCacheMetrics::default()),
         }
     }
 
@@ -70,7 +48,6 @@ impl UserBalanceStore {
             cache: None,
             trading_repo: Some(trading_repo),
             config,
-            metrics: Arc::new(UserBalanceCacheMetrics::default()),
         }
     }
 
@@ -91,7 +68,6 @@ impl UserBalanceStore {
             cache,
             trading_repo,
             config,
-            metrics: Arc::new(UserBalanceCacheMetrics::default()),
         })
     }
 
@@ -101,16 +77,13 @@ impl UserBalanceStore {
                 let key = format!("user_balances:{}", user_id);
                 match cache.get(&key).await {
                     Ok(Some(balances)) => {
-                        self.metrics.cache_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         debug!("Cache hit for user balances ID: {}", user_id);
                         return Ok(balances);
                     }
                     Ok(None) => {
-                        self.metrics.cache_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         debug!("Cache miss for user balances ID: {}", user_id);
                     }
                     Err(e) => {
-                        self.metrics.cache_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         warn!("Cache error for user balances ID {}: {}", user_id, e);
                     }
                 }
@@ -120,8 +93,6 @@ impl UserBalanceStore {
         if let Some(repo) = &self.trading_repo {
             match repo.get_user_balances(user_id).await {
                 Ok(balances) => {
-                    self.metrics.db_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    
                     // Update cache if available
                     if self.config.enabled {
                         if let Some(cache) = &self.cache {
@@ -137,7 +108,6 @@ impl UserBalanceStore {
                     return Ok(balances);
                 }
                 Err(e) => {
-                    self.metrics.db_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     return Err(e);
                 }
             }

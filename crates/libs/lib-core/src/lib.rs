@@ -21,11 +21,9 @@ pub use repository::repository::{
 pub use cache::user_store::{
     UserBalanceStore,
     UserBalanceCacheConfig,
-    UserBalanceCacheMetrics,
 };
 
 pub use cache::order_store::{
     OrderStore,
     OrderCacheConfig,
-    OrderCacheMetrics,
 };

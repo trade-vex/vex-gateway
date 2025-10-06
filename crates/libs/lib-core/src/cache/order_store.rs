@@ -7,44 +7,12 @@ use std::time::Duration;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-/// Statistics for individual order cache
-#[derive(Debug, Clone)]
-pub struct IndividualOrderCacheStats {
-    pub hits: u64,
-    pub misses: u64,
-    pub errors: u64,
-}
-
-/// Statistics for user orders cache
-#[derive(Debug, Clone)]
-pub struct UserOrdersCacheStats {
-    pub hits: u64,
-    pub misses: u64,
-    pub errors: u64,
-}
-
-/// Statistics for database operations
-#[derive(Debug, Clone)]
-pub struct DatabaseStats {
-    pub hits: u64,
-    pub errors: u64,
-}
-
-/// Combined statistics for OrderStore
-#[derive(Debug, Clone)]
-pub struct OrderCacheStats {
-    pub individual_cache: IndividualOrderCacheStats,
-    pub user_orders_cache: UserOrdersCacheStats,
-    pub database: DatabaseStats,
-}
-
 #[derive(Clone)]
 pub struct OrderStore {
     cache: Option<RedisDb>,
     user_orders_cache: Option<RedisDb>,
     trading_repo: Option<Arc<dyn TradingRepository>>,
     config: OrderCacheConfig,
-    metrics: Arc<OrderCacheMetrics>,
 }
 
 #[derive(Clone)]
@@ -62,37 +30,6 @@ impl Default for OrderCacheConfig {
     }
 }
 
-pub struct OrderCacheMetrics {
-    // Individual order cache stats
-    pub individual_cache_hits: std::sync::atomic::AtomicU64,
-    pub individual_cache_misses: std::sync::atomic::AtomicU64,
-    pub individual_cache_errors: std::sync::atomic::AtomicU64,
-    
-    // User orders cache stats
-    pub user_orders_cache_hits: std::sync::atomic::AtomicU64,
-    pub user_orders_cache_misses: std::sync::atomic::AtomicU64,
-    pub user_orders_cache_errors: std::sync::atomic::AtomicU64,
-    
-    // Database stats (shared)
-    pub db_hits: std::sync::atomic::AtomicU64,
-    pub db_errors: std::sync::atomic::AtomicU64,
-}
-
-impl Default for OrderCacheMetrics {
-    fn default() -> Self {
-        Self {
-            individual_cache_hits: std::sync::atomic::AtomicU64::new(0),
-            individual_cache_misses: std::sync::atomic::AtomicU64::new(0),
-            individual_cache_errors: std::sync::atomic::AtomicU64::new(0),
-            user_orders_cache_hits: std::sync::atomic::AtomicU64::new(0),
-            user_orders_cache_misses: std::sync::atomic::AtomicU64::new(0),
-            user_orders_cache_errors: std::sync::atomic::AtomicU64::new(0),
-            db_hits: std::sync::atomic::AtomicU64::new(0),
-            db_errors: std::sync::atomic::AtomicU64::new(0),
-        }
-    }
-}
-
 impl OrderStore {
     pub fn new(config: OrderCacheConfig) -> Self {
         Self {
@@ -100,7 +37,6 @@ impl OrderStore {
             user_orders_cache: None,
             trading_repo: None,
             config,
-            metrics: Arc::new(OrderCacheMetrics::default()),
         }
     }
 
@@ -113,7 +49,6 @@ impl OrderStore {
             user_orders_cache: None,
             trading_repo: Some(trading_repo),
             config,
-            metrics: Arc::new(OrderCacheMetrics::default()),
         }
     }
 
@@ -143,7 +78,6 @@ impl OrderStore {
             user_orders_cache,
             trading_repo,
             config,
-            metrics: Arc::new(OrderCacheMetrics::default()),
         })
     }
 
@@ -154,16 +88,13 @@ impl OrderStore {
                 let key = format!("order:{}", order_id);
                 match cache.get(&key).await {
                     Ok(Some(order)) => {
-                        self.metrics.individual_cache_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         debug!("Individual order cache hit for order ID: {}", order_id);
                         return Ok(Some(order));
                     }
                     Ok(None) => {
-                        self.metrics.individual_cache_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         debug!("Individual order cache miss for order ID: {}", order_id);
                     }
                     Err(e) => {
-                        self.metrics.individual_cache_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         warn!("Individual order cache error for order ID {}: {}", order_id, e);
                     }
                 }
@@ -174,8 +105,6 @@ impl OrderStore {
         if let Some(repo) = &self.trading_repo {
             match repo.get_order_by_id(order_id, user_id).await {
                 Ok(Some(order)) => {
-                    self.metrics.db_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    
                     // Update cache if available
                     if self.config.enabled {
                         if let Some(cache) = &self.cache {
@@ -195,7 +124,6 @@ impl OrderStore {
                     return Ok(None);
                 }
                 Err(e) => {
-                    self.metrics.db_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     return Err(e);
                 }
             }
@@ -213,16 +141,13 @@ impl OrderStore {
                 let key = format!("user_orders:{}", user_id);
                 match cache.get(&key).await {
                     Ok(Some(orders)) => {
-                        self.metrics.user_orders_cache_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         debug!("User orders cache hit for user: {}", user_id);
                         return Ok(orders);
                     }
                     Ok(None) => {
-                        self.metrics.user_orders_cache_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         debug!("User orders cache miss for user: {}", user_id);
                     }
                     Err(e) => {
-                        self.metrics.user_orders_cache_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         warn!("User orders cache error for user {}: {}", user_id, e);
                     }
                 }
@@ -232,7 +157,6 @@ impl OrderStore {
         if let Some(repo) = &self.trading_repo {
             match repo.get_open_orders(user_id).await {
                 Ok(orders) => {
-                    self.metrics.db_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     debug!("Database hit for user orders: {}", user_id);
                     
                     // Cache: Store in Redis if available
@@ -249,7 +173,6 @@ impl OrderStore {
                     return Ok(orders);
                 }
                 Err(e) => {
-                    self.metrics.db_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     return Err(e);
                 }
             }
