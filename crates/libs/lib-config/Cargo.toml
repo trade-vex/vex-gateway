@@ -10,5 +10,8 @@ thiserror = {workspace = true}
 tracing = {workspace = true}
 
 lib-auth = {path = "../lib-auth"}
+
 [dev-dependencies]
 tempfile = {workspace = true}
+tokio = { version = "1", features = ["full"] }
+serde_json = "1.0"

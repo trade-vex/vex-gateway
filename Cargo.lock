@@ -2602,8 +2602,10 @@ dependencies = [
  "config 0.14.1",
  "lib-auth",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 1.0.69",
+ "tokio",
  "tracing",
 ]
 
@@ -2737,6 +2739,7 @@ dependencies = [
  "lib-middleware",
  "serde",
  "serde_json",
+ "tokio",
  "uuid",
 ]
 
