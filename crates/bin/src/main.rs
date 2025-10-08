@@ -4,11 +4,11 @@
 //! It initializes the server configuration and starts the HTTP server.
 
 use lib_config::Config;
-use std::sync::mpsc;
+use lib_server::{CorrelationHandler, CorrelationService};
 use tracing::{error, info};
 use tracing_subscriber::{filter::LevelFilter, fmt};
 use vex_config::GatewayNetworkingConfig;
-use vex_networking::client::{OrderCommandHandler, VexGateway};
+use vex_networking::client::VexGateway;
 
 /// Main entry point for the VEX Gateway Service
 ///
@@ -55,25 +55,31 @@ async fn main() -> std::io::Result<()> {
     info!("Starting VEX Gateway Service");
     info!("{}", config.description());
 
-    // Initialize VexGateway client and handler
+    // Initialize VexGateway client
     info!("Initializing VexGateway client");
     let gateway_config = GatewayNetworkingConfig::test_defaults();
     let mut gateway_client = VexGateway::new(gateway_config)
         .map_err(|e| std::io::Error::other(format!("Failed to initialize VexGateway: {}", e)))?;
 
-    // Create channel for order responses
-    let (order_sender, _order_receiver) = mpsc::channel();
-    let handler = OrderCommandHandler::new(gateway_client.gateway_id(), order_sender);
+    // Create correlation service
+    let correlation_service = CorrelationService::new();
+    info!("Initialized correlation service");
+
+    // Create Aeron handler with correlation service
+    let handler = CorrelationHandler::new(
+        gateway_client.gateway_id(),
+        correlation_service.clone(),
+    );
 
     // Start the gateway client and get the publisher
-    info!("Starting VexGateway client");
+    info!("Starting VexGateway with correlation handler");
     let publisher = gateway_client
         .start(handler)
         .map_err(|e| std::io::Error::other(format!("Failed to start VexGateway: {}", e)))?;
     info!("VexGateway client started successfully");
 
-    // Initialize and start the server with the publisher
-    let (_app_state, server) = lib_server::initialize_server(&config, publisher)
+    // Initialize and start the server with publisher and correlation service
+    let (_app_state, server) = lib_server::initialize_server(&config, publisher, correlation_service)
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
 

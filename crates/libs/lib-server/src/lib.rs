@@ -10,24 +10,28 @@ use std::sync::Arc;
 
 mod app;
 mod combined_auth;
+mod correlation_handler;
 mod state;
 
 pub use app::create_app;
 pub use combined_auth::CombinedAuthMiddleware;
+pub use correlation_handler::CorrelationHandler;
+pub use lib_core::{
+    generate_client_order_id, wait_for_response, CorrelationService, ResponseError,
+};
 pub use state::AppState;
 
 /// Initialize the HTTP server with proper configuration
 pub async fn initialize_server(
     config: &Config,
     gateway_publisher: lib_core::Publisher,
+    correlation_service: CorrelationService,
 ) -> Result<(Arc<AppState>, Server), Box<dyn std::error::Error + Send + Sync>> {
     // Use the auth configuration from lib-config
     let auth_config = config.auth.clone();
 
     // Initialize AppState with all dependencies
-    // Currently app state is reading from auth config , it should be reading from global config
-    // Auth config can be moved to global config
-    let app_state = AppState::new(&auth_config, gateway_publisher).await?;
+    let app_state = AppState::new(&auth_config, gateway_publisher, correlation_service).await?;
 
     // Create TCP listener
     let listener = TcpListener::bind(config.server_address()?)?;

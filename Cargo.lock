@@ -707,7 +707,7 @@ dependencies = [
 [[package]]
 name = "common"
 version = "0.1.0"
-source = "git+https://github.com/trade-vex/vex-core?rev=9e91e27521ecc7e70712906259edc82591de826c#9e91e27521ecc7e70712906259edc82591de826c"
+source = "git+https://github.com/trade-vex/vex-core?rev=f713e8d#f713e8dbe525f97e9387979a8480755ff919b305"
 dependencies = [
  "ahash 0.8.12",
  "borsh",
@@ -2404,12 +2404,16 @@ dependencies = [
  "bb8",
  "bincode",
  "chrono",
+ "common",
+ "dashmap 6.1.0",
  "lib-db",
  "lru",
+ "num_cpus",
  "redis 0.24.0",
  "sea-orm",
  "serde",
  "serde_json",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
  "uuid",
@@ -2471,6 +2475,7 @@ dependencies = [
  "actix-web",
  "chrono",
  "common",
+ "dashmap 6.1.0",
  "deadpool-redis",
  "futures-util",
  "jsonwebtoken",
@@ -2479,9 +2484,12 @@ dependencies = [
  "lib-config",
  "lib-core",
  "lib-middleware",
+ "num_cpus",
  "reqwest 0.11.27",
+ "rusteron-client",
  "sea-orm",
  "serde_json",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
  "url",
@@ -3860,7 +3868,7 @@ dependencies = [
 [[package]]
 name = "sbe_order"
 version = "0.1.0"
-source = "git+https://github.com/trade-vex/vex-core?rev=9e91e27521ecc7e70712906259edc82591de826c#9e91e27521ecc7e70712906259edc82591de826c"
+source = "git+https://github.com/trade-vex/vex-core?rev=f713e8d#f713e8dbe525f97e9387979a8480755ff919b305"
 
 [[package]]
 name = "schannel"
@@ -5287,7 +5295,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vex-config"
 version = "0.1.0"
-source = "git+https://github.com/trade-vex/vex-core?rev=9e91e27521ecc7e70712906259edc82591de826c#9e91e27521ecc7e70712906259edc82591de826c"
+source = "git+https://github.com/trade-vex/vex-core?rev=f713e8d#f713e8dbe525f97e9387979a8480755ff919b305"
 dependencies = [
  "common",
  "config",
@@ -5303,7 +5311,7 @@ dependencies = [
 [[package]]
 name = "vex-networking"
 version = "0.1.0"
-source = "git+https://github.com/trade-vex/vex-core?rev=9e91e27521ecc7e70712906259edc82591de826c#9e91e27521ecc7e70712906259edc82591de826c"
+source = "git+https://github.com/trade-vex/vex-core?rev=f713e8d#f713e8dbe525f97e9387979a8480755ff919b305"
 dependencies = [
  "common",
  "crossbeam",

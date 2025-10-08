@@ -16,6 +16,9 @@ reqwest = {workspace = true}
 url = {workspace = true}
 futures-util = {workspace = true}
 uuid = {workspace = true}
+dashmap = "6.1"
+thiserror = {workspace = true}
+num_cpus = "1.16"
 
 #  Internal crate dependencies
 lib-api = {path = "../lib-api"}
@@ -28,3 +31,4 @@ lib-middleware = {path = "../lib-middleware"}
 vex-networking = {workspace = true}
 vex-config = {workspace = true}
 common = {workspace = true}
+rusteron-client = "0.1.143"

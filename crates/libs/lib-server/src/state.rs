@@ -3,6 +3,7 @@
 //! Central application state containing all dependencies
 
 use deadpool_redis::Pool as RedisPool;
+use lib_core::CorrelationService;
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use lib_auth::config::{AuthConfig, JwtConfig, OAuthProviderConfig};
 use lib_auth::repository::{PostgresUserRepository, UserRepository};
@@ -12,7 +13,6 @@ use lib_middleware::{ApiKeyConfig, ApiKeyMiddleware, SecurityType};
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
 use url::Url;
 
 /// Central application state containing all dependencies
@@ -40,7 +40,10 @@ pub struct AppState {
     pub email_service: EmailService,
 
     // Gateway publisher for order processing
-    pub gateway_publisher: Arc<Mutex<Publisher>>,
+    pub gateway_publisher: Arc<tokio::sync::Mutex<Publisher>>,
+    
+    // Correlation service for matching responses to requests
+    pub correlation_service: CorrelationService,
 }
 
 impl AppState {
@@ -48,6 +51,7 @@ impl AppState {
     pub async fn new(
         config: &AuthConfig,
         gateway_publisher: Publisher,
+        correlation_service: CorrelationService,
     ) -> Result<Arc<Self>, Box<dyn std::error::Error + Send + Sync>> {
         tracing::info!("Initializing AppState with configuration");
 
@@ -105,7 +109,8 @@ impl AppState {
             token_service,
             oauth_service,
             email_service,
-            gateway_publisher: Arc::new(Mutex::new(gateway_publisher)),
+            gateway_publisher: Arc::new(tokio::sync::Mutex::new(gateway_publisher)),
+            correlation_service,
         }))
     }
 
