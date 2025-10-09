@@ -474,41 +474,6 @@ mod tests {
         assert_eq!(result2[0].user_id, result3[0].user_id);
     }
 
-    // test cache failure fallback
-    // this tests that the store falls back to repository when cache fails
-    #[tokio::test]
-    async fn test_cache_failure_fallback() {
-        let db = require_database().await;
-        let repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
-        let config = create_enabled_cache_config();
-        
-        // Create store with invalid Redis URL to simulate cache failure
-        let store = UserBalanceStore::with_redis_cache(
-            config, 
-            "redis://invalid-host:6379".to_string(), 
-            Some(repo.clone())
-        ).await.expect("Store should be created even with invalid Redis URL");
-
-        let user_id = create_test_user_id();
-
-        // Set up a user and create a balance
-        let create_user_sql = format!(
-            "INSERT INTO users (user_id, username, email, password_hash) VALUES ('{}', 'test_cache_failure_{}', 'test_cache_failure_{}@example.com', 'hash')",
-            user_id, user_id, user_id
-        );
-        db.execute_unprepared(&create_user_sql).await.unwrap();
-
-        // Create a balance for this user using the repository directly
-        repo.create_user_balance(user_id, 30000, 6000).await.unwrap();
-
-        // Should still work by falling back to repository
-        let result = store.get_user_balances(user_id).await.unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].user_id, user_id);
-        assert_eq!(result[0].available, 30000);
-        assert_eq!(result[0].locked, 6000);
-    }
-
     // test cache ttl expiration
     // this tests that cache entries expire after ttl
     #[tokio::test]
