@@ -3,11 +3,11 @@
 //! Central application state containing all dependencies
 
 use deadpool_redis::Pool as RedisPool;
-use lib_core::CorrelationService;
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use lib_auth::config::{AuthConfig, JwtConfig, OAuthProviderConfig};
 use lib_auth::repository::{PostgresUserRepository, UserRepository};
 use lib_auth::service::{EmailService, OAuthService, TokenService};
+use lib_core::CorrelationService;
 use lib_core::Publisher;
 use lib_middleware::{ApiKeyConfig, ApiKeyMiddleware, SecurityType};
 use sea_orm::DatabaseConnection;
@@ -41,7 +41,7 @@ pub struct AppState {
 
     // Gateway publisher for order processing
     pub gateway_publisher: Arc<tokio::sync::Mutex<Publisher>>,
-    
+
     // Correlation service for matching responses to requests
     pub correlation_service: CorrelationService,
 }

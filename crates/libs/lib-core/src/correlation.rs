@@ -18,9 +18,9 @@ pub fn generate_client_order_id() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("Time went backwards")
         .as_nanos() as u64;
-    
+
     let counter = CLIENT_ORDER_COUNTER.fetch_add(1, Ordering::Relaxed);
-    
+
     // Combine: top 48 bits = timestamp, bottom 16 bits = counter
     ((timestamp & 0xFFFF_FFFF_FFFF) << 16) | (counter & 0xFFFF)
 }
@@ -44,13 +44,13 @@ impl CorrelationService {
     pub fn register_request(&self, client_order_id: u64) -> oneshot::Receiver<OrderCommand> {
         let (tx, rx) = oneshot::channel();
         self.pending_requests.insert(client_order_id, tx);
-        
+
         debug!(
             client_order_id = client_order_id,
             pending = self.pending_requests.len(),
             "Registered pending request"
         );
-        
+
         rx
     }
 
@@ -59,7 +59,7 @@ impl CorrelationService {
     pub fn route_response(&self, response: OrderCommand) -> bool {
         let client_order_id = response.client_order_id;
         let order_id = response.order_id;
-        
+
         if let Some((_, sender)) = self.pending_requests.remove(&client_order_id) {
             match sender.send(response) {
                 Ok(()) => {
@@ -93,7 +93,10 @@ impl CorrelationService {
     #[inline]
     pub fn cancel_request(&self, client_order_id: u64) -> bool {
         if self.pending_requests.remove(&client_order_id).is_some() {
-            debug!(client_order_id = client_order_id, "Cancelled pending request");
+            debug!(
+                client_order_id = client_order_id,
+                "Cancelled pending request"
+            );
             true
         } else {
             false
@@ -129,8 +132,7 @@ pub async fn wait_for_response(
 pub enum ResponseError {
     #[error("Response timeout")]
     Timeout,
-    
+
     #[error("Response channel cancelled")]
     Cancelled,
 }
-

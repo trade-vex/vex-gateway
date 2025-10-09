@@ -66,10 +66,7 @@ async fn main() -> std::io::Result<()> {
     info!("Initialized correlation service");
 
     // Create Aeron handler with correlation service
-    let handler = CorrelationHandler::new(
-        gateway_client.gateway_id(),
-        correlation_service.clone(),
-    );
+    let handler = CorrelationHandler::new(gateway_client.gateway_id(), correlation_service.clone());
 
     // Start the gateway client and get the publisher
     info!("Starting VexGateway with correlation handler");
@@ -79,9 +76,10 @@ async fn main() -> std::io::Result<()> {
     info!("VexGateway client started successfully");
 
     // Initialize and start the server with publisher and correlation service
-    let (_app_state, server) = lib_server::initialize_server(&config, publisher, correlation_service)
-        .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let (_app_state, server) =
+        lib_server::initialize_server(&config, publisher, correlation_service)
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
     info!("Server startup complete");
     server.await

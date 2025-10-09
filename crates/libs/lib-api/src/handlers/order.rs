@@ -2,7 +2,9 @@
 
 use actix_web::{HttpResponse, web};
 use common::{OrderCommand, OrderCommandType, Side, Status, TimeInForce, UserBalance};
-use lib_core::{generate_client_order_id, wait_for_response, CorrelationService, Publisher, ResponseError};
+use lib_core::{
+    CorrelationService, Publisher, ResponseError, generate_client_order_id, wait_for_response,
+};
 use lib_utils::AuthenticatedUserId;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -39,7 +41,7 @@ pub async fn place_order(
     correlation_service: web::Data<Arc<CorrelationService>>,
 ) -> HttpResponse {
     let start = Instant::now();
-    
+
     // Extract user ID from JWT
     let raw = auth_user.0.as_u128();
     let user_id = ((raw >> 64) as u64) ^ (raw as u64);
@@ -54,8 +56,8 @@ pub async fn place_order(
     // Build order command
     let command = OrderCommand {
         command: OrderCommandType::PlaceOrder,
-        order_id: 0,  // Will be assigned by VEX Core
-        client_order_id,  // Our correlation ID
+        order_id: 0,     // Will be assigned by VEX Core
+        client_order_id, // Our correlation ID
         market_id: order_data.market_id,
         user_id,
         price: order_data.price,
@@ -98,7 +100,7 @@ pub async fn place_order(
     match wait_for_response(response_receiver, Duration::from_secs(5)).await {
         Ok(response) => {
             let latency = start.elapsed();
-            
+
             info!(
                 client_order_id = client_order_id,
                 order_id = response.order_id,
@@ -117,7 +119,7 @@ pub async fn place_order(
         }
         Err(ResponseError::Timeout) => {
             correlation_service.cancel_request(client_order_id);
-            
+
             warn!(
                 client_order_id = client_order_id,
                 user_id = user_id,
@@ -154,7 +156,7 @@ pub async fn cancel_order(
     correlation_service: web::Data<Arc<CorrelationService>>,
 ) -> HttpResponse {
     let start = Instant::now();
-    
+
     let raw = auth_user.0.as_u128();
     let user_id = ((raw >> 64) as u64) ^ (raw as u64);
     let cancel_data = cancel_data.into_inner();
@@ -166,8 +168,8 @@ pub async fn cancel_order(
     // Build cancel command
     let command = OrderCommand {
         command: OrderCommandType::CancelOrder,
-        order_id: cancel_data.order_id,  // The order to cancel
-        client_order_id,  // NEW correlation ID for this cancel request
+        order_id: cancel_data.order_id, // The order to cancel
+        client_order_id,                // NEW correlation ID for this cancel request
         market_id: cancel_data.market_id,
         user_id,
         price: 0,
@@ -204,7 +206,7 @@ pub async fn cancel_order(
     match wait_for_response(response_receiver, Duration::from_secs(5)).await {
         Ok(response) => {
             let latency = start.elapsed();
-            
+
             info!(
                 client_order_id = client_order_id,
                 order_id = response.order_id,
@@ -212,7 +214,7 @@ pub async fn cancel_order(
                 latency_us = latency.as_micros(),
                 "Cancel processed successfully"
             );
-            
+
             HttpResponse::Ok().json(OrderResponse {
                 order_id: response.order_id,
                 client_order_id: response.client_order_id,
@@ -229,13 +231,11 @@ pub async fn cancel_order(
                 message: "Cancel timeout".to_string(),
             })
         }
-        Err(ResponseError::Cancelled) => {
-            HttpResponse::InternalServerError().json(OrderResponse {
-                order_id: cancel_data.order_id,
-                client_order_id,
-                status: "error".to_string(),
-                message: "Internal error".to_string(),
-            })
-        }
+        Err(ResponseError::Cancelled) => HttpResponse::InternalServerError().json(OrderResponse {
+            order_id: cancel_data.order_id,
+            client_order_id,
+            status: "error".to_string(),
+            message: "Internal error".to_string(),
+        }),
     }
 }

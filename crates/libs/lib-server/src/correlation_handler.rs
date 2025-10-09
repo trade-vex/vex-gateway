@@ -12,10 +12,7 @@ pub struct CorrelationHandler {
 
 impl CorrelationHandler {
     pub fn new(gateway_id: u8, correlation_service: CorrelationService) -> Self {
-        debug!(
-            gateway_id = gateway_id,
-            "Created CorrelationHandler"
-        );
+        debug!(gateway_id = gateway_id, "Created CorrelationHandler");
         Self {
             gateway_id,
             correlation_service,
@@ -48,4 +45,3 @@ impl AeronFragmentHandlerCallback for CorrelationHandler {
         }
     }
 }
-

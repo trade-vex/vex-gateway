@@ -17,7 +17,7 @@ pub use app::create_app;
 pub use combined_auth::CombinedAuthMiddleware;
 pub use correlation_handler::CorrelationHandler;
 pub use lib_core::{
-    generate_client_order_id, wait_for_response, CorrelationService, ResponseError,
+    CorrelationService, ResponseError, generate_client_order_id, wait_for_response,
 };
 pub use state::AppState;
 
