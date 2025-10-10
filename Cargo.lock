@@ -4738,14 +4738,19 @@ version = "0.1.0"
 dependencies = [
  "actix-web",
  "chrono",
+ "common",
  "jsonwebtoken",
  "lib-auth",
  "lib-config",
+ "lib-core",
  "lib-server",
  "reqwest 0.11.27",
+ "serde",
  "serde_json",
  "tokio",
  "uuid",
+ "vex-config",
+ "vex-networking",
 ]
 
 [[package]]

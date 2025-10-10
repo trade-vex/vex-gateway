@@ -7,14 +7,19 @@ edition = "2021"
 lib-server = { path = "../libs/lib-server" }
 lib-auth = { path = "../libs/lib-auth" }
 lib-config = { path = "../libs/lib-config" }
+lib-core = { path = "../libs/lib-core" }
 tokio = {workspace = true}
 serde_json = { workspace = true }
 jsonwebtoken = { workspace = true }
 uuid = { workspace = true, features = ["v4", "serde"] }
 chrono = { workspace = true, features = ["serde"] }
 actix-web = { workspace = true }
+serde = { workspace = true }
+common = { workspace = true }
+vex-networking = { workspace = true }
+vex-config = { workspace = true }
 
 # Dev dependencies are used exclusively when running tests or examples
 # They do not get included in the final application binary!
 [dev-dependencies]
-reqwest = "0.11"
+reqwest = { workspace = true }

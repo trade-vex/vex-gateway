@@ -20,3 +20,4 @@ config/production.toml
 crates/libs/lib-auth/src/keys/
 *.pem
 
+/aeron-test-client
