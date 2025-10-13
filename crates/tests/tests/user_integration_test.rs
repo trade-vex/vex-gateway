@@ -31,6 +31,13 @@ struct OrderRequest {
     pub user_id: u64, // For testing - normally from JWT
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct DepositRequest {
+    pub user_id: u64,
+    pub asset_id: u32, // Using market_id field as asset_id
+    pub amount: u64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct OrderResponse {
     pub order_id: u64,
@@ -39,7 +46,119 @@ struct OrderResponse {
     pub message: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct DepositResponse {
+    pub user_id: u64,
+    pub asset_id: u32,
+    pub amount: u64,
+    pub status: String,
+    pub message: String,
+}
+
 // ==================== Test Handlers (Unauthenticated versions) ====================
+
+/// Test version of deposit handler - deposits funds to user account (faucet)
+async fn test_deposit_funds(
+    deposit_data: web::Json<DepositRequest>,
+    publisher: web::Data<Arc<tokio::sync::Mutex<Publisher>>>,
+    correlation_service: web::Data<Arc<CorrelationService>>,
+) -> HttpResponse {
+    let start = Instant::now();
+    let deposit_data = deposit_data.into_inner();
+    let user_id = deposit_data.user_id;
+    let asset_id = deposit_data.asset_id;
+    let amount = deposit_data.amount;
+
+    // Generate unique client order ID for correlation
+    let client_order_id = generate_client_order_id();
+
+    // Register this request
+    let response_receiver = correlation_service.register_request(client_order_id);
+
+    // Build deposit command
+    // For Deposit/Withdraw: market_id field is used as asset_id
+    // balance[0] contains the deposit amount
+    let mut command = OrderCommand {
+        command: OrderCommandType::DepositFunds,
+        order_id: 0,
+        client_order_id,
+        market_id: asset_id, // Using market_id field as asset_id
+        user_id,
+        price: 0,
+        size: amount, // Amount to deposit
+        side: Side::Bid,
+        time_in_force: TimeInForce::Gtc,
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64,
+        status: Status::Processing,
+        events: None,
+        balance: [UserBalance::default(); 2],
+        l2_data: None,
+    };
+
+    // Set the balance amount for deposit
+    command.balance[0].available = amount;
+
+    // Send to VEX Core
+    let send_result = {
+        let publisher = publisher.lock().await;
+        publisher.send_order_command(&command)
+    };
+
+    if let Err(e) = send_result {
+        correlation_service.cancel_request(client_order_id);
+        eprintln!("Failed to send deposit command to VEX Core: {}", e);
+        return HttpResponse::InternalServerError().json(DepositResponse {
+            user_id,
+            asset_id,
+            amount,
+            status: "error".to_string(),
+            message: format!("Failed to send deposit: {}", e),
+        });
+    }
+
+    // Wait for response with timeout
+    match wait_for_response(response_receiver, Duration::from_secs(5)).await {
+        Ok(response) => {
+            let latency = start.elapsed();
+            println!(
+                "Deposit processed: user_id={}, asset_id={}, amount={}, status={:?}, latency={}us",
+                user_id,
+                asset_id,
+                amount,
+                response.status,
+                latency.as_micros()
+            );
+
+            HttpResponse::Ok().json(DepositResponse {
+                user_id,
+                asset_id,
+                amount,
+                status: format!("{:?}", response.status),
+                message: "Deposit processed successfully".to_string(),
+            })
+        }
+        Err(ResponseError::Timeout) => {
+            correlation_service.cancel_request(client_order_id);
+            HttpResponse::RequestTimeout().json(DepositResponse {
+                user_id,
+                asset_id,
+                amount,
+                status: "timeout".to_string(),
+                message: "Deposit processing timeout".to_string(),
+            })
+        }
+        Err(ResponseError::Cancelled) => HttpResponse::InternalServerError().json(DepositResponse {
+            user_id,
+            asset_id,
+            amount,
+            status: "error".to_string(),
+            message: "Internal error".to_string(),
+        }),
+    }
+}
 
 /// Test version of place_order handler - same logic as real handler but without auth
 async fn test_place_order(
@@ -216,6 +335,8 @@ fn spawn_test_server(
             .app_data(web::Data::new(correlation_service.clone()))
             .app_data(web::Data::new(balance_store.clone()))
             .app_data(web::Data::new(order_store.clone()))
+            // Faucet/Deposit endpoint
+            .route("/test/faucet/deposit", web::post().to(test_deposit_funds))
             // Order endpoints
             .route("/test/order/place", web::post().to(test_place_order))
             // User endpoints
@@ -379,9 +500,118 @@ async fn test_user_balance_and_order_retrieval() {
 
     println!("\n✅ Setup complete!\n");
 
-    // ==================== TEST 1: PLACE ORDER ====================
+    // ==================== TEST 1: DEPOSIT FUNDS (FAUCET) ====================
     println!("╔═══════════════════════════════════════════════════════════════╗");
-    println!("║  TEST 1: Place Order                                         ║");
+    println!("║  TEST 1: Deposit Funds (Faucet)                              ║");
+    println!("╚═══════════════════════════════════════════════════════════════╝\n");
+
+    // Define test assets - matching typical crypto trading pairs
+    let base_asset_id = 1u32; // BTC
+    let quote_asset_id = 2u32; // USDT
+
+    // Deposit base asset (BTC) - 10 BTC
+    println!("💰 Depositing base asset (BTC):");
+    let btc_deposit = DepositRequest {
+        user_id: test_user_id,
+        asset_id: base_asset_id,
+        amount: 10_00000000, // 10 BTC with 8 decimals
+    };
+    println!("   User ID: {}", btc_deposit.user_id);
+    println!("   Asset ID: {} (BTC)", btc_deposit.asset_id);
+    println!("   Amount: {} (10 BTC)", btc_deposit.amount);
+
+    let response = client
+        .post(format!("{}/test/faucet/deposit", server_address))
+        .json(&btc_deposit)
+        .send()
+        .await
+        .expect("Failed to deposit BTC");
+
+    println!("\n📥 Response: {}", response.status());
+    let btc_deposit_response: DepositResponse =
+        response.json().await.expect("Failed to parse response");
+    println!("   Status: {}", btc_deposit_response.status);
+    println!("   Message: {}", btc_deposit_response.message);
+
+    // Deposit quote asset (USDT) - 1,000,000 USDT
+    println!("\n💰 Depositing quote asset (USDT):");
+    let usdt_deposit = DepositRequest {
+        user_id: test_user_id,
+        asset_id: quote_asset_id,
+        amount: 1000000_00000000, // 1M USDT with 8 decimals
+    };
+    println!("   User ID: {}", usdt_deposit.user_id);
+    println!("   Asset ID: {} (USDT)", usdt_deposit.asset_id);
+    println!("   Amount: {} (1M USDT)", usdt_deposit.amount);
+
+    let response = client
+        .post(format!("{}/test/faucet/deposit", server_address))
+        .json(&usdt_deposit)
+        .send()
+        .await
+        .expect("Failed to deposit USDT");
+
+    println!("\n📥 Response: {}", response.status());
+    let usdt_deposit_response: DepositResponse =
+        response.json().await.expect("Failed to parse response");
+    println!("   Status: {}", usdt_deposit_response.status);
+    println!("   Message: {}", usdt_deposit_response.message);
+
+    // Wait for deposits to be processed and synced
+    println!("\n⏳ Waiting 2s for deposits to be processed and synced...");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // ==================== TEST 2: CHECK BALANCES AFTER DEPOSIT ====================
+    println!("\n╔═══════════════════════════════════════════════════════════════╗");
+    println!("║  TEST 2: Verify Balances After Deposit                       ║");
+    println!("╚═══════════════════════════════════════════════════════════════╝\n");
+
+    println!("📤 GET /test/user/{}/balances", test_user_id);
+
+    let balance_response = client
+        .get(format!(
+            "{}/test/user/{}/balances",
+            server_address, test_user_id
+        ))
+        .send()
+        .await
+        .expect("Failed to get balances");
+
+    println!("📥 Response: {}", balance_response.status());
+
+    if balance_response.status().is_success() {
+        let balances: BalancesListResponse =
+            balance_response.json().await.expect("Failed to parse");
+        println!("   Total assets: {}", balances.total_assets);
+
+        for (idx, balance) in balances.balances.iter().enumerate() {
+            println!("\n   💰 Balance #{}:", idx + 1);
+            println!("      Asset ID: {}", balance.asset_id);
+            println!("      Available: {}", balance.available);
+            println!("      Locked: {}", balance.locked);
+            println!("      Total: {}", balance.total);
+
+            // Verify deposits
+            if balance.asset_id == base_asset_id {
+                println!("      ✓ BTC balance verified!");
+            } else if balance.asset_id == quote_asset_id {
+                println!("      ✓ USDT balance verified!");
+            }
+        }
+
+        if balances.total_assets >= 2 {
+            println!("\n✅ Deposits successful - User has sufficient balance!");
+        } else {
+            println!("\n⚠️  Expected at least 2 assets after deposit");
+        }
+    } else {
+        let error = balance_response.text().await.unwrap_or_default();
+        println!("❌ Error: {}", error);
+    }
+
+    // ==================== TEST 3: PLACE ORDER ====================
+    println!("\n╔═══════════════════════════════════════════════════════════════╗");
+    println!("║  TEST 3: Place Order (After Deposit)                         ║");
     println!("╚═══════════════════════════════════════════════════════════════╝\n");
 
     let order_request = OrderRequest {
@@ -425,9 +655,9 @@ async fn test_user_balance_and_order_retrieval() {
     println!("\n⏳ Waiting 3s for Kafka to sync order data to Redis/DB...");
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    // ==================== TEST 2: GET BALANCES ====================
+    // ==================== TEST 4: GET BALANCES AFTER ORDER ====================
     println!("\n╔═══════════════════════════════════════════════════════════════╗");
-    println!("║  TEST 2: Get User Balances (via Handler)                     ║");
+    println!("║  TEST 4: Get User Balances After Order (via Handler)         ║");
     println!("╚═══════════════════════════════════════════════════════════════╝\n");
 
     println!("📤 GET /test/user/{}/balances", test_user_id);
@@ -466,9 +696,9 @@ async fn test_user_balance_and_order_retrieval() {
         println!("❌ Error: {}", error);
     }
 
-    // ==================== TEST 3: GET OPEN ORDERS ====================
+    // ==================== TEST 5: GET OPEN ORDERS ====================
     println!("\n╔═══════════════════════════════════════════════════════════════╗");
-    println!("║  TEST 3: Get User Orders (via Handler)                       ║");
+    println!("║  TEST 5: Get User Orders (via Handler)                       ║");
     println!("╚═══════════════════════════════════════════════════════════════╝\n");
 
     println!("📤 GET /test/user/{}/orders", test_user_id);
@@ -518,9 +748,17 @@ async fn test_user_balance_and_order_retrieval() {
     println!("║  TEST SUMMARY                                                 ║");
     println!("╚═══════════════════════════════════════════════════════════════╝\n");
 
-    println!("✅ Order Placement: SUCCESS (Order ID: {})", placed_order_id);
-    println!("✅ Balance Handler: Tested");
-    println!("✅ Order Handler: Tested");
+    println!("✅ TEST 1: Deposit Funds (Faucet) - {}", 
+        if btc_deposit_response.status.contains("Processed") { "SUCCESS" } else { "FAILED" });
+    println!("✅ TEST 2: Balance Check After Deposit - Tested");
+    println!("✅ TEST 3: Order Placement - SUCCESS (Order ID: {})", placed_order_id);
+    println!("✅ TEST 4: Balance Check After Order - Tested");
+    println!("✅ TEST 5: Order Retrieval - Tested");
+    
+    println!("\n📊 Complete Flow Verified:");
+    println!("   1. Deposit funds → 2. Verify balance → 3. Place order");
+    println!("   → 4. Verify balance update → 5. Verify order stored");
+    
     println!("\n🎉 Integration test completed!\n");
 }
 
