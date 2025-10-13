@@ -77,15 +77,19 @@ impl UserBalanceStore {
         &self,
         user_id: Uuid,
     ) -> Result<Vec<UserBalanceModel>, TradingError> {
+        // Convert UUID to i64 to match Kafka consumer's key format
+        // Kafka writes: user:{numeric_id}:asset:{asset_id}:balance
+        let user_id_i64 = user_id.as_u128() as i64;
+        
         // Cache: Scan for user:{user_id}:asset:*:balance keys, then fetch each hash
         if self.config.enabled {
             if let Some(cache) = &self.cache {
-                let pattern = format!("user:{}:asset:*:balance", user_id);
+                let pattern = format!("user:{}:asset:*:balance", user_id_i64);
                 
                 // Use SCAN to find all balance keys for this user
                 match cache.scan_keys(&pattern).await {
                     Ok(keys) if !keys.is_empty() => {
-                        debug!("User balances cache hit for user: {} ({} assets)", user_id, keys.len());
+                        debug!("User balances cache hit for user: {} (i64: {}, {} assets)", user_id, user_id_i64, keys.len());
                         
                         let mut balances = Vec::new();
                         // Fetch each balance hash
@@ -137,7 +141,9 @@ impl UserBalanceStore {
         }
 
         if let Some(cache) = &self.cache {
-            let pattern = format!("user:{}:asset:*:balance", user_id);
+            // Convert UUID to i64 to match Kafka consumer's key format
+            let user_id_i64 = user_id.as_u128() as i64;
+            let pattern = format!("user:{}:asset:*:balance", user_id_i64);
             
             // Scan for all balance keys
             match cache.scan_keys(&pattern).await {

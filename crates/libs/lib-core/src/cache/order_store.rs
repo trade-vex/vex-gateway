@@ -123,14 +123,18 @@ impl OrderStore {
     /// Get user's open orders with caching
     /// Uses Redis set user:{user_id}:orders -> fetches each order:{order_id} hash
     pub async fn get_user_orders(&self, user_id: Uuid) -> Result<Vec<OrderModel>, TradingError> {
+        // Convert UUID to i64 to match Kafka consumer's key format
+        // Kafka writes: user:{numeric_id}:orders
+        let user_id_i64 = user_id.as_u128() as i64;
+        
         // Cache: Query user:{user_id}:orders SET, then fetch each order hash
         if self.config.enabled {
             if let Some(cache) = &self.cache {
-                let set_key = format!("user:{}:orders", user_id);
+                let set_key = format!("user:{}:orders", user_id_i64);
                 
                 match cache.smembers_string(&set_key).await {
                     Ok(order_ids) if !order_ids.is_empty() => {
-                        debug!("User orders cache hit for user: {} ({} orders)", user_id, order_ids.len());
+                        debug!("User orders cache hit for user: {} (i64: {}, {} orders)", user_id, user_id_i64, order_ids.len());
                         
                         let mut orders = Vec::new();
                         // Fetch each order hash
@@ -183,6 +187,9 @@ impl OrderStore {
         }
 
         if let Some(cache) = &self.cache {
+            // Convert UUID to i64 to match Kafka consumer's key format
+            let user_id_i64 = user_id.as_u128() as i64;
+            
             // Delete order:{order_id} hash
             let order_key = format!("order:{}", order_id);
             if let Err(e) = cache.del_key(&order_key).await {
@@ -190,7 +197,7 @@ impl OrderStore {
             }
 
             // Remove from user:{user_id}:orders set
-            let user_set_key = format!("user:{}:orders", user_id);
+            let user_set_key = format!("user:{}:orders", user_id_i64);
             if let Err(e) = cache.srem_string(&user_set_key, &order_id.to_string()).await {
                 warn!("Failed to remove from user orders set {}: {}", user_set_key, e);
             }
@@ -205,7 +212,9 @@ impl OrderStore {
         }
 
         if let Some(cache) = &self.cache {
-            let user_set_key = format!("user:{}:orders", user_id);
+            // Convert UUID to i64 to match Kafka consumer's key format
+            let user_id_i64 = user_id.as_u128() as i64;
+            let user_set_key = format!("user:{}:orders", user_id_i64);
             
             // Get all order IDs first
             match cache.smembers_string(&user_set_key).await {
