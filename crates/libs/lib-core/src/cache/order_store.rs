@@ -132,9 +132,12 @@ impl OrderStore {
             if let Some(cache) = &self.cache {
                 let set_key = format!("user:{}:orders", user_id_i64);
                 
+                println!("🔍 OrderStore: Querying Redis SET: {}", set_key);
+                
                 match cache.smembers_string(&set_key).await {
                     Ok(order_ids) if !order_ids.is_empty() => {
-                        debug!("User orders cache hit for user: {} (i64: {}, {} orders)", user_id, user_id_i64, order_ids.len());
+                        debug!("User orders cache hit for user: {} (i64: {}, {} orders in SET)", user_id, user_id_i64, order_ids.len());
+                        println!("   Found {} order IDs in SET: {:?}", order_ids.len(), order_ids);
                         
                         let mut orders = Vec::new();
                         // Fetch each order hash
@@ -142,7 +145,21 @@ impl OrderStore {
                             let order_key = format!("order:{}", order_id_str);
                             match cache.hgetall_string(&order_key).await {
                                 Ok(hash) if !hash.is_empty() => {
+                                    println!("   Fetched hash for order {}: {:?}", order_id_str, hash);
+                                    
+                                    // Check if order is cancelled - skip cancelled orders
+                                    // Kafka consumer sets status='cancelled' but doesn't remove from user:{user_id}:orders SET
+                                    if let Some(status) = hash.get("status") {
+                                        println!("   Order {} status: {}", order_id_str, status);
+                                        if status.eq_ignore_ascii_case("cancelled") {
+                                            println!("   ✓ SKIPPING cancelled order {}", order_id_str);
+                                            debug!("Skipping cancelled order {} for user {}", order_id_str, user_id);
+                                            continue;
+                                        }
+                                    }
+                                    
                                     if let Some(order) = Self::parse_order_hash(hash, user_id) {
+                                        println!("   ✓ Adding order {} to results", order_id_str);
                                         orders.push(order);
                                     }
                                 }
@@ -150,9 +167,15 @@ impl OrderStore {
                             }
                         }
                         
+                        println!("   Returning {} orders after filtering", orders.len());
+                        
                         if !orders.is_empty() {
                             return Ok(orders);
                         }
+                        
+                        // If all orders were filtered out (all cancelled), return empty vec
+                        println!("   All orders were cancelled - returning empty list");
+                        return Ok(vec![]);
                     }
                     Ok(_) => {
                         debug!("User orders cache miss for user: {}", user_id);
