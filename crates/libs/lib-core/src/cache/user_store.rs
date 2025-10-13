@@ -1,7 +1,8 @@
 use crate::model::user_balances::Model as UserBalanceModel;
 use crate::repository::repository::{TradingError, TradingRepository};
 use lib_db::backends::kv::redis::RedisDb;
-use lib_db::traits::{BasicKvStore, ExpiringKvStore};
+use lib_db::traits::BasicKvStore;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -71,46 +72,53 @@ impl UserBalanceStore {
         })
     }
 
+    /// Get user balances from cache: user:{user_id}:asset:{asset_id}:balance hashes
     pub async fn get_user_balances(
         &self,
         user_id: Uuid,
     ) -> Result<Vec<UserBalanceModel>, TradingError> {
+        // Cache: Scan for user:{user_id}:asset:*:balance keys, then fetch each hash
         if self.config.enabled {
             if let Some(cache) = &self.cache {
-                let key = format!("user_balances:{}", user_id);
-                match cache.get(&key).await {
-                    Ok(Some(balances)) => {
-                        debug!("Cache hit for user balances ID: {}", user_id);
-                        return Ok(balances);
+                let pattern = format!("user:{}:asset:*:balance", user_id);
+                
+                // Use SCAN to find all balance keys for this user
+                match cache.scan_keys(&pattern).await {
+                    Ok(keys) if !keys.is_empty() => {
+                        debug!("User balances cache hit for user: {} ({} assets)", user_id, keys.len());
+                        
+                        let mut balances = Vec::new();
+                        // Fetch each balance hash
+                        for key in keys {
+                            match cache.hgetall_string(&key).await {
+                                Ok(hash) if !hash.is_empty() => {
+                                    if let Some(balance) = Self::parse_balance_hash(hash, user_id) {
+                                        balances.push(balance);
+                                    }
+                                }
+                                _ => continue,
+                            }
+                        }
+                        
+                        if !balances.is_empty() {
+                            return Ok(balances);
+                        }
                     }
-                    Ok(None) => {
-                        debug!("Cache miss for user balances ID: {}", user_id);
+                    Ok(_) => {
+                        debug!("User balances cache miss for user: {}", user_id);
                     }
                     Err(e) => {
-                        warn!("Cache error for user balances ID {}: {}", user_id, e);
+                        warn!("User balances cache error for user {}: {}", user_id, e);
                     }
                 }
             }
         }
 
+        // Database fallback
         if let Some(repo) = &self.trading_repo {
             match repo.get_user_balances(user_id).await {
                 Ok(balances) => {
-                    // Update cache if available
-                    if self.config.enabled {
-                        if let Some(cache) = &self.cache {
-                            let key = format!("user_balances:{}", user_id);
-                            let ttl_secs = self.config.ttl.as_secs();
-                            if let Err(e) = cache.set_ex(&key, &balances, ttl_secs).await {
-                                warn!(
-                                    "Failed to update cache for user balances ID {}: {}",
-                                    user_id, e
-                                );
-                            }
-                        }
-                    }
-
-                    debug!("Database hit for user balances ID: {}", user_id);
+                    debug!("Database hit for user balances: {}", user_id);
                     return Ok(balances);
                 }
                 Err(e) => {
@@ -124,19 +132,50 @@ impl UserBalanceStore {
     }
 
     pub async fn invalidate_user_balances(&self, user_id: Uuid) {
-        // Remove from cache if available
-        if self.config.enabled {
-            if let Some(cache) = &self.cache {
-                let key = format!("user_balances:{}", user_id);
-                if let Err(e) = cache.delete(&key).await {
-                    warn!(
-                        "Failed to invalidate cache for user balances ID {}: {}",
-                        user_id, e
-                    );
+        if !self.config.enabled {
+            return;
+        }
+
+        if let Some(cache) = &self.cache {
+            let pattern = format!("user:{}:asset:*:balance", user_id);
+            
+            // Scan for all balance keys
+            match cache.scan_keys(&pattern).await {
+                Ok(keys) => {
+                    // Delete each balance hash
+                    for key in &keys {
+                        if let Err(e) = cache.del_key(key).await {
+                            warn!("Failed to delete balance hash {}: {}", key, e);
+                        }
+                    }
+                    debug!("Invalidated {} balance(s) for user: {}", keys.len(), user_id);
+                }
+                Err(e) => {
+                    warn!("Failed to scan balance keys for user {}: {}", user_id, e);
                 }
             }
         }
-
-        debug!("Invalidated cache for user balances: {}", user_id);
+    }
+    
+    // Helper: Parse balance hash from Redis into UserBalanceModel
+    // Kafka writes: user_id, asset_id, available, locked, total, timestamp
+    fn parse_balance_hash(hash: HashMap<String, String>, _user_id: Uuid) -> Option<UserBalanceModel> {
+        let user_id = hash.get("user_id")?.parse::<i64>().ok()?;
+        let asset_id = hash.get("asset_id")?.parse::<i32>().ok()?;
+        let available = hash.get("available")?.parse::<i64>().ok()?;
+        let locked = hash.get("locked")?.parse::<i64>().ok()?;
+        let total = hash.get("total")?.parse::<i64>().ok()?;
+        let timestamp = hash.get("timestamp")?.parse::<i64>().ok()?;
+        
+        Some(UserBalanceModel {
+            id: 0, // Auto-generated by DB
+            user_id,
+            asset_id,
+            available,
+            locked,
+            total,
+            timestamp,
+            created_at: None,
+        })
     }
 }

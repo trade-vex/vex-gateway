@@ -487,3 +487,77 @@ impl ExpiringKvStore for RedisDb {
         }
     }
 }
+
+// Raw String Operations (for Kafka-written data)
+// These methods work with plain strings instead of bincode serialization
+impl RedisDb {
+    /// Get all fields and values from a hash (HGETALL)
+    /// Returns HashMap<String, String> for plain string data
+    pub async fn hgetall_string(&self, key: &str) -> Result<std::collections::HashMap<String, String>> {
+        self.execute_with_retry(|conn| {
+            let key = key.to_string();
+            Box::pin(async move { conn.hgetall(key).await })
+        })
+        .await
+    }
+
+    /// Get all members of a set (SMEMBERS)
+    /// Returns Vec<String> for plain string data
+    pub async fn smembers_string(&self, key: &str) -> Result<Vec<String>> {
+        self.execute_with_retry(|conn| {
+            let key = key.to_string();
+            Box::pin(async move { conn.smembers(key).await })
+        })
+        .await
+    }
+
+    /// Delete a key (DEL)
+    pub async fn del_key(&self, key: &str) -> Result<()> {
+        let _: () = self
+            .execute_with_retry(|conn| {
+                let key = key.to_string();
+                Box::pin(async move { conn.del(key).await })
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Remove member from set (SREM)
+    pub async fn srem_string(&self, key: &str, member: &str) -> Result<()> {
+        let _: () = self
+            .execute_with_retry(|conn| {
+                let key = key.to_string();
+                let member = member.to_string();
+                Box::pin(async move { conn.srem(key, member).await })
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Scan for keys matching pattern (SCAN)
+    pub async fn scan_keys(&self, pattern: &str) -> Result<Vec<String>> {
+        let mut conn = self.get_conn().await?;
+        let mut cursor = 0u64;
+        let mut keys = Vec::new();
+        
+        loop {
+            let (new_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(pattern)
+                .arg("COUNT")
+                .arg(100)
+                .query_async(&mut *conn)
+                .await?;
+            
+            keys.extend(batch);
+            cursor = new_cursor;
+            
+            if cursor == 0 {
+                break;
+            }
+        }
+        
+        Ok(keys)
+    }
+}

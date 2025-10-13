@@ -1,7 +1,8 @@
 use crate::model::orders::Model as OrderModel;
 use crate::repository::repository::{TradingError, TradingRepository};
 use lib_db::backends::kv::redis::RedisDb;
-use lib_db::traits::{BasicKvStore, ExpiringKvStore};
+use lib_db::traits::BasicKvStore;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -10,7 +11,6 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct OrderStore {
     cache: Option<RedisDb>,
-    user_orders_cache: Option<RedisDb>,
     trading_repo: Option<Arc<dyn TradingRepository>>,
     config: OrderCacheConfig,
 }
@@ -34,7 +34,6 @@ impl OrderStore {
     pub fn new(config: OrderCacheConfig) -> Self {
         Self {
             cache: None,
-            user_orders_cache: None,
             trading_repo: None,
             config,
         }
@@ -46,7 +45,6 @@ impl OrderStore {
     ) -> Self {
         Self {
             cache: None,
-            user_orders_cache: None,
             trading_repo: Some(trading_repo),
             config,
         }
@@ -61,15 +59,6 @@ impl OrderStore {
             let redis_db = RedisDb::connect(&redis_url).await.map_err(|e| {
                 TradingError::Database(format!("Failed to connect to Redis: {}", e))
             })?;
-            Some(redis_db.clone())
-        } else {
-            None
-        };
-
-        let user_orders_cache = if config.enabled {
-            let redis_db = RedisDb::connect(&redis_url).await.map_err(|e| {
-                TradingError::Database(format!("Failed to connect to Redis: {}", e))
-            })?;
             Some(redis_db)
         } else {
             None
@@ -77,7 +66,6 @@ impl OrderStore {
 
         Ok(Self {
             cache,
-            user_orders_cache,
             trading_repo,
             config,
         })
@@ -88,23 +76,24 @@ impl OrderStore {
         order_id: u64,
         user_id: Uuid,
     ) -> Result<Option<OrderModel>, TradingError> {
-        // Cache: Check Redis if available
+        // Cache: Check Redis hash: order:{order_id}
         if self.config.enabled {
             if let Some(cache) = &self.cache {
                 let key = format!("order:{}", order_id);
-                match cache.get(&key).await {
-                    Ok(Some(order)) => {
-                        debug!("Individual order cache hit for order ID: {}", order_id);
-                        return Ok(Some(order));
+                
+                match cache.hgetall_string(&key).await {
+                    Ok(hash) if !hash.is_empty() => {
+                        // Parse hash to OrderModel
+                        if let Some(order) = Self::parse_order_hash(hash, user_id) {
+                            debug!("Order cache hit for order ID: {}", order_id);
+                            return Ok(Some(order));
+                        }
                     }
-                    Ok(None) => {
-                        debug!("Individual order cache miss for order ID: {}", order_id);
+                    Ok(_) => {
+                        debug!("Order cache miss for order ID: {}", order_id);
                     }
                     Err(e) => {
-                        warn!(
-                            "Individual order cache error for order ID {}: {}",
-                            order_id, e
-                        );
+                        warn!("Order cache error for order ID {}: {}", order_id, e);
                     }
                 }
             }
@@ -114,17 +103,6 @@ impl OrderStore {
         if let Some(repo) = &self.trading_repo {
             match repo.get_order_by_id(order_id, user_id).await {
                 Ok(Some(order)) => {
-                    // Update cache if available
-                    if self.config.enabled {
-                        if let Some(cache) = &self.cache {
-                            let key = format!("order:{}", order_id);
-                            let ttl_secs = self.config.ttl.as_secs();
-                            if let Err(e) = cache.set_ex(&key, &order, ttl_secs).await {
-                                warn!("Failed to update cache for order ID {}: {}", order_id, e);
-                            }
-                        }
-                    }
-
                     debug!("Database hit for order ID: {}", order_id);
                     return Ok(Some(order));
                 }
@@ -143,17 +121,36 @@ impl OrderStore {
     }
 
     /// Get user's open orders with caching
+    /// Uses Redis set user:{user_id}:orders -> fetches each order:{order_id} hash
     pub async fn get_user_orders(&self, user_id: Uuid) -> Result<Vec<OrderModel>, TradingError> {
-        // Cache: Check Redis if available
+        // Cache: Query user:{user_id}:orders SET, then fetch each order hash
         if self.config.enabled {
-            if let Some(cache) = &self.user_orders_cache {
-                let key = format!("user_orders:{}", user_id);
-                match cache.get(&key).await {
-                    Ok(Some(orders)) => {
-                        debug!("User orders cache hit for user: {}", user_id);
-                        return Ok(orders);
+            if let Some(cache) = &self.cache {
+                let set_key = format!("user:{}:orders", user_id);
+                
+                match cache.smembers_string(&set_key).await {
+                    Ok(order_ids) if !order_ids.is_empty() => {
+                        debug!("User orders cache hit for user: {} ({} orders)", user_id, order_ids.len());
+                        
+                        let mut orders = Vec::new();
+                        // Fetch each order hash
+                        for order_id_str in order_ids {
+                            let order_key = format!("order:{}", order_id_str);
+                            match cache.hgetall_string(&order_key).await {
+                                Ok(hash) if !hash.is_empty() => {
+                                    if let Some(order) = Self::parse_order_hash(hash, user_id) {
+                                        orders.push(order);
+                                    }
+                                }
+                                _ => continue,
+                            }
+                        }
+                        
+                        if !orders.is_empty() {
+                            return Ok(orders);
+                        }
                     }
-                    Ok(None) => {
+                    Ok(_) => {
                         debug!("User orders cache miss for user: {}", user_id);
                     }
                     Err(e) => {
@@ -163,22 +160,11 @@ impl OrderStore {
             }
         }
 
+        // Database fallback
         if let Some(repo) = &self.trading_repo {
             match repo.get_open_orders(user_id).await {
                 Ok(orders) => {
                     debug!("Database hit for user orders: {}", user_id);
-
-                    // Cache: Store in Redis if available
-                    if self.config.enabled {
-                        if let Some(cache) = &self.user_orders_cache {
-                            let key = format!("user_orders:{}", user_id);
-                            let ttl_secs = self.config.ttl.as_secs();
-                            if let Err(e) = cache.set_ex(&key, &orders, ttl_secs).await {
-                                warn!("Failed to cache user orders for user {}: {}", user_id, e);
-                            }
-                        }
-                    }
-
                     return Ok(orders);
                 }
                 Err(e) => {
@@ -192,48 +178,81 @@ impl OrderStore {
     }
 
     pub async fn invalidate_order(&self, order_id: u64, user_id: Uuid) {
-        // Remove from cache if available
-        if self.config.enabled {
-            if let Some(cache) = &self.cache {
-                let key = format!("order:{}", order_id);
-                if let Err(e) = cache.delete(&key).await {
-                    warn!(
-                        "Failed to invalidate cache for order ID {}: {}",
-                        order_id, e
-                    );
-                }
-            }
-
-            if let Some(cache) = &self.user_orders_cache {
-                let key = format!("user_orders:{}", user_id);
-                if let Err(e) = cache.delete(&key).await {
-                    warn!(
-                        "Failed to invalidate user orders cache for user {}: {}",
-                        user_id, e
-                    );
-                }
-            }
+        if !self.config.enabled {
+            return;
         }
 
-        debug!(
-            "Invalidated cache for order: {} and user orders: {}",
-            order_id, user_id
-        );
+        if let Some(cache) = &self.cache {
+            // Delete order:{order_id} hash
+            let order_key = format!("order:{}", order_id);
+            if let Err(e) = cache.del_key(&order_key).await {
+                warn!("Failed to delete order hash {}: {}", order_key, e);
+            }
+
+            // Remove from user:{user_id}:orders set
+            let user_set_key = format!("user:{}:orders", user_id);
+            if let Err(e) = cache.srem_string(&user_set_key, &order_id.to_string()).await {
+                warn!("Failed to remove from user orders set {}: {}", user_set_key, e);
+            }
+
+            debug!("Invalidated cache for order: {} and user: {}", order_id, user_id);
+        }
     }
 
     pub async fn invalidate_user_orders(&self, user_id: Uuid) {
-        if self.config.enabled {
-            if let Some(cache) = &self.user_orders_cache {
-                let key = format!("user_orders:{}", user_id);
-                if let Err(e) = cache.delete(&key).await {
-                    warn!(
-                        "Failed to invalidate user orders cache for user {}: {}",
-                        user_id, e
-                    );
+        if !self.config.enabled {
+            return;
+        }
+
+        if let Some(cache) = &self.cache {
+            let user_set_key = format!("user:{}:orders", user_id);
+            
+            // Get all order IDs first
+            match cache.smembers_string(&user_set_key).await {
+                Ok(order_ids) => {
+                    // Delete each order hash
+                    for order_id_str in &order_ids {
+                        let order_key = format!("order:{}", order_id_str);
+                        if let Err(e) = cache.del_key(&order_key).await {
+                            warn!("Failed to delete order hash {}: {}", order_key, e);
+                        }
+                    }
+                    
+                    // Delete the set itself
+                    if let Err(e) = cache.del_key(&user_set_key).await {
+                        warn!("Failed to delete user orders set {}: {}", user_set_key, e);
+                    }
+                    
+                    debug!("Invalidated {} orders for user: {}", order_ids.len(), user_id);
+                }
+                Err(e) => {
+                    warn!("Failed to get order IDs for user {}: {}", user_id, e);
                 }
             }
         }
-
-        debug!("Invalidated user orders cache for user: {}", user_id);
+    }
+    
+    // Helper: Parse order hash from Redis into OrderModel
+    // Kafka writes: order_id, user_id, price, size, side, timestamp, market_id, status
+    fn parse_order_hash(hash: HashMap<String, String>, _user_id: Uuid) -> Option<OrderModel> {
+        let order_order_id = hash.get("order_id")?.parse::<i64>().ok()?;
+        let order_user_id = hash.get("user_id")?.parse::<i64>().ok()?;
+        let order_price = hash.get("price")?.parse::<i64>().ok()?;
+        let order_size = hash.get("size")?.parse::<i64>().ok()?;
+        let order_side = hash.get("side")?.clone();
+        let order_timestamp = hash.get("timestamp")?.parse::<i64>().ok()?;
+        let market_id = hash.get("market_id")?.parse::<i32>().ok()?;
+        
+        Some(OrderModel {
+            id: 0, // Auto-generated by DB
+            order_order_id,
+            order_user_id,
+            order_price,
+            order_size,
+            order_side,
+            order_timestamp,
+            market_id,
+            created_at: None,
+        })
     }
 }

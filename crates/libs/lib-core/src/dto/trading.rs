@@ -1,6 +1,4 @@
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 // Re-export models from separate modules
 pub use crate::model::orders::Model as OrderModel;
@@ -38,7 +36,8 @@ impl std::str::FromStr for Side {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OrderResponse {
     pub order_id: u64,
-    pub user_id: Uuid,
+    pub user_id: u64,  // Changed from Uuid to u64 to match DB schema
+    pub market_id: u32,
     pub price: u64,
     pub size: u64,
     pub side: Side,
@@ -47,11 +46,12 @@ pub struct OrderResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserBalanceResponse {
-    pub user_id: Uuid,
+    pub user_id: u64,  // Changed from Uuid to u64 to match DB schema
+    pub asset_id: u32,
     pub available: u64,
     pub locked: u64,
     pub total: u64,
-    pub last_updated: DateTime<Utc>,
+    pub timestamp: u64,  // Changed from DateTime to unix timestamp
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -70,12 +70,13 @@ pub struct OrdersListResponse {
 impl From<OrderModel> for OrderResponse {
     fn from(model: OrderModel) -> Self {
         Self {
-            order_id: model.order_id as u64,
-            user_id: model.user_id,
-            price: model.price as u64,
-            size: model.size as u64,
-            side: model.side.parse().unwrap_or(Side::Bid),
-            timestamp: model.timestamp as u64,
+            order_id: model.order_order_id as u64,
+            user_id: model.order_user_id as u64,
+            market_id: model.market_id as u32,
+            price: model.order_price as u64,
+            size: model.order_size as u64,
+            side: model.order_side.parse().unwrap_or(Side::Bid),
+            timestamp: model.order_timestamp as u64,
         }
     }
 }
@@ -83,11 +84,12 @@ impl From<OrderModel> for OrderResponse {
 impl From<UserBalanceModel> for UserBalanceResponse {
     fn from(model: UserBalanceModel) -> Self {
         Self {
-            user_id: model.user_id,
+            user_id: model.user_id as u64,
+            asset_id: model.asset_id as u32,
             available: model.available as u64,
             locked: model.locked as u64,
-            total: (model.available + model.locked) as u64,
-            last_updated: model.last_updated,
+            total: model.total as u64,
+            timestamp: model.timestamp as u64,
         }
     }
 }
