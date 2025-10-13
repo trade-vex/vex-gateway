@@ -8,6 +8,7 @@ lib-server = { path = "../libs/lib-server" }
 lib-auth = { path = "../libs/lib-auth" }
 lib-config = { path = "../libs/lib-config" }
 lib-core = { path = "../libs/lib-core" }
+lib-db = { path = "../libs/lib-db" }
 tokio = {workspace = true}
 serde_json = { workspace = true }
 jsonwebtoken = { workspace = true }
@@ -18,6 +19,8 @@ serde = { workspace = true }
 common = { workspace = true }
 vex-networking = { workspace = true }
 vex-config = { workspace = true }
+sea-orm = { workspace = true }
+tracing = { workspace = true }
 
 # Dev dependencies are used exclusively when running tests or examples
 # They do not get included in the final application binary!
