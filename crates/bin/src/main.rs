@@ -57,7 +57,11 @@ async fn main() -> std::io::Result<()> {
 
     // Initialize VexGateway client and handler
     info!("Initializing VexGateway client");
-    let gateway_config = GatewayNetworkingConfig::test_defaults();
+    let mut gateway_config = GatewayNetworkingConfig::test_defaults();
+    gateway_config.context_dir = "/tmp/aeron-driver".to_string();
+    gateway_config.core_port = 40001;
+    gateway_config.core_control_port = 40002;
+    println!("GATEWAY CONFIG: {:?}", gateway_config);
     let mut gateway_client = VexGateway::new(gateway_config)
         .map_err(|e| std::io::Error::other(format!("Failed to initialize VexGateway: {}", e)))?;
 
