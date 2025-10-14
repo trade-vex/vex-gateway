@@ -11,7 +11,7 @@ fn test_model_creation() {
         api_key: "test-api-key".to_string(),
         key_material_type: Some(KeyMaterialType::HmacSecret),
         key_material_value: Some("secret-value".to_string()),
-        permissions: json!(["TRADE", "USER_DATA"]),
+        permissions: vec![SecurityType::Trade, SecurityType::UserData],
         recv_window: 5000,
         enabled: true,
         description: Some("Test API key".to_string()),
@@ -42,7 +42,7 @@ fn test_model_clone() {
         api_key: "test-api-key".to_string(),
         key_material_type: Some(KeyMaterialType::HmacSecret),
         key_material_value: Some("secret".to_string()),
-        permissions: json!(["TRADE"]),
+        permissions: vec![SecurityType::Trade],
         recv_window: 5000,
         enabled: true,
         description: None,
@@ -68,7 +68,7 @@ fn test_model_serialization() {
         api_key: "test-api-key".to_string(),
         key_material_type: Some(KeyMaterialType::RsaPublicKey),
         key_material_value: Some("pem-data".to_string()),
-        permissions: json!(["USER_DATA", "USER_STREAM"]),
+        permissions: vec![SecurityType::UserData, SecurityType::UserStream],
         recv_window: 10000,
         enabled: false,
         description: Some("Disabled key".to_string()),
@@ -244,7 +244,7 @@ fn test_model_with_empty_permissions() {
         api_key: "empty-perms".to_string(),
         key_material_type: None,
         key_material_value: None,
-        permissions: json!([]),
+        permissions: vec![],
         recv_window: 5000,
         enabled: true,
         description: None,
@@ -256,7 +256,7 @@ fn test_model_with_empty_permissions() {
         last_used_at: None,
     };
 
-    assert_eq!(model.permissions, json!([]));
+    assert_eq!(model.permissions, vec![]);
 }
 
 #[test]
@@ -278,7 +278,7 @@ fn test_model_with_complex_permissions() {
         api_key: "complex-perms".to_string(),
         key_material_type: Some(KeyMaterialType::RsaPublicKey),
         key_material_value: Some("rsa-key".to_string()),
-        permissions: complex_permissions.clone(),
+        permissions: vec![SecurityType::UserStream],
         recv_window: 30000,
         enabled: true,
         description: Some("Complex permissions test".to_string()),
@@ -290,7 +290,7 @@ fn test_model_with_complex_permissions() {
         last_used_at: None,
     };
 
-    assert_eq!(model.permissions, complex_permissions);
+    assert_eq!(model.permissions, vec![SecurityType::UserStream]);
 }
 
 #[test]
@@ -309,7 +309,7 @@ fn test_model_with_multiple_ip_blacklist() {
         api_key: "multi-ip".to_string(),
         key_material_type: None,
         key_material_value: None,
-        permissions: json!(["USER_STREAM"]),
+        permissions: vec![SecurityType::UserStream],
         recv_window: 5000,
         enabled: true,
         description: Some("Multi-IP blacklist".to_string()),
@@ -333,7 +333,7 @@ fn test_model_edge_cases() {
         api_key: "max-window".to_string(),
         key_material_type: None,
         key_material_value: None,
-        permissions: json!([]),
+        permissions: vec![],
         recv_window: 60000, // Maximum allowed
         enabled: true,
         description: None,
@@ -354,7 +354,7 @@ fn test_model_edge_cases() {
         api_key: "long-desc".to_string(),
         key_material_type: None,
         key_material_value: None,
-        permissions: json!([]),
+        permissions: vec![],
         recv_window: 5000,
         enabled: true,
         description: Some(long_description.clone()),
@@ -379,7 +379,7 @@ fn test_uuid_consistency() {
         api_key: "uuid-test".to_string(),
         key_material_type: None,
         key_material_value: None,
-        permissions: json!([]),
+        permissions: vec![],
         recv_window: 5000,
         enabled: true,
         description: None,

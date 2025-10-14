@@ -80,13 +80,13 @@ pub struct CreateApiKeyResponse {
 impl From<ApiKeyModel> for ApiKeyResponse {
     fn from(model: ApiKeyModel) -> Self {
         // parsing permissions from JSON
-        let permissions: Vec<String> =
-            serde_json::from_value(model.permissions).unwrap_or_else(|_| vec!["none".to_string()]);
+        // let permissions: Vec<String> =
+        //     serde_json::from_value(model.permissions).unwrap_or_else(|_| vec!["none".to_string()]);
 
         Self {
             id: model.id,
             api_key: model.api_key,
-            permissions,
+            permissions: model.permissions.into_iter().map(|p| p.to_string()).collect(),
             recv_window: model.recv_window,
             enabled: model.enabled,
             description: model.description,
@@ -339,23 +339,9 @@ pub async fn update_api_key(
         })?;
     }
 
-    // convert permissions to JSON for database storage
-    let permissions_json = serde_json::to_value(
-        permissions
-            .iter()
-            .map(|p| match p {
-                SecurityType::None => "none",
-                SecurityType::Trade => "trade",
-                SecurityType::UserData => "user_data",
-                SecurityType::UserStream => "user_stream",
-            })
-            .collect::<Vec<_>>(),
-    )
-    .unwrap_or(serde_json::json!(["none"]));
-
     let mut updates = ActiveModel {
         id: sea_orm::Set(api_key_id),
-        permissions: Set(permissions_json.into()),
+        permissions: Set(permissions),
         ..Default::default()
     };
 
