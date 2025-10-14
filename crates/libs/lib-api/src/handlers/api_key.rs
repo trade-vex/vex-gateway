@@ -4,6 +4,7 @@ use actix_web::{HttpResponse, Result, web};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, Serializer};
 use uuid::Uuid;
+use base64::Engine;
 
 use lib_middleware::{
     api_key::SecurityType,
@@ -74,6 +75,7 @@ pub struct ApiKeyListResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateApiKeyResponse {
     pub api_key: String,          // Plaintext key - only returned during creation
+    pub secret_key: String,       // Secret key for HMAC signing - only returned during creation
     pub key_info: ApiKeyResponse, // Masked key info for consistency
 }
 
@@ -199,11 +201,28 @@ pub async fn create_api_key(
 
     // generating a new API key
     let api_key = format!("vex_{}", Uuid::new_v4().to_string().replace('-', ""));
+    
+    // Generate secret key for HMAC signing (if not provided)
+    let secret_key = if let Some(ref key_material) = key_material {
+        // If user provided key material, extract the secret
+        match key_material {
+            KeyMaterial::HmacSecret(secret) => secret.clone(),
+            _ => return Err(actix_web::error::ErrorBadRequest(
+                "Only HMAC secret keys are supported for API key authentication"
+            )),
+        }
+    } else {
+        // Generate a random secret key
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let secret_bytes: [u8; 32] = rng.r#gen();
+        base64::engine::general_purpose::STANDARD.encode(secret_bytes)
+    };
 
-    // create new API key
+    // create new API key with HMAC secret
     let new_api_key = NewApiKey {
         api_key: api_key.clone(),
-        key_material,
+        key_material: Some(KeyMaterial::HmacSecret(secret_key.clone())),
         permissions,
         recv_window: req.recv_window.unwrap_or(5000),
         description: req.description.clone(),
@@ -217,6 +236,7 @@ pub async fn create_api_key(
             let key_info = ApiKeyResponse::from(created_key);
             let response = CreateApiKeyResponse {
                 api_key: api_key.clone(), // Plaintext key - only returned during creation
+                secret_key: secret_key.clone(), // Secret key for HMAC signing - only returned during creation
                 key_info,                 // Masked key info
             };
             Ok(HttpResponse::Created().json(response))
