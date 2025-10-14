@@ -79,6 +79,7 @@ pub struct ApiKeyConfig {
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub ip_blacklist: Vec<String>,
+    pub user_id: Option<uuid::Uuid>,
 }
 
 impl ApiKeyConfig {
@@ -93,6 +94,7 @@ impl ApiKeyConfig {
             created_at: Some(chrono::Utc::now()),
             expires_at: None,
             ip_blacklist: vec![],
+            user_id: None,
         }
     }
 

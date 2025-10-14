@@ -98,6 +98,7 @@ impl Model {
             created_at: Some(self.created_at),
             expires_at: self.expires_at,
             ip_blacklist: self.ip_blacklist.clone(),
+            user_id: self.user_id,
         }
     }
 

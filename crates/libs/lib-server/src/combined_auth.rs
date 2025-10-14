@@ -1,5 +1,5 @@
 use actix_web::{
-    Error, HttpRequest,
+    Error, HttpRequest, HttpMessage,
     dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready},
 };
 use futures_util::future::{LocalBoxFuture, Ready, ready};
@@ -7,7 +7,7 @@ use lib_auth::middleware::jwt_auth::JwtAuthentication;
 use lib_middleware::api_key::middleware::ApiKeyMiddleware;
 use std::{rc::Rc, sync::Arc};
 use tokio::sync::Mutex as TokioMutex;
-use tracing::error;
+use tracing::{error, info};
 
 #[derive(Clone)]
 pub struct CombinedAuthMiddleware {
@@ -102,13 +102,11 @@ where
                 }
 
                 AuthType::ApiKey => {
-                    let middleware = api_key_middleware.lock().await;
-                    let api_key_service = middleware
-                        .new_transform(service.clone())
-                        .await
-                        .unwrap();
+                    let api_key_middleware = api_key_middleware.lock().await;
+                    let api_key_service = api_key_middleware.new_transform(service.clone()).await.unwrap();
+                    
                     let response = api_key_service.call(req).await?;
-                    return Ok(response.map_into_boxed_body());
+                    Ok(response.map_into_boxed_body())
                 }
 
                 AuthType::None => {

@@ -376,6 +376,11 @@ impl ApiKeyMiddleware {
         self.api_key_store.remove_api_key(api_key).await;
     }
 
+    /// Get API key configuration (for use in combined middleware)
+    pub async fn get_api_key_config(&self, api_key: &str) -> Option<Arc<ApiKeyConfig>> {
+        self.api_key_store.get_api_key(api_key).await
+    }
+
     /// Determine security type for the current route
     fn get_route_security_type(
         &self,
@@ -690,6 +695,8 @@ where
                     return Err(actix_web::error::ErrorUnauthorized("Invalid API key"));
                 }
             };
+
+            println!("API CONFIG: {:?}", api_config);
 
             // Validate API key state
             if !api_config.is_valid() {
