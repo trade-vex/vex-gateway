@@ -14,8 +14,8 @@ pub struct Model {
     pub api_key: String,
     pub key_material_type: Option<KeyMaterialType>,
     pub key_material_value: Option<String>,
-    #[sea_orm(column_type = "Json")]
-    pub permissions: Json,
+    // ✅ change from Json → Vec<SecurityType>
+    pub permissions: Vec<SecurityType>,
     pub recv_window: i64,
     pub enabled: bool,
     pub description: Option<String>,
@@ -75,33 +75,30 @@ impl Model {
         };
 
         // Parse permissions from JSON
-        let permissions = self
-            .permissions
-            .as_array()
-            .and_then(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .map(|s| match s {
-                        "none" => Some(SecurityType::None),
-                        "trade" => Some(SecurityType::Trade),
-                        "user_data" => Some(SecurityType::UserData),
-                        "user_stream" => Some(SecurityType::UserStream),
-                        _ => None,
-                    })
-                    .collect::<Option<Vec<_>>>()
-            })
-            .unwrap_or_else(|| vec![SecurityType::None]);
+        let _permissions_json = serde_json::to_value(
+            self.permissions
+                .iter()
+                .map(|p| match p {
+                    SecurityType::None => "none",
+                    SecurityType::Trade => "trade",
+                    SecurityType::UserData => "user_data",
+                    SecurityType::UserStream => "user_stream",
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or(serde_json::json!(["none"]));
 
         crate::api_key::security::ApiKeyConfig {
             api_key: self.api_key.clone(),
             key_material,
-            permissions,
+            permissions: self.permissions.clone(),
             recv_window: self.recv_window as u64,
             enabled: self.enabled,
             description: self.description.clone(),
             created_at: Some(self.created_at),
             expires_at: self.expires_at,
             ip_blacklist: self.ip_blacklist.clone(),
+            user_id: self.user_id,
         }
     }
 
@@ -112,24 +109,24 @@ impl Model {
 
     /// Check if the API key has the required permission
     pub fn has_permission(&self, required_permission: &SecurityType) -> bool {
-        let permissions = self
-            .permissions
-            .as_array()
-            .and_then(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .map(|s| match s {
-                        "none" => Some(SecurityType::None),
-                        "trade" => Some(SecurityType::Trade),
-                        "user_data" => Some(SecurityType::UserData),
-                        "user_stream" => Some(SecurityType::UserStream),
-                        _ => None,
-                    })
-                    .collect::<Option<Vec<_>>>()
-            })
-            .unwrap_or_else(|| vec![SecurityType::None]);
+        // let permissions = self
+        //     .permissions
+        //     .as_array()
+        //     .and_then(|arr| {
+        //         arr.iter()
+        //             .filter_map(|v| v.as_str())
+        //             .map(|s| match s {
+        //                 "none" => Some(SecurityType::None),
+        //                 "trade" => Some(SecurityType::Trade),
+        //                 "user_data" => Some(SecurityType::UserData),
+        //                 "user_stream" => Some(SecurityType::UserStream),
+        //                 _ => None,
+        //             })
+        //             .collect::<Option<Vec<_>>>()
+        //     })
+        //     .unwrap_or_else(|| vec![SecurityType::None]);
 
-        permissions.contains(required_permission) || permissions.contains(&SecurityType::None)
+        self.permissions.contains(required_permission) || self.permissions.contains(&SecurityType::None)
     }
 
     /// Check if the IP address is blacklisted (blocked)
@@ -186,18 +183,18 @@ impl NewApiKey {
         };
 
         // Convert permissions to JSON
-        let permissions_json = serde_json::to_value(
-            self.permissions
-                .iter()
-                .map(|p| match p {
-                    SecurityType::None => "none",
-                    SecurityType::Trade => "trade",
-                    SecurityType::UserData => "user_data",
-                    SecurityType::UserStream => "user_stream",
-                })
-                .collect::<Vec<_>>(),
-        )
-        .unwrap_or(serde_json::json!(["none"]));
+        // let permissions_json = serde_json::to_value(
+        //     self.permissions
+        //         .iter()
+        //         .map(|p| match p {
+        //             SecurityType::None => "none",
+        //             SecurityType::Trade => "trade",
+        //             SecurityType::UserData => "user_data",
+        //             SecurityType::UserStream => "user_stream",
+        //         })
+        //         .collect::<Vec<_>>(),
+        // )
+        // .unwrap_or(serde_json::json!(["none"]));
 
         let now = Utc::now();
 
@@ -206,7 +203,7 @@ impl NewApiKey {
             api_key: Set(self.api_key),
             key_material_type: Set(key_material_type),
             key_material_value: Set(key_material_value),
-            permissions: Set(permissions_json.into()),
+            permissions: Set(self.permissions),
             recv_window: Set(self.recv_window as i64),
             enabled: Set(true),
             description: Set(self.description),

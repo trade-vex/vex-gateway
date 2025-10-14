@@ -13,6 +13,8 @@ tokio = { workspace = true }
 chrono = { workspace = true }
 sea-orm = { workspace = true }
 tracing = { workspace = true }
+rand = "0.8"
+base64 = "0.21"
 lib-middleware = { path = "../lib-middleware" }
 lib-auth = { path = "../lib-auth" }
 lib-utils = { path = "../lib-utils" }

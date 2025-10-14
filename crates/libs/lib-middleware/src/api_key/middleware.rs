@@ -271,6 +271,23 @@ impl ApiKeyStore {
         &self.metrics
     }
 
+    /// Add a new API key to the cache
+    pub async fn add_api_key(&self, config: ApiKeyConfig) {
+        let mut cache = self.l1_cache.write().await;
+        let cached = CachedApiKey::new(config.clone());
+        cache.put(config.api_key.clone(), cached);
+        
+        info!("Added API key to cache: {}", Self::mask_api_key(&config.api_key));
+    }
+
+    /// Remove an API key from the cache
+    pub async fn remove_api_key(&self, api_key: &str) {
+        let mut cache = self.l1_cache.write().await;
+        cache.pop(api_key);
+        
+        info!("Removed API key from cache: {}", Self::mask_api_key(api_key));
+    }
+
     /// Mask API key for secure logging
     fn mask_api_key(api_key: &str) -> String {
         if api_key.len() <= 4 {
@@ -311,6 +328,12 @@ impl ApiKeyMiddleware {
         self
     }
 
+    /// Configure with database repository for dynamic loading
+    pub fn with_repository(mut self, api_key_repo: Arc<dyn ApiKeyRepository>) -> Self {
+        self.api_key_store = ApiKeyStore::with_repository(CacheConfig::default(), api_key_repo);
+        self
+    }
+
     /// Add single API key (for development)
     pub fn with_api_key(mut self, config: ApiKeyConfig) -> Self {
         self.api_key_store = self.api_key_store.with_api_keys(vec![config]);
@@ -341,6 +364,21 @@ impl ApiKeyMiddleware {
     /// Get cache metrics for monitoring
     pub fn cache_metrics(&self) -> &CacheMetrics {
         self.api_key_store.metrics()
+    }
+
+    /// Add a new API key to the cache
+    pub async fn add_api_key(&self, config: ApiKeyConfig) {
+        self.api_key_store.add_api_key(config).await;
+    }
+
+    /// Remove an API key from the cache
+    pub async fn remove_api_key(&self, api_key: &str) {
+        self.api_key_store.remove_api_key(api_key).await;
+    }
+
+    /// Get API key configuration (for use in combined middleware)
+    pub async fn get_api_key_config(&self, api_key: &str) -> Option<Arc<ApiKeyConfig>> {
+        self.api_key_store.get_api_key(api_key).await
     }
 
     /// Determine security type for the current route
@@ -657,6 +695,8 @@ where
                     return Err(actix_web::error::ErrorUnauthorized("Invalid API key"));
                 }
             };
+
+            println!("API CONFIG: {:?}", api_config);
 
             // Validate API key state
             if !api_config.is_valid() {

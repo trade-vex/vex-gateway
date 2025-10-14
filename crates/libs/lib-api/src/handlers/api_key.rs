@@ -1,16 +1,82 @@
 //! lib-api/src/handlers/api_keys.rs
 
-use actix_web::{HttpResponse, Result, web};
+use actix_web::{HttpResponse, Result, web, HttpMessage, FromRequest};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, Serializer};
 use uuid::Uuid;
+use base64::Engine;
 
 use lib_middleware::{
-    api_key::security::{KeyMaterial, SecurityType},
+    api_key::SecurityType,
     models::api_key::{ActiveModel, Model as ApiKeyModel, NewApiKey},
     repository::api_key_repository::ApiKeyRepository,
+    api_key::security::{KeyMaterial, ApiKeyConfig},
 };
+use std::sync::Arc;
 use sea_orm::Set;
+
+/// Combined authentication result that can be either JWT or API key
+#[derive(Debug, Clone)]
+pub enum AuthenticatedUser {
+    Jwt(lib_auth::middleware::jwt_auth::AuthenticatedUser),
+    ApiKey(ApiKeyConfig),
+}
+
+impl AuthenticatedUser {
+    /// Get the user ID from either authentication method
+    pub fn user_id(&self) -> Option<Uuid> {
+        match self {
+            AuthenticatedUser::Jwt(user) => Some(user.user_id),
+            AuthenticatedUser::ApiKey(config) => config.user_id,
+        }
+    }
+
+    /// Check if the user has a specific permission
+    pub fn has_permission(&self, permission: &SecurityType) -> bool {
+        match self {
+            AuthenticatedUser::Jwt(_) => true, // JWT users have all permissions
+            AuthenticatedUser::ApiKey(config) => config.has_permission(*permission),
+        }
+    }
+
+    /// Get the API key if authenticated via API key
+    pub fn api_key(&self) -> Option<&str> {
+        match self {
+            AuthenticatedUser::ApiKey(config) => Some(&config.api_key),
+            _ => None,
+        }
+    }
+}
+
+/// Combined authentication extractor that works with both JWT and API key authentication
+impl FromRequest for AuthenticatedUser {
+    type Error = actix_web::Error;
+    type Future = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self, Self::Error>>>>;
+
+    fn from_request(req: &actix_web::HttpRequest, _payload: &mut actix_web::dev::Payload) -> Self::Future {
+        let req = req.clone();
+        
+        Box::pin(async move {
+            // First, try to extract JWT authentication
+            if let Ok(jwt_user) = lib_auth::middleware::jwt_auth::AuthenticatedUser::from_request(&req, &mut actix_web::dev::Payload::None).await {
+                return Ok(AuthenticatedUser::Jwt(jwt_user));
+            }
+
+            // If JWT fails, try to extract API key authentication from extensions
+            if let Some(api_config) = req.extensions().get::<ApiKeyConfig>() {
+                return Ok(AuthenticatedUser::ApiKey(api_config.clone()));
+            }
+
+            // Try to get it as Arc<ApiKeyConfig> (in case it was wrapped)
+            if let Some(api_config_arc) = req.extensions().get::<Arc<ApiKeyConfig>>() {
+                return Ok(AuthenticatedUser::ApiKey(api_config_arc.as_ref().clone()));
+            }
+
+            // If neither works, return unauthorized
+            Err(actix_web::error::ErrorUnauthorized("Authentication required"))
+        })
+    }
+}
 
 /// masks an API key for safe serialization
 /// keep first 4 and last 4 characters and masks the rest with *
@@ -72,19 +138,20 @@ pub struct ApiKeyListResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateApiKeyResponse {
     pub api_key: String,          // Plaintext key - only returned during creation
+    pub secret_key: String,       // Secret key for HMAC signing - only returned during creation
     pub key_info: ApiKeyResponse, // Masked key info for consistency
 }
 
 impl From<ApiKeyModel> for ApiKeyResponse {
     fn from(model: ApiKeyModel) -> Self {
         // parsing permissions from JSON
-        let permissions: Vec<String> =
-            serde_json::from_value(model.permissions).unwrap_or_else(|_| vec!["none".to_string()]);
+        // let permissions: Vec<String> =
+        //     serde_json::from_value(model.permissions).unwrap_or_else(|_| vec!["none".to_string()]);
 
         Self {
             id: model.id,
             api_key: model.api_key,
-            permissions,
+            permissions: model.permissions.into_iter().map(|p| p.to_string()).collect(),
             recv_window: model.recv_window,
             enabled: model.enabled,
             description: model.description,
@@ -164,9 +231,13 @@ fn validate_ip_blacklist(ip_list: &[String]) -> Result<(), String> {
 /// create a new API key
 pub async fn create_api_key(
     req: web::Json<CreateApiKeyRequest>,
-    repo: web::Data<dyn ApiKeyRepository>,
-    auth_user: lib_auth::middleware::jwt_auth::AuthenticatedUser,
+    repo: web::Data<Arc<dyn ApiKeyRepository>>,
+    auth_user: AuthenticatedUser,
 ) -> Result<HttpResponse> {
+    // Get user ID from either JWT or API key authentication
+    let user_id = auth_user.user_id().ok_or_else(|| {
+        actix_web::error::ErrorUnauthorized("User ID not found in authentication")
+    })?;
     // parse permissions
     let permissions: Result<Vec<SecurityType>, String> = req
         .permissions
@@ -197,24 +268,42 @@ pub async fn create_api_key(
 
     // generating a new API key
     let api_key = format!("vex_{}", Uuid::new_v4().to_string().replace('-', ""));
+    
+    // Generate secret key for HMAC signing (if not provided)
+    let secret_key = if let Some(ref key_material) = key_material {
+        // If user provided key material, extract the secret
+        match key_material {
+            KeyMaterial::HmacSecret(secret) => secret.clone(),
+            _ => return Err(actix_web::error::ErrorBadRequest(
+                "Only HMAC secret keys are supported for API key authentication"
+            )),
+        }
+    } else {
+        // Generate a random secret key
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let secret_bytes: [u8; 32] = rng.r#gen();
+        base64::engine::general_purpose::STANDARD.encode(secret_bytes)
+    };
 
-    // create new API key
+    // create new API key with HMAC secret
     let new_api_key = NewApiKey {
         api_key: api_key.clone(),
-        key_material,
+        key_material: Some(KeyMaterial::HmacSecret(secret_key.clone())),
         permissions,
         recv_window: req.recv_window.unwrap_or(5000),
         description: req.description.clone(),
         ip_blacklist: req.ip_blacklist.clone().unwrap_or_default(),
-        user_id: Some(auth_user.user_id),
+        user_id: Some(user_id),
         expires_at: req.expires_at,
     };
 
-    match repo.create(new_api_key).await {
+    match repo.as_ref().as_ref().create(new_api_key).await {
         Ok(created_key) => {
             let key_info = ApiKeyResponse::from(created_key);
             let response = CreateApiKeyResponse {
                 api_key: api_key.clone(), // Plaintext key - only returned during creation
+                secret_key: secret_key.clone(), // Secret key for HMAC signing - only returned during creation
                 key_info,                 // Masked key info
             };
             Ok(HttpResponse::Created().json(response))
@@ -231,10 +320,16 @@ pub async fn create_api_key(
 
 /// get all API keys for the authenticated user
 pub async fn list_api_keys(
-    repo: web::Data<dyn ApiKeyRepository>,
-    auth_user: lib_auth::middleware::jwt_auth::AuthenticatedUser,
+    repo: web::Data<Arc<dyn ApiKeyRepository>>,
+    auth_user: AuthenticatedUser,
 ) -> Result<HttpResponse> {
-    match repo.find_by_user_id(auth_user.user_id).await {
+    println!("AUTH USER IN CREATE: {:?}", auth_user);
+    // Get user ID from either JWT or API key authentication
+    let user_id = auth_user.user_id().ok_or_else(|| {
+        actix_web::error::ErrorUnauthorized("User ID not found in authentication")
+    })?;
+
+    match repo.as_ref().as_ref().find_by_user_id(user_id).await {
         Ok(api_keys) => {
             let total = api_keys.len();
             let response = ApiKeyListResponse {
@@ -256,15 +351,20 @@ pub async fn list_api_keys(
 /// get a specific API key by ID
 pub async fn get_api_key(
     path: web::Path<Uuid>,
-    repo: web::Data<dyn ApiKeyRepository>,
-    auth_user: lib_auth::middleware::jwt_auth::AuthenticatedUser,
+    repo: web::Data<Arc<dyn ApiKeyRepository>>,
+    auth_user: AuthenticatedUser,
 ) -> Result<HttpResponse> {
     let api_key_id = path.into_inner();
+    
+    // Get user ID from either JWT or API key authentication
+    let user_id = auth_user.user_id().ok_or_else(|| {
+        actix_web::error::ErrorUnauthorized("User ID not found in authentication")
+    })?;
 
-    match repo.find_by_id(api_key_id).await {
+    match repo.as_ref().as_ref().find_by_id(api_key_id).await {
         Ok(Some(api_key)) => {
             // checking if the API key belongs to the authenticated user
-            if api_key.user_id != Some(auth_user.user_id) {
+            if api_key.user_id != Some(user_id) {
                 return Ok(HttpResponse::Forbidden().json(serde_json::json!({
                     "error": "Access denied",
                     "message": "You don't have permission to access this API key"
@@ -291,15 +391,20 @@ pub async fn get_api_key(
 pub async fn update_api_key(
     path: web::Path<Uuid>,
     req: web::Json<UpdateApiKeyRequest>,
-    repo: web::Data<dyn ApiKeyRepository>,
-    auth_user: lib_auth::middleware::jwt_auth::AuthenticatedUser,
+    repo: web::Data<Arc<dyn ApiKeyRepository>>,
+    auth_user: AuthenticatedUser,
 ) -> Result<HttpResponse> {
     let api_key_id = path.into_inner();
+    
+    // Get user ID from either JWT or API key authentication
+    let user_id = auth_user.user_id().ok_or_else(|| {
+        actix_web::error::ErrorUnauthorized("User ID not found in authentication")
+    })?;
 
     // checking if the API key exists and belongs to the user
-    match repo.find_by_id(api_key_id).await {
+    match repo.as_ref().find_by_id(api_key_id).await {
         Ok(Some(api_key)) => {
-            if api_key.user_id != Some(auth_user.user_id) {
+            if api_key.user_id != Some(user_id) {
                 return Ok(HttpResponse::Forbidden().json(serde_json::json!({
                     "error": "Access denied",
                     "message": "You don't have permission to update this API key"
@@ -337,23 +442,9 @@ pub async fn update_api_key(
         })?;
     }
 
-    // convert permissions to JSON for database storage
-    let permissions_json = serde_json::to_value(
-        permissions
-            .iter()
-            .map(|p| match p {
-                SecurityType::None => "none",
-                SecurityType::Trade => "trade",
-                SecurityType::UserData => "user_data",
-                SecurityType::UserStream => "user_stream",
-            })
-            .collect::<Vec<_>>(),
-    )
-    .unwrap_or(serde_json::json!(["none"]));
-
     let mut updates = ActiveModel {
         id: sea_orm::Set(api_key_id),
-        permissions: Set(permissions_json.into()),
+        permissions: Set(permissions),
         ..Default::default()
     };
 
@@ -362,7 +453,7 @@ pub async fn update_api_key(
         updates.ip_blacklist = Set(ip_blacklist);
     }
 
-    match repo.update(api_key_id, updates).await {
+    match repo.as_ref().update(api_key_id, updates).await {
         Ok(updated_key) => {
             let response = ApiKeyResponse::from(updated_key);
             Ok(HttpResponse::Ok().json(response))
@@ -380,15 +471,20 @@ pub async fn update_api_key(
 /// delete an API key (soft delete by disabling)
 pub async fn delete_api_key(
     path: web::Path<Uuid>,
-    repo: web::Data<dyn ApiKeyRepository>,
-    auth_user: lib_auth::middleware::jwt_auth::AuthenticatedUser,
+    repo: web::Data<Arc<dyn ApiKeyRepository>>,
+    auth_user: AuthenticatedUser,
 ) -> Result<HttpResponse> {
     let api_key_id = path.into_inner();
+    
+    // Get user ID from either JWT or API key authentication
+    let user_id = auth_user.user_id().ok_or_else(|| {
+        actix_web::error::ErrorUnauthorized("User ID not found in authentication")
+    })?;
 
     // first, check if the API key exists and belongs to the user
-    match repo.find_by_id(api_key_id).await {
+    match repo.as_ref().find_by_id(api_key_id).await {
         Ok(Some(api_key)) => {
-            if api_key.user_id != Some(auth_user.user_id) {
+            if api_key.user_id != Some(user_id) {
                 return Ok(HttpResponse::Forbidden().json(serde_json::json!({
                     "error": "Access denied",
                     "message": "You don't have permission to delete this API key"
@@ -409,7 +505,7 @@ pub async fn delete_api_key(
         }
     }
 
-    match repo.delete(api_key_id).await {
+    match repo.as_ref().delete(api_key_id).await {
         Ok(_) => Ok(HttpResponse::Ok().json(serde_json::json!({
             "message": "API key deleted successfully"
         }))),
@@ -427,8 +523,8 @@ pub async fn delete_api_key(
 pub async fn toggle_api_key(
     path: web::Path<Uuid>,
     req: web::Json<serde_json::Value>,
-    repo: web::Data<dyn ApiKeyRepository>,
-    auth_user: lib_auth::middleware::jwt_auth::AuthenticatedUser,
+    repo: web::Data<Arc<dyn ApiKeyRepository>>,
+    auth_user: AuthenticatedUser,
 ) -> Result<HttpResponse> {
     let api_key_id = path.into_inner();
     let enabled = req
@@ -436,10 +532,15 @@ pub async fn toggle_api_key(
         .and_then(|v| v.as_bool())
         .ok_or_else(|| actix_web::error::ErrorBadRequest("Missing or invalid 'enabled' field"))?;
 
+    // Get user ID from either JWT or API key authentication
+    let user_id = auth_user.user_id().ok_or_else(|| {
+        actix_web::error::ErrorUnauthorized("User ID not found in authentication")
+    })?;
+
     // First, check if the API key exists and belongs to the user
-    match repo.find_by_id(api_key_id).await {
+    match repo.as_ref().find_by_id(api_key_id).await {
         Ok(Some(api_key)) => {
-            if api_key.user_id != Some(auth_user.user_id) {
+            if api_key.user_id != Some(user_id) {
                 return Ok(HttpResponse::Forbidden().json(serde_json::json!({
                     "error": "Access denied",
                     "message": "You don't have permission to modify this API key"
@@ -460,7 +561,7 @@ pub async fn toggle_api_key(
         }
     }
 
-    match repo.set_enabled(api_key_id, enabled).await {
+    match repo.as_ref().set_enabled(api_key_id, enabled).await {
         Ok(_) => {
             let action = if enabled { "enabled" } else { "disabled" };
             Ok(HttpResponse::Ok().json(serde_json::json!({

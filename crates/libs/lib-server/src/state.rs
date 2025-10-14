@@ -9,10 +9,16 @@ use lib_auth::repository::{PostgresUserRepository, UserRepository};
 use lib_auth::service::{EmailService, OAuthService, TokenService};
 use lib_core::CorrelationService;
 use lib_core::Publisher;
-use lib_middleware::{ApiKeyConfig, ApiKeyMiddleware, SecurityType};
+use lib_middleware::{
+    ApiKeyMiddleware,
+    repository::api_key_repository::{ApiKeyRepository, PostgresApiKeyRepository},
+    SecurityType,
+};
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
+use tokio::sync::Mutex as TokioMutex;
 use url::Url;
 
 /// Central application state containing all dependencies
@@ -40,10 +46,13 @@ pub struct AppState {
     pub email_service: EmailService,
 
     // Gateway publisher for order processing
-    pub gateway_publisher: Arc<tokio::sync::Mutex<Publisher>>,
-
-    // Correlation service for matching responses to requests
-    pub correlation_service: CorrelationService,
+    pub gateway_publisher: Arc<Mutex<Publisher>>,
+    
+    // API key middleware for dynamic updates
+    pub api_key_middleware: Arc<TokioMutex<ApiKeyMiddleware>>,
+    
+    // API key repository for database operations
+    pub api_key_repository: Arc<dyn ApiKeyRepository>,
 }
 
 impl AppState {
@@ -69,6 +78,12 @@ impl AppState {
 
         // Initialize auth-specific services
         let user_repo = Arc::new(PostgresUserRepository::new(Arc::new(db.clone())));
+
+        // Initialize API key repository
+        let api_key_repository: Arc<dyn ApiKeyRepository> = Arc::new(PostgresApiKeyRepository::new(Arc::new(db.clone())));
+
+        // Initialize API key middleware with database repository
+        let api_key_middleware = Self::init_api_key_middleware(&api_key_repository);
 
         // Initialize services
         let token_service = TokenService::new(
@@ -109,8 +124,9 @@ impl AppState {
             token_service,
             oauth_service,
             email_service,
-            gateway_publisher: Arc::new(tokio::sync::Mutex::new(gateway_publisher)),
-            correlation_service,
+            gateway_publisher: Arc::new(Mutex::new(gateway_publisher)),
+            api_key_middleware: Arc::new(TokioMutex::new(api_key_middleware)),
+            api_key_repository,
         }))
     }
 
@@ -237,16 +253,19 @@ impl AppState {
     }
 
     /// Create ApiKeyMiddleware using AppState dependencies
-    pub fn init_api_key_middleware(&self) -> ApiKeyMiddleware {
-        // Create a basic API key configuration for development
-        // In production, this should be loaded from database or configuration
-        let api_key_config = ApiKeyConfig::new("dev-api-key".to_string())
-            .with_hmac_secret("dev-secret-key".to_string())
-            .with_permissions(vec![SecurityType::Trade, SecurityType::UserData])
-            .with_description("Development API key".to_string());
+    pub fn init_api_key_middleware(api_key_repo: &Arc<dyn ApiKeyRepository>) -> ApiKeyMiddleware {
+        use lib_middleware::api_key::middleware::CacheConfig;
+        
+        // Create cache configuration
+        let cache_config = CacheConfig {
+            l1_max_size: 1000,  // Cache up to 1000 API keys in memory
+            l1_ttl: std::time::Duration::from_secs(300), // 5 minute TTL
+        };
 
+        // Create middleware with database repository for dynamic loading
         ApiKeyMiddleware::new()
-            .with_api_key(api_key_config)
+            .with_cache_config(cache_config)
+            .with_repository(api_key_repo.clone())
             .with_default_security(SecurityType::Trade)
     }
 }

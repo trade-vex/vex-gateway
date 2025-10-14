@@ -64,10 +64,13 @@ pub async fn signup(
     // Save user to database
     let created_user = user_repo.create_user(&new_user).await?;
 
-    // Send verification email
-    email_service
+    // Send verification email (skip in development if SMTP is not available)
+    if let Err(e) = email_service
         .send_verification_email(&created_user.email, &created_user.username)
-        .await?;
+        .await
+    {
+        tracing::warn!("Failed to send verification email (this is expected in development): {}", e);
+    }
 
     let user_info = UserInfo::from(created_user);
     let response = SignupResponse {
