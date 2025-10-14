@@ -16,6 +16,7 @@ reqwest = {workspace = true}
 url = {workspace = true}
 futures-util = {workspace = true}
 uuid = {workspace = true}
+async-trait = "0.1"
 
 #  Internal crate dependencies
 lib-api = {path = "../lib-api"}

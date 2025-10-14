@@ -6,19 +6,20 @@ use futures_util::future::{LocalBoxFuture, Ready, ready};
 use lib_auth::middleware::jwt_auth::JwtAuthentication;
 use lib_middleware::api_key::middleware::ApiKeyMiddleware;
 use std::{rc::Rc, sync::Arc};
+use tokio::sync::Mutex as TokioMutex;
 use tracing::error;
 
 #[derive(Clone)]
 pub struct CombinedAuthMiddleware {
     jwt_middleware: JwtAuthentication,
-    api_key_middleware: Arc<ApiKeyMiddleware>,
+    api_key_middleware: Arc<TokioMutex<ApiKeyMiddleware>>,
 }
 
 impl CombinedAuthMiddleware {
-    pub fn new(jwt_middleware: JwtAuthentication, api_key_middleware: ApiKeyMiddleware) -> Self {
+    pub fn new(jwt_middleware: JwtAuthentication, api_key_middleware: Arc<TokioMutex<ApiKeyMiddleware>>) -> Self {
         Self {
             jwt_middleware,
-            api_key_middleware: Arc::new(api_key_middleware),
+            api_key_middleware,
         }
     }
 
@@ -70,7 +71,7 @@ where
 pub struct CombinedAuthMiddlewareService<S> {
     service: Rc<S>,
     jwt_middleware: JwtAuthentication,
-    api_key_middleware: Arc<ApiKeyMiddleware>,
+    api_key_middleware: Arc<TokioMutex<ApiKeyMiddleware>>,
 }
 
 impl<S, B> Service<ServiceRequest> for CombinedAuthMiddlewareService<S>
@@ -101,7 +102,8 @@ where
                 }
 
                 AuthType::ApiKey => {
-                    let api_key_service = api_key_middleware
+                    let middleware = api_key_middleware.lock().await;
+                    let api_key_service = middleware
                         .new_transform(service.clone())
                         .await
                         .unwrap();

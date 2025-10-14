@@ -5,7 +5,6 @@
 use actix_web::{App, web};
 use lib_api::routes;
 use lib_auth::middleware::jwt_auth::JwtAuthentication;
-use lib_middleware::ApiKeyMiddleware;
 use std::sync::Arc;
 
 use crate::combined_auth::CombinedAuthMiddleware;
@@ -31,9 +30,8 @@ pub fn create_app(
         app_state.redis_pool.clone(),
     );
 
-    let api_key_middleware = app_state.init_api_key_middleware();
-    // Create combined auth middleware
-    let combined_auth_middleware = CombinedAuthMiddleware::new(jwt_middleware, api_key_middleware);
+    // Create combined auth middleware using the API key middleware from AppState
+    let combined_auth_middleware = CombinedAuthMiddleware::new(jwt_middleware, app_state.api_key_middleware.clone());
 
     App::new()
         .app_data(web::Data::new(app_state.clone()))
@@ -63,7 +61,11 @@ pub fn create_app(
                         .wrap(combined_auth_middleware)
                         .configure(lib_auth::configure_protected_auth_services)
                         // Configure API routes
-                        .service(web::scope("/api-key").configure(routes::api_key_routes::configure))
+                        .service(
+                            web::scope("/api-key")
+                                .app_data(web::Data::new(app_state.api_key_repository.clone()))
+                                .configure(routes::api_key_routes::configure)
+                        )
                         .service(web::scope("/order").configure(routes::order_route::configure))
                         .service(web::scope("/user").configure(routes::user_route::configure)),
                 ),

@@ -6,10 +6,12 @@ use serde::{Deserialize, Serialize, Serializer};
 use uuid::Uuid;
 
 use lib_middleware::{
-    api_key::security::{KeyMaterial, SecurityType},
+    api_key::SecurityType,
     models::api_key::{ActiveModel, Model as ApiKeyModel, NewApiKey},
     repository::api_key_repository::ApiKeyRepository,
+    api_key::security::KeyMaterial,
 };
+use std::sync::Arc;
 use sea_orm::Set;
 
 /// masks an API key for safe serialization
@@ -164,7 +166,7 @@ fn validate_ip_blacklist(ip_list: &[String]) -> Result<(), String> {
 /// create a new API key
 pub async fn create_api_key(
     req: web::Json<CreateApiKeyRequest>,
-    repo: web::Data<dyn ApiKeyRepository>,
+    repo: web::Data<Arc<dyn ApiKeyRepository>>,
     auth_user: lib_auth::middleware::jwt_auth::AuthenticatedUser,
 ) -> Result<HttpResponse> {
     // parse permissions
@@ -210,7 +212,7 @@ pub async fn create_api_key(
         expires_at: req.expires_at,
     };
 
-    match repo.create(new_api_key).await {
+    match repo.as_ref().as_ref().create(new_api_key).await {
         Ok(created_key) => {
             let key_info = ApiKeyResponse::from(created_key);
             let response = CreateApiKeyResponse {
@@ -231,10 +233,10 @@ pub async fn create_api_key(
 
 /// get all API keys for the authenticated user
 pub async fn list_api_keys(
-    repo: web::Data<dyn ApiKeyRepository>,
+    repo: web::Data<Arc<dyn ApiKeyRepository>>,
     auth_user: lib_auth::middleware::jwt_auth::AuthenticatedUser,
 ) -> Result<HttpResponse> {
-    match repo.find_by_user_id(auth_user.user_id).await {
+    match repo.as_ref().as_ref().find_by_user_id(auth_user.user_id).await {
         Ok(api_keys) => {
             let total = api_keys.len();
             let response = ApiKeyListResponse {
@@ -256,12 +258,12 @@ pub async fn list_api_keys(
 /// get a specific API key by ID
 pub async fn get_api_key(
     path: web::Path<Uuid>,
-    repo: web::Data<dyn ApiKeyRepository>,
+    repo: web::Data<Arc<dyn ApiKeyRepository>>,
     auth_user: lib_auth::middleware::jwt_auth::AuthenticatedUser,
 ) -> Result<HttpResponse> {
     let api_key_id = path.into_inner();
 
-    match repo.find_by_id(api_key_id).await {
+    match repo.as_ref().as_ref().find_by_id(api_key_id).await {
         Ok(Some(api_key)) => {
             // checking if the API key belongs to the authenticated user
             if api_key.user_id != Some(auth_user.user_id) {
@@ -291,13 +293,13 @@ pub async fn get_api_key(
 pub async fn update_api_key(
     path: web::Path<Uuid>,
     req: web::Json<UpdateApiKeyRequest>,
-    repo: web::Data<dyn ApiKeyRepository>,
+    repo: web::Data<Arc<dyn ApiKeyRepository>>,
     auth_user: lib_auth::middleware::jwt_auth::AuthenticatedUser,
 ) -> Result<HttpResponse> {
     let api_key_id = path.into_inner();
 
     // checking if the API key exists and belongs to the user
-    match repo.find_by_id(api_key_id).await {
+    match repo.as_ref().find_by_id(api_key_id).await {
         Ok(Some(api_key)) => {
             if api_key.user_id != Some(auth_user.user_id) {
                 return Ok(HttpResponse::Forbidden().json(serde_json::json!({
@@ -362,7 +364,7 @@ pub async fn update_api_key(
         updates.ip_blacklist = Set(ip_blacklist);
     }
 
-    match repo.update(api_key_id, updates).await {
+    match repo.as_ref().update(api_key_id, updates).await {
         Ok(updated_key) => {
             let response = ApiKeyResponse::from(updated_key);
             Ok(HttpResponse::Ok().json(response))
@@ -380,13 +382,13 @@ pub async fn update_api_key(
 /// delete an API key (soft delete by disabling)
 pub async fn delete_api_key(
     path: web::Path<Uuid>,
-    repo: web::Data<dyn ApiKeyRepository>,
+    repo: web::Data<Arc<dyn ApiKeyRepository>>,
     auth_user: lib_auth::middleware::jwt_auth::AuthenticatedUser,
 ) -> Result<HttpResponse> {
     let api_key_id = path.into_inner();
 
     // first, check if the API key exists and belongs to the user
-    match repo.find_by_id(api_key_id).await {
+    match repo.as_ref().find_by_id(api_key_id).await {
         Ok(Some(api_key)) => {
             if api_key.user_id != Some(auth_user.user_id) {
                 return Ok(HttpResponse::Forbidden().json(serde_json::json!({
@@ -409,7 +411,7 @@ pub async fn delete_api_key(
         }
     }
 
-    match repo.delete(api_key_id).await {
+    match repo.as_ref().delete(api_key_id).await {
         Ok(_) => Ok(HttpResponse::Ok().json(serde_json::json!({
             "message": "API key deleted successfully"
         }))),
@@ -427,7 +429,7 @@ pub async fn delete_api_key(
 pub async fn toggle_api_key(
     path: web::Path<Uuid>,
     req: web::Json<serde_json::Value>,
-    repo: web::Data<dyn ApiKeyRepository>,
+    repo: web::Data<Arc<dyn ApiKeyRepository>>,
     auth_user: lib_auth::middleware::jwt_auth::AuthenticatedUser,
 ) -> Result<HttpResponse> {
     let api_key_id = path.into_inner();
@@ -437,7 +439,7 @@ pub async fn toggle_api_key(
         .ok_or_else(|| actix_web::error::ErrorBadRequest("Missing or invalid 'enabled' field"))?;
 
     // First, check if the API key exists and belongs to the user
-    match repo.find_by_id(api_key_id).await {
+    match repo.as_ref().find_by_id(api_key_id).await {
         Ok(Some(api_key)) => {
             if api_key.user_id != Some(auth_user.user_id) {
                 return Ok(HttpResponse::Forbidden().json(serde_json::json!({
@@ -460,7 +462,7 @@ pub async fn toggle_api_key(
         }
     }
 
-    match repo.set_enabled(api_key_id, enabled).await {
+    match repo.as_ref().set_enabled(api_key_id, enabled).await {
         Ok(_) => {
             let action = if enabled { "enabled" } else { "disabled" };
             Ok(HttpResponse::Ok().json(serde_json::json!({
