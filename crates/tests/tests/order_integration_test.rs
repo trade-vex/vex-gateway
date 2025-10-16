@@ -216,10 +216,7 @@ async fn test_cancel_order(
 }
 
 /// Test helper to spawn the test server
-fn spawn_test_server(
-    publisher: Publisher,
-    correlation_service: CorrelationService,
-) -> String {
+fn spawn_test_server(publisher: Publisher, correlation_service: CorrelationService) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to bind random port");
     let port = listener.local_addr().unwrap().port();
 
@@ -246,14 +243,21 @@ fn spawn_test_server(
 async fn test_order_placement_and_cancellation() {
     // Initialize VexGateway client
     println!("Initializing VexGateway client for testing");
-    
+
     // Use DEVELOPMENT config to match vex-core (ports 40001/40002)
     let mut gateway_config = vex_config::GatewayNetworkingConfig::development_defaults();
-    gateway_config.context_dir = "/Users/adityaanand/vex-backend/vex-core/aeron-test-server".to_string();
-    
-    println!("Using Aeron context directory: {}", gateway_config.context_dir);
-    println!("Connecting to vex-core on ports: {}:{}", gateway_config.core_port, gateway_config.core_control_port);
-    
+    gateway_config.context_dir =
+        "/Users/adityaanand/vex-backend/vex-core/aeron-test-server".to_string();
+
+    println!(
+        "Using Aeron context directory: {}",
+        gateway_config.context_dir
+    );
+    println!(
+        "Connecting to vex-core on ports: {}:{}",
+        gateway_config.core_port, gateway_config.core_control_port
+    );
+
     let mut gateway_client = vex_networking::client::VexGateway::new(gateway_config)
         .expect("Failed to initialize VexGateway");
 
@@ -261,8 +265,10 @@ async fn test_order_placement_and_cancellation() {
     let correlation_service = CorrelationService::new();
 
     // Create Aeron handler with correlation service
-    let handler =
-        lib_server::CorrelationHandler::new(gateway_client.gateway_id(), correlation_service.clone());
+    let handler = lib_server::CorrelationHandler::new(
+        gateway_client.gateway_id(),
+        correlation_service.clone(),
+    );
 
     // Start the gateway client and get the publisher
     println!("Starting VexGateway with correlation handler");
@@ -319,7 +325,7 @@ async fn test_order_placement_and_cancellation() {
         println!("\n=== Test 2: Cancel Order ===");
         let cancel_order_request = CancelOrderRequest {
             order_id: order_response.order_id,
-            market_id: 5991,  // Must match the order's market_id
+            market_id: 5991, // Must match the order's market_id
             user_id: 12345,
         };
 
@@ -351,4 +357,3 @@ async fn test_order_placement_and_cancellation() {
         println!("Order placement timed out or failed, so we can't test cancellation");
     }
 }
-

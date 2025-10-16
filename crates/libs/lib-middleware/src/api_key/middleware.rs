@@ -276,16 +276,22 @@ impl ApiKeyStore {
         let mut cache = self.l1_cache.write().await;
         let cached = CachedApiKey::new(config.clone());
         cache.put(config.api_key.clone(), cached);
-        
-        info!("Added API key to cache: {}", Self::mask_api_key(&config.api_key));
+
+        info!(
+            "Added API key to cache: {}",
+            Self::mask_api_key(&config.api_key)
+        );
     }
 
     /// Remove an API key from the cache
     pub async fn remove_api_key(&self, api_key: &str) {
         let mut cache = self.l1_cache.write().await;
         cache.pop(api_key);
-        
-        info!("Removed API key from cache: {}", Self::mask_api_key(api_key));
+
+        info!(
+            "Removed API key from cache: {}",
+            Self::mask_api_key(api_key)
+        );
     }
 
     /// Mask API key for secure logging

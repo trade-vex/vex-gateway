@@ -36,7 +36,7 @@ impl std::str::FromStr for Side {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OrderResponse {
     pub order_id: u64,
-    pub user_id: u64,  // Changed from Uuid to u64 to match DB schema
+    pub user_id: u64, // Changed from Uuid to u64 to match DB schema
     pub market_id: u32,
     pub price: u64,
     pub size: u64,
@@ -46,12 +46,12 @@ pub struct OrderResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserBalanceResponse {
-    pub user_id: u64,  // Changed from Uuid to u64 to match DB schema
+    pub user_id: u64, // Changed from Uuid to u64 to match DB schema
     pub asset_id: u32,
     pub available: u64,
     pub locked: u64,
     pub total: u64,
-    pub timestamp: u64,  // Changed from DateTime to unix timestamp
+    pub timestamp: u64, // Changed from DateTime to unix timestamp
 }
 
 #[derive(Debug, Serialize, Deserialize)]

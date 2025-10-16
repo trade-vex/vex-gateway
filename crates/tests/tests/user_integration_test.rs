@@ -150,13 +150,15 @@ async fn test_deposit_funds(
                 message: "Deposit processing timeout".to_string(),
             })
         }
-        Err(ResponseError::Cancelled) => HttpResponse::InternalServerError().json(DepositResponse {
-            user_id,
-            asset_id,
-            amount,
-            status: "error".to_string(),
-            message: "Internal error".to_string(),
-        }),
+        Err(ResponseError::Cancelled) => {
+            HttpResponse::InternalServerError().json(DepositResponse {
+                user_id,
+                asset_id,
+                amount,
+                status: "error".to_string(),
+                message: "Internal error".to_string(),
+            })
+        }
     }
 }
 
@@ -267,10 +269,12 @@ async fn test_get_balances(
         Ok(balances) => {
             println!("   ✓ Retrieved {} balances from store", balances.len());
             for (idx, balance) in balances.iter().enumerate() {
-                println!("   Balance {}: user_id={}, asset_id={}, available={}, locked={}", 
-                    idx, balance.user_id, balance.asset_id, balance.available, balance.locked);
+                println!(
+                    "   Balance {}: user_id={}, asset_id={}, available={}, locked={}",
+                    idx, balance.user_id, balance.asset_id, balance.available, balance.locked
+                );
             }
-            
+
             let total_assets = balances.len();
             let balance_responses: Vec<_> =
                 balances.into_iter().map(|balance| balance.into()).collect();
@@ -309,11 +313,17 @@ async fn test_get_open_orders(
         Ok(orders) => {
             println!("   ✓ Retrieved {} orders from store", orders.len());
             for (idx, order) in orders.iter().enumerate() {
-                println!("   Order {}: order_id={}, user_id={}, market_id={}, price={}, size={}", 
-                    idx, order.order_order_id, order.order_user_id, order.market_id, 
-                    order.order_price, order.order_size);
+                println!(
+                    "   Order {}: order_id={}, user_id={}, market_id={}, price={}, size={}",
+                    idx,
+                    order.order_order_id,
+                    order.order_user_id,
+                    order.market_id,
+                    order.order_price,
+                    order.order_size
+                );
             }
-            
+
             let total = orders.len();
             let order_responses: Vec<_> = orders.into_iter().map(|order| order.into()).collect();
 
@@ -341,10 +351,10 @@ async fn test_debug_redis(
     _order_store: web::Data<Arc<OrderStore>>,
 ) -> Result<HttpResponse> {
     println!("\n🔍 DEBUG: Checking Redis/DB state...");
-    
+
     // Try to access internal Redis connection for debugging
     // This is a simplified version - in production you'd have proper debug endpoints
-    
+
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "message": "Check server logs for debug output"
     })))
@@ -358,8 +368,7 @@ fn spawn_test_server(
     balance_store: UserBalanceStore,
     order_store: OrderStore,
 ) -> String {
-    let listener =
-        std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to bind random port");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to bind random port");
     let port = listener.local_addr().unwrap().port();
 
     let publisher = Arc::new(tokio::sync::Mutex::new(publisher));
@@ -459,7 +468,10 @@ async fn test_user_balance_and_order_retrieval() {
     let publisher = gateway_client
         .start(handler)
         .expect("Failed to start VexGateway");
-    println!("   ✓ Gateway started with ID: {}", gateway_client.gateway_id());
+    println!(
+        "   ✓ Gateway started with ID: {}",
+        gateway_client.gateway_id()
+    );
 
     // 4. Initialize Redis
     println!("\n4️⃣  Connecting to Redis");
@@ -524,8 +536,14 @@ async fn test_user_balance_and_order_retrieval() {
         .expect("Failed to create OrderStore")
     };
 
-    println!("   ✓ Balance store: Redis + {}", if db.is_some() { "DB" } else { "Cache-only" });
-    println!("   ✓ Order store: Redis + {}", if db.is_some() { "DB" } else { "Cache-only" });
+    println!(
+        "   ✓ Balance store: Redis + {}",
+        if db.is_some() { "DB" } else { "Cache-only" }
+    );
+    println!(
+        "   ✓ Order store: Redis + {}",
+        if db.is_some() { "DB" } else { "Cache-only" }
+    );
 
     // 7. Spawn test server
     println!("\n7️⃣  Starting test HTTP server");
@@ -553,12 +571,18 @@ async fn test_user_balance_and_order_retrieval() {
     //   - quote_asset = 5991 >> 16 = 0
     let market_id = 5991u32;
     let base_asset_id = (market_id & 0xFFFF) as u32; // Lower 16 bits
-    let quote_asset_id = (market_id >> 16) as u32;   // Upper 16 bits
-    
+    let quote_asset_id = (market_id >> 16) as u32; // Upper 16 bits
+
     println!("📊 Market Configuration:");
     println!("   Market ID: {}", market_id);
-    println!("   Base Asset ID: {} (extracted from lower 16 bits)", base_asset_id);
-    println!("   Quote Asset ID: {} (extracted from upper 16 bits)", quote_asset_id);
+    println!(
+        "   Base Asset ID: {} (extracted from lower 16 bits)",
+        base_asset_id
+    );
+    println!(
+        "   Quote Asset ID: {} (extracted from upper 16 bits)",
+        quote_asset_id
+    );
     println!("   Note: Deposits must use these exact asset IDs to avoid VEX Core rejection\n");
 
     // Deposit base asset - 10 units
@@ -627,7 +651,10 @@ async fn test_user_balance_and_order_retrieval() {
     println!("   # Check all keys in Redis:");
     println!("   docker exec vex-kafka-pipeline-redis-1 redis-cli -p 6379 KEYS '*'");
     println!("\n   # Check keys for this user:");
-    println!("   docker exec vex-kafka-pipeline-redis-1 redis-cli -p 6379 KEYS '*{}*'", test_user_id);
+    println!(
+        "   docker exec vex-kafka-pipeline-redis-1 redis-cli -p 6379 KEYS '*{}*'",
+        test_user_id
+    );
     println!("\n   # Check balances in Postgres:");
     println!("   docker exec -it vex-kafka-pipeline-postgres-1 psql -U postgres -d trading_db -c \"SELECT * FROM trading.balances_events WHERE user_id = {} ORDER BY timestamp DESC LIMIT 10;\"", test_user_id);
     println!("\n   # Check orders in Postgres:");
@@ -686,9 +713,9 @@ async fn test_user_balance_and_order_retrieval() {
     // We have: 10 base (1000000000) and 1M quote (100000000000000)
     // To buy with 100 quote: size = 100_quote / 100_price = 1
     let order_request = OrderRequest {
-        price: 100_00000000,  // Price: 100 quote per 1 base
-        volume: 1,            // Volume: 1 satoshi of base (TINY!)
-        market_id, // Use the same market_id we deposited assets for
+        price: 100_00000000, // Price: 100 quote per 1 base
+        volume: 1,           // Volume: 1 satoshi of base (TINY!)
+        market_id,           // Use the same market_id we deposited assets for
         side: Side::Bid,
         time_in_force: TimeInForce::Gtc,
         user_id: test_user_id,
@@ -696,14 +723,17 @@ async fn test_user_balance_and_order_retrieval() {
 
     // VEX Core calculates: needed = price * size (no decimal division!)
     let vex_core_needed = order_request.price as u128 * order_request.volume as u128;
-    
+
     println!("📤 Placing order:");
     println!("   User ID: {}", test_user_id);
     println!("   Market: {}", order_request.market_id);
     println!("   Side: {:?}", order_request.side);
     println!("   Price: {} (100 quote per base)", order_request.price);
     println!("   Volume: {} (1 satoshi of base)", order_request.volume);
-    println!("   VEX Core calculates needed as: price * size = {}", vex_core_needed);
+    println!(
+        "   VEX Core calculates needed as: price * size = {}",
+        vex_core_needed
+    );
     println!("   Available quote: 100000000000000 (1M quote)");
     println!("   Available base: 1000000000 (10 base)");
 
@@ -835,21 +865,27 @@ async fn test_user_balance_and_order_retrieval() {
     println!("║  TEST SUMMARY                                                 ║");
     println!("╚═══════════════════════════════════════════════════════════════╝\n");
 
-    println!("✅ TEST 1: Deposit Funds (Faucet) - {}", 
-        if base_deposit_response.status.contains("Processed") || quote_deposit_response.status.contains("Processed") { 
-            "SUCCESS" 
-        } else { 
-            "FAILED" 
-        });
+    println!(
+        "✅ TEST 1: Deposit Funds (Faucet) - {}",
+        if base_deposit_response.status.contains("Processed")
+            || quote_deposit_response.status.contains("Processed")
+        {
+            "SUCCESS"
+        } else {
+            "FAILED"
+        }
+    );
     println!("✅ TEST 2: Balance Check After Deposit - Tested");
-    println!("✅ TEST 3: Order Placement - SUCCESS (Order ID: {})", placed_order_id);
+    println!(
+        "✅ TEST 3: Order Placement - SUCCESS (Order ID: {})",
+        placed_order_id
+    );
     println!("✅ TEST 4: Balance Check After Order - Tested");
     println!("✅ TEST 5: Order Retrieval - Tested");
-    
+
     println!("\n📊 Complete Flow Verified:");
     println!("   1. Deposit funds → 2. Verify balance → 3. Place order");
     println!("   → 4. Verify balance update → 5. Verify order stored");
-    
+
     println!("\n🎉 Integration test completed!\n");
 }
-

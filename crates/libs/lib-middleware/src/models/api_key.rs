@@ -126,7 +126,8 @@ impl Model {
         //     })
         //     .unwrap_or_else(|| vec![SecurityType::None]);
 
-        self.permissions.contains(required_permission) || self.permissions.contains(&SecurityType::None)
+        self.permissions.contains(required_permission)
+            || self.permissions.contains(&SecurityType::None)
     }
 
     /// Check if the IP address is blacklisted (blocked)

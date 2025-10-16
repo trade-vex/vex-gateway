@@ -1,19 +1,19 @@
 //! lib-api/src/handlers/api_keys.rs
 
-use actix_web::{HttpResponse, Result, web, HttpMessage, FromRequest};
+use actix_web::{FromRequest, HttpMessage, HttpResponse, Result, web};
+use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, Serializer};
 use uuid::Uuid;
-use base64::Engine;
 
 use lib_middleware::{
     api_key::SecurityType,
+    api_key::security::{ApiKeyConfig, KeyMaterial},
     models::api_key::{ActiveModel, Model as ApiKeyModel, NewApiKey},
     repository::api_key_repository::ApiKeyRepository,
-    api_key::security::{KeyMaterial, ApiKeyConfig},
 };
-use std::sync::Arc;
 use sea_orm::Set;
+use std::sync::Arc;
 
 /// Combined authentication result that can be either JWT or API key
 #[derive(Debug, Clone)]
@@ -53,12 +53,20 @@ impl FromRequest for AuthenticatedUser {
     type Error = actix_web::Error;
     type Future = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self, Self::Error>>>>;
 
-    fn from_request(req: &actix_web::HttpRequest, _payload: &mut actix_web::dev::Payload) -> Self::Future {
+    fn from_request(
+        req: &actix_web::HttpRequest,
+        _payload: &mut actix_web::dev::Payload,
+    ) -> Self::Future {
         let req = req.clone();
-        
+
         Box::pin(async move {
             // First, try to extract JWT authentication
-            if let Ok(jwt_user) = lib_auth::middleware::jwt_auth::AuthenticatedUser::from_request(&req, &mut actix_web::dev::Payload::None).await {
+            if let Ok(jwt_user) = lib_auth::middleware::jwt_auth::AuthenticatedUser::from_request(
+                &req,
+                &mut actix_web::dev::Payload::None,
+            )
+            .await
+            {
                 return Ok(AuthenticatedUser::Jwt(jwt_user));
             }
 
@@ -73,7 +81,9 @@ impl FromRequest for AuthenticatedUser {
             }
 
             // If neither works, return unauthorized
-            Err(actix_web::error::ErrorUnauthorized("Authentication required"))
+            Err(actix_web::error::ErrorUnauthorized(
+                "Authentication required",
+            ))
         })
     }
 }
@@ -151,7 +161,11 @@ impl From<ApiKeyModel> for ApiKeyResponse {
         Self {
             id: model.id,
             api_key: model.api_key,
-            permissions: model.permissions.into_iter().map(|p| p.to_string()).collect(),
+            permissions: model
+                .permissions
+                .into_iter()
+                .map(|p| p.to_string())
+                .collect(),
             recv_window: model.recv_window,
             enabled: model.enabled,
             description: model.description,
@@ -268,15 +282,17 @@ pub async fn create_api_key(
 
     // generating a new API key
     let api_key = format!("vex_{}", Uuid::new_v4().to_string().replace('-', ""));
-    
+
     // Generate secret key for HMAC signing (if not provided)
     let secret_key = if let Some(ref key_material) = key_material {
         // If user provided key material, extract the secret
         match key_material {
             KeyMaterial::HmacSecret(secret) => secret.clone(),
-            _ => return Err(actix_web::error::ErrorBadRequest(
-                "Only HMAC secret keys are supported for API key authentication"
-            )),
+            _ => {
+                return Err(actix_web::error::ErrorBadRequest(
+                    "Only HMAC secret keys are supported for API key authentication",
+                ));
+            }
         }
     } else {
         // Generate a random secret key
@@ -304,7 +320,7 @@ pub async fn create_api_key(
             let response = CreateApiKeyResponse {
                 api_key: api_key.clone(), // Plaintext key - only returned during creation
                 secret_key: secret_key.clone(), // Secret key for HMAC signing - only returned during creation
-                key_info,                 // Masked key info
+                key_info,                       // Masked key info
             };
             Ok(HttpResponse::Created().json(response))
         }
@@ -355,7 +371,7 @@ pub async fn get_api_key(
     auth_user: AuthenticatedUser,
 ) -> Result<HttpResponse> {
     let api_key_id = path.into_inner();
-    
+
     // Get user ID from either JWT or API key authentication
     let user_id = auth_user.user_id().ok_or_else(|| {
         actix_web::error::ErrorUnauthorized("User ID not found in authentication")
@@ -395,7 +411,7 @@ pub async fn update_api_key(
     auth_user: AuthenticatedUser,
 ) -> Result<HttpResponse> {
     let api_key_id = path.into_inner();
-    
+
     // Get user ID from either JWT or API key authentication
     let user_id = auth_user.user_id().ok_or_else(|| {
         actix_web::error::ErrorUnauthorized("User ID not found in authentication")
@@ -475,7 +491,7 @@ pub async fn delete_api_key(
     auth_user: AuthenticatedUser,
 ) -> Result<HttpResponse> {
     let api_key_id = path.into_inner();
-    
+
     // Get user ID from either JWT or API key authentication
     let user_id = auth_user.user_id().ok_or_else(|| {
         actix_web::error::ErrorUnauthorized("User ID not found in authentication")

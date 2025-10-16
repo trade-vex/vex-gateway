@@ -10,9 +10,8 @@ use lib_auth::service::{EmailService, OAuthService, TokenService};
 use lib_core::CorrelationService;
 use lib_core::Publisher;
 use lib_middleware::{
-    ApiKeyMiddleware,
+    ApiKeyMiddleware, SecurityType,
     repository::api_key_repository::{ApiKeyRepository, PostgresApiKeyRepository},
-    SecurityType,
 };
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
@@ -47,10 +46,10 @@ pub struct AppState {
 
     // Gateway publisher for order processing
     pub gateway_publisher: Arc<Mutex<Publisher>>,
-    
+
     // API key middleware for dynamic updates
     pub api_key_middleware: Arc<TokioMutex<ApiKeyMiddleware>>,
-    
+
     // API key repository for database operations
     pub api_key_repository: Arc<dyn ApiKeyRepository>,
 
@@ -83,7 +82,8 @@ impl AppState {
         let user_repo = Arc::new(PostgresUserRepository::new(Arc::new(db.clone())));
 
         // Initialize API key repository
-        let api_key_repository: Arc<dyn ApiKeyRepository> = Arc::new(PostgresApiKeyRepository::new(Arc::new(db.clone())));
+        let api_key_repository: Arc<dyn ApiKeyRepository> =
+            Arc::new(PostgresApiKeyRepository::new(Arc::new(db.clone())));
 
         // Initialize API key middleware with database repository
         let api_key_middleware = Self::init_api_key_middleware(&api_key_repository);
@@ -130,7 +130,7 @@ impl AppState {
             gateway_publisher: Arc::new(Mutex::new(gateway_publisher)),
             api_key_middleware: Arc::new(TokioMutex::new(api_key_middleware)),
             api_key_repository,
-            correlation_service
+            correlation_service,
         }))
     }
 
@@ -259,10 +259,10 @@ impl AppState {
     /// Create ApiKeyMiddleware using AppState dependencies
     pub fn init_api_key_middleware(api_key_repo: &Arc<dyn ApiKeyRepository>) -> ApiKeyMiddleware {
         use lib_middleware::api_key::middleware::CacheConfig;
-        
+
         // Create cache configuration
         let cache_config = CacheConfig {
-            l1_max_size: 1000,  // Cache up to 1000 API keys in memory
+            l1_max_size: 1000,                           // Cache up to 1000 API keys in memory
             l1_ttl: std::time::Duration::from_secs(300), // 5 minute TTL
         };
 

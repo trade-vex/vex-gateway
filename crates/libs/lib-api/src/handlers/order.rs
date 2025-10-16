@@ -36,16 +36,16 @@ use tracing::{error, info, warn};
 pub struct OrderRequest {
     /// Order price in smallest currency unit
     pub price: u64,
-    
+
     /// Order volume/size in base asset units
     pub volume: u64,
-    
+
     /// Market identifier (trading pair)
     pub market_id: u32,
-    
+
     /// Order side: Bid (buy) or Ask (sell)
     pub side: Side,
-    
+
     /// Time in force policy for the order
     pub time_in_force: TimeInForce,
 }
@@ -67,7 +67,7 @@ pub struct OrderRequest {
 pub struct CancelOrderRequest {
     /// Unique identifier of the order to cancel
     pub order_id: u64,
-    
+
     /// Market identifier for validation
     pub market_id: u32,
 }
@@ -103,15 +103,15 @@ pub struct CancelOrderRequest {
 /// ```
 #[derive(Debug, Serialize)]
 pub struct OrderResponse {
-    /// Order ID assigned by the matching engine 
+    /// Order ID assigned by the matching engine
     pub order_id: u64,
-    
+
     /// Client order ID for correlation tracking
     pub client_order_id: u64,
-    
+
     /// Order status string
     pub status: String,
-    
+
     /// Human-readable message describing the result
     pub message: String,
 }

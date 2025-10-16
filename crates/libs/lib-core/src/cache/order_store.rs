@@ -80,7 +80,7 @@ impl OrderStore {
         if self.config.enabled {
             if let Some(cache) = &self.cache {
                 let key = format!("order:{}", order_id);
-                
+
                 match cache.hgetall_string(&key).await {
                     Ok(hash) if !hash.is_empty() => {
                         // Parse hash to OrderModel
@@ -126,38 +126,56 @@ impl OrderStore {
         // Convert UUID to i64 to match Kafka consumer's key format
         // Kafka writes: user:{numeric_id}:orders
         let user_id_i64 = user_id.as_u128() as i64;
-        
+
         // Cache: Query user:{user_id}:orders SET, then fetch each order hash
         if self.config.enabled {
             if let Some(cache) = &self.cache {
                 let set_key = format!("user:{}:orders", user_id_i64);
-                
+
                 println!("🔍 OrderStore: Querying Redis SET: {}", set_key);
-                
+
                 match cache.smembers_string(&set_key).await {
                     Ok(order_ids) if !order_ids.is_empty() => {
-                        debug!("User orders cache hit for user: {} (i64: {}, {} orders in SET)", user_id, user_id_i64, order_ids.len());
-                        println!("   Found {} order IDs in SET: {:?}", order_ids.len(), order_ids);
-                        
+                        debug!(
+                            "User orders cache hit for user: {} (i64: {}, {} orders in SET)",
+                            user_id,
+                            user_id_i64,
+                            order_ids.len()
+                        );
+                        println!(
+                            "   Found {} order IDs in SET: {:?}",
+                            order_ids.len(),
+                            order_ids
+                        );
+
                         let mut orders = Vec::new();
                         // Fetch each order hash
                         for order_id_str in order_ids {
                             let order_key = format!("order:{}", order_id_str);
                             match cache.hgetall_string(&order_key).await {
                                 Ok(hash) if !hash.is_empty() => {
-                                    println!("   Fetched hash for order {}: {:?}", order_id_str, hash);
-                                    
+                                    println!(
+                                        "   Fetched hash for order {}: {:?}",
+                                        order_id_str, hash
+                                    );
+
                                     // Check if order is cancelled - skip cancelled orders
                                     // Kafka consumer sets status='cancelled' but doesn't remove from user:{user_id}:orders SET
                                     if let Some(status) = hash.get("status") {
                                         println!("   Order {} status: {}", order_id_str, status);
                                         if status.eq_ignore_ascii_case("cancelled") {
-                                            println!("   ✓ SKIPPING cancelled order {}", order_id_str);
-                                            debug!("Skipping cancelled order {} for user {}", order_id_str, user_id);
+                                            println!(
+                                                "   ✓ SKIPPING cancelled order {}",
+                                                order_id_str
+                                            );
+                                            debug!(
+                                                "Skipping cancelled order {} for user {}",
+                                                order_id_str, user_id
+                                            );
                                             continue;
                                         }
                                     }
-                                    
+
                                     if let Some(order) = Self::parse_order_hash(hash, user_id) {
                                         println!("   ✓ Adding order {} to results", order_id_str);
                                         orders.push(order);
@@ -166,13 +184,13 @@ impl OrderStore {
                                 _ => continue,
                             }
                         }
-                        
+
                         println!("   Returning {} orders after filtering", orders.len());
-                        
+
                         if !orders.is_empty() {
                             return Ok(orders);
                         }
-                        
+
                         // If all orders were filtered out (all cancelled), return empty vec
                         println!("   All orders were cancelled - returning empty list");
                         return Ok(vec![]);
@@ -212,7 +230,7 @@ impl OrderStore {
         if let Some(cache) = &self.cache {
             // Convert UUID to i64 to match Kafka consumer's key format
             let user_id_i64 = user_id.as_u128() as i64;
-            
+
             // Delete order:{order_id} hash
             let order_key = format!("order:{}", order_id);
             if let Err(e) = cache.del_key(&order_key).await {
@@ -221,11 +239,20 @@ impl OrderStore {
 
             // Remove from user:{user_id}:orders set
             let user_set_key = format!("user:{}:orders", user_id_i64);
-            if let Err(e) = cache.srem_string(&user_set_key, &order_id.to_string()).await {
-                warn!("Failed to remove from user orders set {}: {}", user_set_key, e);
+            if let Err(e) = cache
+                .srem_string(&user_set_key, &order_id.to_string())
+                .await
+            {
+                warn!(
+                    "Failed to remove from user orders set {}: {}",
+                    user_set_key, e
+                );
             }
 
-            debug!("Invalidated cache for order: {} and user: {}", order_id, user_id);
+            debug!(
+                "Invalidated cache for order: {} and user: {}",
+                order_id, user_id
+            );
         }
     }
 
@@ -238,7 +265,7 @@ impl OrderStore {
             // Convert UUID to i64 to match Kafka consumer's key format
             let user_id_i64 = user_id.as_u128() as i64;
             let user_set_key = format!("user:{}:orders", user_id_i64);
-            
+
             // Get all order IDs first
             match cache.smembers_string(&user_set_key).await {
                 Ok(order_ids) => {
@@ -249,13 +276,17 @@ impl OrderStore {
                             warn!("Failed to delete order hash {}: {}", order_key, e);
                         }
                     }
-                    
+
                     // Delete the set itself
                     if let Err(e) = cache.del_key(&user_set_key).await {
                         warn!("Failed to delete user orders set {}: {}", user_set_key, e);
                     }
-                    
-                    debug!("Invalidated {} orders for user: {}", order_ids.len(), user_id);
+
+                    debug!(
+                        "Invalidated {} orders for user: {}",
+                        order_ids.len(),
+                        user_id
+                    );
                 }
                 Err(e) => {
                     warn!("Failed to get order IDs for user {}: {}", user_id, e);
@@ -263,7 +294,7 @@ impl OrderStore {
             }
         }
     }
-    
+
     // Helper: Parse order hash from Redis into OrderModel
     // Kafka writes: order_id, user_id, price, size, side, timestamp, market_id, status
     fn parse_order_hash(hash: HashMap<String, String>, _user_id: Uuid) -> Option<OrderModel> {
@@ -274,7 +305,7 @@ impl OrderStore {
         let order_side = hash.get("side")?.clone();
         let order_timestamp = hash.get("timestamp")?.parse::<i64>().ok()?;
         let market_id = hash.get("market_id")?.parse::<i32>().ok()?;
-        
+
         Some(OrderModel {
             id: 0, // Auto-generated by DB
             order_order_id,

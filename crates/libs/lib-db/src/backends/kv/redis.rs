@@ -493,7 +493,10 @@ impl ExpiringKvStore for RedisDb {
 impl RedisDb {
     /// Get all fields and values from a hash (HGETALL)
     /// Returns HashMap<String, String> for plain string data
-    pub async fn hgetall_string(&self, key: &str) -> Result<std::collections::HashMap<String, String>> {
+    pub async fn hgetall_string(
+        &self,
+        key: &str,
+    ) -> Result<std::collections::HashMap<String, String>> {
         self.execute_with_retry(|conn| {
             let key = key.to_string();
             Box::pin(async move { conn.hgetall(key).await })
@@ -539,7 +542,7 @@ impl RedisDb {
         let mut conn = self.get_conn().await?;
         let mut cursor = 0u64;
         let mut keys = Vec::new();
-        
+
         loop {
             let (new_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
                 .arg(cursor)
@@ -549,15 +552,15 @@ impl RedisDb {
                 .arg(100)
                 .query_async(&mut *conn)
                 .await?;
-            
+
             keys.extend(batch);
             cursor = new_cursor;
-            
+
             if cursor == 0 {
                 break;
             }
         }
-        
+
         Ok(keys)
     }
 }

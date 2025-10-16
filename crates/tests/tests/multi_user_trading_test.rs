@@ -295,16 +295,21 @@ async fn test_get_open_orders(
     let user_id = *user_id;
     let user_uuid = Uuid::from_u128(user_id as u128);
 
-    println!("🔍 test_get_open_orders: user_id={}, uuid={}", user_id, user_uuid);
+    println!(
+        "🔍 test_get_open_orders: user_id={}, uuid={}",
+        user_id, user_uuid
+    );
 
     match order_store.get_user_orders(user_uuid).await {
         Ok(orders) => {
             println!("   OrderStore returned {} orders", orders.len());
             for (idx, order) in orders.iter().enumerate() {
-                println!("   Order {}: id={}, user={}, status from model field (if any)", 
-                    idx, order.order_order_id, order.order_user_id);
+                println!(
+                    "   Order {}: id={}, user={}, status from model field (if any)",
+                    idx, order.order_order_id, order.order_user_id
+                );
             }
-            
+
             let total = orders.len();
             let order_responses: Vec<_> = orders.into_iter().map(|order| order.into()).collect();
 
@@ -330,8 +335,7 @@ fn spawn_test_server(
     balance_store: UserBalanceStore,
     order_store: OrderStore,
 ) -> String {
-    let listener =
-        std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to bind random port");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to bind random port");
     let port = listener.local_addr().unwrap().port();
 
     let publisher = Arc::new(tokio::sync::Mutex::new(publisher));
@@ -404,7 +408,10 @@ async fn deposit_for_user(
         .await
         .expect("Failed to deposit base");
     let base_resp: DepositResponse = resp.json().await.expect("Failed to parse");
-    println!("   ✓ Base asset: {} (status: {})", base_amount, base_resp.status);
+    println!(
+        "   ✓ Base asset: {} (status: {})",
+        base_amount, base_resp.status
+    );
 
     // Deposit quote
     let quote_deposit = DepositRequest {
@@ -419,7 +426,10 @@ async fn deposit_for_user(
         .await
         .expect("Failed to deposit quote");
     let quote_resp: DepositResponse = resp.json().await.expect("Failed to parse");
-    println!("   ✓ Quote asset: {} (status: {})", quote_amount, quote_resp.status);
+    println!(
+        "   ✓ Quote asset: {} (status: {})",
+        quote_amount, quote_resp.status
+    );
 }
 
 async fn check_balances(
@@ -433,23 +443,36 @@ async fn check_balances(
         .send()
         .await
         .expect("Failed to get balances");
-    
-    assert!(resp.status().is_success(), 
-        "{} balance retrieval failed with status: {}", user_name, resp.status());
-    
+
+    assert!(
+        resp.status().is_success(),
+        "{} balance retrieval failed with status: {}",
+        user_name,
+        resp.status()
+    );
+
     let balances: BalancesListResponse = resp.json().await.expect("Failed to parse balances");
-    
+
     println!("\n💼 {} (user {}) balances:", user_name, user_id);
     for balance in &balances.balances {
-        println!("   Asset {}: available={}, locked={}, total={}",
-            balance.asset_id, balance.available, balance.locked, balance.total);
-        
+        println!(
+            "   Asset {}: available={}, locked={}, total={}",
+            balance.asset_id, balance.available, balance.locked, balance.total
+        );
+
         // Assert total = available + locked
-        assert_eq!(balance.total, balance.available + balance.locked,
-            "{} asset {} total mismatch: {} != {} + {}", 
-            user_name, balance.asset_id, balance.total, balance.available, balance.locked);
+        assert_eq!(
+            balance.total,
+            balance.available + balance.locked,
+            "{} asset {} total mismatch: {} != {} + {}",
+            user_name,
+            balance.asset_id,
+            balance.total,
+            balance.available,
+            balance.locked
+        );
     }
-    
+
     balances
 }
 
@@ -464,28 +487,44 @@ async fn check_orders(
         .send()
         .await
         .expect("Failed to get orders");
-    
-    assert!(resp.status().is_success(), 
-        "{} order retrieval failed with status: {}", user_name, resp.status());
-    
+
+    assert!(
+        resp.status().is_success(),
+        "{} order retrieval failed with status: {}",
+        user_name,
+        resp.status()
+    );
+
     let orders: OrdersListResponse = resp.json().await.expect("Failed to parse orders");
-    
+
     // Assert total matches actual count
-    assert_eq!(orders.total, orders.orders.len(),
-        "{} order count mismatch: total={} but got {} orders", 
-        user_name, orders.total, orders.orders.len());
-    
-    println!("\n📋 {} (user {}) open orders: {}", user_name, user_id, orders.total);
+    assert_eq!(
+        orders.total,
+        orders.orders.len(),
+        "{} order count mismatch: total={} but got {} orders",
+        user_name,
+        orders.total,
+        orders.orders.len()
+    );
+
+    println!(
+        "\n📋 {} (user {}) open orders: {}",
+        user_name, user_id, orders.total
+    );
     for order in &orders.orders {
-        println!("   Order {}: {:?} {} @ {} (size: {})",
-            order.order_id, order.side, order.market_id, order.price, order.size);
-        
+        println!(
+            "   Order {}: {:?} {} @ {} (size: {})",
+            order.order_id, order.side, order.market_id, order.price, order.size
+        );
+
         // Assert order belongs to this user
-        assert_eq!(order.user_id, user_id,
-            "Order {} belongs to user {} but queried for user {}", 
-            order.order_id, order.user_id, user_id);
+        assert_eq!(
+            order.user_id, user_id,
+            "Order {} belongs to user {} but queried for user {}",
+            order.order_id, order.user_id, user_id
+        );
     }
-    
+
     orders
 }
 
@@ -500,22 +539,26 @@ async fn test_multi_user_trading_scenario() {
     // Setup
     println!("🔧 Setup Phase...");
     let mut gateway_config = vex_config::GatewayNetworkingConfig::development_defaults();
-    gateway_config.context_dir = "/Users/adityaanand/vex-backend/vex-core/aeron-test-server".to_string();
-    
+    gateway_config.context_dir =
+        "/Users/adityaanand/vex-backend/vex-core/aeron-test-server".to_string();
+
     let mut gateway_client = vex_networking::client::VexGateway::new(gateway_config)
         .expect("Failed to initialize VexGateway");
-    
+
     let correlation_service = CorrelationService::new();
     let handler = lib_server::CorrelationHandler::new(
         gateway_client.gateway_id(),
         correlation_service.clone(),
     );
-    
-    let publisher = gateway_client.start(handler).expect("Failed to start VexGateway");
-    
-    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6380".to_string());
+
+    let publisher = gateway_client
+        .start(handler)
+        .expect("Failed to start VexGateway");
+
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6380".to_string());
     let db = init_database().await;
-    
+
     let balance_store = if let Some(ref db_conn) = db {
         let trading_repo = Arc::new(PostgresTradingRepository::new(db_conn.clone()));
         UserBalanceStore::with_redis_cache(
@@ -566,7 +609,8 @@ async fn test_multi_user_trading_scenario() {
         .expect("Failed to create OrderStore")
     };
 
-    let server_address = spawn_test_server(publisher, correlation_service, balance_store, order_store);
+    let server_address =
+        spawn_test_server(publisher, correlation_service, balance_store, order_store);
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let client = reqwest::Client::new();
@@ -575,7 +619,10 @@ async fn test_multi_user_trading_scenario() {
     let quote_asset_id = (market_id >> 16) as u32;
 
     println!("✓ Server running at: {}", server_address);
-    println!("✓ Market ID: {}, Base: {}, Quote: {}\n", market_id, base_asset_id, quote_asset_id);
+    println!(
+        "✓ Market ID: {}, Base: {}, Quote: {}\n",
+        market_id, base_asset_id, quote_asset_id
+    );
 
     // Define 8 users with different strategies
     let alice_id = 10001u64;
@@ -592,29 +639,101 @@ async fn test_multi_user_trading_scenario() {
     println!("║  PHASE 1: All Users Deposit Funds                            ║");
     println!("╚═══════════════════════════════════════════════════════════════╝");
 
-    deposit_for_user(&client, &server_address, alice_id, "Alice", base_asset_id, quote_asset_id,
-        200_00000000, 10000000_00000000).await; // 200 base, 10M quote
-    
-    deposit_for_user(&client, &server_address, bob_id, "Bob", base_asset_id, quote_asset_id,
-        100_00000000, 15000000_00000000).await; // 100 base, 15M quote
-    
-    deposit_for_user(&client, &server_address, carol_id, "Carol", base_asset_id, quote_asset_id,
-        150_00000000, 8000000_00000000).await; // 150 base, 8M quote
-    
-    deposit_for_user(&client, &server_address, dave_id, "Dave", base_asset_id, quote_asset_id,
-        80_00000000, 5000000_00000000).await; // 80 base, 5M quote
-    
-    deposit_for_user(&client, &server_address, eve_id, "Eve", base_asset_id, quote_asset_id,
-        300_00000000, 20000000_00000000).await; // 300 base, 20M quote
-    
-    deposit_for_user(&client, &server_address, frank_id, "Frank", base_asset_id, quote_asset_id,
-        50_00000000, 3000000_00000000).await; // 50 base, 3M quote
-    
-    deposit_for_user(&client, &server_address, grace_id, "Grace", base_asset_id, quote_asset_id,
-        120_00000000, 12000000_00000000).await; // 120 base, 12M quote
-    
-    deposit_for_user(&client, &server_address, henry_id, "Henry", base_asset_id, quote_asset_id,
-        90_00000000, 6000000_00000000).await; // 90 base, 6M quote
+    deposit_for_user(
+        &client,
+        &server_address,
+        alice_id,
+        "Alice",
+        base_asset_id,
+        quote_asset_id,
+        200_00000000,
+        10000000_00000000,
+    )
+    .await; // 200 base, 10M quote
+
+    deposit_for_user(
+        &client,
+        &server_address,
+        bob_id,
+        "Bob",
+        base_asset_id,
+        quote_asset_id,
+        100_00000000,
+        15000000_00000000,
+    )
+    .await; // 100 base, 15M quote
+
+    deposit_for_user(
+        &client,
+        &server_address,
+        carol_id,
+        "Carol",
+        base_asset_id,
+        quote_asset_id,
+        150_00000000,
+        8000000_00000000,
+    )
+    .await; // 150 base, 8M quote
+
+    deposit_for_user(
+        &client,
+        &server_address,
+        dave_id,
+        "Dave",
+        base_asset_id,
+        quote_asset_id,
+        80_00000000,
+        5000000_00000000,
+    )
+    .await; // 80 base, 5M quote
+
+    deposit_for_user(
+        &client,
+        &server_address,
+        eve_id,
+        "Eve",
+        base_asset_id,
+        quote_asset_id,
+        300_00000000,
+        20000000_00000000,
+    )
+    .await; // 300 base, 20M quote
+
+    deposit_for_user(
+        &client,
+        &server_address,
+        frank_id,
+        "Frank",
+        base_asset_id,
+        quote_asset_id,
+        50_00000000,
+        3000000_00000000,
+    )
+    .await; // 50 base, 3M quote
+
+    deposit_for_user(
+        &client,
+        &server_address,
+        grace_id,
+        "Grace",
+        base_asset_id,
+        quote_asset_id,
+        120_00000000,
+        12000000_00000000,
+    )
+    .await; // 120 base, 12M quote
+
+    deposit_for_user(
+        &client,
+        &server_address,
+        henry_id,
+        "Henry",
+        base_asset_id,
+        quote_asset_id,
+        90_00000000,
+        6000000_00000000,
+    )
+    .await; // 90 base, 6M quote
 
     println!("\n⏳ Waiting 2s for deposits to sync...");
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -622,31 +741,60 @@ async fn test_multi_user_trading_scenario() {
     // Check all balances and ASSERT deposits worked
     println!("\n--- Verifying Deposits ---");
     let alice_bal = check_balances(&client, &server_address, alice_id, "Alice").await;
-    assert!(alice_bal.total_assets >= 2, "Alice should have at least 2 assets");
-    assert!(alice_bal.balances.iter().any(|b| b.asset_id == base_asset_id && b.total == 20000000000), 
-        "Alice should have 200 base");
-    
+    assert!(
+        alice_bal.total_assets >= 2,
+        "Alice should have at least 2 assets"
+    );
+    assert!(
+        alice_bal
+            .balances
+            .iter()
+            .any(|b| b.asset_id == base_asset_id && b.total == 20000000000),
+        "Alice should have 200 base"
+    );
+
     let bob_bal = check_balances(&client, &server_address, bob_id, "Bob").await;
-    assert!(bob_bal.total_assets >= 2, "Bob should have at least 2 assets");
-    
+    assert!(
+        bob_bal.total_assets >= 2,
+        "Bob should have at least 2 assets"
+    );
+
     let carol_bal = check_balances(&client, &server_address, carol_id, "Carol").await;
-    assert!(carol_bal.total_assets >= 2, "Carol should have at least 2 assets");
-    
+    assert!(
+        carol_bal.total_assets >= 2,
+        "Carol should have at least 2 assets"
+    );
+
     let dave_bal = check_balances(&client, &server_address, dave_id, "Dave").await;
-    assert!(dave_bal.total_assets >= 2, "Dave should have at least 2 assets");
-    
+    assert!(
+        dave_bal.total_assets >= 2,
+        "Dave should have at least 2 assets"
+    );
+
     let eve_bal = check_balances(&client, &server_address, eve_id, "Eve").await;
-    assert!(eve_bal.total_assets >= 2, "Eve should have at least 2 assets");
-    
+    assert!(
+        eve_bal.total_assets >= 2,
+        "Eve should have at least 2 assets"
+    );
+
     let frank_bal = check_balances(&client, &server_address, frank_id, "Frank").await;
-    assert!(frank_bal.total_assets >= 2, "Frank should have at least 2 assets");
-    
+    assert!(
+        frank_bal.total_assets >= 2,
+        "Frank should have at least 2 assets"
+    );
+
     let grace_bal = check_balances(&client, &server_address, grace_id, "Grace").await;
-    assert!(grace_bal.total_assets >= 2, "Grace should have at least 2 assets");
-    
+    assert!(
+        grace_bal.total_assets >= 2,
+        "Grace should have at least 2 assets"
+    );
+
     let henry_bal = check_balances(&client, &server_address, henry_id, "Henry").await;
-    assert!(henry_bal.total_assets >= 2, "Henry should have at least 2 assets");
-    
+    assert!(
+        henry_bal.total_assets >= 2,
+        "Henry should have at least 2 assets"
+    );
+
     println!("\n✅ All deposits verified successfully!");
 
     // ==================== PHASE 2: BUILD ORDER BOOK (SELL SIDE) ====================
@@ -661,7 +809,10 @@ async fn test_multi_user_trading_scenario() {
 
     // Alice: SELL ladder at 120, 130, 140
     println!("\n📤 Alice creates SELL ladder (market making):");
-    for (idx, price) in [120_00000000, 130_00000000, 140_00000000].iter().enumerate() {
+    for (idx, price) in [120_00000000, 130_00000000, 140_00000000]
+        .iter()
+        .enumerate()
+    {
         let order = OrderRequest {
             price: *price,
             volume: 1,
@@ -670,15 +821,32 @@ async fn test_multi_user_trading_scenario() {
             time_in_force: TimeInForce::Gtc,
             user_id: alice_id,
         };
-        let resp = client.post(format!("{}/test/order/place", server_address))
-            .json(&order).send().await.expect("Failed");
+        let resp = client
+            .post(format!("{}/test/order/place", server_address))
+            .json(&order)
+            .send()
+            .await
+            .expect("Failed");
         let order_resp: OrderResponse = resp.json().await.expect("Failed to parse");
-        println!("   {} SELL @ {}: Order ID: {}, Status: {}", 
-            idx + 1, price / 100000000, order_resp.order_id, order_resp.status);
-        
-        assert!(order_resp.order_id > 0, "Alice SELL order {} should have valid order_id", idx + 1);
-        assert!(order_resp.status.contains("Placed"), 
-            "Alice SELL order {} should be Placed, got: {}", idx + 1, order_resp.status);
+        println!(
+            "   {} SELL @ {}: Order ID: {}, Status: {}",
+            idx + 1,
+            price / 100000000,
+            order_resp.order_id,
+            order_resp.status
+        );
+
+        assert!(
+            order_resp.order_id > 0,
+            "Alice SELL order {} should have valid order_id",
+            idx + 1
+        );
+        assert!(
+            order_resp.status.contains("Placed"),
+            "Alice SELL order {} should be Placed, got: {}",
+            idx + 1,
+            order_resp.status
+        );
         alice_orders.push(order_resp.order_id);
     }
 
@@ -692,10 +860,17 @@ async fn test_multi_user_trading_scenario() {
         time_in_force: TimeInForce::Gtc,
         user_id: carol_id,
     };
-    let resp = client.post(format!("{}/test/order/place", server_address))
-        .json(&order).send().await.expect("Failed");
+    let resp = client
+        .post(format!("{}/test/order/place", server_address))
+        .json(&order)
+        .send()
+        .await
+        .expect("Failed");
     let carol_order_resp: OrderResponse = resp.json().await.expect("Failed to parse");
-    println!("   ✓ Order ID: {}, Status: {}", carol_order_resp.order_id, carol_order_resp.status);
+    println!(
+        "   ✓ Order ID: {}, Status: {}",
+        carol_order_resp.order_id, carol_order_resp.status
+    );
     carol_orders.push(carol_order_resp.order_id);
 
     // Eve: Large SELL at 150
@@ -708,10 +883,17 @@ async fn test_multi_user_trading_scenario() {
         time_in_force: TimeInForce::Gtc,
         user_id: eve_id,
     };
-    let resp = client.post(format!("{}/test/order/place", server_address))
-        .json(&order).send().await.expect("Failed");
+    let resp = client
+        .post(format!("{}/test/order/place", server_address))
+        .json(&order)
+        .send()
+        .await
+        .expect("Failed");
     let eve_order_resp: OrderResponse = resp.json().await.expect("Failed to parse");
-    println!("   ✓ Order ID: {}, Status: {}", eve_order_resp.order_id, eve_order_resp.status);
+    println!(
+        "   ✓ Order ID: {}, Status: {}",
+        eve_order_resp.order_id, eve_order_resp.status
+    );
     eve_orders.push(eve_order_resp.order_id);
 
     // ==================== PHASE 3: BUILD ORDER BOOK (BUY SIDE) ====================
@@ -725,7 +907,10 @@ async fn test_multi_user_trading_scenario() {
 
     // Bob: BUY ladder at 110, 105, 100
     println!("\n📤 Bob creates BUY ladder:");
-    for (idx, price) in [110_00000000, 105_00000000, 100_00000000].iter().enumerate() {
+    for (idx, price) in [110_00000000, 105_00000000, 100_00000000]
+        .iter()
+        .enumerate()
+    {
         let order = OrderRequest {
             price: *price,
             volume: 1,
@@ -734,11 +919,20 @@ async fn test_multi_user_trading_scenario() {
             time_in_force: TimeInForce::Gtc,
             user_id: bob_id,
         };
-        let resp = client.post(format!("{}/test/order/place", server_address))
-            .json(&order).send().await.expect("Failed");
+        let resp = client
+            .post(format!("{}/test/order/place", server_address))
+            .json(&order)
+            .send()
+            .await
+            .expect("Failed");
         let order_resp: OrderResponse = resp.json().await.expect("Failed to parse");
-        println!("   {} BUY @ {}: Order ID: {}, Status: {}", 
-            idx + 1, price / 100000000, order_resp.order_id, order_resp.status);
+        println!(
+            "   {} BUY @ {}: Order ID: {}, Status: {}",
+            idx + 1,
+            price / 100000000,
+            order_resp.order_id,
+            order_resp.status
+        );
         bob_orders.push(order_resp.order_id);
     }
 
@@ -752,15 +946,25 @@ async fn test_multi_user_trading_scenario() {
         time_in_force: TimeInForce::Gtc,
         user_id: dave_id,
     };
-    let resp = client.post(format!("{}/test/order/place", server_address))
-        .json(&order).send().await.expect("Failed");
+    let resp = client
+        .post(format!("{}/test/order/place", server_address))
+        .json(&order)
+        .send()
+        .await
+        .expect("Failed");
     let dave_order_resp: OrderResponse = resp.json().await.expect("Failed to parse");
-    println!("   ✓ Order ID: {}, Status: {}", dave_order_resp.order_id, dave_order_resp.status);
+    println!(
+        "   ✓ Order ID: {}, Status: {}",
+        dave_order_resp.order_id, dave_order_resp.status
+    );
     dave_orders.push(dave_order_resp.order_id);
 
     // Frank: Multiple small BUY orders (scalper)
     println!("\n📤 Frank places multiple small BUY orders (scalping):");
-    for (idx, price) in [108_00000000, 107_00000000, 106_00000000].iter().enumerate() {
+    for (idx, price) in [108_00000000, 107_00000000, 106_00000000]
+        .iter()
+        .enumerate()
+    {
         let order = OrderRequest {
             price: *price,
             volume: 1,
@@ -769,11 +973,20 @@ async fn test_multi_user_trading_scenario() {
             time_in_force: TimeInForce::Gtc,
             user_id: frank_id,
         };
-        let resp = client.post(format!("{}/test/order/place", server_address))
-            .json(&order).send().await.expect("Failed");
+        let resp = client
+            .post(format!("{}/test/order/place", server_address))
+            .json(&order)
+            .send()
+            .await
+            .expect("Failed");
         let order_resp: OrderResponse = resp.json().await.expect("Failed to parse");
-        println!("   {} BUY @ {}: Order ID: {}, Status: {}", 
-            idx + 1, price / 100000000, order_resp.order_id, order_resp.status);
+        println!(
+            "   {} BUY @ {}: Order ID: {}, Status: {}",
+            idx + 1,
+            price / 100000000,
+            order_resp.order_id,
+            order_resp.status
+        );
         frank_orders.push(order_resp.order_id);
     }
 
@@ -787,10 +1000,17 @@ async fn test_multi_user_trading_scenario() {
         time_in_force: TimeInForce::Gtc,
         user_id: henry_id,
     };
-    let resp = client.post(format!("{}/test/order/place", server_address))
-        .json(&order).send().await.expect("Failed");
+    let resp = client
+        .post(format!("{}/test/order/place", server_address))
+        .json(&order)
+        .send()
+        .await
+        .expect("Failed");
     let henry_order_resp: OrderResponse = resp.json().await.expect("Failed to parse");
-    println!("   ✓ Order ID: {}, Status: {}", henry_order_resp.order_id, henry_order_resp.status);
+    println!(
+        "   ✓ Order ID: {}, Status: {}",
+        henry_order_resp.order_id, henry_order_resp.status
+    );
     henry_orders.push(henry_order_resp.order_id);
 
     println!("\n⏳ Waiting 5s for orders to sync to Redis/DB...");
@@ -800,57 +1020,94 @@ async fn test_multi_user_trading_scenario() {
     // Print manual verification commands
     println!("\n🔍 DEBUG: If orders not found, manually check:");
     println!("   docker exec vex-kafka-pipeline-redis-1 redis-cli -p 6379 KEYS 'order:*'");
-    println!("   docker exec vex-kafka-pipeline-redis-1 redis-cli -p 6379 KEYS 'user:10001:orders'");
-    println!("   docker exec vex-kafka-pipeline-redis-1 redis-cli -p 6379 SMEMBERS user:10001:orders");
+    println!(
+        "   docker exec vex-kafka-pipeline-redis-1 redis-cli -p 6379 KEYS 'user:10001:orders'"
+    );
+    println!(
+        "   docker exec vex-kafka-pipeline-redis-1 redis-cli -p 6379 SMEMBERS user:10001:orders"
+    );
     println!("   docker exec -it vex-kafka-pipeline-postgres-1 psql -U postgres -d trading_db -c \"SELECT * FROM trading.orders_events WHERE order_user_id = 10001;\"");
     println!();
 
     // Check balances after BUY orders - ASSERT locked funds
     println!("\n--- Balances After BUY Orders (should see locked quote) ---");
     let bob_bal_after = check_balances(&client, &server_address, bob_id, "Bob").await;
-    let bob_quote_bal = bob_bal_after.balances.iter().find(|b| b.asset_id == quote_asset_id).unwrap();
-    assert!(bob_quote_bal.locked > 0, 
-        "Bob should have locked quote funds after placing BUY orders, got locked={}", bob_quote_bal.locked);
-    println!("   ✅ Bob has {} locked quote (correct!)", bob_quote_bal.locked);
-    
+    let bob_quote_bal = bob_bal_after
+        .balances
+        .iter()
+        .find(|b| b.asset_id == quote_asset_id)
+        .unwrap();
+    assert!(
+        bob_quote_bal.locked > 0,
+        "Bob should have locked quote funds after placing BUY orders, got locked={}",
+        bob_quote_bal.locked
+    );
+    println!(
+        "   ✅ Bob has {} locked quote (correct!)",
+        bob_quote_bal.locked
+    );
+
     let frank_bal_after = check_balances(&client, &server_address, frank_id, "Frank").await;
-    let frank_quote_bal = frank_bal_after.balances.iter().find(|b| b.asset_id == quote_asset_id).unwrap();
-    assert!(frank_quote_bal.locked > 0, 
-        "Frank should have locked quote funds after placing BUY orders");
-    println!("   ✅ Frank has {} locked quote (correct!)", frank_quote_bal.locked);
+    let frank_quote_bal = frank_bal_after
+        .balances
+        .iter()
+        .find(|b| b.asset_id == quote_asset_id)
+        .unwrap();
+    assert!(
+        frank_quote_bal.locked > 0,
+        "Frank should have locked quote funds after placing BUY orders"
+    );
+    println!(
+        "   ✅ Frank has {} locked quote (correct!)",
+        frank_quote_bal.locked
+    );
 
     // Check open orders - ASSERT counts
     println!("\n--- Open Orders After Building Book ---");
     let alice_orders_list = check_orders(&client, &server_address, alice_id, "Alice").await;
-    
+
     if alice_orders_list.total != 3 {
-        println!("\n❌ ASSERTION FAILURE: Alice should have 3 orders but has {}", alice_orders_list.total);
+        println!(
+            "\n❌ ASSERTION FAILURE: Alice should have 3 orders but has {}",
+            alice_orders_list.total
+        );
         println!("   Expected order IDs: {:?}", alice_orders);
         println!("   Run these commands to debug:");
         println!("   docker exec vex-kafka-pipeline-redis-1 redis-cli -p 6379 SMEMBERS user:10001:orders");
-        println!("   docker exec vex-kafka-pipeline-redis-1 redis-cli -p 6379 HGETALL order:{}", alice_orders[0]);
+        println!(
+            "   docker exec vex-kafka-pipeline-redis-1 redis-cli -p 6379 HGETALL order:{}",
+            alice_orders[0]
+        );
         println!("   Check Kafka consumer logs: docker-compose logs trading-events-consumer | grep 10001");
     }
-    assert_eq!(alice_orders_list.total, 3, 
-        "Alice should have 3 SELL orders, but has {}. Orders may not have synced to Redis/DB yet.", 
-        alice_orders_list.total);
-    
+    assert_eq!(
+        alice_orders_list.total, 3,
+        "Alice should have 3 SELL orders, but has {}. Orders may not have synced to Redis/DB yet.",
+        alice_orders_list.total
+    );
+
     let bob_orders_list = check_orders(&client, &server_address, bob_id, "Bob").await;
     assert_eq!(bob_orders_list.total, 3, "Bob should have 3 BUY orders");
-    
+
     let carol_orders_list = check_orders(&client, &server_address, carol_id, "Carol").await;
     assert_eq!(carol_orders_list.total, 1, "Carol should have 1 SELL order");
-    
+
     let frank_orders_list = check_orders(&client, &server_address, frank_id, "Frank").await;
     assert_eq!(frank_orders_list.total, 3, "Frank should have 3 BUY orders");
-    
+
     let henry_orders_list = check_orders(&client, &server_address, henry_id, "Henry").await;
     assert_eq!(henry_orders_list.total, 1, "Henry should have 1 BUY order");
 
     println!("\n📊 Order Book Status:");
-    println!("   Total SELL orders: {}", alice_orders_list.total + carol_orders_list.total + 1); // Alice + Carol + Eve
-    println!("   Total BUY orders: {}", bob_orders_list.total + frank_orders_list.total + henry_orders_list.total + 1); // Bob + Dave + Frank + Henry
-    
+    println!(
+        "   Total SELL orders: {}",
+        alice_orders_list.total + carol_orders_list.total + 1
+    ); // Alice + Carol + Eve
+    println!(
+        "   Total BUY orders: {}",
+        bob_orders_list.total + frank_orders_list.total + henry_orders_list.total + 1
+    ); // Bob + Dave + Frank + Henry
+
     println!("\n✅ All orders placed and verified!");
 
     // ==================== PHASE 4: AGGRESSIVE MATCHING ORDERS ====================
@@ -868,13 +1125,24 @@ async fn test_multi_user_trading_scenario() {
         time_in_force: TimeInForce::Ioc,
         user_id: grace_id,
     };
-    let resp = client.post(format!("{}/test/order/place", server_address))
-        .json(&grace_order).send().await.expect("Failed");
+    let resp = client
+        .post(format!("{}/test/order/place", server_address))
+        .json(&grace_order)
+        .send()
+        .await
+        .expect("Failed");
     let grace_order_resp: OrderResponse = resp.json().await.expect("Failed to parse");
-    println!("   ✓ Order ID: {}, Status: {}", grace_order_resp.order_id, grace_order_resp.status);
-    
-    assert!(grace_order_resp.status.contains("Filled") || grace_order_resp.status.contains("PartiallyFilled"),
-        "Grace's IOC order should be Filled or PartiallyFilled, got: {}", grace_order_resp.status);
+    println!(
+        "   ✓ Order ID: {}, Status: {}",
+        grace_order_resp.order_id, grace_order_resp.status
+    );
+
+    assert!(
+        grace_order_resp.status.contains("Filled")
+            || grace_order_resp.status.contains("PartiallyFilled"),
+        "Grace's IOC order should be Filled or PartiallyFilled, got: {}",
+        grace_order_resp.status
+    );
 
     // Eve: Aggressive BUY - matches multiple SELL orders
     println!("\n📤 Eve places large BUY @ 140 (should sweep the book!):");
@@ -886,14 +1154,25 @@ async fn test_multi_user_trading_scenario() {
         time_in_force: TimeInForce::Gtc,
         user_id: eve_id,
     };
-    let resp = client.post(format!("{}/test/order/place", server_address))
-        .json(&eve_buy_order).send().await.expect("Failed");
+    let resp = client
+        .post(format!("{}/test/order/place", server_address))
+        .json(&eve_buy_order)
+        .send()
+        .await
+        .expect("Failed");
     let eve_buy_resp: OrderResponse = resp.json().await.expect("Failed to parse");
-    println!("   ✓ Order ID: {}, Status: {} (should be Filled or PartiallyFilled!)", 
-        eve_buy_resp.order_id, eve_buy_resp.status);
-    
-    assert!(eve_buy_resp.status.contains("Filled") || eve_buy_resp.status.contains("PartiallyFilled") || eve_buy_resp.status.contains("Placed"),
-        "Eve's aggressive BUY should execute or rest, got: {}", eve_buy_resp.status);
+    println!(
+        "   ✓ Order ID: {}, Status: {} (should be Filled or PartiallyFilled!)",
+        eve_buy_resp.order_id, eve_buy_resp.status
+    );
+
+    assert!(
+        eve_buy_resp.status.contains("Filled")
+            || eve_buy_resp.status.contains("PartiallyFilled")
+            || eve_buy_resp.status.contains("Placed"),
+        "Eve's aggressive BUY should execute or rest, got: {}",
+        eve_buy_resp.status
+    );
 
     // Henry: High SELL - becomes best ask
     println!("\n📤 Henry places SELL @ 160:");
@@ -905,10 +1184,17 @@ async fn test_multi_user_trading_scenario() {
         time_in_force: TimeInForce::Gtc,
         user_id: henry_id,
     };
-    let resp = client.post(format!("{}/test/order/place", server_address))
-        .json(&henry_sell_order).send().await.expect("Failed");
+    let resp = client
+        .post(format!("{}/test/order/place", server_address))
+        .json(&henry_sell_order)
+        .send()
+        .await
+        .expect("Failed");
     let henry_sell_resp: OrderResponse = resp.json().await.expect("Failed to parse");
-    println!("   ✓ Order ID: {}, Status: {}", henry_sell_resp.order_id, henry_sell_resp.status);
+    println!(
+        "   ✓ Order ID: {}, Status: {}",
+        henry_sell_resp.order_id, henry_sell_resp.status
+    );
 
     // Check balances after matching
     println!("\n⏳ Waiting 2s for trades to sync...");
@@ -916,33 +1202,56 @@ async fn test_multi_user_trading_scenario() {
 
     println!("\n--- Balances After Matching Trades ---");
     let alice_bal_after_trade = check_balances(&client, &server_address, alice_id, "Alice").await;
-    let alice_quote_after = alice_bal_after_trade.balances.iter()
-        .find(|b| b.asset_id == quote_asset_id).unwrap();
-    
+    let alice_quote_after = alice_bal_after_trade
+        .balances
+        .iter()
+        .find(|b| b.asset_id == quote_asset_id)
+        .unwrap();
+
     // Alice SOLD, so quote should INCREASE
-    let alice_quote_before = alice_bal.balances.iter().find(|b| b.asset_id == quote_asset_id).unwrap();
-    assert!(alice_quote_after.total >= alice_quote_before.total,
-        "Alice's quote should increase or stay same after SELL, before={} after={}", 
-        alice_quote_before.total, alice_quote_after.total);
+    let alice_quote_before = alice_bal
+        .balances
+        .iter()
+        .find(|b| b.asset_id == quote_asset_id)
+        .unwrap();
+    assert!(
+        alice_quote_after.total >= alice_quote_before.total,
+        "Alice's quote should increase or stay same after SELL, before={} after={}",
+        alice_quote_before.total,
+        alice_quote_after.total
+    );
     println!("   ✅ Alice's quote balance changed correctly (SELL executed)");
-    
+
     let grace_bal_after_trade = check_balances(&client, &server_address, grace_id, "Grace").await;
-    let grace_base_after = grace_bal_after_trade.balances.iter()
-        .find(|b| b.asset_id == base_asset_id).unwrap();
-    
+    let grace_base_after = grace_bal_after_trade
+        .balances
+        .iter()
+        .find(|b| b.asset_id == base_asset_id)
+        .unwrap();
+
     // Grace BOUGHT, so base should INCREASE
-    let grace_base_before = grace_bal.balances.iter().find(|b| b.asset_id == base_asset_id).unwrap();
-    assert!(grace_base_after.total > grace_base_before.total,
-        "Grace's base should increase after BUY, before={} after={}", 
-        grace_base_before.total, grace_base_after.total);
+    let grace_base_before = grace_bal
+        .balances
+        .iter()
+        .find(|b| b.asset_id == base_asset_id)
+        .unwrap();
+    assert!(
+        grace_base_after.total > grace_base_before.total,
+        "Grace's base should increase after BUY, before={} after={}",
+        grace_base_before.total,
+        grace_base_after.total
+    );
     println!("   ✅ Grace's base balance increased (BUY executed)");
 
     println!("\n--- Open Orders After Trades ---");
     let grace_orders_after = check_orders(&client, &server_address, grace_id, "Grace").await;
-    assert_eq!(grace_orders_after.total, 0, 
-        "Grace's IOC order should not rest in book, found {} orders", grace_orders_after.total);
+    assert_eq!(
+        grace_orders_after.total, 0,
+        "Grace's IOC order should not rest in book, found {} orders",
+        grace_orders_after.total
+    );
     println!("   ✅ Grace has no open orders (IOC filled and removed)");
-    
+
     check_orders(&client, &server_address, alice_id, "Alice").await;
     check_orders(&client, &server_address, eve_id, "Eve").await;
 
@@ -959,13 +1268,20 @@ async fn test_multi_user_trading_scenario() {
             market_id,
             user_id: dave_id,
         };
-        let resp = client.post(format!("{}/test/order/cancel", server_address))
-            .json(&cancel_req).send().await.expect("Failed");
+        let resp = client
+            .post(format!("{}/test/order/cancel", server_address))
+            .json(&cancel_req)
+            .send()
+            .await
+            .expect("Failed");
         let cancel_resp: OrderResponse = resp.json().await.expect("Failed to parse");
         println!("   ✓ Cancel Status: {}", cancel_resp.status);
-        
-        assert!(cancel_resp.status.contains("Cancelled"),
-            "Dave's cancel should succeed, got: {}", cancel_resp.status);
+
+        assert!(
+            cancel_resp.status.contains("Cancelled"),
+            "Dave's cancel should succeed, got: {}",
+            cancel_resp.status
+        );
     }
 
     // Frank cancels one of his orders
@@ -976,8 +1292,12 @@ async fn test_multi_user_trading_scenario() {
             market_id,
             user_id: frank_id,
         };
-        let resp = client.post(format!("{}/test/order/cancel", server_address))
-            .json(&cancel_req).send().await.expect("Failed");
+        let resp = client
+            .post(format!("{}/test/order/cancel", server_address))
+            .json(&cancel_req)
+            .send()
+            .await
+            .expect("Failed");
         let cancel_resp: OrderResponse = resp.json().await.expect("Failed to parse");
         println!("   ✓ Cancel Status: {}", cancel_resp.status);
     }
@@ -988,28 +1308,46 @@ async fn test_multi_user_trading_scenario() {
     // Check balances and orders after cancellations - ASSERT funds unlocked
     println!("\n--- Balances After Cancellations ---");
     let dave_bal_after_cancel = check_balances(&client, &server_address, dave_id, "Dave").await;
-    let dave_quote_after = dave_bal_after_cancel.balances.iter()
-        .find(|b| b.asset_id == quote_asset_id).unwrap();
-    
+    let dave_quote_after = dave_bal_after_cancel
+        .balances
+        .iter()
+        .find(|b| b.asset_id == quote_asset_id)
+        .unwrap();
+
     // Dave's quote should be fully unlocked after cancel
-    let dave_bal_before = dave_bal.balances.iter().find(|b| b.asset_id == quote_asset_id).unwrap();
-    assert_eq!(dave_quote_after.locked, 0, 
-        "Dave's quote should be unlocked after cancel, got locked={}", dave_quote_after.locked);
-    assert_eq!(dave_quote_after.total, dave_bal_before.total,
-        "Dave's total quote should match original after cancel");
+    let dave_bal_before = dave_bal
+        .balances
+        .iter()
+        .find(|b| b.asset_id == quote_asset_id)
+        .unwrap();
+    assert_eq!(
+        dave_quote_after.locked, 0,
+        "Dave's quote should be unlocked after cancel, got locked={}",
+        dave_quote_after.locked
+    );
+    assert_eq!(
+        dave_quote_after.total, dave_bal_before.total,
+        "Dave's total quote should match original after cancel"
+    );
     println!("   ✅ Dave's funds unlocked after cancellation");
-    
+
     check_balances(&client, &server_address, frank_id, "Frank").await;
 
     println!("\n--- Open Orders After Cancellations ---");
     let dave_orders_after = check_orders(&client, &server_address, dave_id, "Dave").await;
-    assert_eq!(dave_orders_after.total, 0, 
-        "Dave should have 0 orders after cancellation, found {}", dave_orders_after.total);
+    assert_eq!(
+        dave_orders_after.total, 0,
+        "Dave should have 0 orders after cancellation, found {}",
+        dave_orders_after.total
+    );
     println!("   ✅ Dave's order removed from open orders");
-    
+
     let frank_orders_after = check_orders(&client, &server_address, frank_id, "Frank").await;
-    assert_eq!(frank_orders_after.total, 2, 
-        "Frank should have 2 orders remaining (cancelled 1 of 3), found {}", frank_orders_after.total);
+    assert_eq!(
+        frank_orders_after.total, 2,
+        "Frank should have 2 orders remaining (cancelled 1 of 3), found {}",
+        frank_orders_after.total
+    );
     println!("   ✅ Frank has 2 remaining orders (cancelled 1)");
 
     // ==================== PHASE 6: FINAL STATE ====================
@@ -1019,55 +1357,99 @@ async fn test_multi_user_trading_scenario() {
 
     println!("\n--- Final Balances (ALL users must have valid state) ---");
     let final_alice = check_balances(&client, &server_address, alice_id, "Alice").await;
-    assert!(final_alice.total_assets >= 2, "Alice final: should have 2 assets");
-    
+    assert!(
+        final_alice.total_assets >= 2,
+        "Alice final: should have 2 assets"
+    );
+
     let final_bob = check_balances(&client, &server_address, bob_id, "Bob").await;
-    assert!(final_bob.total_assets >= 2, "Bob final: should have 2 assets");
-    
+    assert!(
+        final_bob.total_assets >= 2,
+        "Bob final: should have 2 assets"
+    );
+
     let final_carol = check_balances(&client, &server_address, carol_id, "Carol").await;
-    assert!(final_carol.total_assets >= 2, "Carol final: should have 2 assets");
-    
+    assert!(
+        final_carol.total_assets >= 2,
+        "Carol final: should have 2 assets"
+    );
+
     let final_dave = check_balances(&client, &server_address, dave_id, "Dave").await;
-    assert!(final_dave.total_assets >= 2, "Dave final: should have 2 assets");
-    assert_eq!(final_dave.balances.iter().find(|b| b.asset_id == quote_asset_id).unwrap().locked, 0,
-        "Dave final: should have 0 locked quote after cancel");
-    
+    assert!(
+        final_dave.total_assets >= 2,
+        "Dave final: should have 2 assets"
+    );
+    assert_eq!(
+        final_dave
+            .balances
+            .iter()
+            .find(|b| b.asset_id == quote_asset_id)
+            .unwrap()
+            .locked,
+        0,
+        "Dave final: should have 0 locked quote after cancel"
+    );
+
     let final_eve = check_balances(&client, &server_address, eve_id, "Eve").await;
-    assert!(final_eve.total_assets >= 2, "Eve final: should have 2 assets");
-    
+    assert!(
+        final_eve.total_assets >= 2,
+        "Eve final: should have 2 assets"
+    );
+
     let final_frank = check_balances(&client, &server_address, frank_id, "Frank").await;
-    assert!(final_frank.total_assets >= 2, "Frank final: should have 2 assets");
-    
+    assert!(
+        final_frank.total_assets >= 2,
+        "Frank final: should have 2 assets"
+    );
+
     let final_grace = check_balances(&client, &server_address, grace_id, "Grace").await;
-    assert!(final_grace.total_assets >= 2, "Grace final: should have 2 assets");
-    
+    assert!(
+        final_grace.total_assets >= 2,
+        "Grace final: should have 2 assets"
+    );
+
     let final_henry = check_balances(&client, &server_address, henry_id, "Henry").await;
-    assert!(final_henry.total_assets >= 2, "Henry final: should have 2 assets");
+    assert!(
+        final_henry.total_assets >= 2,
+        "Henry final: should have 2 assets"
+    );
 
     println!("\n--- Final Open Orders (verify counts) ---");
     let _final_alice_orders = check_orders(&client, &server_address, alice_id, "Alice").await;
     // Alice had 3 SELL orders, some may have matched
-    
+
     let final_bob_orders = check_orders(&client, &server_address, bob_id, "Bob").await;
-    assert_eq!(final_bob_orders.total, 3, "Bob should still have 3 resting BUY orders");
+    assert_eq!(
+        final_bob_orders.total, 3,
+        "Bob should still have 3 resting BUY orders"
+    );
     println!("   ✅ Bob still has 3 BUY orders");
-    
+
     let _final_carol_orders = check_orders(&client, &server_address, carol_id, "Carol").await;
-    
+
     let final_dave_orders = check_orders(&client, &server_address, dave_id, "Dave").await;
-    assert_eq!(final_dave_orders.total, 0, "Dave should have 0 orders after cancel");
+    assert_eq!(
+        final_dave_orders.total, 0,
+        "Dave should have 0 orders after cancel"
+    );
     println!("   ✅ Dave has 0 orders (cancelled)");
-    
+
     let _final_eve_orders = check_orders(&client, &server_address, eve_id, "Eve").await;
-    
+
     let final_frank_orders = check_orders(&client, &server_address, frank_id, "Frank").await;
-    assert_eq!(final_frank_orders.total, 2, "Frank should have 2 orders (cancelled 1 of 3)");
+    assert_eq!(
+        final_frank_orders.total, 2,
+        "Frank should have 2 orders (cancelled 1 of 3)"
+    );
     println!("   ✅ Frank has 2 remaining orders");
-    
+
     let final_henry_orders = check_orders(&client, &server_address, henry_id, "Henry").await;
-    assert_eq!(final_henry_orders.total, 2, "Henry should have 2 orders (1 BUY + 1 SELL)");
+    assert_eq!(
+        final_henry_orders.total, 2,
+        "Henry should have 2 orders (1 BUY + 1 SELL)"
+    );
     println!("   ✅ Henry has 2 orders");
-    
+
     println!("\n✅ All final states verified with assertions!");
 
     // ==================== SUMMARY ====================
@@ -1081,7 +1463,7 @@ async fn test_multi_user_trading_scenario() {
     println!("✅ PHASE 4: Trades executed - ASSERTED balance changes");
     println!("✅ PHASE 5: Cancellations - ASSERTED funds unlocked & orders removed");
     println!("✅ PHASE 6: Final state - ALL USERS ASSERTED");
-    
+
     println!("\n📈 Assertions Verified:");
     println!("   ✓ All deposits created balances with correct amounts");
     println!("   ✓ All orders placed with correct order IDs");
@@ -1092,7 +1474,6 @@ async fn test_multi_user_trading_scenario() {
     println!("   ✓ Cancelled orders removed from open orders");
     println!("   ✓ All balance totals = available + locked");
     println!("   ✓ Order counts match actual orders retrieved");
-    
+
     println!("\n🎉 Complex multi-user trading test completed with FULL ASSERTIONS!\n");
 }
-

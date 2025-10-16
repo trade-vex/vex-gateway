@@ -69,7 +69,10 @@ pub async fn signup(
         .send_verification_email(&created_user.email, &created_user.username)
         .await
     {
-        tracing::warn!("Failed to send verification email (this is expected in development): {}", e);
+        tracing::warn!(
+            "Failed to send verification email (this is expected in development): {}",
+            e
+        );
     }
 
     let user_info = UserInfo::from(created_user);

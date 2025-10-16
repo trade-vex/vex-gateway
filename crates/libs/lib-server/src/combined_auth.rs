@@ -7,7 +7,7 @@ use lib_auth::middleware::jwt_auth::JwtAuthentication;
 use lib_middleware::api_key::middleware::ApiKeyMiddleware;
 use std::{rc::Rc, sync::Arc};
 use tokio::sync::Mutex as TokioMutex;
-use tracing::{error};
+use tracing::error;
 
 #[derive(Clone)]
 pub struct CombinedAuthMiddleware {
@@ -16,7 +16,10 @@ pub struct CombinedAuthMiddleware {
 }
 
 impl CombinedAuthMiddleware {
-    pub fn new(jwt_middleware: JwtAuthentication, api_key_middleware: Arc<TokioMutex<ApiKeyMiddleware>>) -> Self {
+    pub fn new(
+        jwt_middleware: JwtAuthentication,
+        api_key_middleware: Arc<TokioMutex<ApiKeyMiddleware>>,
+    ) -> Self {
         Self {
             jwt_middleware,
             api_key_middleware,
@@ -103,8 +106,11 @@ where
 
                 AuthType::ApiKey => {
                     let api_key_middleware = api_key_middleware.lock().await;
-                    let api_key_service = api_key_middleware.new_transform(service.clone()).await.unwrap();
-                    
+                    let api_key_service = api_key_middleware
+                        .new_transform(service.clone())
+                        .await
+                        .unwrap();
+
                     let response = api_key_service.call(req).await?;
                     Ok(response.map_into_boxed_body())
                 }

@@ -31,7 +31,8 @@ pub fn create_app(
     );
 
     // Create combined auth middleware using the API key middleware from AppState
-    let combined_auth_middleware = CombinedAuthMiddleware::new(jwt_middleware, app_state.api_key_middleware.clone());
+    let combined_auth_middleware =
+        CombinedAuthMiddleware::new(jwt_middleware, app_state.api_key_middleware.clone());
 
     App::new()
         .app_data(web::Data::new(app_state.clone()))
@@ -65,7 +66,7 @@ pub fn create_app(
                         .service(
                             web::scope("/api-key")
                                 .app_data(web::Data::new(app_state.api_key_repository.clone()))
-                                .configure(routes::api_key_routes::configure)
+                                .configure(routes::api_key_routes::configure),
                         )
                         .service(web::scope("/order").configure(routes::order_route::configure))
                         .service(web::scope("/user").configure(routes::user_route::configure)),

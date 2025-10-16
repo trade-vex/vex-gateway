@@ -70,7 +70,7 @@ impl TradingRepository for PostgresTradingRepository {
         // Query trading.balances_events by user_id
         // Note: Kafka writes user_id as i64, but we receive Uuid from API
         let user_id_i64 = user_id.as_u128() as i64;
-        
+
         UserBalanceEntity::find()
             .filter(UserBalanceColumn::UserId.eq(user_id_i64))
             .order_by_desc(UserBalanceColumn::Timestamp)
@@ -81,7 +81,7 @@ impl TradingRepository for PostgresTradingRepository {
 
     async fn get_user_balance(&self, user_id: Uuid) -> Result<Option<UserBalanceModel>> {
         let user_id_i64 = user_id.as_u128() as i64;
-        
+
         UserBalanceEntity::find()
             .filter(UserBalanceColumn::UserId.eq(user_id_i64))
             .order_by_desc(UserBalanceColumn::Timestamp)
@@ -93,7 +93,7 @@ impl TradingRepository for PostgresTradingRepository {
     async fn update_user_balance(&self, user_id: Uuid, available: u64, locked: u64) -> Result<()> {
         let user_id_i64 = user_id.as_u128() as i64;
         let total = available + locked;
-        
+
         // Insert new balance event (this is an event log table, not mutable state)
         let balance = UserBalanceActiveModel {
             user_id: Set(user_id_i64),
@@ -112,7 +112,7 @@ impl TradingRepository for PostgresTradingRepository {
     async fn create_user_balance(&self, user_id: Uuid, available: u64, locked: u64) -> Result<()> {
         let user_id_i64 = user_id.as_u128() as i64;
         let total = available + locked;
-        
+
         let balance = UserBalanceActiveModel {
             user_id: Set(user_id_i64),
             asset_id: Set(0), // Default asset, adjust as needed
@@ -130,7 +130,7 @@ impl TradingRepository for PostgresTradingRepository {
     async fn get_open_orders(&self, user_id: Uuid) -> Result<Vec<OrderModel>> {
         // Query trading.orders_events by order_user_id
         let user_id_i64 = user_id.as_u128() as i64;
-        
+
         OrderEntity::find()
             .filter(OrderColumn::OrderUserId.eq(user_id_i64))
             .order_by_desc(OrderColumn::OrderTimestamp)
@@ -141,7 +141,7 @@ impl TradingRepository for PostgresTradingRepository {
 
     async fn get_order_by_id(&self, order_id: u64, user_id: Uuid) -> Result<Option<OrderModel>> {
         let user_id_i64 = user_id.as_u128() as i64;
-        
+
         OrderEntity::find()
             .filter(
                 OrderColumn::OrderOrderId
@@ -171,7 +171,7 @@ impl TradingRepository for PostgresTradingRepository {
 
     async fn count_user_orders(&self, user_id: Uuid) -> Result<u64> {
         let user_id_i64 = user_id.as_u128() as i64;
-        
+
         let count = OrderEntity::find()
             .filter(OrderColumn::OrderUserId.eq(user_id_i64))
             .count(&*self.db)

@@ -19,9 +19,8 @@
 use actix_web::{web, App, HttpResponse, HttpServer, Result};
 use common::{OrderCommand, OrderCommandType, Side, Status, TimeInForce, UserBalance};
 use lib_core::{
-    generate_client_order_id, wait_for_response, CorrelationService,
-    OrderCacheConfig, OrderStore, OrdersListResponse, Publisher,
-    UserBalanceCacheConfig, UserBalanceStore,
+    generate_client_order_id, wait_for_response, CorrelationService, OrderCacheConfig, OrderStore,
+    OrdersListResponse, Publisher, UserBalanceCacheConfig, UserBalanceStore,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -332,8 +331,7 @@ fn spawn_test_server(
     balance_store: UserBalanceStore,
     order_store: OrderStore,
 ) -> String {
-    let listener =
-        std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to bind random port");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to bind random port");
     let port = listener.local_addr().unwrap().port();
 
     let publisher = Arc::new(tokio::sync::Mutex::new(publisher));
@@ -376,23 +374,27 @@ async fn test_high_frequency_stress_test() {
     println!("╚═══════════════════════════════════════════════════════════════╝\n");
 
     // Setup
-    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6380".to_string());
-    
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6380".to_string());
+
     // Initialize VEX Gateway
     let mut gateway_config = vex_config::GatewayNetworkingConfig::development_defaults();
-    gateway_config.context_dir = "/Users/adityaanand/vex-backend/vex-core/aeron-test-server".to_string();
-    
+    gateway_config.context_dir =
+        "/Users/adityaanand/vex-backend/vex-core/aeron-test-server".to_string();
+
     let mut gateway_client = vex_networking::client::VexGateway::new(gateway_config)
         .expect("Failed to initialize VexGateway");
-    
+
     let correlation_service = CorrelationService::new();
     let handler = lib_server::CorrelationHandler::new(
         gateway_client.gateway_id(),
         correlation_service.clone(),
     );
-    
-    let publisher = gateway_client.start(handler).expect("Failed to start VexGateway");
-    
+
+    let publisher = gateway_client
+        .start(handler)
+        .expect("Failed to start VexGateway");
+
     let balance_store = UserBalanceStore::with_redis_cache(
         UserBalanceCacheConfig {
             ttl: Duration::from_secs(300),
@@ -415,8 +417,9 @@ async fn test_high_frequency_stress_test() {
     .await
     .expect("Failed to create OrderStore");
 
-    let server_address = spawn_test_server(publisher, correlation_service, balance_store, order_store);
-    
+    let server_address =
+        spawn_test_server(publisher, correlation_service, balance_store, order_store);
+
     println!("🚀 Server: {}", server_address);
     println!("⏳ Waiting 10s for Kafka topics to initialize...");
     tokio::time::sleep(Duration::from_secs(10)).await;
@@ -429,7 +432,7 @@ async fn test_high_frequency_stress_test() {
 
     // 10 users
     let users: Vec<u64> = (20001..=20010).collect();
-    
+
     // ==================== PHASE 1: RAPID DEPOSITS ====================
     println!("╔═══════════════════════════════════════════════════════════════╗");
     println!("║  PHASE 1: Rapid Deposits (10 users, 20 deposits)             ║");
@@ -537,7 +540,7 @@ async fn test_high_frequency_stress_test() {
 
     let mut total_cancelled = 0;
     let mut total_before_cancel = 0;
-    
+
     // For each user, get CURRENT open orders (after matching) and cancel half
     for user_id in &users {
         let orders_resp = client
@@ -546,18 +549,21 @@ async fn test_high_frequency_stress_test() {
             .await
             .expect("Failed");
         let orders_data: OrdersListResponse = orders_resp.json().await.expect("Failed");
-        
+
         total_before_cancel += orders_data.total;
-        
+
         if orders_data.total > 0 {
-            println!("User {}: {} open orders (cancelling half)", user_id, orders_data.total);
-            
+            println!(
+                "User {}: {} open orders (cancelling half)",
+                user_id, orders_data.total
+            );
+
             // Cancel half of this user's UNFILLED orders
             let cancel_count = (orders_data.total / 2).max(1); // Cancel at least 1
             for i in 0..cancel_count.min(orders_data.orders.len()) {
                 let order = &orders_data.orders[i];
                 let order_id = order.order_id; // Already u64
-                
+
                 let resp = client
                     .post(format!("{}/test/order/cancel", server_address))
                     .json(&CancelOrderRequest {
@@ -569,7 +575,7 @@ async fn test_high_frequency_stress_test() {
                     .await
                     .expect("Failed");
                 let cancel_resp: crate::OrderResponse = resp.json().await.expect("Failed");
-                
+
                 if cancel_resp.status.contains("Cancelled") {
                     total_cancelled += 1;
                     print!("✓");
@@ -582,8 +588,14 @@ async fn test_high_frequency_stress_test() {
         }
     }
 
-    println!("\n✅ {} of {} orders cancelled!\n", total_cancelled, total_before_cancel);
-    println!("   {} orders were already filled", 200 - total_before_cancel);
+    println!(
+        "\n✅ {} of {} orders cancelled!\n",
+        total_cancelled, total_before_cancel
+    );
+    println!(
+        "   {} orders were already filled",
+        200 - total_before_cancel
+    );
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -615,11 +627,18 @@ async fn test_high_frequency_stress_test() {
             .expect("Failed");
         let orders_data: OrdersListResponse = orders_resp.json().await.expect("Failed");
 
-        println!("User {}: {} assets, {} open orders", user_id, balance_data.total_assets, orders_data.total);
+        println!(
+            "User {}: {} assets, {} open orders",
+            user_id, balance_data.total_assets, orders_data.total
+        );
 
         // Each user must have both assets
-        assert!(balance_data.total_assets >= 2, "User {} should have at least 2 assets", user_id);
-        
+        assert!(
+            balance_data.total_assets >= 2,
+            "User {} should have at least 2 assets",
+            user_id
+        );
+
         // Accumulate system-wide totals for conservation check
         for balance in &balance_data.balances {
             let total: u64 = balance.total.parse().unwrap_or(0);
@@ -636,30 +655,48 @@ async fn test_high_frequency_stress_test() {
     // CRITICAL: System-wide fund conservation (total across all users = initial deposits)
     let expected_total_base = initial_base * (users.len() as u64);
     let expected_total_quote = initial_quote * (users.len() as u64);
-    
+
     println!("\n📊 System-Wide Fund Conservation Check:");
-    println!("  Total Base:  {} (expected {})", total_base_balance, expected_total_base);
-    println!("  Total Quote: {} (expected {})", total_quote_balance, expected_total_quote);
-    
-    assert_eq!(total_base_balance, expected_total_base, 
-        "Total base across ALL users must equal initial deposits (conservation of funds)");
-    assert_eq!(total_quote_balance, expected_total_quote,
-        "Total quote across ALL users must equal initial deposits (conservation of funds)");
+    println!(
+        "  Total Base:  {} (expected {})",
+        total_base_balance, expected_total_base
+    );
+    println!(
+        "  Total Quote: {} (expected {})",
+        total_quote_balance, expected_total_quote
+    );
+
+    assert_eq!(
+        total_base_balance, expected_total_base,
+        "Total base across ALL users must equal initial deposits (conservation of funds)"
+    );
+    assert_eq!(
+        total_quote_balance, expected_total_quote,
+        "Total quote across ALL users must equal initial deposits (conservation of funds)"
+    );
 
     println!("\n📊 Final Statistics:");
     println!("  - Total open orders: {}", total_open_orders);
     println!("  - Cancellations executed: {}", total_cancelled);
     println!("  - Orders placed: 200");
-    println!("  - Trades executed: ~{}", 200 - total_open_orders - total_cancelled);
+    println!(
+        "  - Trades executed: ~{}",
+        200 - total_open_orders - total_cancelled
+    );
 
     println!("\n✅ STRESS TEST COMPLETE!\n");
     println!("Summary:");
     println!("  - Orders placed: 200 in {:?}", elapsed);
-    println!("  - Orders per second: {:.0}", 200.0 / elapsed.as_secs_f64());
-    println!("  - Trades executed: {} (automatic matching)", 200 - total_open_orders - total_cancelled);
+    println!(
+        "  - Orders per second: {:.0}",
+        200.0 / elapsed.as_secs_f64()
+    );
+    println!(
+        "  - Trades executed: {} (automatic matching)",
+        200 - total_open_orders - total_cancelled
+    );
     println!("  - Cancellations: {}", total_cancelled);
     println!("  - Final open orders: {}", total_open_orders);
     println!("  - System-wide fund conservation: VERIFIED ✓");
     println!("  - All users verified ✓");
 }
-
