@@ -1,4 +1,4 @@
-//! lib-api/src/handlers/orders.rs
+//! Order Management API Handlers
 
 use actix_web::{HttpResponse, web};
 use common::{OrderCommand, OrderCommandType, Side, Status, TimeInForce, UserBalance};
@@ -11,29 +11,173 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
+// Request/Response DTOs
+
+/// Request payload for placing a new order
+///
+/// # Fields
+/// * `price` - Order price in smallest currency unit (e.g., cents, satoshis)
+/// * `volume` - Order size/quantity in base asset units
+/// * `market_id` - Unique identifier for the trading market/pair
+/// * `side` - Order side (Bid for buy, Ask for sell)
+/// * `time_in_force` - Order duration policy (GTC, IOC, FOK, etc.)
+///
+/// # Example
+/// ```json
+/// {
+///   "price": 5000000,
+///   "volume": 100,
+///   "market_id": 1,
+///   "side": "Bid",
+///   "time_in_force": "Gtc"
+/// }
+/// ```
 #[derive(Debug, Deserialize)]
 pub struct OrderRequest {
+    /// Order price in smallest currency unit
     pub price: u64,
+    
+    /// Order volume/size in base asset units
     pub volume: u64,
+    
+    /// Market identifier (trading pair)
     pub market_id: u32,
+    
+    /// Order side: Bid (buy) or Ask (sell)
     pub side: Side,
+    
+    /// Time in force policy for the order
     pub time_in_force: TimeInForce,
 }
 
+/// Request payload for cancelling an existing order
+///
+/// # Fields
+/// * `order_id` - Unique identifier of the order to cancel
+/// * `market_id` - Market identifier where the order exists
+///
+/// # Example
+/// ```json
+/// {
+///   "order_id": 123456789,
+///   "market_id": 1
+/// }
+/// ```
 #[derive(Debug, Deserialize)]
 pub struct CancelOrderRequest {
+    /// Unique identifier of the order to cancel
     pub order_id: u64,
+    
+    /// Market identifier for validation
     pub market_id: u32,
 }
 
+/// Response payload for order operations
+///
+/// Returns the status and details of an order placement or cancellation request.
+///
+/// # Fields
+/// * `order_id` - Unique order identifier assigned by the matching engine (0 if failed)
+/// * `client_order_id` - Client-side correlation ID for request tracking
+/// * `status` - Order status (Processing, Filled, Cancelled, Rejected, etc.)
+/// * `message` - Human-readable status message
+///
+/// # Example Success Response
+/// ```json
+/// {
+///   "order_id": 123456789,
+///   "client_order_id": 987654321,
+///   "status": "Processing",
+///   "message": "Order processed successfully"
+/// }
+/// ```
+///
+/// # Example Error Response
+/// ```json
+/// {
+///   "order_id": 0,
+///   "client_order_id": 987654321,
+///   "status": "error",
+///   "message": "Insufficient balance"
+/// }
+/// ```
 #[derive(Debug, Serialize)]
 pub struct OrderResponse {
+    /// Order ID assigned by the matching engine 
     pub order_id: u64,
+    
+    /// Client order ID for correlation tracking
     pub client_order_id: u64,
+    
+    /// Order status string
     pub status: String,
+    
+    /// Human-readable message describing the result
     pub message: String,
 }
 
+// API Handlers
+
+/// Place a new order in the market
+///
+/// Submits a new order to the VEX Core matching engine for processing.
+/// The order is validated, sent asynchronously, and tracked using a correlation ID.
+///
+/// # Endpoint
+/// `POST /api/order/order`
+///
+/// # Authentication
+/// Requires valid JWT token in Authorization header: `Bearer <token>`
+///
+/// # Request Body
+/// See [`OrderRequest`] for request payload structure.
+///
+/// # Response
+/// Returns [`OrderResponse`] with order details and status.
+///
+/// # Example Request
+/// ```bash
+/// curl -X POST http://localhost:8080/api/order/order \
+///   -H "Authorization: Bearer <jwt_token>" \
+///   -H "Content-Type: application/json" \
+///   -d '{
+///     "price": 5000000,
+///     "volume": 100,
+///     "market_id": 1,
+///     "side": "Bid",
+///     "time_in_force": "Gtc"
+///   }'
+/// ```
+///
+/// # Example Success Response (200 OK)
+/// ```json
+/// {
+///   "order_id": 123456789,
+///   "client_order_id": 987654321,
+///   "status": "Processing",
+///   "message": "Order processed successfully"
+/// }
+/// ```
+///
+/// # Example Timeout Response (408)
+/// ```json
+/// {
+///   "order_id": 0,
+///   "client_order_id": 987654321,
+///   "status": "timeout",
+///   "message": "Order processing timeout"
+/// }
+/// ```
+///
+/// # Example Error Response (500)
+/// ```json
+/// {
+///   "order_id": 0,
+///   "client_order_id": 987654321,
+///   "status": "error",
+///   "message": "Failed to send order: connection refused"
+/// }
+/// ```
 pub async fn place_order(
     order_data: web::Json<OrderRequest>,
     auth_user: AuthenticatedUserId,
@@ -149,6 +293,63 @@ pub async fn place_order(
     }
 }
 
+/// Cancel an existing order
+///
+/// Submits a cancellation request for an existing order in the market.
+/// The cancellation is processed asynchronously with correlation tracking.
+///
+/// # Endpoint
+/// `POST /api/order/cancel`
+///
+/// # Authentication
+/// Requires valid JWT token in Authorization header: `Bearer <token>`
+///
+/// # Request Body
+/// See [`CancelOrderRequest`] for request payload structure.
+///
+/// # Response
+/// Returns [`OrderResponse`] with cancellation status.
+///
+/// # Example Request
+/// ```bash
+/// curl -X POST http://localhost:8080/api/order/cancel \
+///   -H "Authorization: Bearer <jwt_token>" \
+///   -H "Content-Type: application/json" \
+///   -d '{
+///     "order_id": 123456789,
+///     "market_id": 1
+///   }'
+/// ```
+///
+/// # Example Success Response (200 OK)
+/// ```json
+/// {
+///   "order_id": 123456789,
+///   "client_order_id": 987654321,
+///   "status": "Cancelled",
+///   "message": "Cancel processed successfully"
+/// }
+/// ```
+///
+/// # Example Timeout Response (408)
+/// ```json
+/// {
+///   "order_id": 123456789,
+///   "client_order_id": 987654321,
+///   "status": "timeout",
+///   "message": "Cancel timeout"
+/// }
+/// ```
+///
+/// # Example Error Response (500)
+/// ```json
+/// {
+///   "order_id": 123456789,
+///   "client_order_id": 987654321,
+///   "status": "error",
+///   "message": "Failed to send cancel: connection refused"
+/// }
+/// ```
 pub async fn cancel_order(
     cancel_data: web::Json<CancelOrderRequest>,
     auth_user: AuthenticatedUserId,
