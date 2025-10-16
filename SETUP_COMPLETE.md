@@ -1,53 +1,52 @@
-# VEX Gateway Local Testing Setup - Complete! 🎉
+# VEX Gateway Local Testing Setup - Docker Edition! 🎉
 
-Your VEX Gateway authentication testing environment is now ready for manual testing.
+Your VEX Gateway testing environment is now ready with full Docker support including Kafka pipeline, PostgreSQL, Redis, and WebSocket streaming.
 
 ## ✅ What's Been Set Up
 
-### Configuration Files
-- ✅ `config/development.toml` - Complete development configuration
-- ✅ `.env` - Environment variables for local testing
-- ✅ `env.example` - Template for environment variables
+### Docker Services
+- ✅ **PostgreSQL** - Database running in Docker (localhost:5432)
+- ✅ **Redis** - Cache running in Docker (localhost:6380)
+- ✅ **Kafka + Zookeeper** - Message broker for trading events
+- ✅ **Kafka UI** - Web interface for Kafka (http://localhost:8080)
+- ✅ **Trading Events Consumer** - Real-time event processing
+- ✅ **WebSocket Server** - Real-time data streaming (ws://localhost:8765)
+
+### Database Configuration
+- ✅ Database: `trading_db`
+- ✅ User: `postgres`
+- ✅ Password: `postgres123`
+- ✅ Port: `5432`
+- ✅ Automatic migrations on startup
+
+### Redis Configuration
+- ✅ Port: `6380` (Docker mapped)
+- ✅ Max memory: 2GB
+- ✅ Policy: allkeys-lru
+
+### Kafka Configuration
+- ✅ Bootstrap servers: `localhost:9092`
+- ✅ Auto topic creation enabled
+- ✅ Trading events topic ready
 
 ### JWT Authentication
 - ✅ RSA key pair generated (`crates/libs/lib-auth/src/keys/`)
 - ✅ JWT configuration with proper issuer/audience
 - ✅ Token TTL: 60 minutes access, 30 days refresh
 
-### Database Setup
-- ✅ PostgreSQL configuration (localhost:5432)
-- ✅ Database: `mydb`, User: `myuser`, Password: `mypassword`
-- ✅ Migration scripts ready for users, api_keys, and trading tables
+## 🚀 Quick Start
 
-### Redis Setup
-- ✅ Redis configuration (localhost:6379)
-- ✅ Connection pooling configured
+**Prerequisites**: Docker services must be running (PostgreSQL, Redis, Kafka)
 
-### Test Data
-- ✅ Test user: `test@example.com` / `password123`
-- ✅ Test API key: `test_api_key_12345` / `test_secret_key_67890`
-- ✅ Test balance: 1,000,000 available
-
-## 🚀 Quick Start Commands
-
-### Option 1: Use Makefile (Recommended)
 ```bash
-make setup    # Complete setup
-make start    # Start server
-make test-all # Run all tests
+# 1. Setup gateway (generate keys, build)
+make setup
+
+# 2. Start gateway server
+make start
 ```
 
-### Option 2: Use Scripts Directly
-```bash
-./scripts/setup_dev.sh      # Complete setup
-./scripts/start_server.sh   # Start server
-./test_scripts/test_auth.sh # Test JWT auth
-```
-
-### Option 3: Manual Commands
-```bash
-cargo run --bin gateway     # Start server directly
-```
+That's it! Gateway runs at http://localhost:8081
 
 ## 🧪 Testing Endpoints
 
@@ -109,84 +108,55 @@ curl -X GET "http://localhost:8081/balances?$query&signature=$signature" \
   -H "X-API-KEY: test_api_key_12345"
 ```
 
-## 🔧 Prerequisites Check
+## 🔧 Prerequisites
 
-Before starting, ensure these services are running:
+Docker services must be running:
+- PostgreSQL (localhost:5432)
+- Redis (localhost:6380)  
+- Kafka (localhost:9092)
 
-### PostgreSQL
-```bash
-# Check if running
-pg_isready
-
-# Start if needed (macOS)
-brew services start postgresql
-
-# Start if needed (Ubuntu)
-sudo systemctl start postgresql
-```
-
-### Redis
-```bash
-# Check if running
-redis-cli ping
-
-# Start if needed (macOS)
-brew services start redis
-
-# Start if needed (Ubuntu)
-sudo systemctl start redis
-```
+Check with: `docker ps`
 
 ## 🆘 Troubleshooting
 
-### Server Won't Start
-1. Check if port 8081 is available: `lsof -i :8081`
-2. Verify PostgreSQL is running: `pg_isready`
-3. Verify Redis is running: `redis-cli ping`
-4. Check logs for specific errors
+### Gateway won't start
+- Check Docker services running: `docker ps`
+- Check JWT keys exist: `ls crates/libs/lib-auth/src/keys/`
+- Generate keys: `make keys`
 
-### Database Issues
-1. Ensure PostgreSQL is running
-2. Check database exists: `psql -l`
-3. Verify connection: `psql -h localhost -U myuser -d mydb`
+### Connection errors
+- Verify PostgreSQL: `docker ps | grep postgres`
+- Verify Redis: `docker ps | grep redis`
+- Check config: `config/development.toml`
 
-### Authentication Issues
-1. Verify JWT keys exist: `ls crates/libs/lib-auth/src/keys/`
-2. Check .env file exists and has correct values
-3. Verify test data exists: `./scripts/verify_setup.sh`
+## 📚 Commands
 
-## 📚 Available Scripts
-
-### Setup Scripts
-- `scripts/setup_dev.sh` - Complete development setup
-- `scripts/generate_keys.sh` - Generate JWT keys
-- `scripts/setup_database.sh` - Setup database
-- `scripts/setup_redis.sh` - Setup Redis
-- `scripts/setup_test_data.sh` - Add test data
-
-### Testing Scripts
-- `test_scripts/test_auth.sh` - JWT authentication tests
-- `test_scripts/test_api_key.sh` - API key authentication tests
-
-### Utility Scripts
-- `scripts/start_server.sh` - Start server with checks
-- `scripts/verify_setup.sh` - Verify setup completeness
-- `scripts/quick_start.sh` - Show quick start guide
+```bash
+make setup      # Setup gateway
+make start      # Start server
+make test-auth  # Test JWT auth
+make test-api   # Test API key auth
+make clean      # Clean build
+make help       # Show all commands
+```
 
 ## 🎯 Next Steps
 
-1. **Start the server**: `make start` or `./scripts/start_server.sh`
-2. **Test JWT authentication**: `./test_scripts/test_auth.sh`
-3. **Test API key authentication**: `./test_scripts/test_api_key.sh`
-4. **Manual testing**: Use the curl examples above
-5. **Verify setup**: `./scripts/verify_setup.sh`
+1. **Setup gateway**: `make setup`
+2. **Start server**: `make start`
+3. **Test**: `make test-auth`
 
-## 📖 Documentation
+## 🌐 Service URLs
 
-- `TESTING_SETUP.md` - Complete setup guide
-- `README.md` - Project documentation
-- `Makefile` - Available commands
+| Service | URL | Description |
+|---------|-----|-------------|
+| Gateway API | http://localhost:8081 | REST API endpoints |
+| Kafka UI | http://localhost:8080 | Kafka management interface |
+| WebSocket | ws://localhost:8765 | Real-time data streaming |
+| PostgreSQL | localhost:5432 | Database (trading_db) |
+| Redis | localhost:6380 | Cache server |
+| Kafka | localhost:9092 | Message broker |
 
 ---
 
-**🎉 You're all set! Start testing authentication with: `make start`**
+**Quick start: `make setup && make start`**

@@ -1,7 +1,6 @@
 #!/bin/bash
 
-# Manual testing script for API key authentication
-# This script demonstrates how to test API key authentication with signatures
+# Test API key authentication with HMAC signatures
 
 set -e
 
@@ -10,6 +9,15 @@ BASE_URL="http://localhost:8081"
 echo "🔑 VEX Gateway API Key Authentication Testing"
 echo "============================================="
 echo "Base URL: $BASE_URL"
+echo ""
+
+# Check if gateway is running
+if ! curl -s "$BASE_URL/health" > /dev/null 2>&1; then
+    echo "❌ Gateway not responding. Start it with: make start"
+    exit 1
+fi
+
+echo "✅ Gateway ready"
 echo ""
 
 # Function to generate HMAC signature
@@ -108,22 +116,9 @@ ORDER_DATA='{
 }'
 make_api_key_request "POST" "/orders" "$ORDER_DATA" "$EXAMPLE_API_KEY" "$EXAMPLE_SECRET_KEY"
 
-echo "✅ API Key authentication testing examples completed!"
+echo "✅ API Key authentication testing completed!"
 echo ""
 echo "📝 Next Steps:"
-echo "1. Create an API key using JWT authentication"
-echo "2. Copy the API key and secret from the response"
-echo "3. Replace EXAMPLE_API_KEY and EXAMPLE_SECRET_KEY in this script"
-echo "4. Re-run this script to test API key authentication"
-echo ""
-echo "🔧 API Key Creation Process:"
-echo "1. Login with JWT to get access token"
-echo "2. POST /api-keys with JWT token to create API key"
-echo "3. Use the returned API key and secret for authenticated requests"
-echo ""
-echo "📚 Signature Generation:"
-echo "1. Create query string with timestamp"
-echo "2. Add request body if present"
-echo "3. Generate HMAC-SHA256 signature with secret key"
-echo "4. Add signature to query parameters"
-echo "5. Include X-MBX-APIKEY header"
+echo "1. Create API key using JWT auth (see test_auth.sh)"
+echo "2. Replace EXAMPLE_API_KEY and EXAMPLE_SECRET_KEY"
+echo "3. Re-run this script"

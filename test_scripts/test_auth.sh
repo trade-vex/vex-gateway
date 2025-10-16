@@ -1,7 +1,6 @@
 #!/bin/bash
 
-# Manual testing script for authentication endpoints
-# This script provides examples for testing JWT and API key authentication
+# Test JWT authentication endpoints
 
 set -e
 
@@ -10,6 +9,15 @@ BASE_URL="http://localhost:8081"
 echo "🧪 VEX Gateway Authentication Testing"
 echo "====================================="
 echo "Base URL: $BASE_URL"
+echo ""
+
+# Check if gateway is running
+if ! curl -s "$BASE_URL/health" > /dev/null 2>&1; then
+    echo "❌ Gateway not responding. Start it with: make start"
+    exit 1
+fi
+
+echo "✅ Gateway ready"
 echo ""
 
 # Function to make HTTP requests with pretty output
@@ -102,16 +110,11 @@ echo "6️⃣ List API Keys (requires JWT)"
 echo "⚠️  This will fail without a valid JWT token"
 make_request "GET" "/api-keys" "" "-H 'Authorization: Bearer YOUR_JWT_TOKEN'"
 
-echo "✅ Authentication testing examples completed!"
+echo "✅ Authentication testing completed!"
 echo ""
 echo "📝 Next Steps:"
-echo "1. Start the server: cargo run --bin gateway"
-echo "2. Run this script: ./test_scripts/test_auth.sh"
-echo "3. Copy the JWT token from the login response"
-echo "4. Replace 'YOUR_JWT_TOKEN' in the script with the actual token"
-echo "5. Re-run the protected endpoint tests"
+echo "1. Copy the JWT token from login response"
+echo "2. Replace 'YOUR_JWT_TOKEN' with actual token"
+echo "3. Re-run protected endpoint tests"
 echo ""
-echo "🔧 For API Key testing:"
-echo "1. Create an API key using the JWT-protected endpoint"
-echo "2. Use the API key in requests with proper signature"
-echo "3. See test_api_key.sh for API key authentication examples"
+echo "For API Key testing: ./test_scripts/test_api_key.sh"

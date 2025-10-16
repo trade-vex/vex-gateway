@@ -25,14 +25,14 @@ refresh_token_ttl_days = 30
 issuer = "vex-gateway-dev"
 audience = "vex-api-dev"
 
-# Database Configuration
+# Database Configuration (Docker)
 [auth.database]
-url = "postgresql://vex:1234@localhost:5432/vex_gateway"
+url = "postgresql://postgres:postgres123@localhost:5432/trading_db"
 max_connections = 10
 
-# Redis Configuration
+# Redis Configuration (Docker)
 [auth.redis]
-url = "redis://127.0.0.1:6379"
+url = "redis://127.0.0.1:6380"
 max_connections = 10
 
 # OAuth Configuration

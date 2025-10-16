@@ -1,22 +1,23 @@
 # VEX Gateway Local Development Makefile
-# Provides convenient commands for setup and testing
+# Provides convenient commands for setup and testing with Docker
 
 .PHONY: help setup start test clean cleanup-db cleanup-all
 
 # Default target
 help:
-	@echo "VEX Gateway Local Development Commands"
-	@echo "======================================"
+	@echo "VEX Gateway Local Development Commands (Docker)"
+	@echo "================================================"
+	@echo ""
+	@echo "Docker Commands:"
+	@echo "  make docker-status  - Check Docker services status"
+	@echo "  make docker-logs    - View all Docker logs"
 	@echo ""
 	@echo "Setup Commands:"
-	@echo "  make setup          - Complete development setup"
+	@echo "  make setup          - Setup gateway for Docker-based development"
 	@echo "  make keys           - Generate JWT keys only"
-	@echo "  make db             - Setup database only"
-	@echo "  make redis          - Setup Redis only"
-	@echo "  make test-data      - Add test data only"
 	@echo ""
 	@echo "Server Commands:"
-	@echo "  make start          - Start the server"
+	@echo "  make start          - Start the gateway server"
 	@echo "  make build          - Build the project"
 	@echo ""
 	@echo "Testing Commands:"
@@ -26,17 +27,25 @@ help:
 	@echo ""
 	@echo "Utility Commands:"
 	@echo "  make clean          - Clean build artifacts"
-	@echo "  make cleanup-db     - Clean database (remove all tables)"
-	@echo "  make cleanup-all    - Clean everything (build + database)"
 	@echo "  make help           - Show this help"
 	@echo ""
 	@echo "Quick Start:"
 	@echo "  make setup && make start"
 	@echo ""
 
+# Docker monitoring commands (Docker services managed separately)
+docker-status:
+	@echo "📊 Docker Services Status:"
+	@echo ""
+	@docker-compose ps
+
+docker-logs:
+	@echo "📝 Docker Logs (press Ctrl+C to exit):"
+	@docker-compose logs -f
+
 # Complete setup
 setup:
-	@echo "🚀 Setting up VEX Gateway for local development..."
+	@echo "🚀 Setting up VEX Gateway for Docker-based development..."
 	@./scripts/setup_dev.sh
 
 # Generate JWT keys
@@ -44,22 +53,7 @@ keys:
 	@echo "🔑 Generating JWT keys..."
 	@./scripts/generate_keys.sh
 
-# Setup database
-db:
-	@echo "📊 Setting up database..."
-	@./scripts/setup_database.sh
-
-# Setup Redis
-redis:
-	@echo "🔴 Setting up Redis..."
-	@./scripts/setup_redis.sh
-
-# Setup test data
-test-data:
-	@echo "📝 Setting up test data..."
-	@./scripts/setup_test_data.sh
-
-# Start server
+# Start gateway server
 start:
 	@echo "🚀 Starting VEX Gateway server..."
 	@./scripts/start_server.sh
@@ -68,6 +62,11 @@ start:
 build:
 	@echo "🔨 Building project..."
 	@cargo build
+
+# Build release
+build-release:
+	@echo "🔨 Building project (release mode)..."
+	@cargo build --release
 
 # Test JWT authentication
 test-auth:
@@ -87,16 +86,3 @@ test-all: test-auth test-api
 clean:
 	@echo "🧹 Cleaning build artifacts..."
 	@cargo clean
-
-# Show quick start guide
-quick-start:
-	@./scripts/quick_start.sh
-
-# Clean database (remove all tables and data)
-cleanup-db:
-	@echo "🧹 Cleaning database..."
-	@./scripts/cleanup_database.sh
-
-# Clean everything (build artifacts + database)
-cleanup-all: clean cleanup-db
-	@echo "🎉 Complete cleanup finished!"
