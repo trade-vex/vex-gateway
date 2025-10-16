@@ -5,9 +5,9 @@
 
 set -e
 
-# Redis configuration
+# Redis configuration (from development.toml)
 REDIS_HOST="127.0.0.1"
-REDIS_PORT="6379"
+REDIS_PORT="6380"
 
 echo "Setting up Redis for development..."
 

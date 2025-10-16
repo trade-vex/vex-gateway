@@ -1,6 +1,4 @@
-# VEX Gateway Local Testing Setup - Docker Edition! 🎉
-
-Your VEX Gateway testing environment is now ready with full Docker support including Kafka pipeline, PostgreSQL, Redis, and WebSocket streaming.
+# VEX Gateway Local Testing Setup
 
 ## ✅ What's Been Set Up
 
@@ -36,17 +34,21 @@ Your VEX Gateway testing environment is now ready with full Docker support inclu
 
 ## 🚀 Quick Start
 
-**Prerequisites**: Docker services must be running (PostgreSQL, Redis, Kafka)
+**Prerequisites**: 
+1. Docker services must be running (PostgreSQL, Redis, Kafka)
+2. Local PostgreSQL stopped (if installed via Homebrew)
+3. Aeron Media Driver must be running
+4. VEX Core service must be running
 
 ```bash
 # 1. Setup gateway (generate keys, build)
 make setup
 
-# 2. Start gateway server
+# 4. Start gateway server
 make start
 ```
 
-That's it! Gateway runs at http://localhost:8081
+Gateway runs at http://localhost:8081
 
 ## 🧪 Testing Endpoints
 

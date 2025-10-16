@@ -133,21 +133,15 @@ impl Config {
         debug!("Config directory: {:?}", config_dir);
         debug!(
             "Looking for config file: {:?}",
-            config_dir
-                .join("config")
-                .join(environment.config_file_name())
+            config_dir.join(environment.config_file_name())
         );
 
         // Build configuration with proper precedence
         let config = config::Config::builder()
             // 1. Load environment-specific configuration file
             .add_source(
-                config::File::from(
-                    config_dir
-                        .join("config")
-                        .join(environment.config_file_name()),
-                )
-                .required(false),
+                config::File::from(config_dir.join(environment.config_file_name()))
+                    .required(false),
             )
             // 2. Load from environment variables with APP_ prefix
             .add_source(

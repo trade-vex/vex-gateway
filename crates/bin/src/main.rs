@@ -28,7 +28,7 @@ async fn main() -> std::io::Result<()> {
 
     // Load configuration
     let config = Config::load_auto().unwrap_or_else(|e| {
-        error!(
+        eprintln!(
             "Failed to load configuration: {}. Falling back to defaults.",
             e
         );

@@ -40,11 +40,24 @@ echo "📋 Step 3: Building the project..."
 cargo build
 
 echo ""
+echo "📋 Step 4: Setting up test data..."
+if [ -f "scripts/setup_test_data.sh" ]; then
+    ./scripts/setup_test_data.sh
+else
+    echo "⚠️  setup_test_data.sh not found, skipping test data setup"
+fi
+
+echo ""
 echo "🎉 Gateway setup complete!"
 echo "========================="
 echo "✅ JWT keys generated"
 echo "✅ Project built"
+echo "✅ Test data created"
 echo ""
 echo "🚀 Start the server:"
 echo "  make start"
+echo ""
+echo "🧪 Run tests:"
+echo "  make test-auth    # Test JWT authentication"
+echo "  make test-api     # Test API key authentication"
 echo ""

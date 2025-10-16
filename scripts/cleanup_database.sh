@@ -5,9 +5,10 @@
 
 set -e
 
-# Database configuration
-DB_NAME="vex_gateway"
-DB_USER="vex"
+# Database configuration (from development.toml)
+DB_NAME="trading_db"
+DB_USER="postgres"
+DB_PASSWORD="postgres123"
 DB_HOST="localhost"
 DB_PORT="5432"
 
@@ -17,6 +18,9 @@ echo "Database: $DB_NAME"
 echo "User: $DB_USER"
 echo "Host: $DB_HOST:$DB_PORT"
 echo ""
+
+# Set password for PostgreSQL connection
+export PGPASSWORD="$DB_PASSWORD"
 
 # Confirm before proceeding
 read -p "⚠️  This will DELETE ALL DATA. Are you sure? (y/N): " -n 1 -r

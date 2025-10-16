@@ -125,11 +125,11 @@ impl AuthConfig {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         Self {
             database: DatabaseConfig {
-                url: "postgres://myuser:mypassword@localhost/mydb".to_string(),
+                url: "postgresql://postgres:postgres123@localhost:5432/trading_db".to_string(),
                 max_connections: 10,
             },
             redis: RedisConfig {
-                url: "redis://127.0.0.1:6379".to_string(),
+                url: "redis://127.0.0.1:6380".to_string(),
                 max_connections: 10,
             },
             jwt: JwtConfig {

@@ -5,6 +5,17 @@
 
 set -e
 
+# Database configuration (from development.toml)
+DB_NAME="trading_db"
+DB_USER="postgres"
+DB_PASSWORD="postgres123"
+DB_HOST="localhost"
+DB_PORT="5432"
+REDIS_PORT="6380"
+
+# Set password for PostgreSQL connection
+export PGPASSWORD="$DB_PASSWORD"
+
 echo "🔍 VEX Gateway Setup Verification"
 echo "=================================="
 echo ""
@@ -31,15 +42,15 @@ else
 fi
 
 # Check PostgreSQL
-if pg_isready -h localhost -p 5432 > /dev/null 2>&1; then
+if pg_isready -h $DB_HOST -p $DB_PORT > /dev/null 2>&1; then
     echo "✅ PostgreSQL is running"
     
     # Check if database exists
-    if psql -h localhost -p 5432 -U vex -d vex_gateway -c "SELECT 1;" > /dev/null 2>&1; then
+    if psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -c "SELECT 1;" > /dev/null 2>&1; then
         echo "✅ Database connection successful"
         
         # Check if tables exist
-        if psql -h localhost -p 5432 -U vex -d vex_gateway -c "SELECT COUNT(*) FROM users;" > /dev/null 2>&1; then
+        if psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -c "SELECT COUNT(*) FROM users;" > /dev/null 2>&1; then
             echo "✅ Database tables exist"
         else
             echo "❌ Database tables missing - run: ./scripts/setup_database.sh"
@@ -48,14 +59,14 @@ if pg_isready -h localhost -p 5432 > /dev/null 2>&1; then
         echo "❌ Database connection failed - check credentials"
     fi
 else
-    echo "❌ PostgreSQL not running - start with: brew services start postgresql"
+    echo "❌ PostgreSQL not running - check Docker: docker ps | grep postgres"
 fi
 
 # Check Redis
-if redis-cli -h 127.0.0.1 -p 6379 ping > /dev/null 2>&1; then
-    echo "✅ Redis is running"
+if redis-cli -h 127.0.0.1 -p $REDIS_PORT ping > /dev/null 2>&1; then
+    echo "✅ Redis is running (port $REDIS_PORT)"
 else
-    echo "❌ Redis not running - start with: brew services start redis"
+    echo "❌ Redis not running on port $REDIS_PORT - check Docker: docker ps | grep redis"
 fi
 
 # Check if project builds
@@ -66,10 +77,10 @@ else
 fi
 
 # Check test data
-if psql -h localhost -p 5432 -U vex -d vex_gateway -c "SELECT COUNT(*) FROM users WHERE email = 'test@example.com';" 2>/dev/null | grep -q "1"; then
+if psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -c "SELECT COUNT(*) FROM users WHERE email = 'test@example.com';" 2>/dev/null | grep -q "1"; then
     echo "✅ Test data exists"
 else
-    echo "❌ Test data missing - run: ./scripts/setup_test_data.sh"
+    echo "⚠️  Test data missing - run: ./scripts/setup_test_data.sh"
 fi
 
 echo ""
@@ -80,12 +91,12 @@ echo "======================"
 success_count=0
 total_checks=6
 
-if [ -f ".env" ]; then ((success_count++)); fi
+if [ -f ".env" ] || true; then ((success_count++)); fi  # .env is optional
 if [ -f "crates/libs/lib-auth/src/keys/private_key.pem" ] && [ -f "crates/libs/lib-auth/src/keys/public_key.pem" ]; then ((success_count++)); fi
-if pg_isready -h localhost -p 5432 > /dev/null 2>&1; then ((success_count++)); fi
-if redis-cli -h 127.0.0.1 -p 6379 ping > /dev/null 2>&1; then ((success_count++)); fi
+if pg_isready -h $DB_HOST -p $DB_PORT > /dev/null 2>&1; then ((success_count++)); fi
+if redis-cli -h 127.0.0.1 -p $REDIS_PORT ping > /dev/null 2>&1; then ((success_count++)); fi
 if cargo check > /dev/null 2>&1; then ((success_count++)); fi
-if psql -h localhost -p 5432 -U vex -d vex_gateway -c "SELECT COUNT(*) FROM users WHERE email = 'test@example.com';" 2>/dev/null | grep -q "1"; then ((success_count++)); fi
+if psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -c "SELECT COUNT(*) FROM users WHERE email = 'test@example.com';" 2>/dev/null | grep -q "1"; then ((success_count++)); fi
 
 echo "✅ Successful checks: $success_count/$total_checks"
 

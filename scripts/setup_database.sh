@@ -5,14 +5,17 @@
 
 set -e
 
-# Database configuration
-DB_NAME="vex_gateway"
-DB_USER="vex"
-DB_PASSWORD="1234"
+# Database configuration (from development.toml)
+DB_NAME="trading_db"
+DB_USER="postgres"
+DB_PASSWORD="postgres123"
 DB_HOST="localhost"
 DB_PORT="5432"
 
 echo "Setting up PostgreSQL database for development..."
+
+# Set password for PostgreSQL connection
+export PGPASSWORD="$DB_PASSWORD"
 
 # Check if PostgreSQL is running
 if ! pg_isready -h $DB_HOST -p $DB_PORT > /dev/null 2>&1; then

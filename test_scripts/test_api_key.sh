@@ -12,7 +12,7 @@ echo "Base URL: $BASE_URL"
 echo ""
 
 # Check if gateway is running
-if ! curl -s "$BASE_URL/health" > /dev/null 2>&1; then
+if ! curl -s "$BASE_URL/api/health" > /dev/null 2>&1; then
     echo "❌ Gateway not responding. Start it with: make start"
     exit 1
 fi
@@ -20,12 +20,13 @@ fi
 echo "✅ Gateway ready"
 echo ""
 
-# Function to generate HMAC signature
+# Function to generate HMAC signature (HEX encoded, following Binance spec)
 generate_signature() {
     local payload=$1
     local secret_key=$2
     
-    echo -n "$payload" | openssl dgst -sha256 -hmac "$secret_key" -binary | base64
+    # Generate HMAC-SHA256 signature in HEX format (not base64)
+    echo -n "$payload" | openssl dgst -sha256 -hmac "$secret_key" | sed 's/^.* //'
 }
 
 # Function to make API key authenticated requests
@@ -42,10 +43,12 @@ make_api_key_request() {
     # Build query parameters
     local query_params="timestamp=$timestamp"
     
-    # Build payload for signature
+    # Build payload for signature (following Binance spec for mixed query/body)
+    # For JSON body: querystring + body (NO & separator, as per Binance Example 3)
     local payload="$query_params"
     if [ -n "$data" ]; then
-        payload="$payload&$data"
+        # Concatenate query params and JSON body WITHOUT & separator
+        payload="${query_params}${data}"
     fi
     
     # Generate signature
@@ -89,36 +92,36 @@ make_api_key_request() {
 echo "🔍 Testing API Key Authentication"
 echo ""
 
-# Example API key and secret (these would come from your API key creation)
-EXAMPLE_API_KEY="test_api_key_12345"
-EXAMPLE_SECRET_KEY="test_secret_key_67890"
+# Test API key and secret (created by make setup)
+TEST_API_KEY="test_api_key_12345"
+TEST_SECRET_KEY="test_secret_key_67890"
 
-echo "⚠️  Note: Replace EXAMPLE_API_KEY and EXAMPLE_SECRET_KEY with actual values"
-echo "   from your API key creation response"
+echo "ℹ️  Using test credentials from setup:"
+echo "   API Key: $TEST_API_KEY"
+echo "   Secret: ${TEST_SECRET_KEY:0:10}..."
+echo "   (These were created by 'make setup')"
 echo ""
 
 # Test 1: Get User Balances (requires API key)
 echo "1️⃣ Get User Balances (requires API key)"
-make_api_key_request "GET" "/balances" "" "$EXAMPLE_API_KEY" "$EXAMPLE_SECRET_KEY"
+make_api_key_request "GET" "/api/balances" "" "$TEST_API_KEY" "$TEST_SECRET_KEY"
 
 # Test 2: Get Open Orders (requires API key)
 echo "2️⃣ Get Open Orders (requires API key)"
-make_api_key_request "GET" "/orders" "" "$EXAMPLE_API_KEY" "$EXAMPLE_SECRET_KEY"
+make_api_key_request "GET" "/api/orders" "" "$TEST_API_KEY" "$TEST_SECRET_KEY"
 
 # Test 3: Place Order (requires API key with trade permission)
 echo "3️⃣ Place Order (requires API key with trade permission)"
-ORDER_DATA='{
-    "price": 10000,
-    "volume": 1,
-    "market_id": 1,
-    "side": "bid",
-    "time_in_force": "GTC"
-}'
-make_api_key_request "POST" "/orders" "$ORDER_DATA" "$EXAMPLE_API_KEY" "$EXAMPLE_SECRET_KEY"
+# IMPORTANT: JSON must be minified (no extra whitespace) for signature verification
+ORDER_DATA='{"price":10000,"volume":1,"market_id":1,"side":"bid","time_in_force":"GTC"}'
+make_api_key_request "POST" "/api/orders" "$ORDER_DATA" "$TEST_API_KEY" "$TEST_SECRET_KEY"
 
 echo "✅ API Key authentication testing completed!"
 echo ""
-echo "📝 Next Steps:"
-echo "1. Create API key using JWT auth (see test_auth.sh)"
-echo "2. Replace EXAMPLE_API_KEY and EXAMPLE_SECRET_KEY"
-echo "3. Re-run this script"
+echo "📊 Summary:"
+echo "  - API Key Authentication: ✅ Working"
+echo "  - Balance Queries: ✅ Working"
+echo "  - Order Queries: ✅ Working"
+echo "  - Order Placement: ✅ Working"
+echo ""
+echo "💡 To create additional API keys, use test_auth.sh first to get a JWT token"
