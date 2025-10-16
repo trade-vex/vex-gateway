@@ -1,7 +1,6 @@
 use chrono::{Duration, Utc};
 use lib_middleware::api_key::security::{KeyMaterial, SecurityType};
 use lib_middleware::models::api_key::{KeyMaterialType, Model, NewApiKey};
-use serde_json::json;
 use uuid::Uuid;
 
 #[test]
@@ -261,24 +260,19 @@ fn test_model_with_empty_permissions() {
 
 #[test]
 fn test_model_with_complex_permissions() {
-    let complex_permissions = json!([
-        "TRADE",
-        "USER_DATA",
-        "USER_STREAM",
-        {
-            "custom_permission": {
-                "scope": "limited",
-                "resources": ["orders", "positions"]
-            }
-        }
-    ]);
+    // Test a model with multiple permissions (complex permissions)
+    let permissions = vec![
+        SecurityType::Trade,
+        SecurityType::UserData,
+        SecurityType::UserStream,
+    ];
 
     let model = Model {
         id: Uuid::new_v4(),
         api_key: "complex-perms".to_string(),
         key_material_type: Some(KeyMaterialType::RsaPublicKey),
         key_material_value: Some("rsa-key".to_string()),
-        permissions: vec![SecurityType::UserStream],
+        permissions: permissions.clone(),
         recv_window: 30000,
         enabled: true,
         description: Some("Complex permissions test".to_string()),
@@ -290,7 +284,11 @@ fn test_model_with_complex_permissions() {
         last_used_at: None,
     };
 
-    assert_eq!(model.permissions, vec![SecurityType::UserStream]);
+    assert_eq!(model.permissions, permissions);
+    assert_eq!(model.permissions.len(), 3);
+    assert!(model.permissions.contains(&SecurityType::Trade));
+    assert!(model.permissions.contains(&SecurityType::UserData));
+    assert!(model.permissions.contains(&SecurityType::UserStream));
 }
 
 #[test]

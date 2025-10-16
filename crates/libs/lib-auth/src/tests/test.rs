@@ -507,39 +507,6 @@ mod tests {
         assert_eq!(user_count, 10);
     }
 
-    // 7. Completed Database Integration Test
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn test_database_connection_and_migrations() {
-        // Skip this test if we're in local development without database
-        if std::env::var("SKIP_DATABASE_TESTS").is_ok() {
-            println!("Skipping database test - SKIP_DATABASE_TESTS is set");
-            return;
-        }
-
-        let config = setup_test_config();
-        // Ensure the test database URL is different from production
-        assert!(
-            config.database.url.contains("mydb"),
-            "Database URL should be for a test database!"
-        );
-
-        // Establish a database connection.
-        // Database::connect(&config.database.url)
-        //     .await
-        //     .expect("Failed to create database connection.");
-
-        // Note: SeaORM doesn't have built-in migrations like sqlx::migrate!
-        // Need to use a separate migration tool or run migrations manually.
-        // For now, we'll just test the connection.
-
-        // Test that the connection was established successfully
-        // The fact that Database::connect() didn't panic means the connection is valid
-        println!("Database connection test passed - connected to PostgreSQL");
-
-        // Add migration application related functionlity to lib-db and add tests accordingly
-    }
-
     use reqwest;
 
     // Test live server endpoints
