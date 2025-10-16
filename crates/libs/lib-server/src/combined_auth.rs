@@ -1,5 +1,5 @@
 use actix_web::{
-    Error, HttpRequest, HttpMessage,
+    Error, HttpRequest,
     dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready},
 };
 use futures_util::future::{LocalBoxFuture, Ready, ready};
@@ -7,7 +7,7 @@ use lib_auth::middleware::jwt_auth::JwtAuthentication;
 use lib_middleware::api_key::middleware::ApiKeyMiddleware;
 use std::{rc::Rc, sync::Arc};
 use tokio::sync::Mutex as TokioMutex;
-use tracing::{error, info};
+use tracing::{error};
 
 #[derive(Clone)]
 pub struct CombinedAuthMiddleware {

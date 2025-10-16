@@ -53,6 +53,9 @@ pub struct AppState {
     
     // API key repository for database operations
     pub api_key_repository: Arc<dyn ApiKeyRepository>,
+
+    // Correlation service for matching responses to requests
+    pub correlation_service: CorrelationService,
 }
 
 impl AppState {
@@ -127,6 +130,7 @@ impl AppState {
             gateway_publisher: Arc::new(Mutex::new(gateway_publisher)),
             api_key_middleware: Arc::new(TokioMutex::new(api_key_middleware)),
             api_key_repository,
+            correlation_service
         }))
     }
 
