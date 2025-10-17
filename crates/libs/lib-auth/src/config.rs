@@ -39,6 +39,8 @@ pub struct OAuthProviderConfig {
     pub user_info_url: String,
     pub scopes: Vec<String>,
     pub response_type: String,
+    /// Optional OpenID Connect discovery URL (e.g., for Google)
+    pub issuer_url: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -186,7 +188,7 @@ impl OAuthConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
         let mut providers = HashMap::new();
 
-        // Google OAuth 2.0
+        // Google OAuth 2.0 / OpenID Connect
         if let (Ok(client_id), Ok(client_secret)) = (
             env::var("GOOGLE_CLIENT_ID"),
             env::var("GOOGLE_CLIENT_SECRET"),
@@ -199,13 +201,14 @@ impl OAuthConfig {
                     auth_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
                     token_url: "https://oauth2.googleapis.com/token".to_string(),
                     user_info_url: "https://www.googleapis.com/oauth2/v2/userinfo".to_string(),
-                    scopes: vec!["email".to_string(), "profile".to_string()],
+                    scopes: vec!["openid".to_string(), "email".to_string(), "profile".to_string()],
                     response_type: "code".to_string(),
+                    issuer_url: Some("https://accounts.google.com".to_string()),
                 },
             );
         }
 
-        // GitHub OAuth 2.0
+        // GitHub OAuth 2.0 (no OIDC support)
         if let (Ok(client_id), Ok(client_secret)) = (
             env::var("GITHUB_CLIENT_ID"),
             env::var("GITHUB_CLIENT_SECRET"),
@@ -220,11 +223,12 @@ impl OAuthConfig {
                     user_info_url: "https://api.github.com/user".to_string(),
                     scopes: vec!["user:email".to_string()],
                     response_type: "code".to_string(),
+                    issuer_url: None, // GitHub doesn't support OIDC discovery
                 },
             );
         }
 
-        // X (Twitter) OAuth 2.0
+        // X (Twitter) OAuth 2.0 (no OIDC support)
         if let (Ok(client_id), Ok(client_secret)) = (
             env::var("TWITTER_CLIENT_ID"),
             env::var("TWITTER_CLIENT_SECRET"),
@@ -239,6 +243,7 @@ impl OAuthConfig {
                     user_info_url: "https://api.twitter.com/2/users/me".to_string(),
                     scopes: vec!["tweet.read".to_string(), "users.read".to_string()],
                     response_type: "code".to_string(),
+                    issuer_url: None, // Twitter doesn't support OIDC discovery
                 },
             );
         }

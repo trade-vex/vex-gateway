@@ -42,13 +42,9 @@ redirect_base = "http://localhost:8081"
 [auth.oauth.providers]
 # Empty for development - can add providers later if needed
 
-# Email Configuration (for testing, using fake SMTP)
+# Email Configuration (Gmail SMTP)
 [auth.email]
-smtp_host = "localhost"
-smtp_port = 1025
-smtp_username = "test@example.com"
-smtp_password = "password"
-from_email = "noreply@vex-gateway.dev"
+
 
 # Server Configuration
 [auth.server]

@@ -10,8 +10,6 @@ reqwest = { workspace = true }
 tokio = { workspace = true }
 url = "2.5.7"
 
-openidconnect = { version = "3", features = ["reqwest"] }
-
 # Data & Config
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -28,6 +26,9 @@ redis = { workspace = true }
 async-trait = { workspace = true }
 sea-orm = { workspace = true }
 tracing = { workspace = true }
+
+# OAuth & OpenID Connect
+openidconnect = "3.5"
 
 # Crypto
 rand = "0.8"

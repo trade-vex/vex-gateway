@@ -103,7 +103,8 @@ impl AppState {
             Arc::new(token_service.clone()),
             user_repo.clone(),
             config.oauth.redirect_base.clone(),
-        );
+        )
+        .await?;
 
         let email_service = EmailService::new(
             &config.email,
