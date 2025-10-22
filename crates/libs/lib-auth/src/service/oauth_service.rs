@@ -173,7 +173,7 @@ impl OAuthService {
     ) -> Result<CoreClient, AuthError> {
         let client_id = ClientId::new(config.client_id.clone());
         let client_secret = ClientSecret::new(config.client_secret.expose_secret().to_string());
-        let redirect_uri = format!("{}/auth/{}/callback", redirect_base, provider);
+        let redirect_uri = format!("{}/api/oauth/{}/callback", redirect_base, provider);
         let redirect_url = RedirectUrl::new(redirect_uri)
             .map_err(|e| AuthError::Config(format!("Invalid redirect URL: {}", e)))?;
 
