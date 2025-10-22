@@ -9,14 +9,6 @@
 //! - **GitHub**: OAuth 2.0 with email scope and separate email API
 //! - **Twitter/X**: OAuth 2.0 with PKCE for enhanced security
 //!
-//! # Security Features
-//!
-//! - **PKCE (RFC 7636)**: All flows use Proof Key for Code Exchange for enhanced security
-//! - **CSRF Protection**: State parameter validation with Redis-backed storage
-//! - **Nonce Support**: For OpenID Connect ID token validation (Google)
-//! - **Token Blacklisting**: JWT revocation via Redis for logout functionality
-//! - **One-time Use**: State and PKCE verifiers are consumed atomically
-//!
 //! # Architecture
 //!
 //! The service follows a clean architecture pattern:
