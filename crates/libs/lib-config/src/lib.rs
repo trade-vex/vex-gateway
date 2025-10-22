@@ -223,13 +223,14 @@ impl Config {
         info!("Loading development defaults (no config files required)");
         Self {
             environment: Environment::Development,
-            server: ServerConfig {
-                host: "127.0.0.1".to_string(),
-                port: 8081,
-                max_connections: 1000,
-                connection_timeout: 30,
-                keep_alive_timeout: 60,
-            },
+            server: ServerConfig::from_env()
+                .unwrap_or_else(|_| ServerConfig {
+                    host: "127.0.0.1".to_string(),
+                    port: 8081,
+                    max_connections: 1000,
+                    connection_timeout: 30,
+                    keep_alive_timeout: 60,
+                }),
             logging: LoggingConfig {
                 level: "debug".to_string(),
                 structured: false,
