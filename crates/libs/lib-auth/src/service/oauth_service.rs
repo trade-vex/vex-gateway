@@ -584,7 +584,7 @@ impl OAuthService {
     ) -> Result<OAuthUserInfo, AuthError> {
         // Get user info URL based on provider
         let user_info_url = match provider {
-            "google" => "https://www.googleapis.com/oauth2/v2/userinfo",
+            "google" => "https://openidconnect.googleapis.com/v1/userinfo",
             "github" => "https://api.github.com/user",
             "twitter" => "https://api.twitter.com/2/users/me?user.fields=profile_image_url",
             _ => {
@@ -616,6 +616,11 @@ impl OAuthService {
         let mut user_info: serde_json::Value = response.json().await.map_err(|e| {
             AuthError::UserInfoFetchFailed(format!("Failed to parse user info: {}", e))
         })?;
+
+        // Debug logging for Google OAuth issues
+        if provider == "google" {
+            tracing::debug!("Google user info response: {}", serde_json::to_string_pretty(&user_info).unwrap_or_else(|_| "Failed to serialize".to_string()));
+        }
 
         // Special handling for GitHub - fetch emails separately
         if provider == "github"
@@ -701,15 +706,25 @@ impl OAuthService {
     /// }
     /// ```
     fn parse_google_user_info(&self, data: Value) -> Result<OAuthUserInfo, AuthError> {
+        tracing::debug!("Parsing Google user info: {}", serde_json::to_string_pretty(&data).unwrap_or_else(|_| "Failed to serialize".to_string()));
+        
+        let provider_id = data["sub"].as_str().ok_or_else(|| {
+                let available_fields: Vec<String> = data.as_object()
+                    .map(|obj| obj.keys().cloned().collect())
+                    .unwrap_or_default();
+                AuthError::UserInfoFetchFailed(format!(
+                    "Missing Google 'sub' field. Available fields: {:?}. Response: {}",
+                    available_fields,
+                    serde_json::to_string(&data).unwrap_or_else(|_| "Failed to serialize".to_string())
+                ))
+            })?
+            .to_string();
+            
+        let email = data["email"].as_str().ok_or_else(|| AuthError::UserInfoFetchFailed("Missing Google email".to_string()))?.to_string();
+            
         Ok(OAuthUserInfo {
-            provider_id: data["sub"]
-                .as_str()
-                .ok_or_else(|| AuthError::UserInfoFetchFailed("Missing Google sub".to_string()))?
-                .to_string(),
-            email: data["email"]
-                .as_str()
-                .ok_or_else(|| AuthError::UserInfoFetchFailed("Missing Google email".to_string()))?
-                .to_string(),
+            provider_id,
+            email,
             name: data["name"].as_str().unwrap_or("Unknown User").to_string(),
             username: None,
             avatar_url: data["picture"].as_str().map(|s| s.to_string()),
