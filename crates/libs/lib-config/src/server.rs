@@ -3,6 +3,7 @@
 use crate::ConfigError;
 use serde::{Deserialize, Serialize};
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::env;
 
 /// Server configuration settings for the VEX Gateway Service.
 ///
@@ -23,6 +24,37 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Ok(Self {
+            host: env::var("APP_SERVER_HOST")
+                .unwrap_or_else(|_| "0.0.0.0".to_string()),
+            port: env::var("APP_SERVER_PORT")
+                .unwrap_or_else(|_| "8081".to_string())
+                .parse()
+                .map_err(|_| ConfigError::ValidationError(
+                    "Invalid APP_SERVER_PORT value".to_string()
+                ))?,
+            max_connections: env::var("APP_SERVER_MAX_CONNECTIONS")
+                .unwrap_or_else(|_| "1000".to_string())
+                .parse()
+                .map_err(|_| ConfigError::ValidationError(
+                    "Invalid APP_SERVER_MAX_CONNECTIONS value".to_string()
+                ))?,
+            connection_timeout: env::var("APP_SERVER_CONNECTION_TIMEOUT")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()
+                .map_err(|_| ConfigError::ValidationError(
+                    "Invalid APP_SERVER_CONNECTION_TIMEOUT value".to_string()
+                ))?,
+            keep_alive_timeout: env::var("APP_SERVER_KEEP_ALIVE_TIMEOUT")
+                .unwrap_or_else(|_| "60".to_string())
+                .parse()
+                .map_err(|_| ConfigError::ValidationError(
+                    "Invalid APP_SERVER_KEEP_ALIVE_TIMEOUT value".to_string()
+                ))?,
+        })
+    }
+
     /// Validate server configuration values.
     ///
     /// Performs basic validation to ensure the server configuration
