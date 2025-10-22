@@ -53,12 +53,13 @@ async fn main() -> std::io::Result<()> {
         .init();
 
     info!("Starting VEX Gateway Service");
-    info!("{}", config.description());
 
     // Initialize VexGateway client
     info!("Initializing VexGateway client");
     let mut gateway_config = GatewayNetworkingConfig::test_defaults();
-    gateway_config.context_dir = "/tmp/aeron-driver".to_string();
+    gateway_config.context_dir = "/dev/shm/aeron".to_string();
+    gateway_config.core_address = "aeron-media-driver-core".to_string();
+    gateway_config.local_address = "0.0.0.0".to_string();
     gateway_config.core_port = 40001;
     gateway_config.core_control_port = 40002;
     println!("GATEWAY CONFIG: {:?}", gateway_config);
