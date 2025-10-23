@@ -59,6 +59,7 @@ pub struct RedisConfig {
 pub struct ServerConfig {
     pub base_url: String,
     pub port: u16,
+    pub frontend_url: String,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -162,6 +163,7 @@ impl AuthConfig {
             server: ServerConfig {
                 base_url: "http://localhost:8081".to_string(),
                 port: 8081,
+                frontend_url: "http://localhost:3000".to_string(),
             },
             otp: OtpConfig {
                 otp_length: 6,
@@ -285,6 +287,7 @@ impl ServerConfig {
             port: env::var("PORT")
                 .unwrap_or_else(|_| "8081".to_string())
                 .parse()?,
+            frontend_url: env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3000".to_string()),
         })
     }
 }

@@ -92,6 +92,9 @@ pub struct OAuthService {
     
     /// User repository for database operations
     user_repo: Arc<dyn UserRepository>,
+    
+    /// Frontend URL for redirects after OAuth success
+    frontend_url: String,
 }
 
 impl OAuthService {
@@ -108,6 +111,7 @@ impl OAuthService {
     /// * `token_service` - Service for minting JWT tokens
     /// * `user_repo` - Repository for user database operations
     /// * `redirect_base` - Base URL for OAuth callbacks (e.g., "https://api.example.com")
+    /// * `frontend_url` - Frontend URL for redirects after OAuth success
     ///
     /// # Returns
     ///
@@ -125,6 +129,7 @@ impl OAuthService {
     ///     token_service,
     ///     user_repo,
     ///     "https://api.example.com".to_string(),
+    ///     "https://frontend.example.com".to_string(),
     /// ).await?;
     /// ```
     pub async fn new(
@@ -134,6 +139,7 @@ impl OAuthService {
         token_service: Arc<TokenService>,
         user_repo: Arc<dyn UserRepository>,
         redirect_base: String,
+        frontend_url: String,
     ) -> Result<Self, AuthError> {
         let mut oauth_clients = HashMap::new();
 
@@ -149,6 +155,7 @@ impl OAuthService {
             oauth_clients,
             token_service,
             user_repo,
+            frontend_url,
         })
     }
 
@@ -237,6 +244,11 @@ impl OAuthService {
     /// ```
     pub async fn get_available_providers(&self) -> Vec<String> {
         self.oauth_clients.keys().cloned().collect()
+    }
+
+    /// Returns the frontend URL for redirects after OAuth success
+    pub fn get_frontend_url(&self) -> &str {
+        &self.frontend_url
     }
 
     /// Generates an authorization URL for initiating OAuth flow
