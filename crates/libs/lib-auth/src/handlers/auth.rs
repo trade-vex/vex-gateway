@@ -6,7 +6,7 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::dto::auth_request_dto::{
-    ChangePasswordRequest, LoginRequest, RefreshTokenRequest, SignupRequest, VerifyEmailRequest,
+    ChangePasswordRequest, CheckEmailRequest, LoginRequest, RefreshTokenRequest, SignupRequest, VerifyEmailRequest,
 };
 use crate::dto::auth_response_dto::{
     LoginResponse, RefreshTokenResponse, SignupResponse, UserInfo, UserProfile,
@@ -342,5 +342,24 @@ pub async fn change_password(
     Ok(HttpResponse::Ok().json(json!({
         "message": "Password changed successfully",
         "timestamp": chrono::Utc::now().to_rfc3339()
+    })))
+}
+
+// Check if email exists handler
+pub async fn check_email_exists(
+    req: web::Json<CheckEmailRequest>,
+    user_repo: web::Data<Arc<dyn UserRepository>>,
+) -> Result<HttpResponse, AuthError> {
+    // Validate the request
+    req.validate()
+        .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
+
+    tracing::debug!("Check email exists request for: {}", req.email);
+
+    // Check if user exists by email
+    let user_exists = user_repo.find_by_email(&req.email).await?.is_some();
+
+    Ok(HttpResponse::Ok().json(json!({
+        "exists": user_exists
     })))
 }
