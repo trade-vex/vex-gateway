@@ -103,6 +103,7 @@ impl AppState {
             Arc::new(token_service.clone()),
             user_repo.clone(),
             config.oauth.redirect_base.clone(),
+            config.server.frontend_url.clone(),
         )
         .await?;
 

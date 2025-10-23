@@ -2,9 +2,10 @@ use crate::dto::auth_request_dto::OAuthCallbackQuery;
 use crate::error::auth_error::AuthError;
 use crate::service::oauth_service::OAuthService;
 
-use actix_web::{HttpResponse, web};
+use actix_web::{HttpResponse, web, cookie::{Cookie, SameSite, time::Duration}};
 use std::sync::Arc;
 use tracing::error;
+use serde_json;
 
 /// Initiate OAuth flow
 /// GET /oauth/{provider}
@@ -41,7 +42,47 @@ pub async fn handle_oauth_callback(
         .handle_callback(&provider, code, &query.state)
         .await
     {
-        Ok(response) => Ok(HttpResponse::Ok().json(response)),
+        Ok(response) => {
+            let is_secure = oauth_service.get_frontend_url().starts_with("https://");
+            
+            // Create cookies for the authentication data
+            let access_token_cookie = Cookie::build("access_token", &response.access_token)
+                .path("/")
+                .http_only(true)
+                .secure(is_secure) // Only secure for HTTPS
+                .same_site(SameSite::Strict)
+                .max_age(Duration::seconds(response.expires_in as i64))
+                .finish();
+
+            let refresh_token_cookie = Cookie::build("refresh_token", &response.refresh_token)
+                .path("/")
+                .http_only(true)
+                .secure(is_secure) // Only secure for HTTPS
+                .same_site(SameSite::Strict)
+                .max_age(Duration::days(30)) // Refresh token expires in 30 days
+                .finish();
+
+            // Serialize user info to JSON for the cookie
+            let user_info_json = serde_json::to_string(&response.user)
+                .map_err(|e| AuthError::CodeExchangeFailed(format!("Failed to serialize user info: {}", e)))?;
+            
+            let user_info_cookie = Cookie::build("user_info", user_info_json)
+                .path("/")
+                .http_only(true)
+                .secure(is_secure) // Only secure for HTTPS
+                .same_site(SameSite::Strict)
+                .max_age(Duration::seconds(response.expires_in as i64))
+                .finish();
+
+            // Redirect to the portfolio page with cookies
+            let redirect_url = format!("{}/portfolio", oauth_service.get_frontend_url());
+            Ok(HttpResponse::Found()
+                .cookie(access_token_cookie)
+                .cookie(refresh_token_cookie)
+                .cookie(user_info_cookie)
+                .append_header(("Location", redirect_url))
+                .finish())
+        },
         Err(e) => {
             error!("OAuth callback error: {}", e);
             Err(e)
