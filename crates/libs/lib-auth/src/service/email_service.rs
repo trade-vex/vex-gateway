@@ -29,17 +29,42 @@ impl EmailService {
         otp_length: usize,
         otp_expiry_minutes: i64,
     ) -> Result<Self, AuthError> {
+        tracing::info!("Initializing EmailService with SMTP configuration");
+        tracing::info!("SMTP Host: {}", email_config.smtp_host);
+        tracing::info!("SMTP Port: {}", email_config.smtp_port);
+        tracing::info!("SMTP Username: {}", email_config.smtp_username);
+        tracing::info!("From Email: {}", email_config.from_email);
+        tracing::info!("OTP Length: {}", otp_length);
+        tracing::info!("OTP Expiry Minutes: {}", otp_expiry_minutes);
+
         let creds = Credentials::new(
             email_config.smtp_username.clone(),
             email_config.smtp_password.expose_secret().clone(),
         );
 
-        let smtp_transport = AsyncSmtpTransport::<Tokio1Executor>::relay(&email_config.smtp_host)
-            .map_err(|e| AuthError::InternalError(format!("SMTP relay error: {}", e)))?
-            .credentials(creds)
-            .port(email_config.smtp_port)
-            .build();
+        tracing::debug!("Creating SMTP transport for host: {}", email_config.smtp_host);
+        
+        // Configure SMTP transport based on host
+        let smtp_transport = if email_config.smtp_host == "localhost" || email_config.smtp_host == "127.0.0.1" {
+            // for local development, use plain text without TLS
+            tracing::info!("Configuring SMTP for local development (no TLS)");
+            AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&email_config.smtp_host)
+                .port(email_config.smtp_port)
+                .build()
+        } else {
+            // for production SMTP servers, use relay with TLS
+            tracing::info!("Configuring SMTP for production with TLS");
+            AsyncSmtpTransport::<Tokio1Executor>::relay(&email_config.smtp_host)
+                .map_err(|e| {
+                    tracing::error!("SMTP relay error for host {}: {}", email_config.smtp_host, e);
+                    AuthError::InternalError(format!("SMTP relay error: {}", e))
+                })?
+                .credentials(creds)
+                .port(email_config.smtp_port)
+                .build()
+        };
 
+        tracing::info!("EmailService initialized successfully");
         Ok(Self {
             smtp_transport,
             redis_pool,
@@ -64,32 +89,50 @@ impl EmailService {
 
     /// Store OTP in Redis
     async fn store_otp(&self, email: &str, otp: &str) -> Result<(), AuthError> {
+        tracing::debug!("Storing OTP in Redis for email: {}", email);
+        
         // Validate otp_expiry_minutes is positive
         if self.otp_expiry_minutes <= 0 {
+            tracing::error!("Invalid OTP expiry minutes: {}", self.otp_expiry_minutes);
             return Err(AuthError::Validation(
                 "OTP expiry minutes must be positive".to_string(),
             ));
         }
 
+        tracing::debug!("Getting Redis connection from pool");
         let mut conn = self
             .redis_pool
             .get()
             .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+            .map_err(|e| {
+                tracing::error!("Failed to get Redis connection: {}", e);
+                AuthError::Redis(format!("Failed to get Redis connection: {}", e))
+            })?;
 
         let key = format!("{}{}", OTP_KEY_PREFIX, email);
         let expiry_seconds = self.otp_expiry_minutes * 60;
 
+        tracing::debug!("Redis key: {}", key);
+        tracing::debug!("OTP expiry: {} minutes ({} seconds)", self.otp_expiry_minutes, expiry_seconds);
+
         // Convert to u64 using fallible conversion to handle overflow
         let expiry_seconds_u64 = expiry_seconds
             .try_into()
-            .map_err(|_| AuthError::Validation("OTP expiry time is too large".to_string()))?;
+            .map_err(|_| {
+                tracing::error!("OTP expiry time is too large: {} seconds", expiry_seconds);
+                AuthError::Validation("OTP expiry time is too large".to_string())
+            })?;
 
+        tracing::debug!("Storing OTP in Redis with key: {} and expiry: {} seconds", key, expiry_seconds_u64);
         let _: () = conn
             .set_ex(&key, otp, expiry_seconds_u64)
             .await
-            .map_err(|e| AuthError::Redis(format!("Failed to store OTP: {}", e)))?;
+            .map_err(|e| {
+                tracing::error!("Failed to store OTP in Redis: {}", e);
+                AuthError::Redis(format!("Failed to store OTP: {}", e))
+            })?;
 
+        tracing::debug!("OTP stored successfully in Redis");
         Ok(())
     }
 
@@ -99,12 +142,19 @@ impl EmailService {
         recipient_email: &str,
         recipient_name: &str,
     ) -> Result<(), AuthError> {
+        tracing::info!("Starting verification email send process");
+        tracing::info!("Recipient: {} <{}>", recipient_name, recipient_email);
+        
         let otp = self.generate_otp();
+        tracing::debug!("Generated OTP: {}", otp);
 
         // Store OTP in Redis
+        tracing::debug!("Storing OTP in Redis for email: {}", recipient_email);
         self.store_otp(recipient_email, &otp).await?;
+        tracing::debug!("OTP stored successfully in Redis");
 
         let subject = "Verify Your Email";
+        tracing::debug!("Email subject: {}", subject);
 
         let text_content = format!(
             r#"Hello {},
@@ -159,14 +209,28 @@ The Team"#,
             recipient_name, otp, self.otp_expiry_minutes
         );
 
-        self.send_email(
+        tracing::debug!("Email content prepared, calling send_email");
+        tracing::debug!("Text content length: {} chars", text_content.len());
+        tracing::debug!("HTML content length: {} chars", html_content.len());
+
+        let result = self.send_email(
             recipient_email,
             recipient_name,
             subject,
             &html_content,
             &text_content,
-        )
-        .await
+        ).await;
+
+        match &result {
+            Ok(_) => {
+                tracing::info!("Verification email sent successfully to: {}", recipient_email);
+            }
+            Err(e) => {
+                tracing::error!("Failed to send verification email to {}: {}", recipient_email, e);
+            }
+        }
+
+        result
     }
 
     /// Send email
@@ -178,15 +242,26 @@ The Team"#,
         html_content: &str,
         text_content: &str,
     ) -> Result<(), AuthError> {
+        tracing::info!("Building email message");
+        tracing::debug!("From: {}", self.from_email);
+        tracing::debug!("To: {} <{}>", recipient_name, recipient_email);
+        tracing::debug!("Subject: {}", subject);
+
         let email = lettre::Message::builder()
             .from(
                 self.from_email
                     .parse()
-                    .map_err(|e| AuthError::InternalError(format!("Invalid from email: {}", e)))?,
+                    .map_err(|e| {
+                        tracing::error!("Invalid from email '{}': {}", self.from_email, e);
+                        AuthError::InternalError(format!("Invalid from email: {}", e))
+                    })?,
             )
             .to(format!("{} <{}>", recipient_name, recipient_email)
                 .parse()
-                .map_err(|e| AuthError::InternalError(format!("Invalid recipient email: {}", e)))?)
+                .map_err(|e| {
+                    tracing::error!("Invalid recipient email '{} <{}>': {}", recipient_name, recipient_email, e);
+                    AuthError::InternalError(format!("Invalid recipient email: {}", e))
+                })?)
             .subject(subject)
             .multipart(
                 lettre::message::MultiPart::alternative()
@@ -201,14 +276,47 @@ The Team"#,
                             .body(html_content.to_string()),
                     ),
             )
-            .map_err(|e| AuthError::InternalError(format!("Failed to build email: {}", e)))?;
+            .map_err(|e| {
+                tracing::error!("Failed to build email message: {}", e);
+                AuthError::InternalError(format!("Failed to build email: {}", e))
+            })?;
 
-        self.smtp_transport
-            .send(email)
+        tracing::info!("Email message built successfully, attempting to send via SMTP");
+        tracing::debug!("SMTP transport ready, calling send() method");
+
+        let start_time = std::time::Instant::now();
+        
+        // Add timeout to prevent hanging
+        let send_future = self.smtp_transport.send(email);
+        let timeout_duration = std::time::Duration::from_secs(30); // 30 second timeout
+        
+        tracing::debug!("Starting SMTP send with {} second timeout", timeout_duration.as_secs());
+        
+        let result = tokio::time::timeout(timeout_duration, send_future)
             .await
-            .map_err(|e| AuthError::InternalError(format!("Failed to send email: {}", e)))?;
+            .map_err(|_| {
+                let elapsed = start_time.elapsed();
+                tracing::error!("SMTP send timed out after {:?} (timeout: {:?})", elapsed, timeout_duration);
+                AuthError::InternalError(format!("SMTP send timed out after {:?}", timeout_duration))
+            })?
+            .map_err(|e| {
+                let elapsed = start_time.elapsed();
+                tracing::error!("SMTP send failed after {:?}: {}", elapsed, e);
+                AuthError::InternalError(format!("Failed to send email: {}", e))
+            });
 
-        Ok(())
+        match &result {
+            Ok(response) => {
+                let elapsed = start_time.elapsed();
+                tracing::info!("Email sent successfully via SMTP in {:?}, response: {:?}", elapsed, response);
+            }
+            Err(e) => {
+                let elapsed = start_time.elapsed();
+                tracing::error!("SMTP send error after {:?}: {}", elapsed, e);
+            }
+        }
+
+        result.map(|_| ())
     }
 
     /// Verify OTP

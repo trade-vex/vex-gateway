@@ -118,19 +118,48 @@ impl UserRepository for PostgresUserRepository {
 
     async fn verify_email(&self, user_id: Uuid) -> Result<(), AuthError> {
         let now = Utc::now();
-        let update_result = Entity::update_many()
-            .col_expr(Column::EmailVerified, Expr::value(true))
-            .col_expr(Column::Status, Expr::value(UserStatus::Active))
-            .col_expr(Column::UpdatedAt, Expr::value(now))
-            .filter(Column::UserId.eq(user_id))
-            .filter(Column::Status.ne(UserStatus::Deleted)) // Exclude deleted users
-            .filter(Column::Status.is_in([UserStatus::Pending, UserStatus::Active])) // Allow Pending→Active or Active→Active (idempotent)
-            .exec(&*self.db)
-            .await
-            .map_err(|e| AuthError::Database(format!("Failed to verify email: {}", e)))?;
+        
+        // // First, let's check the current user status for debugging
+        // let user = Entity::find_by_id(user_id)
+        //     .one(&*self.db)
+        //     .await
+        //     .map_err(|e| AuthError::Database(format!("Failed to find user: {}", e)))?;
+            
+        // if let Some(user) = user {
+        //     tracing::debug!("User found: ID={}, Status={:?}, EmailVerified={}", 
+        //         user.user_id, user.status, user.email_verified);
+        // } else {
+        //     tracing::error!("User not found with ID: {}", user_id);
+        //     return Err(AuthError::Database("User not found".to_string()));
+        // }
+        
+        // Use raw SQL to avoid enum casting issues
+        let update_result = self.db.execute(
+            sea_orm::Statement::from_sql_and_values(
+                sea_orm::DatabaseBackend::Postgres,
+                r#"
+                UPDATE users 
+                SET email_verified = $1, 
+                    status = $2::user_status, 
+                    updated_at = $3 
+                WHERE user_id = $4 
+                AND status != 'deleted'::user_status 
+                AND status = 'pending'::user_status
+                "#,
+                vec![
+                    true.into(),
+                    "active".into(),
+                    now.into(),
+                    user_id.into(),
+                ],
+            ),
+        ).await
+        .map_err(|e| AuthError::Database(format!("Failed to verify email: {}", e)))?;
 
-        if update_result.rows_affected == 0 {
-            return Err(AuthError::Database("User not found".to_string()));
+        tracing::debug!("Email verification update result: rows_affected={}", update_result.rows_affected());
+
+        if update_result.rows_affected() == 0 {
+            return Err(AuthError::Database("User not found or status not eligible for verification".to_string()));
         }
 
         Ok(())
