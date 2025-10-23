@@ -47,3 +47,9 @@ pub struct VerifyEmailRequest {
     #[validate(length(min = 6, max = 6))]
     pub otp: String,
 }
+
+#[derive(Deserialize, Validate)]
+pub struct CheckEmailRequest {
+    #[validate(email)]
+    pub email: String,
+}
