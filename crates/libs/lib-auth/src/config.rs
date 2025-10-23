@@ -120,6 +120,22 @@ impl AuthConfig {
         // Load OAuth providers from environment
         config.oauth = OAuthConfig::from_env()?;
 
+        if let Ok(smtp_host) = env::var("SMTP_HOST") {
+            config.email.smtp_host = smtp_host;
+        }
+        if let Ok(smtp_port) = env::var("SMTP_PORT") {
+            config.email.smtp_port = smtp_port.parse().unwrap_or(587);
+        }
+        if let Ok(smtp_username) = env::var("SMTP_USERNAME") {
+            config.email.smtp_username = smtp_username;
+        }
+        if let Ok(smtp_password) = env::var("SMTP_PASSWORD") {
+            config.email.smtp_password = SecretString::new(smtp_password);
+        }
+        if let Ok(from_email) = env::var("FROM_EMAIL") {
+            config.email.from_email = from_email;
+        }
+
         Ok(config)
     }
 
