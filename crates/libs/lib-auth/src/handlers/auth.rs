@@ -371,3 +371,52 @@ pub async fn check_email_exists(
         }
     }
 }
+
+// resend verification email handler
+pub async fn resend_verification_email(
+    req: web::Json<CheckEmailRequest>,
+    user_repo: web::Data<Arc<dyn UserRepository>>,
+    email_service: web::Data<Arc<EmailService>>,
+) -> Result<HttpResponse, AuthError> {
+    // validate the request
+    req.validate().map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
+
+    tracing::debug!("Resend verification email request for: {}", req.email);
+
+    // check if user exists by email
+    let user = user_repo.find_by_email(&req.email).await?;
+    
+    match user {
+        Some(user_model) => {
+            // checking if email is already verified
+            if user_model.email_verified {
+                return Err(AuthError::Validation("Email already verified".to_string()));
+            }
+
+            // resend verification email
+            match email_service.resend_verification_email(&req.email, &user_model.username).await {
+                Ok(new_otp_sent) => {
+                    let message = if new_otp_sent {
+                        "New verification code sent successfully"
+                    } else {
+                        "Verification code resent successfully"
+                    };
+                    
+                    Ok(HttpResponse::Ok().json(json!({
+                        "message": message,
+                        "new_code_sent": new_otp_sent,
+                        "timestamp": chrono::Utc::now().to_rfc3339()
+                    })))
+                }
+                Err(e) => {
+                    tracing::error!("Failed to resend verification email: {}", e);
+                    Err(e)
+                }
+            }
+        }
+        None => {
+            tracing::warn!("Resend verification requested for non-existent email: {}", req.email);
+            Err(AuthError::UserNotFound)
+        }
+    }
+}
