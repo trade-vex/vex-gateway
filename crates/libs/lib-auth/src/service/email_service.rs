@@ -45,7 +45,7 @@ impl EmailService {
         tracing::debug!("Creating SMTP transport for host: {}", email_config.smtp_host);
         
         // Configure SMTP transport based on host
-        let smtp_transport = if email_config.smtp_host == "localhost" || email_config.smtp_host == "127.0.0.1" {
+        let smtp_transport = if email_config.smtp_host == "localhost" || email_config.smtp_host == "127.0.0.1" || email_config.smtp_host == "host.docker.internal" {
             // for local development, use plain text without TLS
             tracing::info!("Configuring SMTP for local development (no TLS)");
             AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&email_config.smtp_host)
