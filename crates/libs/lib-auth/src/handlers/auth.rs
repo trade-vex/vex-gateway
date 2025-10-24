@@ -356,10 +356,18 @@ pub async fn check_email_exists(
 
     tracing::debug!("Check email exists request for: {}", req.email);
 
-    // Check if user exists by email
-    let user_exists = user_repo.find_by_email(&req.email).await?.is_some();
-
-    Ok(HttpResponse::Ok().json(json!({
-        "exists": user_exists
-    })))
+    match user_repo.find_by_email(&req.email).await? {
+        Some(user) => {
+            Ok(HttpResponse::Ok().json(json!({
+                "exists": true,
+                "email_verified": user.email_verified
+            })))
+        }
+        None => {
+            Ok(HttpResponse::Ok().json(json!({
+                "exists": false,
+                "email_verified": false
+            })))
+        }
+    }
 }
