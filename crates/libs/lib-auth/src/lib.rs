@@ -39,6 +39,7 @@ pub fn configure_public_auth_services(cfg: &mut web::ServiceConfig) {
         .route("/login", web::post().to(handlers::auth::login))
         .route("/refresh", web::post().to(handlers::auth::refresh_token))
         .route("/check-email", web::post().to(handlers::auth::check_email_exists))
+        .route("/resend-verification", web::post().to(handlers::auth::resend_verification_email))
         .route(
             "/verify-email",
             web::post().to(handlers::auth::verify_email_with_otp),

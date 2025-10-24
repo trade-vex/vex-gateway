@@ -347,4 +347,148 @@ The Team"#,
             None => Err(AuthError::OtpExpired),
         }
     }
+
+    /// checking if OTP exists and is not expired
+    pub async fn has_valid_otp(&self, email: &str) -> Result<bool, AuthError> {
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+
+        let key = format!("{}{}", OTP_KEY_PREFIX, email);
+
+        let stored_otp: Option<String> = conn
+            .get(&key)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to check OTP: {}", e)))?;
+
+        Ok(stored_otp.is_some())
+    }
+
+    /// resend verification email, will send new OTP if expired, keeps existing if valid
+    pub async fn resend_verification_email(
+        &self,
+        recipient_email: &str,
+        recipient_name: &str,
+    ) -> Result<bool, AuthError> {
+        tracing::info!("Starting resend verification email process");
+        tracing::info!("Recipient: {} <{}>", recipient_name, recipient_email);
+        
+        // checking if there's already a valid OTP and get it
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+
+        let key = format!("{}{}", OTP_KEY_PREFIX, recipient_email);
+        let existing_otp: Option<String> = conn
+            .get(&key)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to check existing OTP: {}", e)))?;
+
+        let (otp, is_new_otp) = if let Some(existing_otp) = existing_otp {
+            tracing::info!("Using existing valid OTP for {}", recipient_email);
+            (existing_otp, false)
+        } else {
+            // generating new OTP since the existing one is expired or not exist
+            let new_otp = self.generate_otp();
+            tracing::debug!("Generated new OTP: {}", new_otp);
+
+            // storing new OTP in Redis
+            tracing::debug!("Storing new OTP in Redis for email: {}", recipient_email);
+            self.store_otp(recipient_email, &new_otp).await?;
+            tracing::debug!("New OTP stored successfully in Redis");
+            (new_otp, true)
+        };
+
+        let subject = if is_new_otp {
+            "Verify Your Email - New Code"
+        } else {
+            "Verify Your Email - Resent Code"
+        };
+        tracing::debug!("Email subject: {}", subject);
+
+        let code_description = if is_new_otp {
+            "Your new verification code is:"
+        } else {
+            "Your verification code is:"
+        };
+
+        let text_content = format!(
+            r#"Hello {},
+
+{}
+
+{}
+
+This code will expire in {} minutes.
+
+If you didn't request this code, please ignore this email.
+
+Best regards,
+The Team"#,
+            recipient_name, code_description, otp, self.otp_expiry_minutes
+        );
+
+        let html_content = format!(
+            r#"
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Verify Your Email</title>
+</head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+    <div style="background: #f8f9fa; padding: 30px; border-radius: 10px; text-align: center;">
+        <h1 style="color: #2c3e50; margin-bottom: 20px;">Verify Your Email</h1>
+        
+        <p style="font-size: 16px; margin-bottom: 30px;">Hello {},</p>
+        
+        <div style="background: #fff; padding: 20px; border-radius: 8px; border: 2px solid #e9ecef; margin: 20px 0;">
+            <p style="font-size: 14px; color: #666; margin-bottom: 10px;">{}</p>
+            <div style="font-size: 32px; font-weight: bold; color: #2c3e50; letter-spacing: 5px; margin: 20px 0;">{}</div>
+        </div>
+        
+        <p style="font-size: 14px; color: #666; margin-bottom: 20px;">
+            This code will expire in <strong>{} minutes</strong>.
+        </p>
+        
+        <p style="font-size: 14px; color: #666;">
+            If you didn't request this code, please ignore this email.
+        </p>
+        
+        <hr style="border: none; border-top: 1px solid #e9ecef; margin: 30px 0;">
+        <p style="font-size: 12px; color: #999; margin: 0;">
+            Best regards,<br>
+            The Team
+        </p>
+    </div>
+</body>
+</html>"#,
+            recipient_name, code_description, otp, self.otp_expiry_minutes
+        );
+
+        tracing::debug!("Sending verification email to: {}", recipient_email);
+        let result = self.send_email(
+            recipient_email,
+            recipient_name,
+            &subject,
+            &html_content,
+            &text_content,
+        ).await;
+        
+        match result {
+            Ok(_) => {
+                tracing::info!("Verification email sent successfully to: {}", recipient_email);
+                Ok(is_new_otp) // Return whether a new OTP was generated
+            }
+            Err(e) => {
+                tracing::error!("Failed to send verification email to {}: {}", recipient_email, e);
+                Err(e)
+            }
+        }
+    }
 }
