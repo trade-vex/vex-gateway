@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::Mutex as TokioMutex;
-use tracing::info;
+use tracing::{debug, info};
 use url::Url;
 
 /// Central application state containing all dependencies
@@ -34,8 +34,9 @@ pub struct AppState {
     pub redis_pool: Arc<RedisPool>,
     pub http_client: Client,
 
-    // Auth-specific services
+    // DB Repository
     pub user_repo: Arc<dyn UserRepository>,
+    pub api_key_repository: Arc<dyn ApiKeyRepository>,
 
     // Auth configuration
     pub jwt_config: JwtConfig,
@@ -52,9 +53,6 @@ pub struct AppState {
 
     // API key middleware for dynamic updates
     pub api_key_middleware: Arc<TokioMutex<ApiKeyMiddleware>>,
-
-    // API key repository for database operations
-    pub api_key_repository: Arc<dyn ApiKeyRepository>,
 
     // Correlation service for matching responses to requests
     pub correlation_service: CorrelationService,
@@ -148,8 +146,8 @@ impl AppState {
 
         let current_dir = std::env::current_dir().unwrap_or_else(|_| "unknown".into());
         info!("Current working directory: {:?}", current_dir);
-        info!("Looking for private key at: {}", config.private_key_path);
-        info!("Looking for public key at: {}", config.public_key_path);
+        debug!("Looking for private key at: {}", config.private_key_path);
+        debug!("Looking for public key at: {}", config.public_key_path);
 
         if !Path::new(&config.private_key_path).exists() {
             return Err(format!(
@@ -222,7 +220,7 @@ impl AppState {
             .map_err(|e| format!("Failed to create Redis pool: {}", e).into())
     }
 
-    /// Initialize HTTP client for external API calls
+    /// Initialize HTTP client for Oauth service
     fn init_http_client() -> Result<Client, Box<dyn std::error::Error + Send + Sync>> {
         info!("Initializing HTTP client");
         Client::builder()
@@ -236,7 +234,7 @@ impl AppState {
         // Create cache configuration
         // This should be loaded from config , hardcoded config should be removed
         let cache_config = CacheConfig {
-            l1_max_size: 1000,
+            l1_max_size: 100000,
             l1_ttl: std::time::Duration::from_secs(300),
         };
 
