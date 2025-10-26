@@ -23,9 +23,6 @@ use vex_networking::client::VexGateway;
 /// or an error if the server fails to start or encounters an error.
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    // Load environment variables first
-    dotenvy::dotenv().ok();
-
     // Load configuration
     let config = Config::load_auto().unwrap_or_else(|e| {
         eprintln!(
