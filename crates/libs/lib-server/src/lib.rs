@@ -2,6 +2,7 @@
 //!
 //! Server initialization and application factory
 
+use tracing::{info};
 use actix_web::HttpServer;
 use actix_web::dev::Server;
 use lib_config::Config;
@@ -34,11 +35,10 @@ pub async fn initialize_server(
 
     // Create TCP listener
     let listener = TcpListener::bind(config.server_address()?)?;
-    tracing::info!("Server listening on {}", listener.local_addr().unwrap());
+    info!("Server listening on {}", listener.local_addr().unwrap());
 
     // Create the HTTP server
-    let app_state_clone = app_state.clone();
-    let server = HttpServer::new(move || create_app(app_state_clone.clone()))
+    let server = HttpServer::new(move || create_app(app_state.clone()))
         .listen(listener)?
         .run();
 
