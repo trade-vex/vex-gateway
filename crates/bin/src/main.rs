@@ -53,7 +53,7 @@ async fn main() -> std::io::Result<()> {
 
     // Initialize VexGateway client
     info!("Initializing VexGateway client");
-    
+
     // Change this for prod , test defaults should not be used and remove all hardcoded network config
     let mut gateway_config = GatewayNetworkingConfig::test_defaults();
     gateway_config.context_dir = "/dev/shm/aeron".to_string();
@@ -81,7 +81,7 @@ async fn main() -> std::io::Result<()> {
     info!("VexGateway client started successfully");
 
     // Initialize and start the server with publisher and correlation service
-    let (_app_state, server) =
+    let server =
         lib_server::initialize_server(&config, publisher, correlation_service)
             .await
             .map_err(|e| std::io::Error::other(e.to_string()))?;

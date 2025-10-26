@@ -6,7 +6,6 @@ use actix_web::HttpServer;
 use actix_web::dev::Server;
 use lib_config::Config;
 use std::net::TcpListener;
-use std::sync::Arc;
 
 mod app;
 mod combined_auth;
@@ -26,7 +25,7 @@ pub async fn initialize_server(
     config: &Config,
     gateway_publisher: lib_core::Publisher,
     correlation_service: CorrelationService,
-) -> Result<(Arc<AppState>, Server), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Server, Box<dyn std::error::Error + Send + Sync>> {
     // Use the auth configuration from lib-config
     let auth_config = config.auth.clone();
 
@@ -43,5 +42,5 @@ pub async fn initialize_server(
         .listen(listener)?
         .run();
 
-    Ok((app_state, server))
+    Ok(server)
 }
