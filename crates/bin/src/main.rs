@@ -53,13 +53,15 @@ async fn main() -> std::io::Result<()> {
 
     // Initialize VexGateway client
     info!("Initializing VexGateway client");
+    
+    // Change this for prod , test defaults should not be used and remove all hardcoded network config
     let mut gateway_config = GatewayNetworkingConfig::test_defaults();
     gateway_config.context_dir = "/dev/shm/aeron".to_string();
     gateway_config.core_address = "aeron-media-driver-core".to_string();
     gateway_config.local_address = "0.0.0.0".to_string();
     gateway_config.core_port = 40001;
     gateway_config.core_control_port = 40002;
-    println!("GATEWAY CONFIG 2: {:?}", gateway_config);
+    info!("GATEWAY CONFIG 2: {:?}", gateway_config);
     let mut gateway_client = VexGateway::new(gateway_config)
         .map_err(|e| std::io::Error::other(format!("Failed to initialize VexGateway: {}", e)))?;
 
@@ -69,6 +71,7 @@ async fn main() -> std::io::Result<()> {
 
     // Create Aeron handler with correlation service
     let handler = CorrelationHandler::new(gateway_client.gateway_id(), correlation_service.clone());
+    info!("Initialized handler");
 
     // Start the gateway client and get the publisher
     info!("Starting VexGateway with correlation handler");

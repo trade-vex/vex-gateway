@@ -67,6 +67,9 @@ use tracing::{debug, info};
 
 use crate::util::find_config_dir;
 
+/// Re-export AuthConfig from lib-auth for convenience
+pub use lib_auth::config::AuthConfig;
+
 /// Main configuration structure for the VEX Gateway Service.
 ///
 /// Contains all configuration settings organized by category.
@@ -82,9 +85,6 @@ pub struct Config {
     /// Authentication configuration
     pub auth: AuthConfig,
 }
-
-/// Re-export AuthConfig from lib-auth for convenience
-pub use lib_auth::config::AuthConfig;
 
 impl Config {
     /// Load configuration for the specified environment.
