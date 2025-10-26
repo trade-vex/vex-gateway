@@ -2,8 +2,8 @@
 
 use crate::ConfigError;
 use serde::{Deserialize, Serialize};
-use std::net::{SocketAddr, ToSocketAddrs};
 use std::env;
+use std::net::{SocketAddr, ToSocketAddrs};
 
 /// Server configuration settings for the VEX Gateway Service.
 ///
@@ -20,14 +20,13 @@ pub struct ServerConfig {
 impl ServerConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
         Ok(Self {
-            host: env::var("APP_SERVER_HOST")
-                .unwrap_or_else(|_| "0.0.0.0".to_string()),
+            host: env::var("APP_SERVER_HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
             port: env::var("APP_SERVER_PORT")
                 .unwrap_or_else(|_| "8081".to_string())
                 .parse()
-                .map_err(|_| ConfigError::ValidationError(
-                    "Invalid APP_SERVER_PORT value".to_string()
-                ))?,
+                .map_err(|_| {
+                    ConfigError::ValidationError("Invalid APP_SERVER_PORT value".to_string())
+                })?,
         })
     }
 

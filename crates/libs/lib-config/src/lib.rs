@@ -140,8 +140,7 @@ impl Config {
         let config = config::Config::builder()
             // 1. Load environment-specific configuration file
             .add_source(
-                config::File::from(config_dir.join(environment.config_file_name()))
-                    .required(false),
+                config::File::from(config_dir.join(environment.config_file_name())).required(false),
             )
             // 2. Load from environment variables with APP_ prefix
             .add_source(
@@ -223,11 +222,10 @@ impl Config {
         info!("Loading development defaults (no config files required)");
         Self {
             environment: Environment::Development,
-            server: ServerConfig::from_env()
-                .unwrap_or_else(|_| ServerConfig {
-                    host: "127.0.0.1".to_string(),
-                    port: 8081,
-                }),
+            server: ServerConfig::from_env().unwrap_or_else(|_| ServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 8081,
+            }),
             logging: LoggingConfig {
                 level: "debug".to_string(),
                 structured: false,

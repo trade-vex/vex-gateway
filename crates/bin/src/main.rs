@@ -81,10 +81,9 @@ async fn main() -> std::io::Result<()> {
     info!("VexGateway client started successfully");
 
     // Initialize and start the server with publisher and correlation service
-    let server =
-        lib_server::initialize_server(&config, publisher, correlation_service)
-            .await
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let server = lib_server::initialize_server(&config, publisher, correlation_service)
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
 
     info!("Server startup complete");
     server.await

@@ -6,7 +6,8 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::dto::auth_request_dto::{
-    ChangePasswordRequest, CheckEmailRequest, LoginRequest, RefreshTokenRequest, SignupRequest, VerifyEmailRequest,
+    ChangePasswordRequest, CheckEmailRequest, LoginRequest, RefreshTokenRequest, SignupRequest,
+    VerifyEmailRequest,
 };
 use crate::dto::auth_response_dto::{
     LoginResponse, RefreshTokenResponse, SignupResponse, UserInfo, UserProfile,
@@ -357,18 +358,14 @@ pub async fn check_email_exists(
     tracing::debug!("Check email exists request for: {}", req.email);
 
     match user_repo.find_by_email(&req.email).await? {
-        Some(user) => {
-            Ok(HttpResponse::Ok().json(json!({
-                "exists": true,
-                "email_verified": user.email_verified
-            })))
-        }
-        None => {
-            Ok(HttpResponse::Ok().json(json!({
-                "exists": false,
-                "email_verified": false
-            })))
-        }
+        Some(user) => Ok(HttpResponse::Ok().json(json!({
+            "exists": true,
+            "email_verified": user.email_verified
+        }))),
+        None => Ok(HttpResponse::Ok().json(json!({
+            "exists": false,
+            "email_verified": false
+        }))),
     }
 }
 
@@ -379,13 +376,14 @@ pub async fn resend_verification_email(
     email_service: web::Data<Arc<EmailService>>,
 ) -> Result<HttpResponse, AuthError> {
     // validate the request
-    req.validate().map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
+    req.validate()
+        .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
 
     tracing::debug!("Resend verification email request for: {}", req.email);
 
     // check if user exists by email
     let user = user_repo.find_by_email(&req.email).await?;
-    
+
     match user {
         Some(user_model) => {
             // checking if email is already verified
@@ -394,14 +392,17 @@ pub async fn resend_verification_email(
             }
 
             // resend verification email
-            match email_service.resend_verification_email(&req.email, &user_model.username).await {
+            match email_service
+                .resend_verification_email(&req.email, &user_model.username)
+                .await
+            {
                 Ok(new_otp_sent) => {
                     let message = if new_otp_sent {
                         "New verification code sent successfully"
                     } else {
                         "Verification code resent successfully"
                     };
-                    
+
                     Ok(HttpResponse::Ok().json(json!({
                         "message": message,
                         "new_code_sent": new_otp_sent,
@@ -415,7 +416,10 @@ pub async fn resend_verification_email(
             }
         }
         None => {
-            tracing::warn!("Resend verification requested for non-existent email: {}", req.email);
+            tracing::warn!(
+                "Resend verification requested for non-existent email: {}",
+                req.email
+            );
             Err(AuthError::UserNotFound)
         }
     }

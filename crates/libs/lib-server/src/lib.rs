@@ -2,11 +2,11 @@
 //!
 //! Server initialization and application factory
 
-use tracing::{info};
 use actix_web::HttpServer;
 use actix_web::dev::Server;
 use lib_config::Config;
 use std::net::TcpListener;
+use tracing::info;
 
 mod app;
 mod combined_auth;

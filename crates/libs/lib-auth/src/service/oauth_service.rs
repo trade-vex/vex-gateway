@@ -44,14 +44,14 @@ use crate::error::auth_error::AuthError;
 use crate::service::token_service::TokenService;
 use deadpool_redis::Pool as RedisPool;
 use deadpool_redis::redis::AsyncCommands;
-use openidconnect::{
-    core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata, CoreResponseType},
-    reqwest::async_http_client,
-    AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce,
-    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, ResponseTypes, Scope, TokenUrl,
-};
 #[allow(unused_imports)]
 use openidconnect::TokenResponse;
+use openidconnect::{
+    AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce,
+    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, ResponseTypes, Scope, TokenUrl,
+    core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata, CoreResponseType},
+    reqwest::async_http_client,
+};
 use secrecy::ExposeSecret;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -80,19 +80,19 @@ use crate::repository::UserRepository;
 pub struct OAuthService {
     /// Redis connection pool for state management
     redis_pool: Arc<RedisPool>,
-    
+
     /// HTTP client for API requests to providers
     http_client: reqwest::Client,
-    
+
     /// Pre-configured OAuth clients per provider (initialized at startup)
     oauth_clients: HashMap<String, CoreClient>,
-    
+
     /// JWT token service for minting application tokens
     token_service: Arc<TokenService>,
-    
+
     /// User repository for database operations
     user_repo: Arc<dyn UserRepository>,
-    
+
     /// Frontend URL for redirects after OAuth success
     frontend_url: String,
 }
@@ -213,15 +213,14 @@ impl OAuthService {
                 issuer,
                 auth_url,
                 // JWKS URL - required by spec but not used for plain OAuth
-                openidconnect::JsonWebKeySetUrl::new(format!("https://{}.com/.well-known/jwks.json", provider))
-                    .map_err(|e| AuthError::Config(format!("Invalid JWKS URL: {}", e)))?,
+                openidconnect::JsonWebKeySetUrl::new(format!(
+                    "https://{}.com/.well-known/jwks.json",
+                    provider
+                ))
+                .map_err(|e| AuthError::Config(format!("Invalid JWKS URL: {}", e)))?,
                 vec![ResponseTypes::new(vec![CoreResponseType::Code])],
-                vec![
-                    openidconnect::core::CoreSubjectIdentifierType::Public,
-                ],
-                vec![
-                    openidconnect::core::CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256,
-                ],
+                vec![openidconnect::core::CoreSubjectIdentifierType::Public],
+                vec![openidconnect::core::CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256],
                 openidconnect::EmptyAdditionalProviderMetadata {},
             )
             .set_token_endpoint(Some(token_url));
@@ -431,9 +430,7 @@ impl OAuthService {
         let access_token_secret = token_response.access_token().secret();
 
         // Get user info from provider's API
-        let user_info = self
-            .get_user_info(provider, access_token_secret)
-            .await?;
+        let user_info = self.get_user_info(provider, access_token_secret).await?;
 
         // Find or create user in database
         let user = match self
@@ -603,7 +600,7 @@ impl OAuthService {
                 return Err(AuthError::InvalidProvider(format!(
                     "Unknown provider: {}",
                     provider
-                )))
+                )));
             }
         };
 
@@ -631,7 +628,11 @@ impl OAuthService {
 
         // Debug logging for Google OAuth issues
         if provider == "google" {
-            tracing::debug!("Google user info response: {}", serde_json::to_string_pretty(&user_info).unwrap_or_else(|_| "Failed to serialize".to_string()));
+            tracing::debug!(
+                "Google user info response: {}",
+                serde_json::to_string_pretty(&user_info)
+                    .unwrap_or_else(|_| "Failed to serialize".to_string())
+            );
         }
 
         // Special handling for GitHub - fetch emails separately
@@ -718,22 +719,33 @@ impl OAuthService {
     /// }
     /// ```
     fn parse_google_user_info(&self, data: Value) -> Result<OAuthUserInfo, AuthError> {
-        tracing::debug!("Parsing Google user info: {}", serde_json::to_string_pretty(&data).unwrap_or_else(|_| "Failed to serialize".to_string()));
-        
-        let provider_id = data["sub"].as_str().ok_or_else(|| {
-                let available_fields: Vec<String> = data.as_object()
+        tracing::debug!(
+            "Parsing Google user info: {}",
+            serde_json::to_string_pretty(&data)
+                .unwrap_or_else(|_| "Failed to serialize".to_string())
+        );
+
+        let provider_id = data["sub"]
+            .as_str()
+            .ok_or_else(|| {
+                let available_fields: Vec<String> = data
+                    .as_object()
                     .map(|obj| obj.keys().cloned().collect())
                     .unwrap_or_default();
                 AuthError::UserInfoFetchFailed(format!(
                     "Missing Google 'sub' field. Available fields: {:?}. Response: {}",
                     available_fields,
-                    serde_json::to_string(&data).unwrap_or_else(|_| "Failed to serialize".to_string())
+                    serde_json::to_string(&data)
+                        .unwrap_or_else(|_| "Failed to serialize".to_string())
                 ))
             })?
             .to_string();
-            
-        let email = data["email"].as_str().ok_or_else(|| AuthError::UserInfoFetchFailed("Missing Google email".to_string()))?.to_string();
-            
+
+        let email = data["email"]
+            .as_str()
+            .ok_or_else(|| AuthError::UserInfoFetchFailed("Missing Google email".to_string()))?
+            .to_string();
+
         Ok(OAuthUserInfo {
             provider_id,
             email,

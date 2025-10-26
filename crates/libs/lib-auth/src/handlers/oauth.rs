@@ -2,10 +2,14 @@ use crate::dto::auth_request_dto::OAuthCallbackQuery;
 use crate::error::auth_error::AuthError;
 use crate::service::oauth_service::OAuthService;
 
-use actix_web::{HttpResponse, web, cookie::{Cookie, SameSite, time::Duration}};
+use actix_web::{
+    HttpResponse,
+    cookie::{Cookie, SameSite, time::Duration},
+    web,
+};
+use serde_json;
 use std::sync::Arc;
 use tracing::error;
-use serde_json;
 
 /// Initiate OAuth flow
 /// GET /oauth/{provider}
@@ -44,7 +48,7 @@ pub async fn handle_oauth_callback(
     {
         Ok(response) => {
             let is_secure = oauth_service.get_frontend_url().starts_with("https://");
-            
+
             // Create cookies for the authentication data
             let access_token_cookie = Cookie::build("access_token", &response.access_token)
                 .path("/")
@@ -63,9 +67,10 @@ pub async fn handle_oauth_callback(
                 .finish();
 
             // Serialize user info to JSON for the cookie
-            let user_info_json = serde_json::to_string(&response.user)
-                .map_err(|e| AuthError::CodeExchangeFailed(format!("Failed to serialize user info: {}", e)))?;
-            
+            let user_info_json = serde_json::to_string(&response.user).map_err(|e| {
+                AuthError::CodeExchangeFailed(format!("Failed to serialize user info: {}", e))
+            })?;
+
             let user_info_cookie = Cookie::build("user_info", user_info_json)
                 .path("/")
                 .http_only(true)
@@ -82,7 +87,7 @@ pub async fn handle_oauth_callback(
                 .cookie(user_info_cookie)
                 .append_header(("Location", redirect_url))
                 .finish())
-        },
+        }
         Err(e) => {
             error!("OAuth callback error: {}", e);
             Err(e)

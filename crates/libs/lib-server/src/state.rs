@@ -2,23 +2,25 @@
 //!
 //! Central application state containing all dependencies
 
-use tracing::{info};
 use deadpool_redis::Pool as RedisPool;
 use jsonwebtoken::{DecodingKey, EncodingKey};
-use lib_auth::config::{AuthConfig, JwtConfig, OAuthProviderConfig};
+use lib_auth::config::{AuthConfig, JwtConfig, OAuthProviderConfig, RedisConfig};
 use lib_auth::repository::{PostgresUserRepository, UserRepository};
 use lib_auth::service::{EmailService, OAuthService, TokenService};
 use lib_core::CorrelationService;
 use lib_core::Publisher;
+use lib_middleware::api_key::middleware::CacheConfig;
 use lib_middleware::{
     ApiKeyMiddleware, SecurityType,
     repository::api_key_repository::{ApiKeyRepository, PostgresApiKeyRepository},
 };
+use reqwest::Client;
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::Mutex as TokioMutex;
+use tracing::info;
 use url::Url;
 
 /// Central application state containing all dependencies
@@ -30,7 +32,7 @@ pub struct AppState {
     // Database and infrastructure
     pub db: Arc<DatabaseConnection>,
     pub redis_pool: Arc<RedisPool>,
-    pub http_client: reqwest::Client,
+    pub http_client: Client,
 
     // Auth-specific services
     pub user_repo: Arc<dyn UserRepository>,
@@ -65,7 +67,7 @@ impl AppState {
         gateway_publisher: Publisher,
         correlation_service: CorrelationService,
     ) -> Result<Arc<Self>, Box<dyn std::error::Error + Send + Sync>> {
-        info!("Initializing AppState with configuration");
+        info!("Initializing App State");
 
         // Initialize database connection
         let db = Self::init_database(&config.database).await?;
@@ -137,36 +139,6 @@ impl AppState {
         }))
     }
 
-    /// Sanitize a URL string to remove credentials and sensitive information
-    fn sanitize_url(url_str: &str) -> String {
-        match Url::parse(url_str) {
-            Ok(mut url) => {
-                // Remove username and password
-                let _ = url.set_username("");
-                let _ = url.set_password(None);
-
-                // For database URLs, we can show scheme, host, port, and path (database name)
-                let scheme = url.scheme();
-                let host = url.host_str().unwrap_or("<unknown>");
-                let port = url.port();
-                let path = url.path();
-
-                if let Some(port) = port {
-                    format!("{}://{}:{}{}", scheme, host, port, path)
-                } else {
-                    // Use default ports if not specified
-                    let default_port = match scheme {
-                        "postgresql" | "postgres" => ":5432",
-                        "redis" | "rediss" => ":6379",
-                        _ => "",
-                    };
-                    format!("{}://{}{}{}", scheme, host, default_port, path)
-                }
-            }
-            Err(_) => "<invalid-url>".to_string(),
-        }
-    }
-
     /// Initialize JWT keys from configuration
     fn init_jwt_keys(
         config: &lib_auth::config::JwtConfig,
@@ -175,9 +147,9 @@ impl AppState {
         use std::path::Path;
 
         let current_dir = std::env::current_dir().unwrap_or_else(|_| "unknown".into());
-        tracing::info!("Current working directory: {:?}", current_dir);
-        tracing::info!("Looking for private key at: {}", config.private_key_path);
-        tracing::info!("Looking for public key at: {}", config.public_key_path);
+        info!("Current working directory: {:?}", current_dir);
+        info!("Looking for private key at: {}", config.private_key_path);
+        info!("Looking for public key at: {}", config.public_key_path);
 
         if !Path::new(&config.private_key_path).exists() {
             return Err(format!(
@@ -221,7 +193,7 @@ impl AppState {
             )
         })?;
 
-        tracing::info!("Successfully loaded JWT keys");
+        info!("Successfully loaded JWT keys");
         Ok((encoding_key, decoding_key))
     }
 
@@ -231,7 +203,7 @@ impl AppState {
     ) -> Result<DatabaseConnection, Box<dyn std::error::Error + Send + Sync>> {
         use sea_orm::Database;
         let sanitized_url = Self::sanitize_url(&config.url);
-        tracing::info!("Connecting to database: {}", sanitized_url);
+        info!("Connecting to database: {}", sanitized_url);
         Database::connect(&config.url)
             .await
             .map_err(|e| format!("Failed to connect to database: {}", e).into())
@@ -239,11 +211,11 @@ impl AppState {
 
     /// Initialize Redis connection pool
     async fn init_redis(
-        config: &lib_auth::config::RedisConfig,
+        config: &RedisConfig,
     ) -> Result<RedisPool, Box<dyn std::error::Error + Send + Sync>> {
         use deadpool_redis::{Config as RedisConfig, Runtime};
         let sanitized_url = Self::sanitize_url(&config.url);
-        tracing::info!("Connecting to Redis: {}", sanitized_url);
+        info!("Connecting to Redis: {}", sanitized_url);
         let redis_config = RedisConfig::from_url(&config.url);
         redis_config
             .create_pool(Some(Runtime::Tokio1))
@@ -251,9 +223,9 @@ impl AppState {
     }
 
     /// Initialize HTTP client for external API calls
-    fn init_http_client() -> Result<reqwest::Client, Box<dyn std::error::Error + Send + Sync>> {
-        tracing::info!("Initializing HTTP client");
-        reqwest::Client::builder()
+    fn init_http_client() -> Result<Client, Box<dyn std::error::Error + Send + Sync>> {
+        info!("Initializing HTTP client");
+        Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {}", e).into())
@@ -261,12 +233,11 @@ impl AppState {
 
     /// Create ApiKeyMiddleware using AppState dependencies
     pub fn init_api_key_middleware(api_key_repo: &Arc<dyn ApiKeyRepository>) -> ApiKeyMiddleware {
-        use lib_middleware::api_key::middleware::CacheConfig;
-
         // Create cache configuration
+        // This should be loaded from config , hardcoded config should be removed
         let cache_config = CacheConfig {
-            l1_max_size: 1000,                           // Cache up to 1000 API keys in memory
-            l1_ttl: std::time::Duration::from_secs(300), // 5 minute TTL
+            l1_max_size: 1000,
+            l1_ttl: std::time::Duration::from_secs(300),
         };
 
         // Create middleware with database repository for dynamic loading
@@ -274,6 +245,36 @@ impl AppState {
             .with_cache_config(cache_config)
             .with_repository(api_key_repo.clone())
             .with_default_security(SecurityType::Trade)
+    }
+
+    /// Sanitize a URL string to remove credentials and sensitive information
+    fn sanitize_url(url_str: &str) -> String {
+        match Url::parse(url_str) {
+            Ok(mut url) => {
+                // Remove username and password
+                let _ = url.set_username("");
+                let _ = url.set_password(None);
+
+                // For database URLs, we can show scheme, host, port, and path (database name)
+                let scheme = url.scheme();
+                let host = url.host_str().unwrap_or("<unknown>");
+                let port = url.port();
+                let path = url.path();
+
+                if let Some(port) = port {
+                    format!("{}://{}:{}{}", scheme, host, port, path)
+                } else {
+                    // Use default ports if not specified
+                    let default_port = match scheme {
+                        "postgresql" | "postgres" => ":5432",
+                        "redis" | "rediss" => ":6379",
+                        _ => "",
+                    };
+                    format!("{}://{}{}{}", scheme, host, default_port, path)
+                }
+            }
+            Err(_) => "<invalid-url>".to_string(),
+        }
     }
 }
 
