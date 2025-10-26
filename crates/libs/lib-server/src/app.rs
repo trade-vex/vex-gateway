@@ -40,9 +40,6 @@ pub fn create_app(
         .app_data(web::Data::new(app_state.db.clone()))
         .app_data(web::Data::new(app_state.redis_pool.clone()))
         .app_data(web::Data::new(app_state.http_client.clone()))
-        .app_data(web::Data::new(Arc::new(app_state.token_service.clone())))
-        .app_data(web::Data::new(Arc::new(app_state.oauth_service.clone())))
-        .app_data(web::Data::new(Arc::new(app_state.email_service.clone())))
         .app_data(web::Data::new(app_state.gateway_publisher.clone()))
         .app_data(web::Data::new(app_state.correlation_service.clone()))
         // Configure all routes under a single /api scope

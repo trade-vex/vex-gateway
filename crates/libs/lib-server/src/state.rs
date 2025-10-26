@@ -115,7 +115,7 @@ impl AppState {
             config.otp.email_verification_expiry_minutes,
         )?;
 
-        tracing::info!("AppState initialization completed successfully");
+        info!("AppState initialization completed successfully");
 
         Ok(Arc::new(Self {
             db: Arc::new(db),
