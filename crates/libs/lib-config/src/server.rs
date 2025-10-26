@@ -15,12 +15,6 @@ pub struct ServerConfig {
     pub host: String,
     /// The port number to bind the server to (0 for ephemeral port in testing)
     pub port: u16,
-    /// Maximum number of concurrent connections the server will accept
-    pub max_connections: usize,
-    /// Connection timeout in seconds (how long to wait for new connections)
-    pub connection_timeout: u64,
-    /// Keep-alive timeout in seconds (how long to keep idle connections open)
-    pub keep_alive_timeout: u64,
 }
 
 impl ServerConfig {
@@ -33,24 +27,6 @@ impl ServerConfig {
                 .parse()
                 .map_err(|_| ConfigError::ValidationError(
                     "Invalid APP_SERVER_PORT value".to_string()
-                ))?,
-            max_connections: env::var("APP_SERVER_MAX_CONNECTIONS")
-                .unwrap_or_else(|_| "1000".to_string())
-                .parse()
-                .map_err(|_| ConfigError::ValidationError(
-                    "Invalid APP_SERVER_MAX_CONNECTIONS value".to_string()
-                ))?,
-            connection_timeout: env::var("APP_SERVER_CONNECTION_TIMEOUT")
-                .unwrap_or_else(|_| "30".to_string())
-                .parse()
-                .map_err(|_| ConfigError::ValidationError(
-                    "Invalid APP_SERVER_CONNECTION_TIMEOUT value".to_string()
-                ))?,
-            keep_alive_timeout: env::var("APP_SERVER_KEEP_ALIVE_TIMEOUT")
-                .unwrap_or_else(|_| "60".to_string())
-                .parse()
-                .map_err(|_| ConfigError::ValidationError(
-                    "Invalid APP_SERVER_KEEP_ALIVE_TIMEOUT value".to_string()
                 ))?,
         })
     }
@@ -71,25 +47,6 @@ impl ServerConfig {
                 "Server host cannot be empty".to_string(),
             ));
         }
-
-        if self.max_connections == 0 {
-            return Err(ConfigError::ValidationError(
-                "Max connections cannot be 0".to_string(),
-            ));
-        }
-
-        if self.connection_timeout == 0 {
-            return Err(ConfigError::ValidationError(
-                "Connection timeout cannot be 0".to_string(),
-            ));
-        }
-
-        if self.keep_alive_timeout == 0 {
-            return Err(ConfigError::ValidationError(
-                "Keep-alive timeout cannot be 0".to_string(),
-            ));
-        }
-
         Ok(())
     }
 

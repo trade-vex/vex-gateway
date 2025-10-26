@@ -2,6 +2,7 @@
 //!
 //! Central application state containing all dependencies
 
+use tracing::{info};
 use deadpool_redis::Pool as RedisPool;
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use lib_auth::config::{AuthConfig, JwtConfig, OAuthProviderConfig};
@@ -64,7 +65,7 @@ impl AppState {
         gateway_publisher: Publisher,
         correlation_service: CorrelationService,
     ) -> Result<Arc<Self>, Box<dyn std::error::Error + Send + Sync>> {
-        tracing::info!("Initializing AppState with configuration");
+        info!("Initializing AppState with configuration");
 
         // Initialize database connection
         let db = Self::init_database(&config.database).await?;

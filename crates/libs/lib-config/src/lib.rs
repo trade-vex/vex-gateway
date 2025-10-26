@@ -227,9 +227,6 @@ impl Config {
                 .unwrap_or_else(|_| ServerConfig {
                     host: "127.0.0.1".to_string(),
                     port: 8081,
-                    max_connections: 1000,
-                    connection_timeout: 30,
-                    keep_alive_timeout: 60,
                 }),
             logging: LoggingConfig {
                 level: "debug".to_string(),
@@ -313,13 +310,6 @@ impl Config {
             }
             Environment::Development => {
                 debug!("Applying development-specific validation rules");
-
-                // Development-specific validations
-                if self.server.max_connections > 10000 {
-                    return Err(ConfigError::ValidationError(
-                        "Development environment max_connections should be reasonable".to_string(),
-                    ));
-                }
             }
             Environment::Testing => {
                 debug!("Applying testing-specific validation rules");
@@ -435,18 +425,12 @@ mod tests {
         let valid_config = ServerConfig {
             host: "127.0.0.1".to_string(),
             port: 8081,
-            max_connections: 1000,
-            connection_timeout: 30,
-            keep_alive_timeout: 60,
         };
         assert!(valid_config.validate().is_ok());
 
         let invalid_config = ServerConfig {
             host: "".to_string(),
             port: 8081,
-            max_connections: 1000,
-            connection_timeout: 30,
-            keep_alive_timeout: 60,
         };
         assert!(invalid_config.validate().is_err());
     }
