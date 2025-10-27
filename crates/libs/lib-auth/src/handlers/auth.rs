@@ -1,4 +1,4 @@
-use actix_web::{HttpRequest, HttpResponse, web};
+use actix_web::{HttpRequest, HttpResponse, web, cookie::{Cookie, SameSite, time::Duration}};
 use bcrypt::{DEFAULT_COST, hash, verify};
 use chrono::Utc;
 use serde_json::json;
@@ -9,13 +9,14 @@ use crate::dto::auth_request_dto::{
     ChangePasswordRequest, CheckEmailRequest, LoginRequest, RefreshTokenRequest, SignupRequest, VerifyEmailRequest,
 };
 use crate::dto::auth_response_dto::{
-    LoginResponse, RefreshTokenResponse, SignupResponse, UserInfo, UserProfile,
+    RefreshTokenResponse, SignupResponse, UserInfo, UserProfile,
 };
+use crate::dto::session_dto::SessionResponse;
 use crate::error::auth_error::AuthError;
 use crate::middleware::jwt_auth::AuthenticatedUser;
 use crate::models::user::{Model, UserStatus};
 use crate::repository::UserRepository;
-use crate::service::{EmailService, TokenService};
+use crate::service::{EmailService, TokenService, SessionService};
 use std::sync::Arc;
 
 // Signup handler
@@ -90,6 +91,7 @@ pub async fn login(
     req: web::Json<LoginRequest>,
     user_repo: web::Data<Arc<dyn UserRepository>>,
     token_service: web::Data<Arc<TokenService>>,
+    session_service: web::Data<Arc<SessionService>>,
 ) -> Result<HttpResponse, AuthError> {
     // Validate the request
     req.validate()
@@ -135,23 +137,68 @@ pub async fn login(
     user_repo.update_last_login(user_id).await?;
 
     let user_info = UserInfo::from(user);
-    let response = LoginResponse {
-        access_token: tokens.access_token,
-        refresh_token: tokens.refresh_token,
-        token_type: "Bearer".to_string(),
-        expires_in: tokens.expires_in,
-        user: user_info,
+    
+    // Create session
+    let session_id = session_service
+        .create_session(user_info.clone(), tokens.access_token, tokens.refresh_token)
+        .await?;
+
+    // Clone session_id for the cookie
+    let session_id_clone = session_id.clone();
+
+    // Create session cookie
+    let session_cookie = Cookie::build("session_id", session_id_clone)
+        .path("/")
+        .http_only(true)
+        .secure(false) // Set to true in production with HTTPS
+        .same_site(SameSite::Strict)
+        .max_age(Duration::days(30))
+        .finish();
+
+    let response = SessionResponse {
+        session_id: session_id.clone(),
+        message: "Login successful".to_string(),
     };
 
-    Ok(HttpResponse::Ok().json(response))
+    Ok(HttpResponse::Ok()
+        .cookie(session_cookie)
+        .json(response))
 }
 
 // Logout handler
 pub async fn logout(
     req: HttpRequest,
+    session_service: web::Data<Arc<SessionService>>,
     token_service: web::Data<Arc<TokenService>>,
 ) -> Result<HttpResponse, AuthError> {
-    // Extract JWT token from Authorization header
+    // Try to get session ID from cookie first (preferred)
+    let mut session_id_opt = None;
+    if let Some(cookie) = req.cookie("session_id") {
+        session_id_opt = Some(cookie.value().to_string());
+    }
+
+    // If session-based logout, destroy the session
+    if let Some(session_id) = session_id_opt {
+        session_service.destroy_session(&session_id).await?;
+
+        // Create expired cookie to clear the session cookie
+        let expired_cookie = Cookie::build("session_id", "")
+            .path("/")
+            .http_only(true)
+            .secure(false)
+            .same_site(SameSite::Strict)
+            .max_age(Duration::seconds(-1))
+            .finish();
+
+        return Ok(HttpResponse::Ok()
+            .cookie(expired_cookie)
+            .json(json!({
+                "message": "Logged out successfully",
+                "timestamp": chrono::Utc::now().to_rfc3339()
+            })));
+    }
+
+    // Fallback to JWT-based logout for backward compatibility
     let token = match req.headers().get("Authorization") {
         Some(auth_header) => {
             let auth_str = auth_header
@@ -172,6 +219,26 @@ pub async fn logout(
     Ok(HttpResponse::Ok().json(json!({
         "message": "Logged out successfully",
         "timestamp": chrono::Utc::now().to_rfc3339()
+    })))
+}
+
+// Get current session handler
+pub async fn get_session(
+    req: HttpRequest,
+    session_service: web::Data<Arc<SessionService>>,
+) -> Result<HttpResponse, AuthError> {
+    // Extract session ID from cookie
+    let session_id = req.cookie("session_id")
+        .and_then(|c| Some(c.value().to_string()))
+        .ok_or(AuthError::Validation("No session found".to_string()))?;
+
+    // Retrieve session data from Redis
+    let session_data = session_service.get_session(&session_id).await?;
+
+    // Return session data (without tokens for security)
+    Ok(HttpResponse::Ok().json(json!({
+        "user": session_data.user,
+        "has_session": true,
     })))
 }
 
@@ -225,6 +292,7 @@ pub async fn verify_email_with_otp(
     user_repo: web::Data<Arc<dyn UserRepository>>,
     email_service: web::Data<Arc<EmailService>>,
     token_service: web::Data<Arc<TokenService>>,
+    session_service: web::Data<Arc<SessionService>>,
 ) -> Result<HttpResponse, AuthError> {
     // Validate the request
     req.validate()
@@ -262,15 +330,32 @@ pub async fn verify_email_with_otp(
         .ok_or(AuthError::UserNotFound)?;
 
     let user_info = UserInfo::from(updated_user);
-    let response = LoginResponse {
-        access_token: tokens.access_token,
-        refresh_token: tokens.refresh_token,
-        token_type: "Bearer".to_string(),
-        expires_in: tokens.expires_in,
-        user: user_info,
+
+    // Create session
+    let session_id = session_service
+        .create_session(user_info.clone(), tokens.access_token, tokens.refresh_token)
+        .await?;
+
+    // Clone session_id for the cookie
+    let session_id_clone = session_id.clone();
+
+    // Create session cookie
+    let session_cookie = Cookie::build("session_id", session_id_clone)
+        .path("/")
+        .http_only(true)
+        .secure(false) // Set to true in production with HTTPS
+        .same_site(SameSite::Strict)
+        .max_age(Duration::days(30))
+        .finish();
+
+    let response = SessionResponse {
+        session_id: session_id.clone(),
+        message: "Email verified and session created successfully".to_string(),
     };
 
-    Ok(HttpResponse::Ok().json(response))
+    Ok(HttpResponse::Ok()
+        .cookie(session_cookie)
+        .json(response))
 }
 
 // Verify email handler (internal handler)

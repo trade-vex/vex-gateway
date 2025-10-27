@@ -6,7 +6,7 @@ use deadpool_redis::Pool as RedisPool;
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use lib_auth::config::{AuthConfig, JwtConfig, OAuthProviderConfig};
 use lib_auth::repository::{PostgresUserRepository, UserRepository};
-use lib_auth::service::{EmailService, OAuthService, TokenService};
+use lib_auth::service::{EmailService, OAuthService, TokenService, SessionService};
 use lib_core::CorrelationService;
 use lib_core::Publisher;
 use lib_middleware::{
@@ -43,6 +43,7 @@ pub struct AppState {
     pub token_service: TokenService,
     pub oauth_service: OAuthService,
     pub email_service: EmailService,
+    pub session_service: SessionService,
 
     // Gateway publisher for order processing
     pub gateway_publisher: Arc<Mutex<Publisher>>,
@@ -114,6 +115,12 @@ impl AppState {
             config.otp.email_verification_expiry_minutes,
         )?;
 
+        // Initialize session service
+        let session_service = SessionService::new(
+            Arc::new(redis_pool.clone()),
+            config.jwt.refresh_token_ttl_days,
+        );
+
         tracing::info!("AppState initialization completed successfully");
 
         Ok(Arc::new(Self {
@@ -129,6 +136,7 @@ impl AppState {
             token_service,
             oauth_service,
             email_service,
+            session_service,
             gateway_publisher: Arc::new(Mutex::new(gateway_publisher)),
             api_key_middleware: Arc::new(TokioMutex::new(api_key_middleware)),
             api_key_repository,

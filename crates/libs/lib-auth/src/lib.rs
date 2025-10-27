@@ -43,7 +43,9 @@ pub fn configure_public_auth_services(cfg: &mut web::ServiceConfig) {
         .route(
             "/verify-email",
             web::post().to(handlers::auth::verify_email_with_otp),
-        );
+        )
+        // Session route (public, but requires session cookie)
+        .route("/session", web::get().to(handlers::auth::get_session));
 }
 
 /// Configure protected routes for auth that require authentication
