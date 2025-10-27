@@ -1,9 +1,10 @@
 use actix_web::{
-    Error, HttpRequest,
+    Error, HttpRequest, HttpMessage,
     dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready},
 };
 use futures_util::future::{LocalBoxFuture, Ready, ready};
-use lib_auth::middleware::jwt_auth::JwtAuthentication;
+use lib_auth::middleware::jwt_auth::{AuthenticatedUser, JwtAuthentication};
+use lib_auth::service::session_service::SessionService;
 use lib_middleware::api_key::middleware::ApiKeyMiddleware;
 use std::{rc::Rc, sync::Arc};
 use tokio::sync::Mutex as TokioMutex;
@@ -13,16 +14,19 @@ use tracing::error;
 pub struct CombinedAuthMiddleware {
     jwt_middleware: JwtAuthentication,
     api_key_middleware: Arc<TokioMutex<ApiKeyMiddleware>>,
+    session_service: Arc<SessionService>,
 }
 
 impl CombinedAuthMiddleware {
     pub fn new(
         jwt_middleware: JwtAuthentication,
         api_key_middleware: Arc<TokioMutex<ApiKeyMiddleware>>,
+        session_service: Arc<SessionService>,
     ) -> Self {
         Self {
             jwt_middleware,
             api_key_middleware,
+            session_service,
         }
     }
 
@@ -39,6 +43,11 @@ impl CombinedAuthMiddleware {
             return AuthType::ApiKey;
         }
 
+        // Check for session cookie
+        if req.cookie("session_id").is_some() {
+            return AuthType::Session;
+        }
+
         AuthType::None
     }
 }
@@ -47,6 +56,7 @@ impl CombinedAuthMiddleware {
 enum AuthType {
     Jwt,
     ApiKey,
+    Session,
     None,
 }
 
@@ -67,6 +77,7 @@ where
             service: Rc::new(service),
             jwt_middleware: self.jwt_middleware.clone(),
             api_key_middleware: Arc::clone(&self.api_key_middleware),
+            session_service: Arc::clone(&self.session_service),
         }))
     }
 }
@@ -75,6 +86,7 @@ pub struct CombinedAuthMiddlewareService<S> {
     service: Rc<S>,
     jwt_middleware: JwtAuthentication,
     api_key_middleware: Arc<TokioMutex<ApiKeyMiddleware>>,
+    session_service: Arc<SessionService>,
 }
 
 impl<S, B> Service<ServiceRequest> for CombinedAuthMiddlewareService<S>
@@ -92,6 +104,7 @@ where
     fn call(&self, req: ServiceRequest) -> Self::Future {
         let jwt_middleware = self.jwt_middleware.clone();
         let api_key_middleware = Arc::clone(&self.api_key_middleware);
+        let session_service = Arc::clone(&self.session_service);
         let service = Rc::clone(&self.service);
 
         Box::pin(async move {
@@ -113,6 +126,29 @@ where
 
                     let response = api_key_service.call(req).await?;
                     Ok(response.map_into_boxed_body())
+                }
+
+                AuthType::Session => {
+                    // Handle session-based authentication
+                    if let Some(session_id_cookie) = req.request().cookie("session_id") {
+                        let session_id = session_id_cookie.value().to_string();
+                        
+                        match session_service.get_session(&session_id).await {
+                            Ok(session_data) => {
+                                let authenticated_user = AuthenticatedUser { user_id: session_data.user_id };
+                                req.extensions_mut().insert(authenticated_user);
+                                
+                                let response = service.call(req).await?;
+                                Ok(response.map_into_boxed_body())
+                            }
+                            Err(e) => {
+                                tracing::warn!("Invalid session: {}", e);
+                                Err(actix_web::error::ErrorUnauthorized("Invalid session"))
+                            }
+                        }
+                    } else {
+                        Err(actix_web::error::ErrorUnauthorized("Session cookie not found"))
+                    }
                 }
 
                 AuthType::None => {

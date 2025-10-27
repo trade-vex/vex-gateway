@@ -30,9 +30,9 @@ pub fn create_app(
         app_state.redis_pool.clone(),
     );
 
-    // Create combined auth middleware using the API key middleware from AppState
+    // Create combined auth middleware using the API key middleware and session service from AppState
     let combined_auth_middleware =
-        CombinedAuthMiddleware::new(jwt_middleware, app_state.api_key_middleware.clone());
+        CombinedAuthMiddleware::new(jwt_middleware, app_state.api_key_middleware.clone(), Arc::new(app_state.session_service.clone()));
 
     App::new()
         .app_data(web::Data::new(app_state.clone()))
@@ -43,6 +43,7 @@ pub fn create_app(
         .app_data(web::Data::new(Arc::new(app_state.token_service.clone())))
         .app_data(web::Data::new(Arc::new(app_state.oauth_service.clone())))
         .app_data(web::Data::new(Arc::new(app_state.email_service.clone())))
+        .app_data(web::Data::new(Arc::new(app_state.session_service.clone())))
         .app_data(web::Data::new(app_state.gateway_publisher.clone()))
         .app_data(web::Data::new(app_state.correlation_service.clone()))
         // Configure all routes under a single /api scope
@@ -53,6 +54,7 @@ pub fn create_app(
                 .app_data(web::Data::new(Arc::new(app_state.email_service.clone())))
                 .app_data(web::Data::new(Arc::new(app_state.token_service.clone())))
                 .app_data(web::Data::new(Arc::new(app_state.oauth_service.clone())))
+                .app_data(web::Data::new(Arc::new(app_state.session_service.clone())))
                 // Public routes (no authentication required)
                 .configure(lib_auth::configure_public_auth_services)
                 // Health check route
