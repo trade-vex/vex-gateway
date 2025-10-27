@@ -44,6 +44,20 @@ pub struct OrderResponse {
     pub timestamp: u64,
 }
 
+/// Enhanced order response for order history with status and fill information
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OrderHistoryResponse {
+    pub order_id: u64,
+    pub user_id: u64,
+    pub market_id: u32,
+    pub price: u64,
+    pub size: u64,
+    pub side: Side,
+    pub timestamp: u64,
+    pub status: String,
+    pub filled_size: u64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserBalanceResponse {
     pub user_id: u64, // Changed from Uuid to u64 to match DB schema
@@ -63,6 +77,12 @@ pub struct BalancesListResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OrdersListResponse {
     pub orders: Vec<OrderResponse>,
+    pub total: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OrdersHistoryListResponse {
+    pub orders: Vec<OrderHistoryResponse>,
     pub total: usize,
 }
 
@@ -90,6 +110,22 @@ impl From<UserBalanceModel> for UserBalanceResponse {
             locked: model.locked as u64,
             total: model.total as u64,
             timestamp: model.timestamp as u64,
+        }
+    }
+}
+
+impl From<OrderModel> for OrderHistoryResponse {
+    fn from(model: OrderModel) -> Self {
+        Self {
+            order_id: model.order_order_id as u64,
+            user_id: model.order_user_id as u64,
+            market_id: model.market_id as u32,
+            price: model.order_price as u64,
+            size: model.order_size as u64,
+            side: model.order_side.parse().unwrap_or(Side::Bid),
+            timestamp: model.order_timestamp as u64,
+            status: "Open".to_string(),
+            filled_size: 0,
         }
     }
 }

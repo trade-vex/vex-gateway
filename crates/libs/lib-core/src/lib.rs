@@ -5,7 +5,7 @@ pub mod model;
 pub mod repository;
 
 pub use dto::trading::{
-    BalancesListResponse, OrderResponse, OrdersListResponse, Side, UserBalanceResponse,
+    BalancesListResponse, OrderHistoryResponse, OrderResponse, OrdersHistoryListResponse, OrdersListResponse, Side, UserBalanceResponse,
 };
 
 pub use repository::repository::{

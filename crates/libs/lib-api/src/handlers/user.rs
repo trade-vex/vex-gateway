@@ -2,7 +2,7 @@
 
 use actix_web::{HttpResponse, Result, web};
 use lib_core::{
-    BalancesListResponse, OrderResponse, OrderStore, OrdersListResponse, UserBalanceResponse,
+    BalancesListResponse, OrderHistoryResponse, OrderResponse, OrderStore, OrdersHistoryListResponse, OrdersListResponse, UserBalanceResponse,
     UserBalanceStore,
 };
 use lib_utils::auth_extractors::AuthenticatedUserId;
@@ -187,6 +187,122 @@ pub async fn get_open_orders(
             tracing::error!("failed to get open orders: {}", e);
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "failed to retrieve open orders",
+                "message": e.to_string()
+            })))
+        }
+    }
+}
+
+/// Get user's complete order history
+///
+/// Retrieves all orders (open, filled, cancelled, rejected) for the authenticated user across all markets.
+/// Returns detailed information about each order including price, size, side, status, and fill information.
+///
+/// # Endpoint
+/// `GET /api/user/orders/history`
+///
+/// # Authentication
+/// Requires valid JWT token in Authorization header: `Bearer <token>`
+///
+/// # Response
+/// Returns [`OrdersHistoryListResponse`] containing all orders with status and fill information.
+///
+/// # Example Request
+/// ```bash
+/// curl -X GET http://localhost:8080/api/user/orders/history \
+///   -H "Authorization: Bearer <jwt_token>"
+/// ```
+///
+/// # Example Success Response (200 OK)
+/// ```json
+/// {
+///   "orders": [
+///     {
+///       "order_id": 123456789,
+///       "user_id": 123456,
+///       "market_id": 1,
+///       "price": 5000000,
+///       "size": 100,
+///       "side": "Bid",
+///       "timestamp": 1697452800000000,
+///       "status": "Filled",
+///       "filled_size": 100
+///     },
+///     {
+///       "order_id": 987654321,
+///       "user_id": 123456,
+///       "market_id": 2,
+///       "price": 10000000,
+///       "size": 50,
+///       "side": "Ask",
+///       "timestamp": 1697452900000000,
+///       "status": "PartiallyFilled",
+///       "filled_size": 25
+///     },
+///     {
+///       "order_id": 456789123,
+///       "user_id": 123456,
+///       "market_id": 1,
+///       "price": 4500000,
+///       "size": 75,
+///       "side": "Bid",
+///       "timestamp": 1697453000000000,
+///       "status": "Cancelled",
+///       "filled_size": 0
+///     }
+///   ],
+///   "total": 3
+/// }
+/// ```
+///
+/// # Example Error Response (500)
+/// ```json
+/// {
+///   "error": "failed to retrieve order history",
+///   "message": "database connection lost"
+/// }
+/// ```
+///
+/// # Data Source
+/// - Primary: Redis cache (sub-millisecond latency)
+/// - Fallback: PostgreSQL database (if cache miss)
+/// - Updates: Real-time via Kafka event streaming from VEX Core
+///
+/// # Order States
+/// Returns orders in ALL states:
+/// - Pending - Order submitted but not yet processed
+/// - PartiallyFilled - Order partially executed
+/// - Processing - Order being matched
+/// - Filled - Completely executed orders
+/// - Cancelled - User-cancelled orders
+/// - Rejected - Orders rejected by matching engine
+///
+/// # Fill Information
+/// - `filled_size`: Amount of the order that has been executed
+/// - `status`: Current status of the order (Pending, PartiallyFilled, Filled, Cancelled, Rejected)
+pub async fn get_order_history(
+    user: AuthenticatedUserId,
+    order_store: web::Data<Arc<OrderStore>>,
+) -> Result<HttpResponse> {
+    let user_id = user.0;
+
+    match order_store.get_user_order_history(user_id).await {
+        Ok(orders) => {
+            let total = orders.len();
+            let order_responses: Vec<OrderHistoryResponse> =
+                orders.into_iter().map(|order| order.into()).collect();
+
+            let response = OrdersHistoryListResponse {
+                orders: order_responses,
+                total,
+            };
+
+            Ok(HttpResponse::Ok().json(response))
+        }
+        Err(e) => {
+            tracing::error!("failed to get order history: {}", e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "failed to retrieve order history",
                 "message": e.to_string()
             })))
         }

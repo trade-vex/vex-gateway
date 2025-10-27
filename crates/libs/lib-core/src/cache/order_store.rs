@@ -120,6 +120,86 @@ impl OrderStore {
         Ok(None)
     }
 
+    /// Get user's order history with caching (all orders including filled, cancelled, etc.)
+    /// Uses Redis set user:{user_id}:orders -> fetches each order:{order_id} hash
+    /// Unlike get_user_orders, this includes ALL orders regardless of status
+    pub async fn get_user_order_history(&self, user_id: Uuid) -> Result<Vec<OrderModel>, TradingError> {
+        // Convert UUID to i64 to match Kafka consumer's key format
+        // Kafka writes: user:{numeric_id}:orders
+        let user_id_i64 = user_id.as_u128() as i64;
+
+        // Cache: Query user:{user_id}:orders SET, then fetch each order hash
+        if self.config.enabled {
+            if let Some(cache) = &self.cache {
+                let set_key = format!("user:{}:orders", user_id_i64);
+
+                println!("🔍 OrderStore: Querying Redis SET for order history: {}", set_key);
+
+                match cache.smembers_string(&set_key).await {
+                    Ok(order_ids) if !order_ids.is_empty() => {
+                        debug!(
+                            "User order history cache hit for user: {} (i64: {}, {} orders in SET)",
+                            user_id,
+                            user_id_i64,
+                            order_ids.len()
+                        );
+                        println!(
+                            "   Found {} order IDs in SET: {:?}",
+                            order_ids.len(),
+                            order_ids
+                        );
+
+                        let mut orders = Vec::new();
+                        // Fetch each order hash - include ALL orders regardless of status
+                        for order_id_str in order_ids {
+                            let order_key = format!("order:{}", order_id_str);
+                            match cache.hgetall_string(&order_key).await {
+                                Ok(hash) if !hash.is_empty() => {
+                                    println!(
+                                        "   Fetched hash for order {}: {:?}",
+                                        order_id_str, hash
+                                    );
+
+                                    // Include ALL orders - don't filter by status
+                                    if let Some(order) = Self::parse_order_hash(hash, user_id) {
+                                        println!("   ✓ Adding order {} to history results", order_id_str);
+                                        orders.push(order);
+                                    }
+                                }
+                                _ => continue,
+                            }
+                        }
+
+                        println!("   Returning {} orders in history", orders.len());
+                        return Ok(orders);
+                    }
+                    Ok(_) => {
+                        debug!("User order history cache miss for user: {}", user_id);
+                    }
+                    Err(e) => {
+                        warn!("User order history cache error for user {}: {}", user_id, e);
+                    }
+                }
+            }
+        }
+
+        // Database fallback - get all orders (not just open ones)
+        if let Some(repo) = &self.trading_repo {
+            match repo.get_open_orders(user_id).await {
+                Ok(orders) => {
+                    debug!("Database hit for user order history: {}", user_id);
+                    return Ok(orders);
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+
+        debug!("No repository available for user order history: {}", user_id);
+        Ok(vec![])
+    }
+
     /// Get user's open orders with caching
     /// Uses Redis set user:{user_id}:orders -> fetches each order:{order_id} hash
     pub async fn get_user_orders(&self, user_id: Uuid) -> Result<Vec<OrderModel>, TradingError> {
