@@ -48,7 +48,7 @@ pub struct OAuthTokenResponse {
     pub scope: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct UserInfo {
     pub user_id: Uuid,
     pub email: String,

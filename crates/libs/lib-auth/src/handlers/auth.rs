@@ -15,7 +15,7 @@ use crate::error::auth_error::AuthError;
 use crate::middleware::jwt_auth::AuthenticatedUser;
 use crate::models::user::{Model, UserStatus};
 use crate::repository::UserRepository;
-use crate::service::{EmailService, TokenService};
+use crate::service::{EmailService, SessionService, TokenService};
 use std::sync::Arc;
 
 // Signup handler
@@ -90,6 +90,7 @@ pub async fn login(
     req: web::Json<LoginRequest>,
     user_repo: web::Data<Arc<dyn UserRepository>>,
     token_service: web::Data<Arc<TokenService>>,
+    session_service: web::Data<Arc<SessionService>>,
 ) -> Result<HttpResponse, AuthError> {
     // Validate the request
     req.validate()
@@ -135,6 +136,25 @@ pub async fn login(
     user_repo.update_last_login(user_id).await?;
 
     let user_info = UserInfo::from(user);
+
+    // Create session (store user_id and tokens in Redis)
+    let session_id = session_service
+        .create_session(user_id, tokens.access_token.clone(), tokens.refresh_token.clone())
+        .await?;
+
+    // Create session cookie
+    let is_secure = std::env::var("FRONTEND_URL")
+        .unwrap_or_else(|_| "http://localhost:8081".to_string())
+        .starts_with("https://");
+
+    let session_cookie = actix_web::cookie::Cookie::build("session_id", session_id)
+        .path("/")
+        .http_only(true)
+        .secure(is_secure)
+        .same_site(actix_web::cookie::SameSite::Strict)
+        .max_age(actix_web::cookie::time::Duration::seconds(tokens.expires_in as i64))
+        .finish();
+
     let response = LoginResponse {
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
@@ -143,36 +163,55 @@ pub async fn login(
         user: user_info,
     };
 
-    Ok(HttpResponse::Ok().json(response))
+    Ok(HttpResponse::Ok()
+        .cookie(session_cookie)
+        .json(response))
 }
 
 // Logout handler
 pub async fn logout(
     req: HttpRequest,
     token_service: web::Data<Arc<TokenService>>,
+    session_service: web::Data<Arc<SessionService>>,
 ) -> Result<HttpResponse, AuthError> {
-    // Extract JWT token from Authorization header
-    let token = match req.headers().get("Authorization") {
-        Some(auth_header) => {
-            let auth_str = auth_header
-                .to_str()
-                .map_err(|_| AuthError::InvalidRequest)?;
+    // Try to extract session ID from cookie
+    if let Some(cookie) = req.cookie("session_id") {
+        // Delete session from Redis
+        if let Err(e) = session_service.delete_session(cookie.value()).await {
+            tracing::warn!("Failed to delete session during logout: {}", e);
+        }
+    }
+
+    // Also handle JWT token if present
+    if let Some(auth_header) = req.headers().get("Authorization") {
+        if let Ok(auth_str) = auth_header.to_str() {
             if let Some(stripped) = auth_str.strip_prefix("Bearer ") {
-                stripped.to_string()
-            } else {
-                return Err(AuthError::InvalidRequest);
+                if let Err(e) = token_service.blacklist_token(stripped).await {
+                    tracing::warn!("Failed to blacklist token during logout: {}", e);
+                }
             }
         }
-        None => return Err(AuthError::InvalidRequest),
-    };
+    }
 
-    // Blacklist the token
-    token_service.blacklist_token(&token).await?;
+    // Create a cookie to delete the session cookie
+    let is_secure = std::env::var("FRONTEND_URL")
+        .unwrap_or_else(|_| "http://localhost:8081".to_string())
+        .starts_with("https://");
 
-    Ok(HttpResponse::Ok().json(json!({
-        "message": "Logged out successfully",
-        "timestamp": chrono::Utc::now().to_rfc3339()
-    })))
+    let delete_cookie = actix_web::cookie::Cookie::build("session_id", "")
+        .path("/")
+        .http_only(true)
+        .secure(is_secure)
+        .same_site(actix_web::cookie::SameSite::Strict)
+        .max_age(actix_web::cookie::time::Duration::seconds(0))
+        .finish();
+
+    Ok(HttpResponse::Ok()
+        .cookie(delete_cookie)
+        .json(json!({
+            "message": "Logged out successfully",
+            "timestamp": chrono::Utc::now().to_rfc3339()
+        })))
 }
 
 // Get user profile
@@ -225,6 +264,7 @@ pub async fn verify_email_with_otp(
     user_repo: web::Data<Arc<dyn UserRepository>>,
     email_service: web::Data<Arc<EmailService>>,
     token_service: web::Data<Arc<TokenService>>,
+    session_service: web::Data<Arc<SessionService>>,
 ) -> Result<HttpResponse, AuthError> {
     // Validate the request
     req.validate()
@@ -261,16 +301,42 @@ pub async fn verify_email_with_otp(
         .await?
         .ok_or(AuthError::UserNotFound)?;
 
-    let user_info = UserInfo::from(updated_user);
-    let response = LoginResponse {
-        access_token: tokens.access_token,
-        refresh_token: tokens.refresh_token,
-        token_type: "Bearer".to_string(),
-        expires_in: tokens.expires_in,
-        user: user_info,
-    };
+    let user_info = UserInfo::from(updated_user.clone());
 
-    Ok(HttpResponse::Ok().json(response))
+    tracing::debug!("Creating session for user_id: {}", user.user_id);
+    
+    // Create session (stores user_id and tokens in Redis)
+    let session_id = session_service
+        .create_session(user.user_id, tokens.access_token.clone(), tokens.refresh_token.clone())
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to create session: {}", e);
+            AuthError::Redis(format!("Failed to create session: {}", e))
+        })?;
+
+    tracing::debug!("Session created successfully: {}", session_id);
+
+    // Create session cookie
+    let is_secure = std::env::var("FRONTEND_URL")
+        .unwrap_or_else(|_| "http://localhost:8081".to_string())
+        .starts_with("https://");
+
+    let session_cookie = actix_web::cookie::Cookie::build("session_id", session_id)
+        .path("/")
+        .http_only(true)
+        .secure(is_secure)
+        .same_site(actix_web::cookie::SameSite::Strict)
+        .max_age(actix_web::cookie::time::Duration::seconds(tokens.expires_in as i64))
+        .finish();
+
+    tracing::debug!("Session cookie created, sending response with cookie");
+
+    // Return only success message (session created with cookie)
+    Ok(HttpResponse::Ok()
+        .cookie(session_cookie)
+        .json(json!({
+            "message": "Email verified successfully"
+        })))
 }
 
 // Verify email handler (internal handler)

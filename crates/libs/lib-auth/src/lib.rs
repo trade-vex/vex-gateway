@@ -59,5 +59,8 @@ pub fn configure_protected_auth_services(cfg: &mut web::ServiceConfig) {
         .route(
             "/change-password",
             web::post().to(handlers::auth::change_password),
-        );
+        )
+        // Session routes (public but require session cookie)
+        .route("/session/info", web::get().to(handlers::session::get_session_info))
+        .route("/session/refresh", web::post().to(handlers::session::refresh_session));
 }

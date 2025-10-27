@@ -1,6 +1,6 @@
 use crate::dto::auth_request_dto::OAuthCallbackQuery;
 use crate::error::auth_error::AuthError;
-use crate::service::oauth_service::OAuthService;
+use crate::service::{oauth_service::OAuthService, session_service::SessionService};
 
 use actix_web::{HttpResponse, web, cookie::{Cookie, SameSite, time::Duration}};
 use std::sync::Arc;
@@ -30,6 +30,7 @@ pub async fn handle_oauth_callback(
     provider: web::Path<String>,
     query: web::Query<OAuthCallbackQuery>,
     oauth_service: web::Data<Arc<OAuthService>>,
+    session_service: web::Data<Arc<SessionService>>,
 ) -> Result<HttpResponse, AuthError> {
     // Validate that the OAuth code is present and non-empty
     let code = query
@@ -45,41 +46,28 @@ pub async fn handle_oauth_callback(
         Ok(response) => {
             let is_secure = oauth_service.get_frontend_url().starts_with("https://");
             
-            // Create cookies for the authentication data
-            let access_token_cookie = Cookie::build("access_token", &response.access_token)
+            // Get user_id from the response.user
+            let user_id = response.user.user_id;
+
+            // Create session with user_id and tokens
+            let session_id = session_service
+                .create_session(user_id, response.access_token.clone(), response.refresh_token.clone())
+                .await
+                .map_err(|e| AuthError::CodeExchangeFailed(format!("Failed to create session: {}", e)))?;
+
+            // Create session cookie
+            let session_cookie = Cookie::build("session_id", session_id)
                 .path("/")
                 .http_only(true)
-                .secure(is_secure) // Only secure for HTTPS
+                .secure(is_secure)
                 .same_site(SameSite::Strict)
                 .max_age(Duration::seconds(response.expires_in as i64))
                 .finish();
 
-            let refresh_token_cookie = Cookie::build("refresh_token", &response.refresh_token)
-                .path("/")
-                .http_only(true)
-                .secure(is_secure) // Only secure for HTTPS
-                .same_site(SameSite::Strict)
-                .max_age(Duration::days(30)) // Refresh token expires in 30 days
-                .finish();
-
-            // Serialize user info to JSON for the cookie
-            let user_info_json = serde_json::to_string(&response.user)
-                .map_err(|e| AuthError::CodeExchangeFailed(format!("Failed to serialize user info: {}", e)))?;
-            
-            let user_info_cookie = Cookie::build("user_info", user_info_json)
-                .path("/")
-                .http_only(true)
-                .secure(is_secure) // Only secure for HTTPS
-                .same_site(SameSite::Strict)
-                .max_age(Duration::seconds(response.expires_in as i64))
-                .finish();
-
-            // Redirect to the portfolio page with cookies
+            // Redirect to the portfolio page with session cookie
             let redirect_url = format!("{}/portfolio", oauth_service.get_frontend_url());
             Ok(HttpResponse::Found()
-                .cookie(access_token_cookie)
-                .cookie(refresh_token_cookie)
-                .cookie(user_info_cookie)
+                .cookie(session_cookie)
                 .append_header(("Location", redirect_url))
                 .finish())
         },
