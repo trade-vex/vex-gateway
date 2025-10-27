@@ -27,6 +27,7 @@ impl CombinedAuthMiddleware {
     }
 
     fn detect_auth_type(req: &HttpRequest) -> AuthType {
+        // Check for JWT in Authorization header
         if let Some(auth_header) = req.headers().get("authorization") {
             if let Ok(auth_str) = auth_header.to_str() {
                 if auth_str.starts_with("Bearer ") {
@@ -35,6 +36,7 @@ impl CombinedAuthMiddleware {
             }
         }
 
+        // Check for API key
         if req.headers().get("X-MBX-APIKEY").is_some() {
             return AuthType::ApiKey;
         }

@@ -5,6 +5,7 @@
 use actix_web::{App, web};
 use lib_api::routes;
 use lib_auth::middleware::jwt_auth::JwtAuthentication;
+use lib_auth::middleware::session_auth::SessionAuthentication;
 use std::sync::Arc;
 
 use crate::combined_auth::CombinedAuthMiddleware;
@@ -30,7 +31,10 @@ pub fn create_app(
         app_state.redis_pool.clone(),
     );
 
-    // Create combined auth middleware using the API key middleware from AppState
+    // Create session middleware (top layer that extracts tokens from sessions)
+    let session_middleware = SessionAuthentication::new(app_state.redis_pool.clone());
+
+    // Create combined auth middleware (handles JWT and API Key auth)
     let combined_auth_middleware =
         CombinedAuthMiddleware::new(jwt_middleware, app_state.api_key_middleware.clone());
 
@@ -59,9 +63,10 @@ pub fn create_app(
                 .configure(lib_auth::configure_public_auth_services)
                 // Health check route
                 .configure(routes::health_check_route::configure)
-                // Protected routes with combined auth middleware
+                // Protected routes with session middleware wrapping combined auth middleware
                 .service(
                     web::scope("")
+                        .wrap(session_middleware.clone())
                         .wrap(combined_auth_middleware)
                         .configure(lib_auth::configure_protected_auth_services)
                         // Configure API routes
