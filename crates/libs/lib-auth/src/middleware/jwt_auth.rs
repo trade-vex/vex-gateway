@@ -146,12 +146,14 @@ where
             let token = parts[1];
 
             // Validate JWT
+            tracing::debug!("JWT middleware: Starting JWT validation");
             let mut validation = Validation::new(algorithm);
             validation.set_issuer(&[issuer]);
             validation.set_audience(&[audience]);
 
             match decode::<JwtClaims>(token, &decoding_key, &validation) {
                 Ok(token_data) => {
+                    tracing::debug!("JWT middleware: JWT validation successful");
                     if let Ok(user_id) = Uuid::parse_str(&token_data.claims.sub) {
                         let jti = token_data.claims.jti.clone();
                         let authenticated_user: AuthenticatedUser = AuthenticatedUser { user_id };
@@ -163,6 +165,7 @@ where
                         let svc = self.service.clone();
 
                         return Box::pin(async move {
+                            tracing::debug!("JWT middleware: Checking blacklist for JTI: {}", jti);
                             // Check if token is blacklisted BEFORE calling the inner service
                             let blacklist_result = match redis_pool.get().await {
                                 Ok(mut conn) => {
@@ -197,6 +200,7 @@ where
 
                             match blacklist_result {
                                 Ok(true) => {
+                                    tracing::warn!("JWT middleware: Token is blacklisted with JTI: {}", jti);
                                     // Token is blacklisted, short-circuit with an unauthorized response
                                     let (req, _) = req.into_parts();
                                     let response =
@@ -210,6 +214,7 @@ where
                                     Ok(ServiceResponse::new(req, response).map_into_boxed_body())
                                 }
                                 Ok(false) => {
+                                    tracing::debug!("JWT middleware: Token not blacklisted, proceeding to handler");
                                     // Token is valid and not blacklisted, proceed to the inner service
                                     let res = svc.call(req).await?;
                                     Ok(res.map_into_boxed_body())
@@ -231,9 +236,11 @@ where
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("JWT validation failed: {}", e);
+                    tracing::warn!("JWT middleware: JWT validation failed: {}", e);
                 }
             }
+        } else {
+            tracing::debug!("JWT middleware: No JWT token provided");
         }
 
         // No valid JWT found - return unauthorized
