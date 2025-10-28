@@ -6,7 +6,7 @@ use actix_web::{
 use deadpool_redis::Pool;
 use deadpool_redis::redis::AsyncCommands;
 use futures_util::future::LocalBoxFuture;
-use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, errors::ErrorKind};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::future::{Ready, ready};
@@ -236,7 +236,28 @@ where
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("JWT middleware: JWT validation failed: {}", e);
+                    let (error_code, error_message) = match *e.kind() {
+                        ErrorKind::ExpiredSignature => {
+                            ("token_expired", "Token has expired")
+                        }
+                        _ => {
+                            ("invalid_token", "Invalid authentication token")
+                        }
+                    };
+                    
+                    tracing::warn!("JWT middleware: JWT validation failed: {} ({}: {})", e, error_code, error_message);
+                    
+                    return Box::pin(async move {
+                        let (req, _) = req.into_parts();
+                        let response = HttpResponse::Unauthorized().json(serde_json::json!({
+                            "error": {
+                                "code": error_code,
+                                "message": error_message,
+                                "status": 401
+                            }
+                        }));
+                        Ok(ServiceResponse::new(req, response).map_into_boxed_body())
+                    });
                 }
             }
         } else {
