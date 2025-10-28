@@ -145,12 +145,14 @@ pub async fn login(
         .unwrap_or_else(|_| "http://localhost:8081".to_string())
         .starts_with("https://");
 
+    let cookie_ttl = 24 * 3600;
+
     let session_cookie = actix_web::cookie::Cookie::build("session_id", session_id)
         .path("/")
         .http_only(true)
         .secure(is_secure)
         .same_site(actix_web::cookie::SameSite::Strict)
-        .max_age(actix_web::cookie::time::Duration::seconds(tokens.expires_in as i64))
+        .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
         .finish();
 
     Ok(HttpResponse::Ok()
@@ -311,12 +313,14 @@ pub async fn verify_email_with_otp(
         .unwrap_or_else(|_| "http://localhost:8081".to_string())
         .starts_with("https://");
 
+    let cookie_ttl = 24 * 3600;
+
     let session_cookie = actix_web::cookie::Cookie::build("session_id", session_id)
         .path("/")
         .http_only(true)
         .secure(is_secure)
         .same_site(actix_web::cookie::SameSite::Strict)
-        .max_age(actix_web::cookie::time::Duration::seconds(tokens.expires_in as i64))
+        .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
         .finish();
 
     tracing::debug!("Session cookie created, sending response with cookie");
