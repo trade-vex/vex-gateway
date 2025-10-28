@@ -81,9 +81,7 @@ pub async fn refresh_session_tokens(
         .await?;
 
     Ok(HttpResponse::Ok().json(serde_json::json!({
-        "access_token": new_tokens.access_token,
-        "refresh_token": new_tokens.refresh_token,
-        "expires_in": new_tokens.expires_in
-    })))
+		"message": "Token refreshed successfully"
+	})))
 }
 
