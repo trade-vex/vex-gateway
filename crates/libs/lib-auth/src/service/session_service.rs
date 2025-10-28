@@ -132,6 +132,49 @@ impl SessionService {
         Ok(())
     }
 
+    /// Update tokens in an existing session
+    pub async fn update_session_tokens(
+        &self,
+        session_id: &str,
+        access_token: String,
+        refresh_token: String,
+    ) -> Result<(), AuthError> {
+        let session_key = format!("session:{}", session_id);
+
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+
+        // Get existing session to preserve user_id
+        let session_data = self.get_session(session_id).await?;
+
+        // Create updated session data with new tokens
+        let updated_session = SessionData {
+            user_id: session_data.user_id,
+            access_token,
+            refresh_token,
+        };
+
+        let session_json = serde_json::to_string(&updated_session)
+            .map_err(|e| AuthError::Redis(format!("Failed to serialize session: {}", e)))?;
+
+        // Update the session with new tokens, preserving existing TTL
+        let _: () = conn
+            .set(&session_key, session_json)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to update session: {}", e)))?;
+
+        // Extend TTL to the configured session TTL
+        let _: () = conn
+            .expire(&session_key, self.session_ttl_seconds)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to extend session TTL: {}", e)))?;
+
+        Ok(())
+    }
+
     /// Get the session ID from a cookie name
     pub async fn get_session_id_from_cookie(&self, cookie_value: &str) -> Option<String> {
         if cookie_value.is_empty() {
