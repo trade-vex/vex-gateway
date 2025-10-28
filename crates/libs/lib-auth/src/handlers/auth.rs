@@ -9,7 +9,7 @@ use crate::dto::auth_request_dto::{
     ChangePasswordRequest, CheckEmailRequest, LoginRequest, RefreshTokenRequest, SignupRequest, VerifyEmailRequest,
 };
 use crate::dto::auth_response_dto::{
-    LoginResponse, RefreshTokenResponse, SignupResponse, UserInfo, UserProfile,
+    RefreshTokenResponse, SignupResponse, UserInfo, UserProfile,
 };
 use crate::error::auth_error::AuthError;
 use crate::middleware::jwt_auth::AuthenticatedUser;
@@ -135,8 +135,6 @@ pub async fn login(
     // Update last login
     user_repo.update_last_login(user_id).await?;
 
-    let user_info = UserInfo::from(user);
-
     // Create session (store user_id and tokens in Redis)
     let session_id = session_service
         .create_session(user_id, tokens.access_token.clone(), tokens.refresh_token.clone())
@@ -155,17 +153,11 @@ pub async fn login(
         .max_age(actix_web::cookie::time::Duration::seconds(tokens.expires_in as i64))
         .finish();
 
-    let response = LoginResponse {
-        access_token: tokens.access_token,
-        refresh_token: tokens.refresh_token,
-        token_type: "Bearer".to_string(),
-        expires_in: tokens.expires_in,
-        user: user_info,
-    };
-
     Ok(HttpResponse::Ok()
         .cookie(session_cookie)
-        .json(response))
+        .json(json!({
+            "message": "Logged in successfully"
+        })))
 }
 
 // Logout handler
@@ -296,12 +288,10 @@ pub async fn verify_email_with_otp(
     user_repo.update_last_login(user.user_id).await?;
 
     // Get updated user info
-    let updated_user = user_repo
+    let _updated_user = user_repo
         .find_by_id(user.user_id)
         .await?
         .ok_or(AuthError::UserNotFound)?;
-
-    let user_info = UserInfo::from(updated_user.clone());
 
     tracing::debug!("Creating session for user_id: {}", user.user_id);
     
