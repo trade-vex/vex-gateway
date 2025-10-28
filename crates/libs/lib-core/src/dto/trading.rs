@@ -86,6 +86,17 @@ pub struct OrdersHistoryListResponse {
     pub total: usize,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PortfolioOverviewResponse {
+    pub balance: u64,
+    pub balance_24h_ago: u64,
+    pub volume_24h: u64,
+    pub pnl_7d: i64,
+    pub max_drawdown_1m: i64,
+    pub total_deposits: u64,
+    pub total_withdrawals: u64,
+}
+
 // Conversion implementations
 impl From<OrderModel> for OrderResponse {
     fn from(model: OrderModel) -> Self {

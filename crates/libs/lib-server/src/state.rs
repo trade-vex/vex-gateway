@@ -9,6 +9,7 @@ use lib_auth::repository::{PostgresUserRepository, UserRepository};
 use lib_auth::service::{EmailService, OAuthService, TokenService};
 use lib_core::CorrelationService;
 use lib_core::Publisher;
+use lib_core::repository::repository::{PortfolioRepository, PostgresTradingRepository};
 use lib_middleware::api_key::middleware::CacheConfig;
 use lib_middleware::{
     ApiKeyMiddleware, SecurityType,
@@ -37,6 +38,7 @@ pub struct AppState {
     // DB Repository
     pub user_repo: Arc<dyn UserRepository>,
     pub api_key_repository: Arc<dyn ApiKeyRepository>,
+    pub portfolio_repository: Arc<dyn PortfolioRepository>,
 
     // Auth configuration
     pub jwt_config: JwtConfig,
@@ -86,6 +88,10 @@ impl AppState {
         let api_key_repository: Arc<dyn ApiKeyRepository> =
             Arc::new(PostgresApiKeyRepository::new(Arc::new(db.clone())));
 
+        // Initialize portfolio repository
+        let portfolio_repository: Arc<dyn PortfolioRepository> =
+            Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
+
         // Initialize API key middleware with database repository
         let api_key_middleware = Self::init_api_key_middleware(&api_key_repository);
 
@@ -133,6 +139,7 @@ impl AppState {
             gateway_publisher: Arc::new(Mutex::new(gateway_publisher)),
             api_key_middleware: Arc::new(TokioMutex::new(api_key_middleware)),
             api_key_repository,
+            portfolio_repository,
             correlation_service,
         }))
     }

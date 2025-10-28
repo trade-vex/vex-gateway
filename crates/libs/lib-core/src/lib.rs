@@ -10,6 +10,7 @@ pub use dto::trading::{
 
 pub use repository::repository::{
     PostgresTradingRepository, Result as TradingResult, TradingError, TradingRepository,
+    PortfolioRepository, PortfolioMetrics,
 };
 
 pub use cache::user_store::{UserBalanceCacheConfig, UserBalanceStore};

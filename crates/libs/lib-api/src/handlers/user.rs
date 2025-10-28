@@ -7,6 +7,8 @@ use lib_core::{
 };
 use lib_utils::auth_extractors::AuthenticatedUserId;
 use std::sync::Arc;
+use lib_core::dto::trading::PortfolioOverviewResponse;
+use lib_core::PortfolioRepository;
 
 /// Get user balances for all assets
 ///
@@ -307,4 +309,33 @@ pub async fn get_order_history(
             })))
         }
     }
+}
+
+/// Get portfolio overview
+///
+/// # Data Sources
+/// - **Primary**: PostgreSQL database
+/// - **Tables**: `trading.balances_events`, `trading.trades_events`, `trading.deposits_events`, `trading.withdrawals_events`
+pub async fn get_portfolio_overview(
+    user: AuthenticatedUserId,
+    portfolio_repo: web::Data<Arc<dyn PortfolioRepository>>,
+) -> Result<HttpResponse> {
+    let now_secs = chrono::Utc::now().timestamp();
+    
+    let metrics = portfolio_repo
+        .get_portfolio(user.0, now_secs)
+        .await
+        .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
+
+    let response = PortfolioOverviewResponse {
+        balance: metrics.balance,
+        balance_24h_ago: metrics.balance_24h_ago,
+        volume_24h: metrics.volume_24h,
+        pnl_7d: metrics.pnl_7d,
+        max_drawdown_1m: metrics.max_drawdown_1m,
+        total_deposits: metrics.total_deposits,
+        total_withdrawals: metrics.total_withdrawals,
+    };
+
+    Ok(HttpResponse::Ok().json(response))
 }
