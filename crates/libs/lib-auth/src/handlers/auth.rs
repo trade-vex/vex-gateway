@@ -140,6 +140,9 @@ pub async fn login(
         .create_session(user_id, tokens.access_token.clone(), tokens.refresh_token.clone())
         .await?;
 
+    // Get user info for cookie
+    let user_info = UserInfo::from(user.clone());
+
     // Create session cookie
     let is_secure = std::env::var("FRONTEND_URL")
         .unwrap_or_else(|_| "http://localhost:8081".to_string())
@@ -155,8 +158,21 @@ pub async fn login(
         .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
         .finish();
 
+    // Create user_info cookie (JSON format)
+    let user_info_json = serde_json::to_string(&user_info)
+        .map_err(|e| AuthError::Validation(format!("Failed to serialize user info: {}", e)))?;
+
+    let user_info_cookie = actix_web::cookie::Cookie::build("user_info", user_info_json)
+        .path("/")
+        .http_only(false) // Allow client-side JavaScript access
+        .secure(is_secure)
+        .same_site(actix_web::cookie::SameSite::Strict)
+        .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
+        .finish();
+
     Ok(HttpResponse::Ok()
         .cookie(session_cookie)
+        .cookie(user_info_cookie)
         .json(json!({
             "message": "Logged in successfully"
         })))
@@ -187,12 +203,12 @@ pub async fn logout(
         }
     }
 
-    // Create a cookie to delete the session cookie
+    // Create cookies to delete the session and user_info cookies
     let is_secure = std::env::var("FRONTEND_URL")
         .unwrap_or_else(|_| "http://localhost:8081".to_string())
         .starts_with("https://");
 
-    let delete_cookie = actix_web::cookie::Cookie::build("session_id", "")
+    let delete_session_cookie = actix_web::cookie::Cookie::build("session_id", "")
         .path("/")
         .http_only(true)
         .secure(is_secure)
@@ -200,8 +216,17 @@ pub async fn logout(
         .max_age(actix_web::cookie::time::Duration::seconds(0))
         .finish();
 
+    let delete_user_info_cookie = actix_web::cookie::Cookie::build("user_info", "")
+        .path("/")
+        .http_only(false)
+        .secure(is_secure)
+        .same_site(actix_web::cookie::SameSite::Strict)
+        .max_age(actix_web::cookie::time::Duration::seconds(0))
+        .finish();
+
     Ok(HttpResponse::Ok()
-        .cookie(delete_cookie)
+        .cookie(delete_session_cookie)
+        .cookie(delete_user_info_cookie)
         .json(json!({
             "message": "Logged out successfully",
             "timestamp": chrono::Utc::now().to_rfc3339()
@@ -290,7 +315,7 @@ pub async fn verify_email_with_otp(
     user_repo.update_last_login(user.user_id).await?;
 
     // Get updated user info
-    let _updated_user = user_repo
+    let updated_user = user_repo
         .find_by_id(user.user_id)
         .await?
         .ok_or(AuthError::UserNotFound)?;
@@ -308,6 +333,9 @@ pub async fn verify_email_with_otp(
 
     tracing::debug!("Session created successfully: {}", session_id);
 
+    // Get user info for cookie
+    let user_info = UserInfo::from(updated_user);
+
     // Create session cookie
     let is_secure = std::env::var("FRONTEND_URL")
         .unwrap_or_else(|_| "http://localhost:8081".to_string())
@@ -323,11 +351,24 @@ pub async fn verify_email_with_otp(
         .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
         .finish();
 
+    // Create user_info cookie (JSON format)
+    let user_info_json = serde_json::to_string(&user_info)
+        .map_err(|e| AuthError::Validation(format!("Failed to serialize user info: {}", e)))?;
+
+    let user_info_cookie = actix_web::cookie::Cookie::build("user_info", user_info_json)
+        .path("/")
+        .http_only(false) // Allow client-side JavaScript access
+        .secure(is_secure)
+        .same_site(actix_web::cookie::SameSite::Strict)
+        .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
+        .finish();
+
     tracing::debug!("Session cookie created, sending response with cookie");
 
     // Return only success message (session created with cookie)
     Ok(HttpResponse::Ok()
         .cookie(session_cookie)
+        .cookie(user_info_cookie)
         .json(json!({
             "message": "Email verified successfully"
         })))
