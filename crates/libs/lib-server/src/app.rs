@@ -22,12 +22,14 @@ pub fn create_app(
         InitError = (),
     >,
 > {
-    // Create JWT middleware
-    let jwt_middleware = JwtAuthentication::new(
+    // Create JWT middleware with auto-refresh enabled
+    let jwt_middleware = JwtAuthentication::with_auto_refresh(
         app_state.decoding_key.clone(),
         app_state.jwt_config.issuer.clone(),
         app_state.jwt_config.audience.clone(),
         app_state.redis_pool.clone(),
+        Arc::new(app_state.token_service.clone()),
+        Arc::new(app_state.session_service.clone()),
     );
 
     // Create combined auth middleware using the API key middleware and session service from AppState
