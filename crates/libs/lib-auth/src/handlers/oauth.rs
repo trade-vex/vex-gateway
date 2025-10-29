@@ -46,8 +46,9 @@ pub async fn handle_oauth_callback(
         Ok(response) => {
             let is_secure = oauth_service.get_frontend_url().starts_with("https://");
             
-            // Get user_id from the response.user
+            // Get user_id and user_info from the response
             let user_id = response.user.user_id;
+            let user_info = response.user.clone();
 
             // Create session with user_id and tokens
             let session_id = session_service
@@ -64,10 +65,23 @@ pub async fn handle_oauth_callback(
                 .max_age(Duration::seconds(response.expires_in as i64))
                 .finish();
 
-            // Redirect to the portfolio page with session cookie
+            // Create user_info cookie (JSON format)
+            let user_info_json = serde_json::to_string(&user_info)
+                .map_err(|e| AuthError::Validation(format!("Failed to serialize user info: {}", e)))?;
+
+            let user_info_cookie = Cookie::build("user_info", user_info_json)
+                .path("/")
+                .http_only(false) // Allow client-side JavaScript access
+                .secure(is_secure)
+                .same_site(SameSite::Strict)
+                .max_age(Duration::seconds(response.expires_in as i64))
+                .finish();
+
+            // Redirect to the portfolio page with session and user_info cookies
             let redirect_url = format!("{}/portfolio", oauth_service.get_frontend_url());
             Ok(HttpResponse::Found()
                 .cookie(session_cookie)
+                .cookie(user_info_cookie)
                 .append_header(("Location", redirect_url))
                 .finish())
         },
