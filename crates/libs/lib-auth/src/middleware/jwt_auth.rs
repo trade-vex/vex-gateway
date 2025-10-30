@@ -185,13 +185,16 @@ where
                     tracing::debug!("JWT middleware: JWT validation successful");
                     if let Ok(user_id) = Uuid::parse_str(&token_data.claims.sub) {
                         let jti = token_data.claims.jti.clone();
+                        let token_exp = token_data.claims.exp as i64;
                         let authenticated_user: AuthenticatedUser = AuthenticatedUser { user_id };
 
                         // Store the authenticated user for later
                         req.extensions_mut().insert(authenticated_user.clone());
 
-                        // Clone the service handle to move into the async block
+                        // Clone handles to move into the async block
                         let svc = self.service.clone();
+                        let token_service_opt = self.token_service.clone();
+                        let session_service_opt = self.session_service.clone();
 
                         return Box::pin(async move {
                             tracing::debug!("JWT middleware: Checking blacklist for JTI: {}", jti);
@@ -243,8 +246,42 @@ where
                                     Ok(ServiceResponse::new(req, response).map_into_boxed_body())
                                 }
                                 Ok(false) => {
-                                    tracing::debug!("JWT middleware: Token not blacklisted, proceeding to handler");
-                                    // Token is valid and not blacklisted, proceed to the inner service
+                                    tracing::debug!("JWT middleware: Token not blacklisted; checking session inactivity if cookie present");
+                                    if let Some(cookie) = req.cookie("session_id") {
+                                        if let Some(session_service) = &session_service_opt {
+                                            match session_service.refresh_session(cookie.value()).await {
+                                                Ok(()) => {
+                                                    tracing::debug!("Session TTL refreshed for session_id={}", cookie.value());
+                                                }
+                                                Err(_) => {
+                                                    // Session missing → idle-expired: blacklist and 401
+                                                    let now = chrono::Utc::now().timestamp();
+                                                    if token_exp > now {
+                                                        let ttl_secs = (token_exp - now) as u64;
+                                                        if let Some(token_service) = &token_service_opt {
+                                                            if let Err(e) = token_service.blacklist_jti(&jti, ttl_secs).await {
+                                                                tracing::warn!("Failed to blacklist JTI on idle-expiry: {}", e);
+                                                            }
+                                                        } else if let Ok(mut conn) = redis_pool.get().await {
+                                                            let _ : Result<(), _> = conn.set_ex(format!("blacklist:{}", jti), "1", ttl_secs).await;
+                                                        }
+                                                    }
+
+                                                    let (req, _) = req.into_parts();
+                                                    let response = HttpResponse::Unauthorized().json(serde_json::json!({
+                                                        "error": {
+                                                            "code": "session_expired",
+                                                            "message": "Session expired due to inactivity",
+                                                            "status": 401
+                                                        }
+                                                    }));
+                                                    return Ok(ServiceResponse::new(req, response).map_into_boxed_body());
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Proceed to inner service
                                     let res = svc.call(req).await?;
                                     Ok(res.map_into_boxed_body())
                                 }

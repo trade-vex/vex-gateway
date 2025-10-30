@@ -115,10 +115,10 @@ impl AppState {
             config.otp.email_verification_expiry_minutes,
         )?;
 
-        // Initialize session service with 24 hour TTL
+        // Initialize session service with 30-minute inactivity TTL
         let session_service = SessionService::new(
             Arc::new(redis_pool.clone()),
-            24 * 3600, // 24 hours in seconds
+            30 * 60,
         );
 
         tracing::info!("AppState initialization completed successfully");
