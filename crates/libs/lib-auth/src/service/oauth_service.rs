@@ -98,6 +98,87 @@ pub struct OAuthService {
 }
 
 impl OAuthService {
+    fn normalize_username_candidate(candidate: &str) -> String {
+        let lower = candidate.to_lowercase();
+        // Map invalid chars to '-' and allow [a-z0-9._-]
+        let mut out = String::with_capacity(lower.len());
+        for ch in lower.chars() {
+            if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '.' || ch == '_' || ch == '-' {
+                out.push(ch);
+            } else if ch.is_whitespace() {
+                out.push('-');
+            } else {
+                out.push('-');
+            }
+        }
+        // Collapse multiple '-'
+        let mut collapsed = String::with_capacity(out.len());
+        let mut prev_dash = false;
+        for ch in out.chars() {
+            if ch == '-' {
+                if !prev_dash { collapsed.push('-'); }
+                prev_dash = true;
+            } else {
+                collapsed.push(ch);
+                prev_dash = false;
+            }
+        }
+        // Trim leading/trailing '-'
+        let trimmed = collapsed.trim_matches('-').to_string();
+        // Enforce max length
+        let mut trimmed = if trimmed.len() > 30 { trimmed[..30].to_string() } else { trimmed };
+        // Ensure starts with alphanumeric
+        if trimmed.chars().next().map(|c| c.is_ascii_alphanumeric()).unwrap_or(false) {
+            if trimmed.is_empty() { "user".to_string() } else { trimmed }
+        } else {
+            trimmed.insert_str(0, "user-");
+            trimmed
+        }
+    }
+
+    fn email_local_part(email: &str) -> Option<String> {
+        email.split('@').next().map(|s| s.to_string())
+    }
+
+    fn generate_username(provider: &str, info: &crate::dto::auth_response_dto::OAuthUserInfo) -> String {
+        match provider {
+            // GitHub: prefer handle (`login`) if provided in parsed info.username
+            "github" => {
+                if let Some(uname) = &info.username {
+                    let norm = Self::normalize_username_candidate(uname);
+                    if !norm.is_empty() { return norm; }
+                }
+                // fallback to display name, then email local-part
+                let from_name = Self::normalize_username_candidate(&info.name);
+                if !from_name.is_empty() { return from_name; }
+                let from_email = Self::email_local_part(&info.email).map(|s| Self::normalize_username_candidate(&s)).unwrap_or_default();
+                if !from_email.is_empty() { return from_email; }
+                "user".to_string()
+            }
+            // Google: prefer email local-part; fallback to name
+            "google" => {
+                if let Some(local) = Self::email_local_part(&info.email) {
+                    let norm = Self::normalize_username_candidate(&local);
+                    if !norm.is_empty() { return norm; }
+                }
+                let from_name = Self::normalize_username_candidate(&info.name);
+                if !from_name.is_empty() { return from_name; }
+                "user".to_string()
+            }
+            _ => {
+                // Other providers: try username field, then name, then email local-part
+                if let Some(uname) = &info.username {
+                    let norm = Self::normalize_username_candidate(uname);
+                    if !norm.is_empty() { return norm; }
+                }
+                let from_name = Self::normalize_username_candidate(&info.name);
+                if !from_name.is_empty() { return from_name; }
+                let from_email = Self::email_local_part(&info.email).map(|s| Self::normalize_username_candidate(&s)).unwrap_or_default();
+                if !from_email.is_empty() { return from_email; }
+                "user".to_string()
+            }
+        }
+    }
     /// Creates a new OAuth service with pre-configured clients
     ///
     /// This performs async initialization including OIDC discovery for
@@ -457,10 +538,11 @@ impl OAuthService {
 
                 // Create new user record
                 let now = chrono::Utc::now();
+                let generated_username = Self::generate_username(provider, &user_info);
                 let new_user = Model {
                     user_id: Uuid::new_v4(),
                     email: user_info.email.clone(),
-                    username: user_info.name.clone(),
+                    username: generated_username,
                     password_hash: None, // OAuth users don't have passwords
                     auth_provider: provider.to_string(),
                     provider_id: Some(user_info.provider_id.clone()),
