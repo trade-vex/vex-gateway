@@ -3,6 +3,7 @@ use actix_web::{
     body::{BoxBody, MessageBody},
     dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready},
 };
+use actix_web::http::header::{AUTHORIZATION, HeaderValue};
 use deadpool_redis::Pool;
 use deadpool_redis::redis::AsyncCommands;
 use futures_util::future::LocalBoxFuture;
@@ -319,6 +320,7 @@ where
                                 let redis_pool = self.redis_pool.clone();
                                 
                                 return Box::pin(async move {
+                                    let mut req = req;
                                     let session_id = cookie.value();
                                     
                                     // Get session data
@@ -383,7 +385,14 @@ where
                                                                     }
                                                                 }
                                                                 
-                                                                tracing::info!("JWT middleware: Token auto-refreshed successfully");
+                                                                let bearer = format!("Bearer {}", new_tokens.access_token);
+                                                                if let Ok(hv) = HeaderValue::from_str(&bearer) {
+                                                                    req.headers_mut().insert(AUTHORIZATION, hv);
+                                                                } else {
+                                                                    tracing::warn!("Failed to set refreshed Authorization header");
+                                                                }
+
+                                                                tracing::info!("JWT middleware: Token auto-refreshed successfully; forwarding with updated header");
                                                                 let res = svc.call(req).await?;
                                                                 return Ok(res.map_into_boxed_body());
                                                             }
