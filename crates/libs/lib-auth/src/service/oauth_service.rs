@@ -423,6 +423,7 @@ impl OAuthService {
             .map_err(|e| AuthError::Redis(format!("Failed to store verifier: {}", e)))?;
 
         // Store nonce for OIDC providers (used for ID token validation)
+        // nonce is validated in handle_callback to prevent replay attacks
         if provider == "google" {
             let nonce_key = format!("oauth_nonce:{}:{}", provider, csrf_state.secret());
             let _: () = redis_conn
@@ -505,6 +506,12 @@ impl OAuthService {
             .request_async(async_http_client)
             .await
             .map_err(|e| AuthError::CodeExchangeFailed(format!("Token exchange failed: {}", e)))?;
+
+        // validate ID token for OIDC providers
+        // this validates signature, issuer, audience, expiration, and nonce
+        if provider == "google" {
+            self.validate_id_token(client, &token_response, state).await?;
+        }
 
         // Extract access token from response
         // Trait must be in scope to use the access_token() method
@@ -644,6 +651,101 @@ impl OAuthService {
             .map_err(|e| AuthError::Redis(format!("Failed to delete verifier: {}", e)))?;
 
         Ok(verifier)
+    }
+
+    /// Retrieves and consumes the stored nonce from Redis
+    ///
+    /// The nonce is used for ID token validation in OIDC flows to prevent replay attacks.
+    ///
+    /// # One-time Use
+    ///
+    /// The nonce is deleted after retrieval to prevent reuse.
+    async fn get_stored_nonce(&self, provider: &str, state: &str) -> Result<String, AuthError> {
+        let mut redis_conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Redis connection failed: {}", e)))?;
+
+        let nonce_key = format!("oauth_nonce:{}:{}", provider, state);
+
+        let nonce: Option<String> = redis_conn
+            .get(&nonce_key)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to retrieve nonce: {}", e)))?;
+
+        let nonce = nonce.ok_or_else(|| {
+            AuthError::CodeExchangeFailed("OIDC nonce not found or expired".to_string())
+        })?;
+
+        // Delete nonce after retrieval (one-time use)
+        let _: () = redis_conn
+            .del(&nonce_key)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to delete nonce: {}", e)))?;
+
+        Ok(nonce)
+    }
+
+    /// Validates the OIDC ID token for Google authentication
+    ///
+    /// This method performs comprehensive ID token validation:
+    /// - Verifies signature using Google's JWKS endpoint
+    /// - Checks issuer matches "https://accounts.google.com"
+    /// - Checks audience matches the configured client ID
+    /// - Verifies expiration and issued-at timestamps
+    /// - Validates the nonce claim matches the stored nonce
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - The OAuth client configured for the provider
+    /// * `token_response` - The token response from the provider
+    /// * `state` - The OAuth state parameter used to retrieve the stored nonce
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - ID token is missing from the response
+    /// - Nonce cannot be retrieved from Redis
+    /// - Any validation step fails (signature, issuer, audience, expiration, nonce)
+    async fn validate_id_token(
+        &self,
+        client: &CoreClient,
+        token_response: &openidconnect::core::CoreTokenResponse,
+        state: &str,
+    ) -> Result<(), AuthError> {
+        // Extract ID token from response
+        let id_token = token_response
+            .id_token()
+            .ok_or_else(|| {
+                AuthError::CodeExchangeFailed(
+                    "ID token missing from OIDC response".to_string(),
+                )
+            })?;
+
+        // Retrieve stored nonce from Redis
+        let stored_nonce_secret = self.get_stored_nonce("google", state).await?;
+        let stored_nonce = Nonce::new(stored_nonce_secret);
+
+        // Verify ID token using the client's verifier
+        // This validates:
+        // - Signature using JWKS endpoint
+        // - Issuer (iss) claim
+        // - Audience (aud) claim
+        // - Expiration (exp) and issued-at (iat) claims
+        // - Nonce claim must match the stored nonce
+        let verifier = client.id_token_verifier();
+        id_token
+            .claims(&verifier, &stored_nonce)
+            .map_err(|e| {
+                AuthError::CodeExchangeFailed(format!(
+                    "ID token validation failed: {}",
+                    e
+                ))
+            })?;
+
+        tracing::debug!("ID token validated successfully for Google OAuth");
+        Ok(())
     }
 
     /// Fetches user information from the OAuth provider
