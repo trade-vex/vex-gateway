@@ -391,13 +391,15 @@ pub async fn verify_email(
 
 // Change password handler
 pub async fn change_password(
+    req: HttpRequest,
     user: AuthenticatedUser,
-    req: web::Json<ChangePasswordRequest>,
+    body: web::Json<ChangePasswordRequest>,
     user_repo: web::Data<Arc<dyn UserRepository>>,
     token_service: web::Data<Arc<TokenService>>,
+    session_service: web::Data<Arc<SessionService>>,
 ) -> Result<HttpResponse, AuthError> {
     // Validate the request
-    req.validate()
+    body.validate()
         .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
 
     // Get user
@@ -409,7 +411,7 @@ pub async fn change_password(
     // Verify old password
     if let Some(password_hash) = &user_record.password_hash {
         if !tokio::task::spawn_blocking({
-            let p = req.old_password.clone();
+            let p = body.old_password.clone();
             let h = password_hash.clone();
             move || verify(&p, &h)
         })
@@ -425,20 +427,58 @@ pub async fn change_password(
 
     // Hash new password
     let new_password_hash = tokio::task::spawn_blocking({
-        let p = req.new_password.clone();
+        let p = body.new_password.clone();
         move || hash(&p, DEFAULT_COST)
     })
     .await
     .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
     .map_err(|e| AuthError::Validation(format!("Password hashing failed: {}", e)))?;
 
-    // Update password
+    // Update password in database
     user_repo
         .update_password(user.user_id, &new_password_hash)
         .await?;
 
-    // Revoke all existing sessions for this user
-    token_service.revoke_user_sessions(user.user_id).await?;
+    // Generate new tokens (with updated password timestamp)
+    let new_tokens = token_service.mint_tokens(user.user_id).await?;
+
+    // Get current session ID from cookie if present
+    let current_session_id = req.cookie("session_id").map(|c| c.value().to_string());
+
+    if let Some(session_id) = current_session_id {
+        // Update current session with new tokens (keep user logged in)
+        session_service
+            .update_session_tokens(&session_id, new_tokens.access_token.clone(), new_tokens.refresh_token.clone())
+            .await
+            .map_err(|e| {
+                tracing::warn!("Failed to update current session tokens: {}", e);
+                AuthError::Redis(format!("Failed to update session: {}", e))
+            })?;
+
+        // Revoke all other sessions (other devices)
+        let revoked_count = session_service
+            .revoke_user_sessions_except(user.user_id, &session_id)
+            .await
+            .map_err(|e| {
+                tracing::warn!("Failed to revoke other sessions: {}", e);
+                AuthError::Redis(format!("Failed to revoke sessions: {}", e))
+            })?;
+
+        tracing::debug!(
+            "Password changed: updated current session, revoked {} other sessions",
+            revoked_count
+        );
+    } else {
+        // No session cookie found - this shouldn't happen in normal flow,
+        // but handle gracefully by revoking all sessions
+        tracing::warn!("Change password called without session cookie - revoking all sessions");
+        let _ = session_service
+            .revoke_all_user_sessions(user.user_id)
+            .await;
+        
+        // Also revoke refresh tokens (legacy cleanup)
+        let _ = token_service.revoke_user_sessions(user.user_id).await;
+    }
 
     Ok(HttpResponse::Ok().json(json!({
         "message": "Password changed successfully",

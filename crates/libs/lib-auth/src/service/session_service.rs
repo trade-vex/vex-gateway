@@ -182,5 +182,94 @@ impl SessionService {
         }
         Some(cookie_value.to_string())
     }
+
+    /// Revoke all sessions for a user except the specified session
+    pub async fn revoke_user_sessions_except(
+        &self,
+        user_id: Uuid,
+        keep_session_id: &str,
+    ) -> Result<usize, AuthError> {
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+
+        // Find all sessions
+        let pattern = "session:*".to_string();
+        let keys: Vec<String> = conn
+            .keys(pattern)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to find sessions: {}", e)))?;
+
+        let mut revoked_count = 0;
+
+        // Check each session and delete if it belongs to this user but isn't the current session
+        for key in keys {
+            if let Ok(Some(session_json)) = conn.get::<String, Option<String>>(key.clone()).await {
+                if let Ok(session_data) = serde_json::from_str::<SessionData>(&session_json) {
+                    // Check if this session belongs to the user
+                    if session_data.user_id == user_id {
+                        // Extract session_id from key (format: "session:{session_id}")
+                        if let Some(session_id) = key.strip_prefix("session:") {
+                            // Delete if it's not the session we want to keep
+                            if session_id != keep_session_id {
+                                let _: () = conn
+                                    .del(key)
+                                    .await
+                                    .map_err(|e| {
+                                        AuthError::Redis(format!(
+                                            "Failed to delete session: {}",
+                                            e
+                                        ))
+                                    })?;
+                                revoked_count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(revoked_count)
+    }
+
+    /// Revoke all sessions for a user
+    pub async fn revoke_all_user_sessions(&self, user_id: Uuid) -> Result<usize, AuthError> {
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+
+        // Find all sessions
+        let pattern = "session:*".to_string();
+        let keys: Vec<String> = conn
+            .keys(pattern)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to find sessions: {}", e)))?;
+
+        let mut revoked_count = 0;
+
+        // Check each session and delete if it belongs to this user
+        for key in keys {
+            if let Ok(Some(session_json)) = conn.get::<String, Option<String>>(key.clone()).await {
+                if let Ok(session_data) = serde_json::from_str::<SessionData>(&session_json) {
+                    // Check if this session belongs to the user
+                    if session_data.user_id == user_id {
+                        let _: () = conn
+                            .del(key)
+                            .await
+                            .map_err(|e| {
+                                AuthError::Redis(format!("Failed to delete session: {}", e))
+                            })?;
+                        revoked_count += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(revoked_count)
+    }
 }
 
