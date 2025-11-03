@@ -9,6 +9,10 @@ use lib_auth::repository::{PostgresUserRepository, UserRepository};
 use lib_auth::service::{EmailService, OAuthService, TokenService};
 use lib_core::CorrelationService;
 use lib_core::Publisher;
+use lib_core::{
+    OrderCacheConfig, OrderStore, UserBalanceCacheConfig, UserBalanceStore,
+    PostgresTradingRepository, TradingRepository,
+};
 use lib_middleware::api_key::middleware::CacheConfig;
 use lib_middleware::{
     ApiKeyMiddleware, SecurityType,
@@ -56,6 +60,10 @@ pub struct AppState {
 
     // Correlation service for matching responses to requests
     pub correlation_service: CorrelationService,
+
+    // Trading stores for balances and orders
+    pub balance_store: UserBalanceStore,
+    pub order_store: OrderStore,
 }
 
 impl AppState {
@@ -68,7 +76,7 @@ impl AppState {
         info!("Initializing App State");
 
         // Initialize database connection
-        let db = Self::init_database(&config.database).await?;
+        let db = Arc::new(Self::init_database(&config.database).await?);
 
         // Initialize Redis connection
         let redis_pool = Self::init_redis(&config.redis).await?;
@@ -80,11 +88,11 @@ impl AppState {
         let (encoding_key, decoding_key) = Self::init_jwt_keys(&config.jwt)?;
 
         // Initialize auth-specific services
-        let user_repo = Arc::new(PostgresUserRepository::new(Arc::new(db.clone())));
+        let user_repo = Arc::new(PostgresUserRepository::new(db.clone()));
 
         // Initialize API key repository
         let api_key_repository: Arc<dyn ApiKeyRepository> =
-            Arc::new(PostgresApiKeyRepository::new(Arc::new(db.clone())));
+            Arc::new(PostgresApiKeyRepository::new(db.clone()));
 
         // Initialize API key middleware with database repository
         let api_key_middleware = Self::init_api_key_middleware(&api_key_repository);
@@ -115,10 +123,36 @@ impl AppState {
             config.otp.email_verification_expiry_minutes,
         )?;
 
+        // Initialize trading repository
+        let trading_repo: Arc<dyn TradingRepository> =
+            Arc::new(PostgresTradingRepository::new(db.clone()));
+
+        // Initialize balance store with Redis cache and trading repository
+        let balance_store = UserBalanceStore::with_redis_cache(
+            UserBalanceCacheConfig {
+                ttl: std::time::Duration::from_secs(1800),
+                enabled: true,
+            },
+            config.redis.url.clone(),
+            Some(trading_repo.clone()),
+        )
+        .await?;
+
+        // Initialize order store with Redis cache and trading repository
+        let order_store = OrderStore::with_redis_cache(
+            OrderCacheConfig {
+                ttl: std::time::Duration::from_secs(1800),
+                enabled: true,
+            },
+            config.redis.url.clone(),
+            Some(trading_repo.clone()),
+        )
+        .await?;
+
         info!("AppState initialization completed successfully");
 
         Ok(Arc::new(Self {
-            db: Arc::new(db),
+            db,
             redis_pool: Arc::new(redis_pool),
             http_client,
             user_repo,
@@ -134,6 +168,8 @@ impl AppState {
             api_key_middleware: Arc::new(TokioMutex::new(api_key_middleware)),
             api_key_repository,
             correlation_service,
+            balance_store,
+            order_store,
         }))
     }
 
