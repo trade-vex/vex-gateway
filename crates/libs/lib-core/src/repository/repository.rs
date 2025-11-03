@@ -195,20 +195,20 @@ impl TradingRepository for PostgresTradingRepository {
     }
 }
 
-// Removed PostgreSQL-based PortfolioRepository implementation.
-
 /// ClickHouse-backed Portfolio Repository
 ///
 /// Data model (ClickHouse):
 /// - `trading.equity_per_minute(user_id, minute, equity_quote)`
 ///   ReplacingMergeTree with last-per-minute equity valued in configured quote asset.
+/// - `trading.user_cashflow_per_minute(user_id, minute, cashflow_quote)`
+///   SummingMergeTree aggregating deposits (+) and withdrawals (-) per minute.
 /// - `trading.trade_events(ts, price, size_base, maker_user_id, taker_user_id, ...)`
 ///   Raw trade feed for computing user volume.
 ///
 /// Metrics computed:
 /// - balance (now): last equity at or before `now`
 /// - balance_24h_ago: last equity at or before `now - 24h`
-/// - pnl_7d: equity(now) - equity(now - 7d)
+/// - pnl_7d: equity(now) - equity(now - 7d) - cashflow(7d)
 /// - max_drawdown_1m: peak-to-trough decline over equity in the last 30 days
 /// - volume_24h: sum(price * size_base) where user is maker or taker in last 24h
 ///
@@ -241,6 +241,10 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
     ///
     /// - balance_7d_ago
     ///   same with minute <= toDateTime({now - 7d})
+    ///
+    /// - cashflow_7d
+    ///   SELECT toInt128OrZero(coalesce(sum(cashflow_quote), 0)) FROM trading.user_cashflow_per_minute
+    ///   WHERE user_id = {user} AND minute > toDateTime({now - 7d}) AND minute <= toDateTime({now})
     ///
     /// - volume_24h
     ///   SELECT toInt128OrZero(sum(price * size_base)) FROM trading.trade_events
@@ -307,6 +311,19 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
             .map_err(|e| TradingError::Database(e.to_string()))?
             .unwrap_or(0);
 
+        // cashflow over last 7d (deposits - withdrawals), already in the same quote
+        let cashflow_7d_i128: i128 = self
+            .ch
+            .query(
+                "SELECT toInt128OrZero(coalesce(sum(cashflow_quote), 0)) AS cf\n                 FROM trading.user_cashflow_per_minute\n                 WHERE user_id = ?\n                   AND minute > toDateTime(?)\n                   AND minute <= toDateTime(?)",
+            )
+            .bind(user_id_u64)
+            .bind(cutoff_7d)
+            .bind(now_ts_secs)
+            .fetch_one::<i128>()
+            .await
+            .map_err(|e| TradingError::Database(e.to_string()))?;
+
         // volume_24h
         let volume_24h_i128: i128 = self
             .ch
@@ -334,8 +351,11 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
             .map_err(|e| TradingError::Database(e.to_string()))?
             .unwrap_or(0);
 
-        // pnl_7d = balance_now - balance_7d_ago
-        let pnl_7d_i128 = balance_now_i128.saturating_sub(balance_7d_ago_i128);
+        // accounting PnL over 7d
+        // PnL = Equity(now) - Equity(7d_ago) - Cashflow(7d)
+        let pnl_7d_i128 = balance_now_i128
+            .saturating_sub(balance_7d_ago_i128)
+            .saturating_sub(cashflow_7d_i128);
 
         Ok(PortfolioMetrics {
             balance: balance_now_i128.max(0) as u64,
