@@ -10,7 +10,6 @@ use async_trait::async_trait;
 use sea_orm::prelude::*;
 use sea_orm::*;
 use std::sync::Arc;
-use uuid::Uuid;
 use clickhouse::Client as ClickHouseClient;
 
 // Error type for trading operations
@@ -42,16 +41,16 @@ pub type Result<T> = std::result::Result<T, TradingError>;
 #[async_trait]
 pub trait TradingRepository: Send + Sync {
     // Balance operations
-    async fn get_user_balances(&self, user_id: Uuid) -> Result<Vec<UserBalanceModel>>;
-    async fn get_user_balance(&self, user_id: Uuid) -> Result<Option<UserBalanceModel>>;
-    async fn update_user_balance(&self, user_id: Uuid, available: u64, locked: u64) -> Result<()>;
-    async fn create_user_balance(&self, user_id: Uuid, available: u64, locked: u64) -> Result<()>;
+    async fn get_user_balances(&self, user_id: u64) -> Result<Vec<UserBalanceModel>>;
+    async fn get_user_balance(&self, user_id: u64) -> Result<Option<UserBalanceModel>>;
+    async fn update_user_balance(&self, user_id: u64, available: u64, locked: u64) -> Result<()>;
+    async fn create_user_balance(&self, user_id: u64, available: u64, locked: u64) -> Result<()>;
 
     // Order operations
-    async fn get_open_orders(&self, user_id: Uuid) -> Result<Vec<OrderModel>>;
-    async fn get_order_by_id(&self, order_id: u64, user_id: Uuid) -> Result<Option<OrderModel>>;
+    async fn get_open_orders(&self, user_id: u64) -> Result<Vec<OrderModel>>;
+    async fn get_order_by_id(&self, order_id: u64, user_id: u64) -> Result<Option<OrderModel>>;
     async fn create_order(&self, order: OrderModel) -> Result<u64>;
-    async fn count_user_orders(&self, user_id: Uuid) -> Result<u64>;
+    async fn count_user_orders(&self, user_id: u64) -> Result<u64>;
 }
 
 #[derive(Debug, Clone)]
@@ -65,7 +64,7 @@ pub struct PortfolioMetrics {
 
 #[async_trait]
 pub trait PortfolioRepository: Send + Sync {
-    async fn get_portfolio(&self, user: Uuid, now_ts_secs: i64) -> Result<PortfolioMetrics>;
+    async fn get_portfolio(&self, user_id: u64, now_ts_secs: i64) -> Result<PortfolioMetrics>;
 }
 
 // PostgreSQL implementation
@@ -81,10 +80,8 @@ impl PostgresTradingRepository {
 
 #[async_trait]
 impl TradingRepository for PostgresTradingRepository {
-    async fn get_user_balances(&self, user_id: Uuid) -> Result<Vec<UserBalanceModel>> {
-        // Query trading.balances_events by user_id
-        // Note: Kafka writes user_id as i64, but we receive Uuid from API
-        let user_id_i64 = user_id.as_u128() as i64;
+    async fn get_user_balances(&self, user_id: u64) -> Result<Vec<UserBalanceModel>> {
+        let user_id_i64 = user_id as i64;
 
         UserBalanceEntity::find()
             .filter(UserBalanceColumn::UserId.eq(user_id_i64))
@@ -94,8 +91,8 @@ impl TradingRepository for PostgresTradingRepository {
             .map_err(Into::into)
     }
 
-    async fn get_user_balance(&self, user_id: Uuid) -> Result<Option<UserBalanceModel>> {
-        let user_id_i64 = user_id.as_u128() as i64;
+    async fn get_user_balance(&self, user_id: u64) -> Result<Option<UserBalanceModel>> {
+        let user_id_i64 = user_id as i64;
 
         UserBalanceEntity::find()
             .filter(UserBalanceColumn::UserId.eq(user_id_i64))
@@ -105,8 +102,8 @@ impl TradingRepository for PostgresTradingRepository {
             .map_err(Into::into)
     }
 
-    async fn update_user_balance(&self, user_id: Uuid, available: u64, locked: u64) -> Result<()> {
-        let user_id_i64 = user_id.as_u128() as i64;
+    async fn update_user_balance(&self, user_id: u64, available: u64, locked: u64) -> Result<()> {
+        let user_id_i64 = user_id as i64;
         let total = available + locked;
 
         // Insert new balance event (this is an event log table, not mutable state)
@@ -124,8 +121,8 @@ impl TradingRepository for PostgresTradingRepository {
         Ok(())
     }
 
-    async fn create_user_balance(&self, user_id: Uuid, available: u64, locked: u64) -> Result<()> {
-        let user_id_i64 = user_id.as_u128() as i64;
+    async fn create_user_balance(&self, user_id: u64, available: u64, locked: u64) -> Result<()> {
+        let user_id_i64 = user_id as i64;
         let total = available + locked;
 
         let balance = UserBalanceActiveModel {
@@ -142,9 +139,8 @@ impl TradingRepository for PostgresTradingRepository {
         Ok(())
     }
 
-    async fn get_open_orders(&self, user_id: Uuid) -> Result<Vec<OrderModel>> {
-        // Query trading.orders_events by order_user_id
-        let user_id_i64 = user_id.as_u128() as i64;
+    async fn get_open_orders(&self, user_id: u64) -> Result<Vec<OrderModel>> {
+        let user_id_i64 = user_id as i64;
 
         OrderEntity::find()
             .filter(OrderColumn::OrderUserId.eq(user_id_i64))
@@ -154,8 +150,8 @@ impl TradingRepository for PostgresTradingRepository {
             .map_err(Into::into)
     }
 
-    async fn get_order_by_id(&self, order_id: u64, user_id: Uuid) -> Result<Option<OrderModel>> {
-        let user_id_i64 = user_id.as_u128() as i64;
+    async fn get_order_by_id(&self, order_id: u64, user_id: u64) -> Result<Option<OrderModel>> {
+        let user_id_i64 = user_id as i64;
 
         OrderEntity::find()
             .filter(
@@ -184,8 +180,8 @@ impl TradingRepository for PostgresTradingRepository {
         Ok(result.order_order_id as u64)
     }
 
-    async fn count_user_orders(&self, user_id: Uuid) -> Result<u64> {
-        let user_id_i64 = user_id.as_u128() as i64;
+    async fn count_user_orders(&self, user_id: u64) -> Result<u64> {
+        let user_id_i64 = user_id as i64;
 
         let count = OrderEntity::find()
             .filter(OrderColumn::OrderUserId.eq(user_id_i64))
@@ -266,8 +262,7 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
     ///     FROM s
     ///   )
     ///   SELECT max(peak - v) AS max_drawdown FROM r;
-    async fn get_portfolio(&self, user: Uuid, now_ts_secs: i64) -> Result<PortfolioMetrics> {
-        let user_id_u64 = user.as_u128() as u64;
+    async fn get_portfolio(&self, user_id: u64, now_ts_secs: i64) -> Result<PortfolioMetrics> {
         let cutoff_24h = now_ts_secs - 24 * 60 * 60;
         let cutoff_7d = now_ts_secs - 7 * 24 * 60 * 60;
         let cutoff_1m = now_ts_secs - 30 * 24 * 60 * 60;
@@ -278,7 +273,7 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
             .query(
                 "SELECT toInt128OrZero(equity_quote) AS v\n                 FROM trading.equity_per_minute\n                 WHERE user_id = ?\n                   AND minute <= toDateTime(?)\n                 ORDER BY minute DESC\n                 LIMIT 1",
             )
-            .bind(user_id_u64)
+            .bind(user_id)
             .bind(now_ts_secs)
             .fetch_optional::<i128>()
             .await
@@ -291,7 +286,7 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
             .query(
                 "SELECT toInt128OrZero(equity_quote) AS v\n                 FROM trading.equity_per_minute\n                 WHERE user_id = ?\n                   AND minute <= toDateTime(?)\n                 ORDER BY minute DESC\n                 LIMIT 1",
             )
-            .bind(user_id_u64)
+            .bind(user_id)
             .bind(cutoff_24h)
             .fetch_optional::<i128>()
             .await
@@ -304,7 +299,7 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
             .query(
                 "SELECT toInt128OrZero(equity_quote) AS v\n                 FROM trading.equity_per_minute\n                 WHERE user_id = ?\n                   AND minute <= toDateTime(?)\n                 ORDER BY minute DESC\n                 LIMIT 1",
             )
-            .bind(user_id_u64)
+            .bind(user_id)
             .bind(cutoff_7d)
             .fetch_optional::<i128>()
             .await
@@ -317,7 +312,7 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
             .query(
                 "SELECT toInt128OrZero(coalesce(sum(cashflow_quote), 0)) AS cf\n                 FROM trading.user_cashflow_per_minute\n                 WHERE user_id = ?\n                   AND minute > toDateTime(?)\n                   AND minute <= toDateTime(?)",
             )
-            .bind(user_id_u64)
+            .bind(user_id)
             .bind(cutoff_7d)
             .bind(now_ts_secs)
             .fetch_one::<i128>()
@@ -331,8 +326,8 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
                 "SELECT toInt128OrZero(coalesce(sum(price * size_base), 0)) AS vol\n                 FROM trading.trade_events\n                 WHERE ts >= toDateTime(?)\n                   AND (maker_user_id = ? OR taker_user_id = ?)",
             )
             .bind(cutoff_24h)
-            .bind(user_id_u64)
-            .bind(user_id_u64)
+            .bind(user_id)
+            .bind(user_id)
             .fetch_one::<i128>()
             .await
             .map_err(|e| TradingError::Database(e.to_string()))?;
@@ -343,7 +338,7 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
             .query(
                 "WITH s AS (\n                   SELECT minute, toInt128OrZero(equity_quote) AS v\n                   FROM trading.equity_per_minute\n                   WHERE user_id = ?\n                     AND minute >= toDateTime(?)\n                     AND minute <= toDateTime(?)\n                   ORDER BY minute\n                 ),\n                 r AS (\n                   SELECT minute, v,\n                          runningMax(v) OVER (ORDER BY minute ROWS UNBOUNDED PRECEDING) AS peak\n                   FROM s\n                 )\n                 SELECT toInt128OrZero(max(peak - v)) AS max_drawdown FROM r",
             )
-            .bind(user_id_u64)
+            .bind(user_id)
             .bind(cutoff_1m)
             .bind(now_ts_secs)
             .fetch_optional::<i128>()

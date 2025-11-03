@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
-use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct OrderStore {
@@ -74,7 +73,7 @@ impl OrderStore {
     pub async fn get_order_by_id(
         &self,
         order_id: u64,
-        user_id: Uuid,
+        user_id: u64,
     ) -> Result<Option<OrderModel>, TradingError> {
         // Cache: Check Redis hash: order:{order_id}
         if self.config.enabled {
@@ -84,7 +83,7 @@ impl OrderStore {
                 match cache.hgetall_string(&key).await {
                     Ok(hash) if !hash.is_empty() => {
                         // Parse hash to OrderModel
-                        if let Some(order) = Self::parse_order_hash(hash, user_id) {
+                        if let Some(order) = Self::parse_order_hash(hash) {
                             debug!("Order cache hit for order ID: {}", order_id);
                             return Ok(Some(order));
                         }
@@ -123,10 +122,8 @@ impl OrderStore {
     /// Get user's order history with caching (all orders including filled, cancelled, etc.)
     /// Uses Redis set user:{user_id}:orders -> fetches each order:{order_id} hash
     /// Unlike get_user_orders, this includes ALL orders regardless of status
-    pub async fn get_user_order_history(&self, user_id: Uuid) -> Result<Vec<OrderModel>, TradingError> {
-        // Convert UUID to i64 to match Kafka consumer's key format
-        // Kafka writes: user:{numeric_id}:orders
-        let user_id_i64 = user_id.as_u128() as i64;
+    pub async fn get_user_order_history(&self, user_id: u64) -> Result<Vec<OrderModel>, TradingError> {
+        let user_id_i64 = user_id as i64;
 
         // Cache: Query user:{user_id}:orders SET, then fetch each order hash
         if self.config.enabled {
@@ -138,9 +135,8 @@ impl OrderStore {
                 match cache.smembers_string(&set_key).await {
                     Ok(order_ids) if !order_ids.is_empty() => {
                         debug!(
-                            "User order history cache hit for user: {} (i64: {}, {} orders in SET)",
+                            "User order history cache hit for user: {} ({} orders in SET)",
                             user_id,
-                            user_id_i64,
                             order_ids.len()
                         );
                         println!(
@@ -161,7 +157,7 @@ impl OrderStore {
                                     );
 
                                     // Include ALL orders - don't filter by status
-                                    if let Some(order) = Self::parse_order_hash(hash, user_id) {
+                                    if let Some(order) = Self::parse_order_hash(hash) {
                                         println!("   ✓ Adding order {} to history results", order_id_str);
                                         orders.push(order);
                                     }
@@ -202,10 +198,8 @@ impl OrderStore {
 
     /// Get user's open orders with caching
     /// Uses Redis set user:{user_id}:orders -> fetches each order:{order_id} hash
-    pub async fn get_user_orders(&self, user_id: Uuid) -> Result<Vec<OrderModel>, TradingError> {
-        // Convert UUID to i64 to match Kafka consumer's key format
-        // Kafka writes: user:{numeric_id}:orders
-        let user_id_i64 = user_id.as_u128() as i64;
+    pub async fn get_user_orders(&self, user_id: u64) -> Result<Vec<OrderModel>, TradingError> {
+        let user_id_i64 = user_id as i64;
 
         // Cache: Query user:{user_id}:orders SET, then fetch each order hash
         if self.config.enabled {
@@ -217,9 +211,8 @@ impl OrderStore {
                 match cache.smembers_string(&set_key).await {
                     Ok(order_ids) if !order_ids.is_empty() => {
                         debug!(
-                            "User orders cache hit for user: {} (i64: {}, {} orders in SET)",
+                            "User orders cache hit for user: {} ({} orders in SET)",
                             user_id,
-                            user_id_i64,
                             order_ids.len()
                         );
                         println!(
@@ -256,7 +249,7 @@ impl OrderStore {
                                         }
                                     }
 
-                                    if let Some(order) = Self::parse_order_hash(hash, user_id) {
+                                    if let Some(order) = Self::parse_order_hash(hash) {
                                         println!("   ✓ Adding order {} to results", order_id_str);
                                         orders.push(order);
                                     }
@@ -302,14 +295,13 @@ impl OrderStore {
         Ok(vec![])
     }
 
-    pub async fn invalidate_order(&self, order_id: u64, user_id: Uuid) {
+    pub async fn invalidate_order(&self, order_id: u64, user_id: u64) {
         if !self.config.enabled {
             return;
         }
 
         if let Some(cache) = &self.cache {
-            // Convert UUID to i64 to match Kafka consumer's key format
-            let user_id_i64 = user_id.as_u128() as i64;
+            let user_id_i64 = user_id as i64;
 
             // Delete order:{order_id} hash
             let order_key = format!("order:{}", order_id);
@@ -336,14 +328,13 @@ impl OrderStore {
         }
     }
 
-    pub async fn invalidate_user_orders(&self, user_id: Uuid) {
+    pub async fn invalidate_user_orders(&self, user_id: u64) {
         if !self.config.enabled {
             return;
         }
 
         if let Some(cache) = &self.cache {
-            // Convert UUID to i64 to match Kafka consumer's key format
-            let user_id_i64 = user_id.as_u128() as i64;
+            let user_id_i64 = user_id as i64;
             let user_set_key = format!("user:{}:orders", user_id_i64);
 
             // Get all order IDs first
@@ -377,7 +368,7 @@ impl OrderStore {
 
     // Helper: Parse order hash from Redis into OrderModel
     // Kafka writes: order_id, user_id, price, size, side, timestamp, market_id, status
-    fn parse_order_hash(hash: HashMap<String, String>, _user_id: Uuid) -> Option<OrderModel> {
+    fn parse_order_hash(hash: HashMap<String, String>) -> Option<OrderModel> {
         let order_order_id = hash.get("order_id")?.parse::<i64>().ok()?;
         let order_user_id = hash.get("user_id")?.parse::<i64>().ok()?;
         let order_price = hash.get("price")?.parse::<i64>().ok()?;

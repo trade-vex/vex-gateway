@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
-use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct UserBalanceStore {
@@ -75,11 +74,9 @@ impl UserBalanceStore {
     /// Get user balances from cache: user:{user_id}:asset:{asset_id}:balance hashes
     pub async fn get_user_balances(
         &self,
-        user_id: Uuid,
+        user_id: u64,
     ) -> Result<Vec<UserBalanceModel>, TradingError> {
-        // Convert UUID to i64 to match Kafka consumer's key format
-        // Kafka writes: user:{numeric_id}:asset:{asset_id}:balance
-        let user_id_i64 = user_id.as_u128() as i64;
+        let user_id_i64 = user_id as i64;
 
         // Cache: Scan for user:{user_id}:asset:*:balance keys, then fetch each hash
         if self.config.enabled {
@@ -90,9 +87,8 @@ impl UserBalanceStore {
                 match cache.scan_keys(&pattern).await {
                     Ok(keys) if !keys.is_empty() => {
                         debug!(
-                            "User balances cache hit for user: {} (i64: {}, {} assets)",
+                            "User balances cache hit for user: {} ({} assets)",
                             user_id,
-                            user_id_i64,
                             keys.len()
                         );
 
@@ -101,7 +97,7 @@ impl UserBalanceStore {
                         for key in keys {
                             match cache.hgetall_string(&key).await {
                                 Ok(hash) if !hash.is_empty() => {
-                                    if let Some(balance) = Self::parse_balance_hash(hash, user_id) {
+                                    if let Some(balance) = Self::parse_balance_hash(hash) {
                                         balances.push(balance);
                                     }
                                 }
@@ -140,14 +136,13 @@ impl UserBalanceStore {
         Ok(vec![])
     }
 
-    pub async fn invalidate_user_balances(&self, user_id: Uuid) {
+    pub async fn invalidate_user_balances(&self, user_id: u64) {
         if !self.config.enabled {
             return;
         }
 
         if let Some(cache) = &self.cache {
-            // Convert UUID to i64 to match Kafka consumer's key format
-            let user_id_i64 = user_id.as_u128() as i64;
+            let user_id_i64 = user_id as i64;
             let pattern = format!("user:{}:asset:*:balance", user_id_i64);
 
             // Scan for all balance keys
@@ -174,10 +169,7 @@ impl UserBalanceStore {
 
     // Helper: Parse balance hash from Redis into UserBalanceModel
     // Kafka writes: user_id, asset_id, available, locked, total, timestamp
-    fn parse_balance_hash(
-        hash: HashMap<String, String>,
-        _user_id: Uuid,
-    ) -> Option<UserBalanceModel> {
+    fn parse_balance_hash(hash: HashMap<String, String>) -> Option<UserBalanceModel> {
         let user_id = hash.get("user_id")?.parse::<i64>().ok()?;
         let asset_id = hash.get("asset_id")?.parse::<i32>().ok()?;
         let available = hash.get("available")?.parse::<i64>().ok()?;

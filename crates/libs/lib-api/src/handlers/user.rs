@@ -71,7 +71,8 @@ pub async fn get_balances(
     user: AuthenticatedUserId,
     balance_store: web::Data<Arc<UserBalanceStore>>,
 ) -> Result<HttpResponse> {
-    let user_id = user.0;
+    let raw = user.0.as_u128();
+    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
 
     match balance_store.get_user_balances(user_id).await {
         Ok(balances) => {
@@ -170,7 +171,8 @@ pub async fn get_open_orders(
     user: AuthenticatedUserId,
     order_store: web::Data<Arc<OrderStore>>,
 ) -> Result<HttpResponse> {
-    let user_id = user.0;
+    let raw = user.0.as_u128();
+    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
 
     match order_store.get_user_orders(user_id).await {
         Ok(orders) => {
@@ -286,7 +288,8 @@ pub async fn get_order_history(
     user: AuthenticatedUserId,
     order_store: web::Data<Arc<OrderStore>>,
 ) -> Result<HttpResponse> {
-    let user_id = user.0;
+    let raw = user.0.as_u128();
+    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
 
     match order_store.get_user_order_history(user_id).await {
         Ok(orders) => {
@@ -334,10 +337,12 @@ pub async fn get_portfolio_overview(
     user: AuthenticatedUserId,
     portfolio_repo: web::Data<Arc<dyn PortfolioRepository>>,
 ) -> Result<HttpResponse> {
+    let raw = user.0.as_u128();
+    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
     let now_secs = chrono::Utc::now().timestamp();
     
     let metrics = portfolio_repo
-        .get_portfolio(user.0, now_secs)
+        .get_portfolio(user_id, now_secs)
         .await
         .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
 
