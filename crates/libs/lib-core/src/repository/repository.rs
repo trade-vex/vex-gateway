@@ -6,14 +6,12 @@ use crate::model::user_balances::{
     ActiveModel as UserBalanceActiveModel, Column as UserBalanceColumn,
     Entity as UserBalanceEntity, Model as UserBalanceModel,
 };
-use crate::model::trades::{Entity as TradeEntity, Column as TradeColumn};
-use crate::model::deposits::{Entity as DepositEntity, Column as DepositColumn};
-use crate::model::withdrawals::{Entity as WithdrawalEntity, Column as WithdrawalColumn};
 use async_trait::async_trait;
 use sea_orm::prelude::*;
 use sea_orm::*;
 use std::sync::Arc;
 use uuid::Uuid;
+use clickhouse::Client as ClickHouseClient;
 
 // Error type for trading operations
 #[derive(Debug)]
@@ -63,8 +61,6 @@ pub struct PortfolioMetrics {
     pub volume_24h: u64,
     pub pnl_7d: i64,
     pub max_drawdown_1m: i64,
-    pub total_deposits: u64,
-    pub total_withdrawals: u64,
 }
 
 #[async_trait]
@@ -199,152 +195,154 @@ impl TradingRepository for PostgresTradingRepository {
     }
 }
 
-/// Portfolio Repository implementation
+// Removed PostgreSQL-based PortfolioRepository implementation.
+
+/// ClickHouse-backed Portfolio Repository
+///
+/// Data model (ClickHouse):
+/// - `trading.equity_per_minute(user_id, minute, equity_quote)`
+///   ReplacingMergeTree with last-per-minute equity valued in configured quote asset.
+/// - `trading.trade_events(ts, price, size_base, maker_user_id, taker_user_id, ...)`
+///   Raw trade feed for computing user volume.
+///
+/// Metrics computed:
+/// - balance (now): last equity at or before `now`
+/// - balance_24h_ago: last equity at or before `now - 24h`
+/// - pnl_7d: equity(now) - equity(now - 7d)
+/// - max_drawdown_1m: peak-to-trough decline over equity in the last 30 days
+/// - volume_24h: sum(price * size_base) where user is maker or taker in last 24h
+///
+/// Notes:
+/// - Time parameters are passed as Unix seconds and wrapped with ClickHouse `toDateTime(?)`
+/// - Equity is stored as Decimal(38,12). We coerce to i128 in CH and cast to Rust i64/u64
+///   conservatively (saturating and clamping at 0 for unsigned fields) to match API types.
+pub struct ClickHousePortfolioRepository {
+    ch: ClickHouseClient,
+}
+
+impl ClickHousePortfolioRepository {
+    pub fn new(ch: ClickHouseClient) -> Self {
+        Self { ch }
+    }
+}
+
 #[async_trait]
-impl PortfolioRepository for PostgresTradingRepository {
-    /// Calculates: current balance, 24h balance, 24h volume, 7d PnL, 1m max drawdown,
-    /// total deposits, total withdrawals.
+impl PortfolioRepository for ClickHousePortfolioRepository {
+    /// ClickHouse implementation using the schema-provided tables and queries.
     ///
-    /// Data sources: `balances_events`, `trades_events`, `deposits_events`, `withdrawals_events`.
+    /// SQL (conceptual):
+    /// - balance_now
+    ///   SELECT toInt128OrZero(equity_quote) FROM trading.equity_per_minute
+    ///   WHERE user_id = {user} AND minute <= toDateTime({now})
+    ///   ORDER BY minute DESC LIMIT 1;
+    ///
+    /// - balance_24h_ago
+    ///   same with minute <= toDateTime({now - 24h})
+    ///
+    /// - balance_7d_ago
+    ///   same with minute <= toDateTime({now - 7d})
+    ///
+    /// - volume_24h
+    ///   SELECT toInt128OrZero(sum(price * size_base)) FROM trading.trade_events
+    ///   WHERE ts >= toDateTime({now - 24h})
+    ///     AND (maker_user_id = {user} OR taker_user_id = {user});
+    ///
+    /// - max_drawdown_1m
+    ///   WITH s AS (
+    ///     SELECT minute, toInt128OrZero(equity_quote) AS v
+    ///     FROM trading.equity_per_minute
+    ///     WHERE user_id = {user}
+    ///       AND minute >= toDateTime({now - 30d})
+    ///       AND minute <= toDateTime({now})
+    ///     ORDER BY minute
+    ///   ),
+    ///   r AS (
+    ///     SELECT minute, v,
+    ///            runningMax(v) OVER (ORDER BY minute ROWS UNBOUNDED PRECEDING) AS peak
+    ///     FROM s
+    ///   )
+    ///   SELECT max(peak - v) AS max_drawdown FROM r;
     async fn get_portfolio(&self, user: Uuid, now_ts_secs: i64) -> Result<PortfolioMetrics> {
-        let user_id_i64 = user.as_u128() as i64; 
+        let user_id_u64 = user.as_u128() as u64;
         let cutoff_24h = now_ts_secs - 24 * 60 * 60;
         let cutoff_7d = now_ts_secs - 7 * 24 * 60 * 60;
         let cutoff_1m = now_ts_secs - 30 * 24 * 60 * 60;
 
-        // Current balance: sum the latest `total` per asset.
-        // Query: SELECT * FROM trading.balances_events WHERE user_id = ? ORDER BY timestamp DESC
-        // Fetch all user balance events ordered by time desc; for each asset_id,
-        // keep the first seen event (latest), then sum totals across assets.
-        let latest_rows = UserBalanceEntity::find()
-            .filter(UserBalanceColumn::UserId.eq(user_id_i64))
-            .order_by_desc(UserBalanceColumn::Timestamp)
-            .all(&*self.db)
-            .await?;
-        use std::collections::HashMap;
-        let mut latest_per_asset: HashMap<i32, i64> = HashMap::new();
-        for r in &latest_rows {
-            latest_per_asset.entry(r.asset_id).or_insert(r.total);
-        }
-        let balance_now: i64 = latest_per_asset.values().sum();
-
-        // Balance 24h ago: for each asset, take the latest event with ts <= cutoff_24h; sum totals.
-        // Query: Uses same data as current balance (no additional query)
-        // Filter balance_events by timestamp <= cutoff_24h, group by asset_id, take latest per asset, sum
-        let mut latest_24h_per_asset: HashMap<i32, i64> = HashMap::new();
-        for r in &latest_rows {
-            if r.timestamp <= cutoff_24h {
-                latest_24h_per_asset.entry(r.asset_id).or_insert(r.total);
-            }
-        }
-        let balance_24h_ago: i64 = latest_24h_per_asset.values().sum();
-
-        // Balance 7d ago: same as above with ts <= cutoff_7d.
-        // Query: Uses same data as current balance (no additional query)
-        // Filter balance_events by timestamp <= cutoff_7d, group by asset_id, take latest per asset, sum
-        let mut latest_7d_per_asset: HashMap<i32, i64> = HashMap::new();
-        for r in &latest_rows {
-            if r.timestamp <= cutoff_7d {
-                latest_7d_per_asset.entry(r.asset_id).or_insert(r.total);
-            }
-        }
-        let balance_7d_ago: i64 = latest_7d_per_asset.values().sum();
-
-        // 24h volume: sum price * size for trades where user is maker or taker and ts >= cutoff_24h.
-        // Query: SELECT * FROM trading.trades_events WHERE (maker_user_id = ? OR taker_user_id = ?) AND timestamp >= ?
-        // Filter trades by user participation (maker OR taker) and timestamp >= cutoff_24h, sum price*size
-        let volume_24h: i64 = TradeEntity::find()
-            .filter(
-                Condition::any()
-                    .add(TradeColumn::MakerUserId.eq(user_id_i64))
-                    .add(TradeColumn::TakerUserId.eq(user_id_i64)),
+        // balance_now
+        let balance_now_i128: i128 = self
+            .ch
+            .query(
+                "SELECT toInt128OrZero(equity_quote) AS v\n                 FROM trading.equity_per_minute\n                 WHERE user_id = ?\n                   AND minute <= toDateTime(?)\n                 ORDER BY minute DESC\n                 LIMIT 1",
             )
-            .filter(TradeColumn::Timestamp.gte(cutoff_24h))
-            .all(&*self.db)
-            .await?
-            .into_iter()
-            .map(|t| t.price.saturating_mul(t.size))
-            .sum();
+            .bind(user_id_u64)
+            .bind(now_ts_secs)
+            .fetch_optional::<i128>()
+            .await
+            .map_err(|e| TradingError::Database(e.to_string()))?
+            .unwrap_or(0);
 
-        // Lifetime deposits/withdrawals: sum amounts across all user events.
-        // Query: SELECT amount FROM trading.deposits_events WHERE user_id = ?
-        //        SELECT amount FROM trading.withdrawals_events WHERE user_id = ?
-        // Simple SUM aggregation on deposits and withdrawals tables
-        let total_deposits: i64 = DepositEntity::find()
-            .filter(DepositColumn::UserId.eq(user_id_i64))
-            .all(&*self.db)
-            .await?
-            .into_iter()
-            .map(|d| d.amount)
-            .sum();
-        let total_withdrawals: i64 = WithdrawalEntity::find()
-            .filter(WithdrawalColumn::UserId.eq(user_id_i64))
-            .all(&*self.db)
-            .await?
-            .into_iter()
-            .map(|w| w.amount)
-            .sum();
+        // balance_24h_ago
+        let balance_24h_ago_i128: i128 = self
+            .ch
+            .query(
+                "SELECT toInt128OrZero(equity_quote) AS v\n                 FROM trading.equity_per_minute\n                 WHERE user_id = ?\n                   AND minute <= toDateTime(?)\n                 ORDER BY minute DESC\n                 LIMIT 1",
+            )
+            .bind(user_id_u64)
+            .bind(cutoff_24h)
+            .fetch_optional::<i128>()
+            .await
+            .map_err(|e| TradingError::Database(e.to_string()))?
+            .unwrap_or(0);
 
-        // 7d deposits/withdrawals: sum amounts where ts > cutoff_7d.
-        // Query: SELECT amount FROM trading.deposits_events WHERE user_id = ? AND timestamp > ?
-        //        SELECT amount FROM trading.withdrawals_events WHERE user_id = ? AND timestamp > ?
-        // Filter by user_id and timestamp > cutoff_7d, sum amounts
-        let deposits_7d: i64 = DepositEntity::find()
-            .filter(DepositColumn::UserId.eq(user_id_i64))
-            .filter(DepositColumn::Timestamp.gt(cutoff_7d))
-            .all(&*self.db)
-            .await?
-            .into_iter()
-            .map(|d| d.amount)
-            .sum();
-        let withdrawals_7d: i64 = WithdrawalEntity::find()
-            .filter(WithdrawalColumn::UserId.eq(user_id_i64))
-            .filter(WithdrawalColumn::Timestamp.gt(cutoff_7d))
-            .all(&*self.db)
-            .await?
-            .into_iter()
-            .map(|w| w.amount)
-            .sum();
+        // balance_7d_ago
+        let balance_7d_ago_i128: i128 = self
+            .ch
+            .query(
+                "SELECT toInt128OrZero(equity_quote) AS v\n                 FROM trading.equity_per_minute\n                 WHERE user_id = ?\n                   AND minute <= toDateTime(?)\n                 ORDER BY minute DESC\n                 LIMIT 1",
+            )
+            .bind(user_id_u64)
+            .bind(cutoff_7d)
+            .fetch_optional::<i128>()
+            .await
+            .map_err(|e| TradingError::Database(e.to_string()))?
+            .unwrap_or(0);
 
-        // Max drawdown (1m): peak-to-trough decline over last 30 days.
-        // Query: SELECT timestamp, total FROM trading.balances_events WHERE user_id = ? AND timestamp >= ? ORDER BY timestamp ASC
-        // Within [cutoff_1m, now], aggregate total per timestamp (summing across assets),
-        // iterate in time order, track running peak, compute (peak - value) at each point, take max.
-        let series_rows = UserBalanceEntity::find()
-            .filter(UserBalanceColumn::UserId.eq(user_id_i64))
-            .filter(UserBalanceColumn::Timestamp.gte(cutoff_1m))
-            .order_by_asc(UserBalanceColumn::Timestamp)
-            .all(&*self.db)
-            .await?;
-        let mut by_ts: HashMap<i64, i64> = HashMap::new();
-        for r in series_rows {
-            let entry = by_ts.entry(r.timestamp).or_insert(0);
-            *entry += r.total;
-        }
-        let mut timestamps: Vec<i64> = by_ts.keys().copied().collect();
-        timestamps.sort_unstable();
-        let mut peak: i64 = 0;
-        let mut max_drawdown: i64 = 0;
-        for ts in timestamps {
-            let v = *by_ts.get(&ts).unwrap_or(&0);
-            if v > peak { peak = v; }
-            let dd = peak - v;
-            if dd > max_drawdown { max_drawdown = dd; }
-        }
+        // volume_24h
+        let volume_24h_i128: i128 = self
+            .ch
+            .query(
+                "SELECT toInt128OrZero(coalesce(sum(price * size_base), 0)) AS vol\n                 FROM trading.trade_events\n                 WHERE ts >= toDateTime(?)\n                   AND (maker_user_id = ? OR taker_user_id = ?)",
+            )
+            .bind(cutoff_24h)
+            .bind(user_id_u64)
+            .bind(user_id_u64)
+            .fetch_one::<i128>()
+            .await
+            .map_err(|e| TradingError::Database(e.to_string()))?;
 
-        // 7d PnL: (current_balance - balance_7d_ago) - (deposits_7d - withdrawals_7d).
-        // Query: Uses previously calculated values (no additional query)
-        // (total_portfolio_change) - (external_cash_flows) = pure_trading_pnl
-        let pnl_7d = (balance_now - balance_7d_ago) - (deposits_7d - withdrawals_7d);
+        // max_drawdown_1m
+        let max_drawdown_i128: i128 = self
+            .ch
+            .query(
+                "WITH s AS (\n                   SELECT minute, toInt128OrZero(equity_quote) AS v\n                   FROM trading.equity_per_minute\n                   WHERE user_id = ?\n                     AND minute >= toDateTime(?)\n                     AND minute <= toDateTime(?)\n                   ORDER BY minute\n                 ),\n                 r AS (\n                   SELECT minute, v,\n                          runningMax(v) OVER (ORDER BY minute ROWS UNBOUNDED PRECEDING) AS peak\n                   FROM s\n                 )\n                 SELECT toInt128OrZero(max(peak - v)) AS max_drawdown FROM r",
+            )
+            .bind(user_id_u64)
+            .bind(cutoff_1m)
+            .bind(now_ts_secs)
+            .fetch_optional::<i128>()
+            .await
+            .map_err(|e| TradingError::Database(e.to_string()))?
+            .unwrap_or(0);
+
+        // pnl_7d = balance_now - balance_7d_ago
+        let pnl_7d_i128 = balance_now_i128.saturating_sub(balance_7d_ago_i128);
 
         Ok(PortfolioMetrics {
-            balance: balance_now.max(0) as u64,
-            balance_24h_ago: balance_24h_ago.max(0) as u64,
-            volume_24h: volume_24h.max(0) as u64,
-            pnl_7d,
-            max_drawdown_1m: max_drawdown,
-            total_deposits: total_deposits.max(0) as u64,
-            total_withdrawals: total_withdrawals.max(0) as u64,
+            balance: balance_now_i128.max(0) as u64,
+            balance_24h_ago: balance_24h_ago_i128.max(0) as u64,
+            volume_24h: volume_24h_i128.max(0) as u64,
+            pnl_7d: pnl_7d_i128 as i64,
+            max_drawdown_1m: max_drawdown_i128 as i64,
         })
     }
 }

@@ -93,8 +93,6 @@ pub struct PortfolioOverviewResponse {
     pub volume_24h: u64,
     pub pnl_7d: i64,
     pub max_drawdown_1m: i64,
-    pub total_deposits: u64,
-    pub total_withdrawals: u64,
 }
 
 // Conversion implementations

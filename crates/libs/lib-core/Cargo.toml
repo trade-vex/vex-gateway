@@ -21,6 +21,7 @@ common = { workspace = true }
 dashmap = "6.1"
 thiserror = { workspace = true }
 num_cpus = "1.16"
+clickhouse = "0.12"
 
 [dev-dependencies]
 actix-web = "4.4"

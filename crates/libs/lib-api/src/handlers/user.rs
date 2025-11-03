@@ -313,9 +313,23 @@ pub async fn get_order_history(
 
 /// Get portfolio overview
 ///
-/// # Data Sources
-/// - **Primary**: PostgreSQL database
-/// - **Tables**: `trading.balances_events`, `trading.trades_events`, `trading.deposits_events`, `trading.withdrawals_events`
+/// Computes portfolio metrics using ClickHouse materialized views and raw events.
+///
+/// # Data Sources (ClickHouse)
+/// - `trading.equity_per_minute(user_id, minute, equity_quote)`
+///   ReplacingMergeTree with per-minute equity valued in configured quote asset.
+/// - `trading.trade_events(ts, market_id, price, size_base, maker_user_id, taker_user_id, ...)`
+///   Raw trades for user volume aggregation.
+///
+/// # Metrics
+/// - `balance` (now): last `equity_quote` at or before current time
+/// - `balance_24h_ago`: last `equity_quote` at or before now - 24h
+/// - `pnl_7d`: `equity(now) - equity(now - 7d)`
+/// - `max_drawdown_1m`: max peak-to-trough drawdown of equity over last 30d using `runningMax`
+/// - `volume_24h`: sum(`price * size_base`) where user is maker or taker and `ts >= now - 24h`
+///
+/// The handler is backend-agnostic and uses the injected `PortfolioRepository` which is
+/// implemented against ClickHouse in production.
 pub async fn get_portfolio_overview(
     user: AuthenticatedUserId,
     portfolio_repo: web::Data<Arc<dyn PortfolioRepository>>,
@@ -333,8 +347,6 @@ pub async fn get_portfolio_overview(
         volume_24h: metrics.volume_24h,
         pnl_7d: metrics.pnl_7d,
         max_drawdown_1m: metrics.max_drawdown_1m,
-        total_deposits: metrics.total_deposits,
-        total_withdrawals: metrics.total_withdrawals,
     };
 
     Ok(HttpResponse::Ok().json(response))

@@ -20,6 +20,7 @@ dashmap = "6.1"
 thiserror = {workspace = true}
 num_cpus = "1.16"
 async-trait = "0.1"
+clickhouse = "0.12"
 
 #  Internal crate dependencies
 lib-api = {path = "../lib-api"}
