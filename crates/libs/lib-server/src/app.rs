@@ -65,11 +65,11 @@ pub fn create_app(
                                 .app_data(web::Data::new(app_state.api_key_repository.clone()))
                                 .configure(routes::api_key_routes::configure),
                         )
-                        .service(web::scope("").configure(routes::order_route::configure))
                         .service(
                             web::scope("")
-                                .app_data(web::Data::new(app_state.balance_store.clone()))
-                                .app_data(web::Data::new(app_state.order_store.clone()))
+                                .app_data(web::Data::new(Arc::new(app_state.balance_store.clone())))
+                                .app_data(web::Data::new(Arc::new(app_state.order_store.clone())))
+                                .configure(routes::order_route::configure)
                                 .configure(routes::user_route::configure),
                         ),
                 ),
