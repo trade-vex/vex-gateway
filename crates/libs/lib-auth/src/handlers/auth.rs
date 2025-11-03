@@ -6,7 +6,7 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::dto::auth_request_dto::{
-    ChangePasswordRequest, CheckEmailRequest, LoginRequest, RefreshTokenRequest, SignupRequest, VerifyEmailRequest,
+    ChangePasswordRequest, CheckEmailRequest, ForgotPasswordRequest, LoginRequest, RefreshTokenRequest, ResetPasswordRequest, SignupRequest, VerifyEmailRequest, VerifyResetOtpRequest,
 };
 use crate::dto::auth_response_dto::{
     RefreshTokenResponse, SignupResponse, UserInfo, UserProfile,
@@ -560,4 +560,161 @@ pub async fn resend_verification_email(
             Err(AuthError::UserNotFound)
         }
     }
+}
+
+// Forgot password handler
+pub async fn forgot_password(
+    req: web::Json<ForgotPasswordRequest>,
+    user_repo: web::Data<Arc<dyn UserRepository>>,
+    email_service: web::Data<Arc<EmailService>>,
+) -> Result<HttpResponse, AuthError> {
+    // Validate the request
+    req.validate()
+        .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
+
+    tracing::debug!("Forgot password request for email: {}", req.email);
+
+    // Check rate limit
+    if email_service
+        .check_password_reset_rate_limit(&req.email)
+        .await?
+    {
+        return Err(AuthError::Validation(
+            "Too many password reset requests. Please try again later.".to_string(),
+        ));
+    }
+
+    // Try to find user by email
+    if let Ok(Some(user)) = user_repo.find_by_email(&req.email).await {
+        // Check if user has password_hash
+        if user.password_hash.is_none() {
+            // OAuth-only user - return same success message
+            tracing::debug!("Password reset requested for OAuth-only user: {}", req.email);
+            return Ok(HttpResponse::Ok().json(json!({
+                "message": "If an account exists with this email, a password reset code has been sent.",
+                "timestamp": chrono::Utc::now().to_rfc3339()
+            })));
+        }
+
+        // User exists and has password - send OTP
+        email_service
+            .send_password_reset_otp(&req.email, &user.username)
+            .await?;
+    } else {
+        // User not exist 
+        tracing::debug!("Password reset requested for non-existent email: {}", req.email);
+    }
+
+    // Always return same success message regardless of email existence
+    Ok(HttpResponse::Ok().json(json!({
+        "message": "If an account exists with this email, a password reset code has been sent.",
+        "timestamp": chrono::Utc::now().to_rfc3339()
+    })))
+}
+
+// Verify reset OTP handler
+pub async fn verify_reset_otp(
+    req: web::Json<VerifyResetOtpRequest>,
+    user_repo: web::Data<Arc<dyn UserRepository>>,
+    email_service: web::Data<Arc<EmailService>>,
+) -> Result<HttpResponse, AuthError> {
+    // Validate the request
+    req.validate()
+        .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
+
+    tracing::debug!("Verify reset OTP request for email: {}", req.email);
+
+    // Find user by email
+    let user = user_repo
+        .find_by_email(&req.email)
+        .await?
+        .ok_or(AuthError::UserNotFound)?;
+
+    // Check if user has password_hash
+    if user.password_hash.is_none() {
+        return Err(AuthError::Validation(
+            "Password reset is not available for OAuth-only accounts".to_string(),
+        ));
+    }
+
+    // Verify OTP
+    email_service
+        .verify_password_reset_otp(&req.email, &req.otp)
+        .await?;
+
+    // Generate reset token
+    let reset_token = email_service.generate_reset_token();
+
+    // Store reset token with user_id
+    email_service
+        .store_reset_token(&reset_token, user.user_id)
+        .await?;
+
+    Ok(HttpResponse::Ok().json(json!({
+        "reset_token": reset_token,
+        "message": "OTP verified successfully. Use the reset_token to set your new password.",
+        "timestamp": chrono::Utc::now().to_rfc3339()
+    })))
+}
+
+// Reset password handler
+pub async fn reset_password(
+    req: web::Json<ResetPasswordRequest>,
+    user_repo: web::Data<Arc<dyn UserRepository>>,
+    token_service: web::Data<Arc<TokenService>>,
+    session_service: web::Data<Arc<SessionService>>,
+    email_service: web::Data<Arc<EmailService>>,
+) -> Result<HttpResponse, AuthError> {
+    // Validate the request
+    req.validate()
+        .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
+
+    tracing::debug!("Reset password request");
+
+    // Validate reset token and get user_id
+    let user_id = email_service
+        .validate_reset_token(&req.reset_token)
+        .await?;
+
+    // Find user
+    let user = user_repo
+        .find_by_id(user_id)
+        .await?
+        .ok_or(AuthError::UserNotFound)?;
+
+    // Verify user has password_hash
+    if user.password_hash.is_none() {
+        return Err(AuthError::Validation(
+            "Password reset is not available for OAuth-only accounts".to_string(),
+        ));
+    }
+
+    // Hash new password
+    let new_password_hash = tokio::task::spawn_blocking({
+        let p = req.new_password.clone();
+        move || hash(&p, DEFAULT_COST)
+    })
+    .await
+    .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
+    .map_err(|e| AuthError::Validation(format!("Password hashing failed: {}", e)))?;
+
+    // Update password in database
+    user_repo
+        .update_password(user_id, &new_password_hash)
+        .await?;
+
+    // Revoke all user sessions
+    let _ = session_service
+        .revoke_all_user_sessions(user_id)
+        .await;
+
+    // Also revoke refresh tokens (legacy cleanup)
+    let _ = token_service.revoke_user_sessions(user_id).await;
+
+    tracing::info!("Password reset successful for user_id: {}", user_id);
+
+    Ok(HttpResponse::Ok().json(json!({
+        "message": "Password reset successfully. Please login with your new password.",
+        "timestamp": chrono::Utc::now().to_rfc3339()
+    })))
 }

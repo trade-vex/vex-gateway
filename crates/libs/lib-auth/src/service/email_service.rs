@@ -6,12 +6,17 @@ use lettre::{
 };
 use rand::Rng;
 use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::config::EmailConfig;
 use crate::error::auth_error::AuthError;
 use secrecy::ExposeSecret;
 
 const OTP_KEY_PREFIX: &str = "otp:verification:";
+const PASSWORD_RESET_OTP_PREFIX: &str = "otp:password_reset:";
+const PASSWORD_RESET_TOKEN_PREFIX: &str = "password_reset:";
+const RATE_LIMIT_PASSWORD_RESET_PREFIX: &str = "rate_limit:password_reset:";
+const RATE_LIMIT_OTP_VERIFY_PREFIX: &str = "rate_limit:otp_verify:";
 
 #[derive(Clone)]
 pub struct EmailService {
@@ -490,5 +495,303 @@ The Team"#,
                 Err(e)
             }
         }
+    }
+
+    /// Check rate limit for password reset requests
+    /// Returns true if rate limit is exceeded
+    pub async fn check_password_reset_rate_limit(&self, email: &str) -> Result<bool, AuthError> {
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+
+        let key = format!("{}{}", RATE_LIMIT_PASSWORD_RESET_PREFIX, email);
+        let count: Option<u64> = conn
+            .get(&key)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get rate limit: {}", e)))?;
+        let count = count.unwrap_or(0);
+
+        // Max 3 requests per hour
+        if count >= 3 {
+            return Ok(true);
+        }
+
+        // Increment counter
+        let _: () = conn
+            .incr(&key, 1)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to increment rate limit: {}", e)))?;
+
+        // Set TTL to 1 hour if this is the first request
+        if count == 0 {
+            let _: () = conn
+                .expire(&key, 3600)
+                .await
+                .map_err(|e| AuthError::Redis(format!("Failed to set rate limit TTL: {}", e)))?;
+        }
+
+        Ok(false)
+    }
+
+    /// Check rate limit for OTP verification attempts
+    /// Returns true if rate limit is exceeded
+    async fn check_otp_verify_rate_limit(&self, email: &str) -> Result<bool, AuthError> {
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+
+        let key = format!("{}{}", RATE_LIMIT_OTP_VERIFY_PREFIX, email);
+        let count: Option<u64> = conn
+            .get(&key)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get rate limit: {}", e)))?;
+        let count = count.unwrap_or(0);
+
+        // Max 5 attempts per OTP lifetime is 15 min
+        if count >= 5 {
+            return Ok(true);
+        }
+
+        // Increment counter
+        let _: () = conn
+            .incr(&key, 1)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to increment rate limit: {}", e)))?;
+
+        // Set TTL to 15 min if this is the first attempt
+        if count == 0 {
+            let _: () = conn
+                .expire(&key, 900) // 15 minutes
+                .await
+                .map_err(|e| AuthError::Redis(format!("Failed to set rate limit TTL: {}", e)))?;
+        }
+
+        Ok(false)
+    }
+
+    /// Store password reset OTP in Redis
+    async fn store_password_reset_otp(&self, email: &str, otp: &str) -> Result<(), AuthError> {
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+
+        let key = format!("{}{}", PASSWORD_RESET_OTP_PREFIX, email);
+        // Password reset OTP expires in 15 min
+        let expiry_seconds = 15 * 60; // 15 minutes
+        let expiry_seconds_u64 = expiry_seconds
+            .try_into()
+            .map_err(|_| AuthError::Validation("OTP expiry time is too large".to_string()))?;
+
+        let _: () = conn
+            .set_ex(&key, otp, expiry_seconds_u64)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to store password reset OTP: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Send password reset OTP email
+    pub async fn send_password_reset_otp(
+        &self,
+        recipient_email: &str,
+        recipient_name: &str,
+    ) -> Result<(), AuthError> {
+        tracing::info!("Starting password reset OTP email send process");
+        tracing::info!("Recipient: {} <{}>", recipient_name, recipient_email);
+
+        let otp = self.generate_otp();
+        tracing::debug!("Generated password reset OTP: {}", otp);
+
+        // Store OTP in Redis
+        self.store_password_reset_otp(recipient_email, &otp).await?;
+
+        let subject = "Reset Your Password";
+        let text_content = format!(
+            r#"Hello {},
+
+You requested to reset your password. Your verification code is:
+
+{}
+
+This code will expire in 15 minutes.
+
+If you didn't request this, please ignore this email.
+
+Best regards,
+The Team"#,
+            recipient_name, otp
+        );
+
+        let html_content = format!(
+            r#"<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+        .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+        .header {{ background-color: #f8f9fa; padding: 20px; text-align: center; }}
+        .content {{ padding: 20px; }}
+        .otp {{ font-size: 32px; font-weight: bold; text-align: center; 
+               padding: 20px; margin: 20px 0; background-color: #f0f0f0; 
+               border-radius: 8px; letter-spacing: 8px; }}
+        .footer {{ text-align: center; padding: 20px; color: #666; font-size: 14px; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h2>Reset Your Password</h2>
+        </div>
+        <div class="content">
+            <p>Hello {},</p>
+            <p>You requested to reset your password. Please use the verification code below:</p>
+            <div class="otp">{}</div>
+            <p>This code will expire in <strong>15 minutes</strong>.</p>
+            <p>If you didn't request this, please ignore this email.</p>
+        </div>
+        <div class="footer">
+            <p>Best regards,<br>The Team</p>
+        </div>
+    </div>
+</body>
+</html>"#,
+            recipient_name, otp
+        );
+
+        let result = self
+            .send_email(recipient_email, recipient_name, subject, &html_content, &text_content)
+            .await;
+
+        match &result {
+            Ok(_) => {
+                tracing::info!("Password reset OTP email sent successfully to: {}", recipient_email);
+            }
+            Err(e) => {
+                tracing::error!("Failed to send password reset OTP email to {}: {}", recipient_email, e);
+            }
+        }
+
+        result
+    }
+
+    /// Verify password reset OTP
+    /// Returns Ok(()) if OTP is valid, deletes OTP (one-time use)
+    pub async fn verify_password_reset_otp(
+        &self,
+        email: &str,
+        submitted_otp: &str,
+    ) -> Result<(), AuthError> {
+        // Check rate limit
+        if self.check_otp_verify_rate_limit(email).await? {
+            return Err(AuthError::Validation(
+                "Too many OTP verification attempts. Please request a new password reset.".to_string(),
+            ));
+        }
+
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+
+        let key = format!("{}{}", PASSWORD_RESET_OTP_PREFIX, email);
+
+        let stored_otp: Option<String> = conn
+            .get(&key)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get password reset OTP: {}", e)))?;
+
+        match stored_otp {
+            Some(otp) if otp == submitted_otp => {
+                // Delete OTP after successful verification (one-time use)
+                let _: () = conn
+                    .del(&key)
+                    .await
+                    .map_err(|e| AuthError::Redis(format!("Failed to delete OTP: {}", e)))?;
+
+                // Clean up OTP verification rate limit since OTP is no longer valid
+                let rate_limit_key = format!("{}{}", RATE_LIMIT_OTP_VERIFY_PREFIX, email);
+                let _: () = conn
+                    .del(&rate_limit_key)
+                    .await
+                    .map_err(|e| {
+                        tracing::warn!("Failed to delete OTP verify rate limit: {}", e);
+                        // Don't fail the request if cleanup fails
+                    })
+                    .unwrap_or(());
+
+                Ok(())
+            }
+            Some(_) => Err(AuthError::InvalidOtp),
+            None => Err(AuthError::OtpExpired),
+        }
+    }
+
+    /// Generate a new password reset token
+    pub fn generate_reset_token(&self) -> String {
+        Uuid::new_v4().to_string()
+    }
+
+    /// Validate and consume password reset token
+    /// Returns user_id if token is valid
+    pub async fn validate_reset_token(&self, reset_token: &str) -> Result<Uuid, AuthError> {
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+
+        let token_key = format!("{}{}", PASSWORD_RESET_TOKEN_PREFIX, reset_token);
+
+        let user_id_str: Option<String> = conn
+            .get(&token_key)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get reset token: {}", e)))?;
+
+        match user_id_str {
+            Some(user_id_str) => {
+                // Delete token after validation (one-time use)
+                let _: () = conn
+                    .del(&token_key)
+                    .await
+                    .map_err(|e| AuthError::Redis(format!("Failed to delete reset token: {}", e)))?;
+
+                // Parse user_id
+                if user_id_str == "pending" {
+                    return Err(AuthError::InvalidResetToken);
+                }
+
+                let user_id = Uuid::parse_str(&user_id_str)
+                    .map_err(|_| AuthError::InvalidResetToken)?;
+
+                Ok(user_id)
+            }
+            None => Err(AuthError::ResetTokenExpired),
+        }
+    }
+
+    /// Store reset token with user_id
+    pub async fn store_reset_token(&self, reset_token: &str, user_id: Uuid) -> Result<(), AuthError> {
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+
+        let token_key = format!("{}{}", PASSWORD_RESET_TOKEN_PREFIX, reset_token);
+
+        let _: () = conn
+            .set_ex(&token_key, user_id.to_string(), 1800) // 30 minutes
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to store reset token: {}", e)))?;
+
+        Ok(())
     }
 }

@@ -44,7 +44,11 @@ pub fn configure_public_auth_services(cfg: &mut web::ServiceConfig) {
         .route(
             "/verify-email",
             web::post().to(handlers::auth::verify_email_with_otp),
-        );
+        )
+        // Password reset routes
+        .route("/forgot-password", web::post().to(handlers::auth::forgot_password))
+        .route("/verify-reset-otp", web::post().to(handlers::auth::verify_reset_otp))
+        .route("/reset-password", web::post().to(handlers::auth::reset_password));
 }
 
 /// Configure protected routes for auth that require authentication
