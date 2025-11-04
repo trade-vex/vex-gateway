@@ -1,9 +1,9 @@
 use actix_web::{
-    Error, HttpRequest, HttpMessage,
+    Error, HttpRequest,
     dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready},
 };
 use futures_util::future::{LocalBoxFuture, Ready, ready};
-use lib_auth::middleware::jwt_auth::{AuthenticatedUser, JwtAuthentication};
+use lib_auth::middleware::jwt_auth::JwtAuthentication;
 use lib_auth::service::session_service::SessionService;
 use lib_middleware::api_key::middleware::ApiKeyMiddleware;
 use std::{rc::Rc, sync::Arc};

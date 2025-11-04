@@ -108,16 +108,6 @@ impl AppState {
             Arc::new(ClickHousePortfolioRepository::new(ch))
         };
 
-        // Initialize portfolio repository (ClickHouse)
-        let portfolio_repository: Arc<dyn PortfolioRepository> = {
-            let ch_url = std::env::var("CLICKHOUSE_URL")
-                .unwrap_or_else(|_| "http://localhost:8123".to_string());
-            let sanitized = Self::sanitize_url(&ch_url);
-            info!("Connecting to ClickHouse: {}", sanitized);
-            let ch = ClickHouseClient::default().with_url(ch_url);
-            Arc::new(ClickHousePortfolioRepository::new(ch))
-        };
-
         // Initialize API key middleware with database repository
         let api_key_middleware = Self::init_api_key_middleware(&api_key_repository);
 
@@ -146,32 +136,6 @@ impl AppState {
             config.otp.otp_length,
             config.otp.email_verification_expiry_minutes,
         )?;
-
-        // Initialize trading repository
-        let trading_repo: Arc<dyn TradingRepository> =
-            Arc::new(PostgresTradingRepository::new(db.clone()));
-
-        // Initialize balance store with Redis cache and trading repository
-        let balance_store = UserBalanceStore::with_redis_cache(
-            UserBalanceCacheConfig {
-                ttl: std::time::Duration::from_secs(1800),
-                enabled: true,
-            },
-            config.redis.url.clone(),
-            Some(trading_repo.clone()),
-        )
-        .await?;
-
-        // Initialize order store with Redis cache and trading repository
-        let order_store = OrderStore::with_redis_cache(
-            OrderCacheConfig {
-                ttl: std::time::Duration::from_secs(1800),
-                enabled: true,
-            },
-            config.redis.url.clone(),
-            Some(trading_repo.clone()),
-        )
-        .await?;
 
         // Initialize trading repository
         let trading_repo: Arc<dyn TradingRepository> =
