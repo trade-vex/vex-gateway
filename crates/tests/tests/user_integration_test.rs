@@ -17,7 +17,6 @@ use sea_orm::{Database, DatabaseConnection};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use uuid::Uuid;
 
 // ==================== Request/Response DTOs ====================
 
@@ -259,13 +258,11 @@ async fn test_get_balances(
     balance_store: web::Data<Arc<UserBalanceStore>>,
 ) -> Result<HttpResponse> {
     let user_id = *user_id;
-    let user_uuid = Uuid::from_u128(user_id as u128);
 
     println!("🔍 DEBUG get_balances:");
     println!("   User ID (u64): {}", user_id);
-    println!("   User UUID: {}", user_uuid);
 
-    match balance_store.get_user_balances(user_uuid).await {
+    match balance_store.get_user_balances(user_id).await {
         Ok(balances) => {
             println!("   ✓ Retrieved {} balances from store", balances.len());
             for (idx, balance) in balances.iter().enumerate() {
@@ -303,13 +300,11 @@ async fn test_get_open_orders(
     order_store: web::Data<Arc<OrderStore>>,
 ) -> Result<HttpResponse> {
     let user_id = *user_id;
-    let user_uuid = Uuid::from_u128(user_id as u128);
 
     println!("🔍 DEBUG get_open_orders:");
     println!("   User ID (u64): {}", user_id);
-    println!("   User UUID: {}", user_uuid);
 
-    match order_store.get_user_orders(user_uuid).await {
+    match order_store.get_user_orders(user_id).await {
         Ok(orders) => {
             println!("   ✓ Retrieved {} orders from store", orders.len());
             for (idx, order) in orders.iter().enumerate() {
@@ -643,10 +638,8 @@ async fn test_user_balance_and_order_retrieval() {
     println!("╚═══════════════════════════════════════════════════════════════╝\n");
 
     // Print UUID being used for debugging
-    let user_uuid = Uuid::from_u128(test_user_id as u128);
     println!("🔍 Debug Info:");
     println!("   User ID (u64): {}", test_user_id);
-    println!("   User UUID (for lookups): {}", user_uuid);
     println!("\n📋 Manual Verification Commands (run these to check data):");
     println!("   # Check all keys in Redis:");
     println!("   docker exec vex-kafka-pipeline-redis-1 redis-cli -p 6379 KEYS '*'");

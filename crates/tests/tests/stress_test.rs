@@ -25,7 +25,6 @@ use lib_core::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use uuid::Uuid;
 
 // ==================== DTOs ====================
 
@@ -276,9 +275,8 @@ async fn test_get_balances(
     balance_store: web::Data<Arc<UserBalanceStore>>,
 ) -> Result<HttpResponse> {
     let user_id = *user_id;
-    let user_uuid = Uuid::from_u128(user_id as u128);
 
-    match balance_store.get_user_balances(user_uuid).await {
+    match balance_store.get_user_balances(user_id).await {
         Ok(balances) => {
             let total_assets = balances.len();
             let balance_responses: Vec<_> = balances
@@ -308,9 +306,8 @@ async fn test_get_open_orders(
     order_store: web::Data<Arc<OrderStore>>,
 ) -> Result<HttpResponse> {
     let user_id = *user_id;
-    let user_uuid = Uuid::from_u128(user_id as u128);
 
-    match order_store.get_user_orders(user_uuid).await {
+    match order_store.get_user_orders(user_id).await {
         Ok(orders) => {
             let total = orders.len();
             Ok(HttpResponse::Ok().json(OrdersListResponse {

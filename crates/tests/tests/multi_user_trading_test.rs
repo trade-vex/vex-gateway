@@ -29,7 +29,6 @@ use sea_orm::{Database, DatabaseConnection};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use uuid::Uuid;
 
 // ==================== DTOs ====================
 
@@ -266,9 +265,8 @@ async fn test_get_balances(
     balance_store: web::Data<Arc<UserBalanceStore>>,
 ) -> Result<HttpResponse> {
     let user_id = *user_id;
-    let user_uuid = Uuid::from_u128(user_id as u128);
 
-    match balance_store.get_user_balances(user_uuid).await {
+    match balance_store.get_user_balances(user_id).await {
         Ok(balances) => {
             let total_assets = balances.len();
             let balance_responses: Vec<_> =
@@ -293,14 +291,13 @@ async fn test_get_open_orders(
     order_store: web::Data<Arc<OrderStore>>,
 ) -> Result<HttpResponse> {
     let user_id = *user_id;
-    let user_uuid = Uuid::from_u128(user_id as u128);
 
     println!(
-        "🔍 test_get_open_orders: user_id={}, uuid={}",
-        user_id, user_uuid
+        "🔍 test_get_open_orders: user_id={}",
+        user_id
     );
 
-    match order_store.get_user_orders(user_uuid).await {
+    match order_store.get_user_orders(user_id).await {
         Ok(orders) => {
             println!("   OrderStore returned {} orders", orders.len());
             for (idx, order) in orders.iter().enumerate() {
