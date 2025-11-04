@@ -6,17 +6,16 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::dto::auth_request_dto::{
-    ChangePasswordRequest, CheckEmailRequest, LoginRequest, RefreshTokenRequest, SignupRequest,
-    VerifyEmailRequest,
+    ChangePasswordRequest, CheckEmailRequest, ForgotPasswordRequest, LoginRequest, RefreshTokenRequest, ResetPasswordRequest, SignupRequest, VerifyEmailRequest, VerifyResetOtpRequest,
 };
 use crate::dto::auth_response_dto::{
-    LoginResponse, RefreshTokenResponse, SignupResponse, UserInfo, UserProfile,
+    RefreshTokenResponse, SignupResponse, UserInfo, UserProfile,
 };
 use crate::error::auth_error::AuthError;
 use crate::middleware::jwt_auth::AuthenticatedUser;
 use crate::models::user::{Model, UserStatus};
 use crate::repository::UserRepository;
-use crate::service::{EmailService, TokenService};
+use crate::service::{EmailService, SessionService, TokenService};
 use std::sync::Arc;
 
 // Signup handler
@@ -91,6 +90,7 @@ pub async fn login(
     req: web::Json<LoginRequest>,
     user_repo: web::Data<Arc<dyn UserRepository>>,
     token_service: web::Data<Arc<TokenService>>,
+    session_service: web::Data<Arc<SessionService>>,
 ) -> Result<HttpResponse, AuthError> {
     // Validate the request
     req.validate()
@@ -135,45 +135,102 @@ pub async fn login(
     // Update last login
     user_repo.update_last_login(user_id).await?;
 
-    let user_info = UserInfo::from(user);
-    let response = LoginResponse {
-        access_token: tokens.access_token,
-        refresh_token: tokens.refresh_token,
-        token_type: "Bearer".to_string(),
-        expires_in: tokens.expires_in,
-        user: user_info,
-    };
+    // Create session (store user_id and tokens in Redis)
+    let session_id = session_service
+        .create_session(user_id, tokens.access_token.clone(), tokens.refresh_token.clone())
+        .await?;
 
-    Ok(HttpResponse::Ok().json(response))
+    // Get user info for cookie
+    let user_info = UserInfo::from(user.clone());
+
+    // Create session cookie
+    let is_secure = std::env::var("FRONTEND_URL")
+        .unwrap_or_else(|_| "http://localhost:8081".to_string())
+        .starts_with("https://");
+
+    let cookie_ttl = 24 * 3600;
+
+    let session_cookie = actix_web::cookie::Cookie::build("session_id", session_id)
+        .path("/")
+        .http_only(true)
+        .secure(is_secure)
+        .same_site(actix_web::cookie::SameSite::Strict)
+        .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
+        .finish();
+
+    // Create user_info cookie (JSON format)
+    let user_info_json = serde_json::to_string(&user_info)
+        .map_err(|e| AuthError::Validation(format!("Failed to serialize user info: {}", e)))?;
+
+    let user_info_cookie = actix_web::cookie::Cookie::build("user_info", user_info_json)
+        .path("/")
+        .http_only(false) // Allow client-side JavaScript access
+        .secure(is_secure)
+        .same_site(actix_web::cookie::SameSite::Strict)
+        .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
+        .finish();
+
+    Ok(HttpResponse::Ok()
+        .cookie(session_cookie)
+        .cookie(user_info_cookie)
+        .json(json!({
+            "message": "Logged in successfully"
+        })))
 }
 
 // Logout handler
 pub async fn logout(
     req: HttpRequest,
     token_service: web::Data<Arc<TokenService>>,
+    session_service: web::Data<Arc<SessionService>>,
 ) -> Result<HttpResponse, AuthError> {
-    // Extract JWT token from Authorization header
-    let token = match req.headers().get("Authorization") {
-        Some(auth_header) => {
-            let auth_str = auth_header
-                .to_str()
-                .map_err(|_| AuthError::InvalidRequest)?;
+    // Try to extract session ID from cookie
+    if let Some(cookie) = req.cookie("session_id") {
+        // Delete session from Redis
+        if let Err(e) = session_service.delete_session(cookie.value()).await {
+            tracing::warn!("Failed to delete session during logout: {}", e);
+        }
+    }
+
+    // Also handle JWT token if present
+    if let Some(auth_header) = req.headers().get("Authorization") {
+        if let Ok(auth_str) = auth_header.to_str() {
             if let Some(stripped) = auth_str.strip_prefix("Bearer ") {
-                stripped.to_string()
-            } else {
-                return Err(AuthError::InvalidRequest);
+                if let Err(e) = token_service.blacklist_token(stripped).await {
+                    tracing::warn!("Failed to blacklist token during logout: {}", e);
+                }
             }
         }
-        None => return Err(AuthError::InvalidRequest),
-    };
+    }
 
-    // Blacklist the token
-    token_service.blacklist_token(&token).await?;
+    // Create cookies to delete the session and user_info cookies
+    let is_secure = std::env::var("FRONTEND_URL")
+        .unwrap_or_else(|_| "http://localhost:8081".to_string())
+        .starts_with("https://");
 
-    Ok(HttpResponse::Ok().json(json!({
-        "message": "Logged out successfully",
-        "timestamp": chrono::Utc::now().to_rfc3339()
-    })))
+    let delete_session_cookie = actix_web::cookie::Cookie::build("session_id", "")
+        .path("/")
+        .http_only(true)
+        .secure(is_secure)
+        .same_site(actix_web::cookie::SameSite::Strict)
+        .max_age(actix_web::cookie::time::Duration::seconds(0))
+        .finish();
+
+    let delete_user_info_cookie = actix_web::cookie::Cookie::build("user_info", "")
+        .path("/")
+        .http_only(false)
+        .secure(is_secure)
+        .same_site(actix_web::cookie::SameSite::Strict)
+        .max_age(actix_web::cookie::time::Duration::seconds(0))
+        .finish();
+
+    Ok(HttpResponse::Ok()
+        .cookie(delete_session_cookie)
+        .cookie(delete_user_info_cookie)
+        .json(json!({
+            "message": "Logged out successfully",
+            "timestamp": chrono::Utc::now().to_rfc3339()
+        })))
 }
 
 // Get user profile
@@ -226,6 +283,7 @@ pub async fn verify_email_with_otp(
     user_repo: web::Data<Arc<dyn UserRepository>>,
     email_service: web::Data<Arc<EmailService>>,
     token_service: web::Data<Arc<TokenService>>,
+    session_service: web::Data<Arc<SessionService>>,
 ) -> Result<HttpResponse, AuthError> {
     // Validate the request
     req.validate()
@@ -262,16 +320,58 @@ pub async fn verify_email_with_otp(
         .await?
         .ok_or(AuthError::UserNotFound)?;
 
-    let user_info = UserInfo::from(updated_user);
-    let response = LoginResponse {
-        access_token: tokens.access_token,
-        refresh_token: tokens.refresh_token,
-        token_type: "Bearer".to_string(),
-        expires_in: tokens.expires_in,
-        user: user_info,
-    };
+    tracing::debug!("Creating session for user_id: {}", user.user_id);
+    
+    // Create session (stores user_id and tokens in Redis)
+    let session_id = session_service
+        .create_session(user.user_id, tokens.access_token.clone(), tokens.refresh_token.clone())
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to create session: {}", e);
+            AuthError::Redis(format!("Failed to create session: {}", e))
+        })?;
 
-    Ok(HttpResponse::Ok().json(response))
+    tracing::debug!("Session created successfully: {}", session_id);
+
+    // Get user info for cookie
+    let user_info = UserInfo::from(updated_user);
+
+    // Create session cookie
+    let is_secure = std::env::var("FRONTEND_URL")
+        .unwrap_or_else(|_| "http://localhost:8081".to_string())
+        .starts_with("https://");
+
+    let cookie_ttl = 24 * 3600;
+
+    let session_cookie = actix_web::cookie::Cookie::build("session_id", session_id)
+        .path("/")
+        .http_only(true)
+        .secure(is_secure)
+        .same_site(actix_web::cookie::SameSite::Strict)
+        .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
+        .finish();
+
+    // Create user_info cookie (JSON format)
+    let user_info_json = serde_json::to_string(&user_info)
+        .map_err(|e| AuthError::Validation(format!("Failed to serialize user info: {}", e)))?;
+
+    let user_info_cookie = actix_web::cookie::Cookie::build("user_info", user_info_json)
+        .path("/")
+        .http_only(false) // Allow client-side JavaScript access
+        .secure(is_secure)
+        .same_site(actix_web::cookie::SameSite::Strict)
+        .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
+        .finish();
+
+    tracing::debug!("Session cookie created, sending response with cookie");
+
+    // Return only success message (session created with cookie)
+    Ok(HttpResponse::Ok()
+        .cookie(session_cookie)
+        .cookie(user_info_cookie)
+        .json(json!({
+            "message": "Email verified successfully"
+        })))
 }
 
 // Verify email handler (internal handler)
@@ -291,13 +391,15 @@ pub async fn verify_email(
 
 // Change password handler
 pub async fn change_password(
+    req: HttpRequest,
     user: AuthenticatedUser,
-    req: web::Json<ChangePasswordRequest>,
+    body: web::Json<ChangePasswordRequest>,
     user_repo: web::Data<Arc<dyn UserRepository>>,
     token_service: web::Data<Arc<TokenService>>,
+    session_service: web::Data<Arc<SessionService>>,
 ) -> Result<HttpResponse, AuthError> {
     // Validate the request
-    req.validate()
+    body.validate()
         .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
 
     // Get user
@@ -309,7 +411,7 @@ pub async fn change_password(
     // Verify old password
     if let Some(password_hash) = &user_record.password_hash {
         if !tokio::task::spawn_blocking({
-            let p = req.old_password.clone();
+            let p = body.old_password.clone();
             let h = password_hash.clone();
             move || verify(&p, &h)
         })
@@ -325,20 +427,58 @@ pub async fn change_password(
 
     // Hash new password
     let new_password_hash = tokio::task::spawn_blocking({
-        let p = req.new_password.clone();
+        let p = body.new_password.clone();
         move || hash(&p, DEFAULT_COST)
     })
     .await
     .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
     .map_err(|e| AuthError::Validation(format!("Password hashing failed: {}", e)))?;
 
-    // Update password
+    // Update password in database
     user_repo
         .update_password(user.user_id, &new_password_hash)
         .await?;
 
-    // Revoke all existing sessions for this user
-    token_service.revoke_user_sessions(user.user_id).await?;
+    // Generate new tokens (with updated password timestamp)
+    let new_tokens = token_service.mint_tokens(user.user_id).await?;
+
+    // Get current session ID from cookie if present
+    let current_session_id = req.cookie("session_id").map(|c| c.value().to_string());
+
+    if let Some(session_id) = current_session_id {
+        // Update current session with new tokens (keep user logged in)
+        session_service
+            .update_session_tokens(&session_id, new_tokens.access_token.clone(), new_tokens.refresh_token.clone())
+            .await
+            .map_err(|e| {
+                tracing::warn!("Failed to update current session tokens: {}", e);
+                AuthError::Redis(format!("Failed to update session: {}", e))
+            })?;
+
+        // Revoke all other sessions (other devices)
+        let revoked_count = session_service
+            .revoke_user_sessions_except(user.user_id, &session_id)
+            .await
+            .map_err(|e| {
+                tracing::warn!("Failed to revoke other sessions: {}", e);
+                AuthError::Redis(format!("Failed to revoke sessions: {}", e))
+            })?;
+
+        tracing::debug!(
+            "Password changed: updated current session, revoked {} other sessions",
+            revoked_count
+        );
+    } else {
+        // No session cookie found - this shouldn't happen in normal flow,
+        // but handle gracefully by revoking all sessions
+        tracing::warn!("Change password called without session cookie - revoking all sessions");
+        let _ = session_service
+            .revoke_all_user_sessions(user.user_id)
+            .await;
+        
+        // Also revoke refresh tokens (legacy cleanup)
+        let _ = token_service.revoke_user_sessions(user.user_id).await;
+    }
 
     Ok(HttpResponse::Ok().json(json!({
         "message": "Password changed successfully",
@@ -358,14 +498,18 @@ pub async fn check_email_exists(
     tracing::debug!("Check email exists request for: {}", req.email);
 
     match user_repo.find_by_email(&req.email).await? {
-        Some(user) => Ok(HttpResponse::Ok().json(json!({
-            "exists": true,
-            "email_verified": user.email_verified
-        }))),
-        None => Ok(HttpResponse::Ok().json(json!({
-            "exists": false,
-            "email_verified": false
-        }))),
+        Some(user) => {
+            Ok(HttpResponse::Ok().json(json!({
+                "exists": true,
+                "email_verified": user.email_verified
+            })))
+        }
+        None => {
+            Ok(HttpResponse::Ok().json(json!({
+                "exists": false,
+                "email_verified": false
+            })))
+        }
     }
 }
 
@@ -376,14 +520,13 @@ pub async fn resend_verification_email(
     email_service: web::Data<Arc<EmailService>>,
 ) -> Result<HttpResponse, AuthError> {
     // validate the request
-    req.validate()
-        .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
+    req.validate().map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
 
     tracing::debug!("Resend verification email request for: {}", req.email);
 
     // check if user exists by email
     let user = user_repo.find_by_email(&req.email).await?;
-
+    
     match user {
         Some(user_model) => {
             // checking if email is already verified
@@ -392,17 +535,14 @@ pub async fn resend_verification_email(
             }
 
             // resend verification email
-            match email_service
-                .resend_verification_email(&req.email, &user_model.username)
-                .await
-            {
+            match email_service.resend_verification_email(&req.email, &user_model.username).await {
                 Ok(new_otp_sent) => {
                     let message = if new_otp_sent {
                         "New verification code sent successfully"
                     } else {
                         "Verification code resent successfully"
                     };
-
+                    
                     Ok(HttpResponse::Ok().json(json!({
                         "message": message,
                         "new_code_sent": new_otp_sent,
@@ -416,11 +556,165 @@ pub async fn resend_verification_email(
             }
         }
         None => {
-            tracing::warn!(
-                "Resend verification requested for non-existent email: {}",
-                req.email
-            );
+            tracing::warn!("Resend verification requested for non-existent email: {}", req.email);
             Err(AuthError::UserNotFound)
         }
     }
+}
+
+// Forgot password handler
+pub async fn forgot_password(
+    req: web::Json<ForgotPasswordRequest>,
+    user_repo: web::Data<Arc<dyn UserRepository>>,
+    email_service: web::Data<Arc<EmailService>>,
+) -> Result<HttpResponse, AuthError> {
+    // Validate the request
+    req.validate()
+        .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
+
+    tracing::debug!("Forgot password request for email: {}", req.email);
+
+    // Check rate limit
+    if email_service
+        .check_password_reset_rate_limit(&req.email)
+        .await?
+    {
+        return Err(AuthError::Validation(
+            "Too many password reset requests. Please try again later.".to_string(),
+        ));
+    }
+
+    // Try to find user by email
+    if let Ok(Some(user)) = user_repo.find_by_email(&req.email).await {
+        // Check if user has password_hash
+        if user.password_hash.is_none() {
+            // OAuth-only user - return same success message
+            tracing::debug!("Password reset requested for OAuth-only user: {}", req.email);
+            return Ok(HttpResponse::Ok().json(json!({
+                "message": "If an account exists with this email, a password reset code has been sent.",
+                "timestamp": chrono::Utc::now().to_rfc3339()
+            })));
+        }
+
+        // User exists and has password - send OTP
+        email_service
+            .send_password_reset_otp(&req.email, &user.username)
+            .await?;
+    } else {
+        // User not exist 
+        tracing::debug!("Password reset requested for non-existent email: {}", req.email);
+    }
+
+    // Always return same success message regardless of email existence
+    Ok(HttpResponse::Ok().json(json!({
+        "message": "If an account exists with this email, a password reset code has been sent.",
+        "timestamp": chrono::Utc::now().to_rfc3339()
+    })))
+}
+
+// Verify reset OTP handler
+pub async fn verify_reset_otp(
+    req: web::Json<VerifyResetOtpRequest>,
+    user_repo: web::Data<Arc<dyn UserRepository>>,
+    email_service: web::Data<Arc<EmailService>>,
+) -> Result<HttpResponse, AuthError> {
+    // Validate the request
+    req.validate()
+        .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
+
+    tracing::debug!("Verify reset OTP request for email: {}", req.email);
+
+    // Find user by email
+    let user = user_repo
+        .find_by_email(&req.email)
+        .await?
+        .ok_or(AuthError::UserNotFound)?;
+
+    // Check if user has password_hash
+    if user.password_hash.is_none() {
+        return Err(AuthError::Validation(
+            "Password reset is not available for OAuth-only accounts".to_string(),
+        ));
+    }
+
+    // Verify OTP
+    email_service
+        .verify_password_reset_otp(&req.email, &req.otp)
+        .await?;
+
+    // Generate reset token
+    let reset_token = email_service.generate_reset_token();
+
+    // Store reset token with user_id
+    email_service
+        .store_reset_token(&reset_token, user.user_id)
+        .await?;
+
+    Ok(HttpResponse::Ok().json(json!({
+        "reset_token": reset_token,
+        "message": "OTP verified successfully. Use the reset_token to set your new password.",
+        "timestamp": chrono::Utc::now().to_rfc3339()
+    })))
+}
+
+// Reset password handler
+pub async fn reset_password(
+    req: web::Json<ResetPasswordRequest>,
+    user_repo: web::Data<Arc<dyn UserRepository>>,
+    token_service: web::Data<Arc<TokenService>>,
+    session_service: web::Data<Arc<SessionService>>,
+    email_service: web::Data<Arc<EmailService>>,
+) -> Result<HttpResponse, AuthError> {
+    // Validate the request
+    req.validate()
+        .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
+
+    tracing::debug!("Reset password request");
+
+    // Validate reset token and get user_id
+    let user_id = email_service
+        .validate_reset_token(&req.reset_token)
+        .await?;
+
+    // Find user
+    let user = user_repo
+        .find_by_id(user_id)
+        .await?
+        .ok_or(AuthError::UserNotFound)?;
+
+    // Verify user has password_hash
+    if user.password_hash.is_none() {
+        return Err(AuthError::Validation(
+            "Password reset is not available for OAuth-only accounts".to_string(),
+        ));
+    }
+
+    // Hash new password
+    let new_password_hash = tokio::task::spawn_blocking({
+        let p = req.new_password.clone();
+        move || hash(&p, DEFAULT_COST)
+    })
+    .await
+    .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
+    .map_err(|e| AuthError::Validation(format!("Password hashing failed: {}", e)))?;
+
+    // Update password in database
+    user_repo
+        .update_password(user_id, &new_password_hash)
+        .await?;
+
+    // Revoke all user sessions
+    let _ = session_service
+        .revoke_all_user_sessions(user_id)
+        .await;
+
+    // Also revoke refresh tokens (legacy cleanup)
+    let _ = token_service.revoke_user_sessions(user_id).await;
+
+    tracing::info!("Password reset successful for user_id: {}", user_id);
+
+    Ok(HttpResponse::Ok().json(json!({
+        "message": "Password reset successfully. Please login with your new password.",
+        "timestamp": chrono::Utc::now().to_rfc3339()
+    })))
 }

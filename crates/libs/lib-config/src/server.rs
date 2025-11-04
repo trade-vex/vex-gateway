@@ -4,6 +4,7 @@ use crate::ConfigError;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::env;
 
 /// Server configuration settings for the VEX Gateway Service.
 ///

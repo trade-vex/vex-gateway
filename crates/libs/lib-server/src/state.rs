@@ -7,7 +7,7 @@ use deadpool_redis::Pool as RedisPool;
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use lib_auth::config::{AuthConfig, JwtConfig, OAuthProviderConfig, RedisConfig};
 use lib_auth::repository::{PostgresUserRepository, UserRepository};
-use lib_auth::service::{EmailService, OAuthService, TokenService};
+use lib_auth::service::{EmailService, OAuthService, SessionService, TokenService};
 use lib_core::CorrelationService;
 use lib_core::Publisher;
 use lib_core::repository::repository::{ClickHousePortfolioRepository, PortfolioRepository};
@@ -50,6 +50,7 @@ pub struct AppState {
     pub token_service: TokenService,
     pub oauth_service: OAuthService,
     pub email_service: EmailService,
+    pub session_service: SessionService,
 
     // Gateway publisher for order processing
     pub gateway_publisher: Arc<Mutex<Publisher>>,
@@ -128,7 +129,13 @@ impl AppState {
             config.otp.email_verification_expiry_minutes,
         )?;
 
-        info!("AppState initialization completed successfully");
+        // Initialize session service with 30-minute inactivity TTL
+        let session_service = SessionService::new(
+            Arc::new(redis_pool.clone()),
+            30 * 60,
+        );
+
+        tracing::info!("AppState initialization completed successfully");
 
         Ok(Arc::new(Self {
             db: Arc::new(db),
@@ -143,6 +150,7 @@ impl AppState {
             token_service,
             oauth_service,
             email_service,
+            session_service,
             gateway_publisher: Arc::new(Mutex::new(gateway_publisher)),
             api_key_middleware: Arc::new(TokioMutex::new(api_key_middleware)),
             api_key_repository,

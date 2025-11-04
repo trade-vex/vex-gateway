@@ -53,3 +53,24 @@ pub struct CheckEmailRequest {
     #[validate(email)]
     pub email: String,
 }
+
+#[derive(Deserialize, Validate)]
+pub struct ForgotPasswordRequest {
+    #[validate(email)]
+    pub email: String,
+}
+
+#[derive(Deserialize, Validate)]
+pub struct VerifyResetOtpRequest {
+    #[validate(email)]
+    pub email: String,
+    #[validate(length(min = 6, max = 6))]
+    pub otp: String,
+}
+
+#[derive(Deserialize, Validate)]
+pub struct ResetPasswordRequest {
+    pub reset_token: String,
+    #[validate(length(min = 8))]
+    pub new_password: String,
+}

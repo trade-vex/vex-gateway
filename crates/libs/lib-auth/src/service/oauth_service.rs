@@ -92,12 +92,93 @@ pub struct OAuthService {
 
     /// User repository for database operations
     user_repo: Arc<dyn UserRepository>,
-
+    
     /// Frontend URL for redirects after OAuth success
     frontend_url: String,
 }
 
 impl OAuthService {
+    fn normalize_username_candidate(candidate: &str) -> String {
+        let lower = candidate.to_lowercase();
+        // Map invalid chars to '-' and allow [a-z0-9._-]
+        let mut out = String::with_capacity(lower.len());
+        for ch in lower.chars() {
+            if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '.' || ch == '_' || ch == '-' {
+                out.push(ch);
+            } else if ch.is_whitespace() {
+                out.push('-');
+            } else {
+                out.push('-');
+            }
+        }
+        // Collapse multiple '-'
+        let mut collapsed = String::with_capacity(out.len());
+        let mut prev_dash = false;
+        for ch in out.chars() {
+            if ch == '-' {
+                if !prev_dash { collapsed.push('-'); }
+                prev_dash = true;
+            } else {
+                collapsed.push(ch);
+                prev_dash = false;
+            }
+        }
+        // Trim leading/trailing '-'
+        let trimmed = collapsed.trim_matches('-').to_string();
+        // Enforce max length
+        let mut trimmed = if trimmed.len() > 30 { trimmed[..30].to_string() } else { trimmed };
+        // Ensure starts with alphanumeric
+        if trimmed.chars().next().map(|c| c.is_ascii_alphanumeric()).unwrap_or(false) {
+            if trimmed.is_empty() { "user".to_string() } else { trimmed }
+        } else {
+            trimmed.insert_str(0, "user-");
+            trimmed
+        }
+    }
+
+    fn email_local_part(email: &str) -> Option<String> {
+        email.split('@').next().map(|s| s.to_string())
+    }
+
+    fn generate_username(provider: &str, info: &crate::dto::auth_response_dto::OAuthUserInfo) -> String {
+        match provider {
+            // GitHub: prefer handle (`login`) if provided in parsed info.username
+            "github" => {
+                if let Some(uname) = &info.username {
+                    let norm = Self::normalize_username_candidate(uname);
+                    if !norm.is_empty() { return norm; }
+                }
+                // fallback to display name, then email local-part
+                let from_name = Self::normalize_username_candidate(&info.name);
+                if !from_name.is_empty() { return from_name; }
+                let from_email = Self::email_local_part(&info.email).map(|s| Self::normalize_username_candidate(&s)).unwrap_or_default();
+                if !from_email.is_empty() { return from_email; }
+                "user".to_string()
+            }
+            // Google: prefer email local-part; fallback to name
+            "google" => {
+                if let Some(local) = Self::email_local_part(&info.email) {
+                    let norm = Self::normalize_username_candidate(&local);
+                    if !norm.is_empty() { return norm; }
+                }
+                let from_name = Self::normalize_username_candidate(&info.name);
+                if !from_name.is_empty() { return from_name; }
+                "user".to_string()
+            }
+            _ => {
+                // Other providers: try username field, then name, then email local-part
+                if let Some(uname) = &info.username {
+                    let norm = Self::normalize_username_candidate(uname);
+                    if !norm.is_empty() { return norm; }
+                }
+                let from_name = Self::normalize_username_candidate(&info.name);
+                if !from_name.is_empty() { return from_name; }
+                let from_email = Self::email_local_part(&info.email).map(|s| Self::normalize_username_candidate(&s)).unwrap_or_default();
+                if !from_email.is_empty() { return from_email; }
+                "user".to_string()
+            }
+        }
+    }
     /// Creates a new OAuth service with pre-configured clients
     ///
     /// This performs async initialization including OIDC discovery for
@@ -341,6 +422,7 @@ impl OAuthService {
             .map_err(|e| AuthError::Redis(format!("Failed to store verifier: {}", e)))?;
 
         // Store nonce for OIDC providers (used for ID token validation)
+        // nonce is validated in handle_callback to prevent replay attacks
         if provider == "google" {
             let nonce_key = format!("oauth_nonce:{}:{}", provider, csrf_state.secret());
             let _: () = redis_conn
@@ -424,6 +506,12 @@ impl OAuthService {
             .await
             .map_err(|e| AuthError::CodeExchangeFailed(format!("Token exchange failed: {}", e)))?;
 
+        // validate ID token for OIDC providers
+        // this validates signature, issuer, audience, expiration, and nonce
+        if provider == "google" {
+            self.validate_id_token(client, &token_response, state).await?;
+        }
+
         // Extract access token from response
         // Trait must be in scope to use the access_token() method
         use openidconnect::OAuth2TokenResponse;
@@ -454,10 +542,11 @@ impl OAuthService {
 
                 // Create new user record
                 let now = chrono::Utc::now();
+                let generated_username = Self::generate_username(provider, &user_info);
                 let new_user = Model {
                     user_id: Uuid::new_v4(),
                     email: user_info.email.clone(),
-                    username: user_info.name.clone(),
+                    username: generated_username,
                     password_hash: None, // OAuth users don't have passwords
                     auth_provider: provider.to_string(),
                     provider_id: Some(user_info.provider_id.clone()),
@@ -561,6 +650,101 @@ impl OAuthService {
         Ok(verifier)
     }
 
+    /// Retrieves and consumes the stored nonce from Redis
+    ///
+    /// The nonce is used for ID token validation in OIDC flows to prevent replay attacks.
+    ///
+    /// # One-time Use
+    ///
+    /// The nonce is deleted after retrieval to prevent reuse.
+    async fn get_stored_nonce(&self, provider: &str, state: &str) -> Result<String, AuthError> {
+        let mut redis_conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Redis connection failed: {}", e)))?;
+
+        let nonce_key = format!("oauth_nonce:{}:{}", provider, state);
+
+        let nonce: Option<String> = redis_conn
+            .get(&nonce_key)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to retrieve nonce: {}", e)))?;
+
+        let nonce = nonce.ok_or_else(|| {
+            AuthError::CodeExchangeFailed("OIDC nonce not found or expired".to_string())
+        })?;
+
+        // Delete nonce after retrieval (one-time use)
+        let _: () = redis_conn
+            .del(&nonce_key)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to delete nonce: {}", e)))?;
+
+        Ok(nonce)
+    }
+
+    /// Validates the OIDC ID token for Google authentication
+    ///
+    /// This method performs comprehensive ID token validation:
+    /// - Verifies signature using Google's JWKS endpoint
+    /// - Checks issuer matches "https://accounts.google.com"
+    /// - Checks audience matches the configured client ID
+    /// - Verifies expiration and issued-at timestamps
+    /// - Validates the nonce claim matches the stored nonce
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - The OAuth client configured for the provider
+    /// * `token_response` - The token response from the provider
+    /// * `state` - The OAuth state parameter used to retrieve the stored nonce
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - ID token is missing from the response
+    /// - Nonce cannot be retrieved from Redis
+    /// - Any validation step fails (signature, issuer, audience, expiration, nonce)
+    async fn validate_id_token(
+        &self,
+        client: &CoreClient,
+        token_response: &openidconnect::core::CoreTokenResponse,
+        state: &str,
+    ) -> Result<(), AuthError> {
+        // Extract ID token from response
+        let id_token = token_response
+            .id_token()
+            .ok_or_else(|| {
+                AuthError::CodeExchangeFailed(
+                    "ID token missing from OIDC response".to_string(),
+                )
+            })?;
+
+        // Retrieve stored nonce from Redis
+        let stored_nonce_secret = self.get_stored_nonce("google", state).await?;
+        let stored_nonce = Nonce::new(stored_nonce_secret);
+
+        // Verify ID token using the client's verifier
+        // This validates:
+        // - Signature using JWKS endpoint
+        // - Issuer (iss) claim
+        // - Audience (aud) claim
+        // - Expiration (exp) and issued-at (iat) claims
+        // - Nonce claim must match the stored nonce
+        let verifier = client.id_token_verifier();
+        id_token
+            .claims(&verifier, &stored_nonce)
+            .map_err(|e| {
+                AuthError::CodeExchangeFailed(format!(
+                    "ID token validation failed: {}",
+                    e
+                ))
+            })?;
+
+        tracing::debug!("ID token validated successfully for Google OAuth");
+        Ok(())
+    }
+
     /// Fetches user information from the OAuth provider
     ///
     /// Different providers return user info in different formats, so this method
@@ -628,11 +812,7 @@ impl OAuthService {
 
         // Debug logging for Google OAuth issues
         if provider == "google" {
-            tracing::debug!(
-                "Google user info response: {}",
-                serde_json::to_string_pretty(&user_info)
-                    .unwrap_or_else(|_| "Failed to serialize".to_string())
-            );
+            tracing::debug!("Google user info response: {}", serde_json::to_string_pretty(&user_info).unwrap_or_else(|_| "Failed to serialize".to_string()));
         }
 
         // Special handling for GitHub - fetch emails separately
@@ -719,33 +899,22 @@ impl OAuthService {
     /// }
     /// ```
     fn parse_google_user_info(&self, data: Value) -> Result<OAuthUserInfo, AuthError> {
-        tracing::debug!(
-            "Parsing Google user info: {}",
-            serde_json::to_string_pretty(&data)
-                .unwrap_or_else(|_| "Failed to serialize".to_string())
-        );
-
-        let provider_id = data["sub"]
-            .as_str()
-            .ok_or_else(|| {
-                let available_fields: Vec<String> = data
-                    .as_object()
+        tracing::debug!("Parsing Google user info: {}", serde_json::to_string_pretty(&data).unwrap_or_else(|_| "Failed to serialize".to_string()));
+        
+        let provider_id = data["sub"].as_str().ok_or_else(|| {
+                let available_fields: Vec<String> = data.as_object()
                     .map(|obj| obj.keys().cloned().collect())
                     .unwrap_or_default();
                 AuthError::UserInfoFetchFailed(format!(
                     "Missing Google 'sub' field. Available fields: {:?}. Response: {}",
                     available_fields,
-                    serde_json::to_string(&data)
-                        .unwrap_or_else(|_| "Failed to serialize".to_string())
+                    serde_json::to_string(&data).unwrap_or_else(|_| "Failed to serialize".to_string())
                 ))
             })?
             .to_string();
-
-        let email = data["email"]
-            .as_str()
-            .ok_or_else(|| AuthError::UserInfoFetchFailed("Missing Google email".to_string()))?
-            .to_string();
-
+            
+        let email = data["email"].as_str().ok_or_else(|| AuthError::UserInfoFetchFailed("Missing Google email".to_string()))?.to_string();
+            
         Ok(OAuthUserInfo {
             provider_id,
             email,
