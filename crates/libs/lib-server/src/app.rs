@@ -75,7 +75,8 @@ pub fn create_app(
                         .service(web::scope("").configure(routes::order_route::configure))
                         .service(
                             web::scope("")
-                                .app_data(web::Data::new(app_state.portfolio_repository.clone()))
+                                .app_data(web::Data::new(app_state.balance_store.clone()))
+                                .app_data(web::Data::new(app_state.order_store.clone()))
                                 .configure(routes::user_route::configure),
                         ),
                 ),
