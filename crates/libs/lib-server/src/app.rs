@@ -69,7 +69,7 @@ pub fn create_app(
                         .service(
                             web::scope("")
                                 .app_data(web::Data::new(app_state.portfolio_repository.clone()))
-                                .configure(routes::user_route::configure)
+                                .configure(routes::user_route::configure),
                         ),
                 ),
         )

@@ -1,14 +1,14 @@
 //! User Account Data API Handlers
 
 use actix_web::{HttpResponse, Result, web};
+use lib_core::PortfolioRepository;
+use lib_core::dto::trading::PortfolioOverviewResponse;
 use lib_core::{
-    BalancesListResponse, OrderHistoryResponse, OrderResponse, OrderStore, OrdersHistoryListResponse, OrdersListResponse, UserBalanceResponse,
-    UserBalanceStore,
+    BalancesListResponse, OrderHistoryResponse, OrderResponse, OrderStore,
+    OrdersHistoryListResponse, OrdersListResponse, UserBalanceResponse, UserBalanceStore,
 };
 use lib_utils::auth_extractors::AuthenticatedUserId;
 use std::sync::Arc;
-use lib_core::dto::trading::PortfolioOverviewResponse;
-use lib_core::PortfolioRepository;
 
 /// Get user balances for all assets
 ///
@@ -340,7 +340,7 @@ pub async fn get_portfolio_overview(
     let raw = user.0.as_u128();
     let user_id = ((raw >> 64) as u64) ^ (raw as u64);
     let now_secs = chrono::Utc::now().timestamp();
-    
+
     let metrics = portfolio_repo
         .get_portfolio(user_id, now_secs)
         .await

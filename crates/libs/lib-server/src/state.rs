@@ -2,6 +2,7 @@
 //!
 //! Central application state containing all dependencies
 
+use clickhouse::Client as ClickHouseClient;
 use deadpool_redis::Pool as RedisPool;
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use lib_auth::config::{AuthConfig, JwtConfig, OAuthProviderConfig, RedisConfig};
@@ -9,7 +10,7 @@ use lib_auth::repository::{PostgresUserRepository, UserRepository};
 use lib_auth::service::{EmailService, OAuthService, TokenService};
 use lib_core::CorrelationService;
 use lib_core::Publisher;
-use lib_core::repository::repository::{PortfolioRepository, ClickHousePortfolioRepository};
+use lib_core::repository::repository::{ClickHousePortfolioRepository, PortfolioRepository};
 use lib_middleware::api_key::middleware::CacheConfig;
 use lib_middleware::{
     ApiKeyMiddleware, SecurityType,
@@ -23,7 +24,6 @@ use std::sync::Mutex;
 use tokio::sync::Mutex as TokioMutex;
 use tracing::{debug, info};
 use url::Url;
-use clickhouse::Client as ClickHouseClient;
 
 /// Central application state containing all dependencies
 ///
@@ -91,7 +91,8 @@ impl AppState {
 
         // Initialize portfolio repository (ClickHouse)
         let portfolio_repository: Arc<dyn PortfolioRepository> = {
-            let ch_url = std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string());
+            let ch_url = std::env::var("CLICKHOUSE_URL")
+                .unwrap_or_else(|_| "http://localhost:8123".to_string());
             let sanitized = Self::sanitize_url(&ch_url);
             info!("Connecting to ClickHouse: {}", sanitized);
             let ch = ClickHouseClient::default().with_url(ch_url);

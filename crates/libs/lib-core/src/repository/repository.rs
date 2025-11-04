@@ -7,10 +7,10 @@ use crate::model::user_balances::{
     Entity as UserBalanceEntity, Model as UserBalanceModel,
 };
 use async_trait::async_trait;
+use clickhouse::Client as ClickHouseClient;
 use sea_orm::prelude::*;
 use sea_orm::*;
 use std::sync::Arc;
-use clickhouse::Client as ClickHouseClient;
 
 // Error type for trading operations
 #[derive(Debug)]

@@ -122,7 +122,10 @@ impl OrderStore {
     /// Get user's order history with caching (all orders including filled, cancelled, etc.)
     /// Uses Redis set user:{user_id}:orders -> fetches each order:{order_id} hash
     /// Unlike get_user_orders, this includes ALL orders regardless of status
-    pub async fn get_user_order_history(&self, user_id: u64) -> Result<Vec<OrderModel>, TradingError> {
+    pub async fn get_user_order_history(
+        &self,
+        user_id: u64,
+    ) -> Result<Vec<OrderModel>, TradingError> {
         let user_id_i64 = user_id as i64;
 
         // Cache: Query user:{user_id}:orders SET, then fetch each order hash
@@ -130,7 +133,10 @@ impl OrderStore {
             if let Some(cache) = &self.cache {
                 let set_key = format!("user:{}:orders", user_id_i64);
 
-                println!("🔍 OrderStore: Querying Redis SET for order history: {}", set_key);
+                println!(
+                    "🔍 OrderStore: Querying Redis SET for order history: {}",
+                    set_key
+                );
 
                 match cache.smembers_string(&set_key).await {
                     Ok(order_ids) if !order_ids.is_empty() => {
@@ -158,7 +164,10 @@ impl OrderStore {
 
                                     // Include ALL orders - don't filter by status
                                     if let Some(order) = Self::parse_order_hash(hash) {
-                                        println!("   ✓ Adding order {} to history results", order_id_str);
+                                        println!(
+                                            "   ✓ Adding order {} to history results",
+                                            order_id_str
+                                        );
                                         orders.push(order);
                                     }
                                 }
@@ -192,7 +201,10 @@ impl OrderStore {
             }
         }
 
-        debug!("No repository available for user order history: {}", user_id);
+        debug!(
+            "No repository available for user order history: {}",
+            user_id
+        );
         Ok(vec![])
     }
 
