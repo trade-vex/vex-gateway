@@ -76,10 +76,6 @@ pub fn create_app(
                             web::scope("")
                                 .app_data(web::Data::new(app_state.gateway_publisher.clone()))
                                 .app_data(web::Data::new(app_state.correlation_service.clone()))
-                                .configure(routes::order_route::configure),
-                        )
-                        .service(
-                            web::scope("")
                                 .app_data(web::Data::new(Arc::new(app_state.balance_store.clone())))
                                 .app_data(web::Data::new(Arc::new(app_state.order_store.clone())))
                                 .configure(routes::order_route::configure)
