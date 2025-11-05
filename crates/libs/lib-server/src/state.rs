@@ -24,7 +24,6 @@ use reqwest::Client;
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
 use tokio::sync::Mutex as TokioMutex;
 use tracing::{debug, info};
 use url::Url;
@@ -57,13 +56,13 @@ pub struct AppState {
     pub session_service: SessionService,
 
     // Gateway publisher for order processing
-    pub gateway_publisher: Arc<Mutex<Publisher>>,
+    pub gateway_publisher: Arc<TokioMutex<Publisher>>,
 
     // API key middleware for dynamic updates
     pub api_key_middleware: Arc<TokioMutex<ApiKeyMiddleware>>,
 
     // Correlation service for matching responses to requests
-    pub correlation_service: CorrelationService,
+    pub correlation_service: Arc<CorrelationService>,
 
     // Trading stores for balances and orders
     pub balance_store: UserBalanceStore,
@@ -185,11 +184,11 @@ impl AppState {
             oauth_service,
             email_service,
             session_service,
-            gateway_publisher: Arc::new(Mutex::new(gateway_publisher)),
+            gateway_publisher: Arc::new(TokioMutex::new(gateway_publisher)),
             api_key_middleware: Arc::new(TokioMutex::new(api_key_middleware)),
             api_key_repository,
             portfolio_repository,
-            correlation_service,
+            correlation_service: Arc::new(correlation_service),
             balance_store,
             order_store,
         }))
