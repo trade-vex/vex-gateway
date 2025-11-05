@@ -61,7 +61,7 @@ async fn main() -> std::io::Result<()> {
     gateway_config.local_address = "0.0.0.0".to_string();
     gateway_config.core_port = 40001;
     gateway_config.core_control_port = 40002;
-    info!("GATEWAY CONFIG 2: {:?}", gateway_config);
+    info!("GATEWAY CONFIG 0: {:?}", gateway_config);
     let mut gateway_client = VexGateway::new(gateway_config)
         .map_err(|e| std::io::Error::other(format!("Failed to initialize VexGateway: {}", e)))?;
 
