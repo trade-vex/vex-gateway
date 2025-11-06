@@ -33,7 +33,10 @@ pub struct CorrelationService {
 
 impl CorrelationService {
     pub fn new() -> Self {
-        let shard_count = num_cpus::get() * 4;
+        // let shard_count = num_cpus::get() * 4;
+        let base_shard_count = num_cpus::get() * 4;
+        // DashMap requires shard_count to be a power of two
+        let shard_count = base_shard_count.next_power_of_two();
         Self {
             pending_requests: Arc::new(DashMap::with_shard_amount(shard_count)),
         }
