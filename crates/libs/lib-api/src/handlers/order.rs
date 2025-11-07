@@ -21,6 +21,8 @@ use tracing::{error, info, warn};
 /// * `market_id` - Unique identifier for the trading market/pair
 /// * `side` - Order side (Bid for buy, Ask for sell)
 /// * `time_in_force` - Order duration policy (GTC, IOC, FOK, etc.)
+/// * `order_type` - Determines how the order is handled (`Limit` submits at the provided price,
+///   `Market` ignores the price and sets it to 0 for vex-core processing)
 ///
 /// # Example
 /// ```json
@@ -29,9 +31,16 @@ use tracing::{error, info, warn};
 ///   "volume": 100,
 ///   "market_id": 1,
 ///   "side": "Bid",
-///   "time_in_force": "Gtc"
+///   "time_in_force": "Gtc",
+///   "order_type": "Limit"
 /// }
 /// ```
+#[derive(Debug, Deserialize)]
+pub enum OrderType {
+    Limit,
+    Market,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct OrderRequest {
     /// Order price in smallest currency unit
@@ -48,6 +57,9 @@ pub struct OrderRequest {
 
     /// Time in force policy for the order
     pub time_in_force: TimeInForce,
+
+    /// Order execution type
+    pub order_type: OrderType,
 }
 
 /// Request payload for cancelling an existing order
@@ -145,9 +157,13 @@ pub struct OrderResponse {
 ///     "volume": 100,
 ///     "market_id": 1,
 ///     "side": "Bid",
-///     "time_in_force": "Gtc"
+///     "time_in_force": "Gtc",
+///     "order_type": "Limit"
 ///   }'
 /// ```
+///
+/// Market orders automatically set the submitted price to `0` when forwarded to the
+/// matching engine.
 ///
 /// # Example Success Response (200 OK)
 /// ```json
@@ -191,6 +207,20 @@ pub async fn place_order(
     let user_id = ((raw >> 64) as u64) ^ (raw as u64);
     let order_data = order_data.into_inner();
 
+    let OrderRequest {
+        price,
+        volume,
+        market_id,
+        side,
+        time_in_force,
+        order_type,
+    } = order_data;
+
+    let command_price = match order_type {
+        OrderType::Limit => price,
+        OrderType::Market => 0,
+    };
+
     // Generate unique client order ID for correlation
     let client_order_id = generate_client_order_id();
 
@@ -202,12 +232,12 @@ pub async fn place_order(
         command: OrderCommandType::PlaceOrder,
         order_id: 0,     // Will be assigned by VEX Core
         client_order_id, // Our correlation ID
-        market_id: order_data.market_id,
+        market_id,
         user_id,
-        price: order_data.price,
-        size: order_data.volume,
-        side: order_data.side,
-        time_in_force: order_data.time_in_force,
+        price: command_price,
+        size: volume,
+        side,
+        time_in_force,
         timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
