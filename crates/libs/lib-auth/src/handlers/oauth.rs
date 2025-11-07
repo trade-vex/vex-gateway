@@ -2,10 +2,14 @@ use crate::dto::auth_request_dto::OAuthCallbackQuery;
 use crate::error::auth_error::AuthError;
 use crate::service::{oauth_service::OAuthService, session_service::SessionService};
 
-use actix_web::{HttpResponse, web, cookie::{Cookie, SameSite, time::Duration}};
+use actix_web::{
+    HttpResponse,
+    cookie::{Cookie, SameSite, time::Duration},
+    web,
+};
+use serde_json;
 use std::sync::Arc;
 use tracing::error;
-use serde_json;
 
 /// Initiate OAuth flow
 /// GET /oauth/{provider}
@@ -45,16 +49,22 @@ pub async fn handle_oauth_callback(
     {
         Ok(response) => {
             let is_secure = oauth_service.get_frontend_url().starts_with("https://");
-            
+
             // Get user_id and user_info from the response
             let user_id = response.user.user_id;
             let user_info = response.user.clone();
 
             // Create session with user_id and tokens
             let session_id = session_service
-                .create_session(user_id, response.access_token.clone(), response.refresh_token.clone())
+                .create_session(
+                    user_id,
+                    response.access_token.clone(),
+                    response.refresh_token.clone(),
+                )
                 .await
-                .map_err(|e| AuthError::CodeExchangeFailed(format!("Failed to create session: {}", e)))?;
+                .map_err(|e| {
+                    AuthError::CodeExchangeFailed(format!("Failed to create session: {}", e))
+                })?;
 
             // Create session cookie
             let session_cookie = Cookie::build("session_id", session_id)
@@ -66,8 +76,9 @@ pub async fn handle_oauth_callback(
                 .finish();
 
             // Create user_info cookie (JSON format)
-            let user_info_json = serde_json::to_string(&user_info)
-                .map_err(|e| AuthError::Validation(format!("Failed to serialize user info: {}", e)))?;
+            let user_info_json = serde_json::to_string(&user_info).map_err(|e| {
+                AuthError::Validation(format!("Failed to serialize user info: {}", e))
+            })?;
 
             let user_info_cookie = Cookie::build("user_info", user_info_json)
                 .path("/")
@@ -84,7 +95,7 @@ pub async fn handle_oauth_callback(
                 .cookie(user_info_cookie)
                 .append_header(("Location", redirect_url))
                 .finish())
-        },
+        }
         Err(e) => {
             error!("OAuth callback error: {}", e);
             Err(e)

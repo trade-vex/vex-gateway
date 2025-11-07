@@ -133,35 +133,51 @@ where
                     if let Some(session_id_cookie) = req.request().cookie("session_id") {
                         let session_id = session_id_cookie.value().to_string();
                         tracing::debug!("Session auth: Found session_id cookie: {}", session_id);
-                        
+
                         // Get session from Redis (contains access_token and refresh_token)
                         match session_service.get_session(&session_id).await {
                             Ok(session_data) => {
-                                tracing::debug!("Session auth: Session found in Redis, extracting access_token");
+                                tracing::debug!(
+                                    "Session auth: Session found in Redis, extracting access_token"
+                                );
                                 // Extract access_token from session
                                 let access_token = session_data.access_token.clone();
-                                
-                                tracing::debug!("Session auth: Adding JWT token to Authorization header");
+
+                                tracing::debug!(
+                                    "Session auth: Adding JWT token to Authorization header"
+                                );
                                 // Add Authorization header to the request with the JWT from session
                                 req.headers_mut().insert(
                                     actix_web::http::header::AUTHORIZATION,
-                                    actix_web::http::header::HeaderValue::from_str(&format!("Bearer {}", access_token))
-                                        .map_err(|_| actix_web::error::ErrorUnauthorized("Invalid token format"))?,
+                                    actix_web::http::header::HeaderValue::from_str(&format!(
+                                        "Bearer {}",
+                                        access_token
+                                    ))
+                                    .map_err(|_| {
+                                        actix_web::error::ErrorUnauthorized("Invalid token format")
+                                    })?,
                                 );
-                                
-                                tracing::debug!("Session auth: Passing request to JWT middleware for validation");
+
+                                tracing::debug!(
+                                    "Session auth: Passing request to JWT middleware for validation"
+                                );
                                 // Now pass to JWT middleware for proper validation
-                                let jwt_service = jwt_middleware.new_transform(service.clone()).await.unwrap();
+                                let jwt_service =
+                                    jwt_middleware.new_transform(service.clone()).await.unwrap();
                                 jwt_service.call(req).await
                             }
                             Err(e) => {
                                 tracing::warn!("Session auth: Invalid session: {}", e);
-                                Err(actix_web::error::ErrorUnauthorized("Invalid or expired session"))
+                                Err(actix_web::error::ErrorUnauthorized(
+                                    "Invalid or expired session",
+                                ))
                             }
                         }
                     } else {
                         tracing::debug!("Session auth: No session_id cookie found");
-                        Err(actix_web::error::ErrorUnauthorized("Session cookie not found"))
+                        Err(actix_web::error::ErrorUnauthorized(
+                            "Session cookie not found",
+                        ))
                     }
                 }
 

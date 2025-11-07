@@ -74,14 +74,19 @@ pub async fn refresh_session_tokens(
 
     let session_data = session_service.get_session(&session_id).await?;
 
-    let new_tokens = token_service.refresh_tokens(&session_data.refresh_token).await?;
+    let new_tokens = token_service
+        .refresh_tokens(&session_data.refresh_token)
+        .await?;
 
     session_service
-        .update_session_tokens(&session_id, new_tokens.access_token.clone(), new_tokens.refresh_token.clone())
+        .update_session_tokens(
+            &session_id,
+            new_tokens.access_token.clone(),
+            new_tokens.refresh_token.clone(),
+        )
         .await?;
 
     Ok(HttpResponse::Ok().json(serde_json::json!({
-		"message": "Token refreshed successfully"
-	})))
+        "message": "Token refreshed successfully"
+    })))
 }
-

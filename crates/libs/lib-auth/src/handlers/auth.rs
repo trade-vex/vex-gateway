@@ -6,11 +6,11 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::dto::auth_request_dto::{
-    ChangePasswordRequest, CheckEmailRequest, ForgotPasswordRequest, LoginRequest, RefreshTokenRequest, ResetPasswordRequest, SignupRequest, VerifyEmailRequest, VerifyResetOtpRequest,
+    ChangePasswordRequest, CheckEmailRequest, ForgotPasswordRequest, LoginRequest,
+    RefreshTokenRequest, ResetPasswordRequest, SignupRequest, VerifyEmailRequest,
+    VerifyResetOtpRequest,
 };
-use crate::dto::auth_response_dto::{
-    RefreshTokenResponse, SignupResponse, UserInfo, UserProfile,
-};
+use crate::dto::auth_response_dto::{RefreshTokenResponse, SignupResponse, UserInfo, UserProfile};
 use crate::error::auth_error::AuthError;
 use crate::middleware::jwt_auth::AuthenticatedUser;
 use crate::models::user::{Model, UserStatus};
@@ -137,7 +137,11 @@ pub async fn login(
 
     // Create session (store user_id and tokens in Redis)
     let session_id = session_service
-        .create_session(user_id, tokens.access_token.clone(), tokens.refresh_token.clone())
+        .create_session(
+            user_id,
+            tokens.access_token.clone(),
+            tokens.refresh_token.clone(),
+        )
         .await?;
 
     // Get user info for cookie
@@ -321,10 +325,14 @@ pub async fn verify_email_with_otp(
         .ok_or(AuthError::UserNotFound)?;
 
     tracing::debug!("Creating session for user_id: {}", user.user_id);
-    
+
     // Create session (stores user_id and tokens in Redis)
     let session_id = session_service
-        .create_session(user.user_id, tokens.access_token.clone(), tokens.refresh_token.clone())
+        .create_session(
+            user.user_id,
+            tokens.access_token.clone(),
+            tokens.refresh_token.clone(),
+        )
         .await
         .map_err(|e| {
             tracing::error!("Failed to create session: {}", e);
@@ -448,7 +456,11 @@ pub async fn change_password(
     if let Some(session_id) = current_session_id {
         // Update current session with new tokens (keep user logged in)
         session_service
-            .update_session_tokens(&session_id, new_tokens.access_token.clone(), new_tokens.refresh_token.clone())
+            .update_session_tokens(
+                &session_id,
+                new_tokens.access_token.clone(),
+                new_tokens.refresh_token.clone(),
+            )
             .await
             .map_err(|e| {
                 tracing::warn!("Failed to update current session tokens: {}", e);
@@ -472,10 +484,8 @@ pub async fn change_password(
         // No session cookie found - this shouldn't happen in normal flow,
         // but handle gracefully by revoking all sessions
         tracing::warn!("Change password called without session cookie - revoking all sessions");
-        let _ = session_service
-            .revoke_all_user_sessions(user.user_id)
-            .await;
-        
+        let _ = session_service.revoke_all_user_sessions(user.user_id).await;
+
         // Also revoke refresh tokens (legacy cleanup)
         let _ = token_service.revoke_user_sessions(user.user_id).await;
     }
@@ -498,18 +508,14 @@ pub async fn check_email_exists(
     tracing::debug!("Check email exists request for: {}", req.email);
 
     match user_repo.find_by_email(&req.email).await? {
-        Some(user) => {
-            Ok(HttpResponse::Ok().json(json!({
-                "exists": true,
-                "email_verified": user.email_verified
-            })))
-        }
-        None => {
-            Ok(HttpResponse::Ok().json(json!({
-                "exists": false,
-                "email_verified": false
-            })))
-        }
+        Some(user) => Ok(HttpResponse::Ok().json(json!({
+            "exists": true,
+            "email_verified": user.email_verified
+        }))),
+        None => Ok(HttpResponse::Ok().json(json!({
+            "exists": false,
+            "email_verified": false
+        }))),
     }
 }
 
@@ -520,13 +526,14 @@ pub async fn resend_verification_email(
     email_service: web::Data<Arc<EmailService>>,
 ) -> Result<HttpResponse, AuthError> {
     // validate the request
-    req.validate().map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
+    req.validate()
+        .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
 
     tracing::debug!("Resend verification email request for: {}", req.email);
 
     // check if user exists by email
     let user = user_repo.find_by_email(&req.email).await?;
-    
+
     match user {
         Some(user_model) => {
             // checking if email is already verified
@@ -535,14 +542,17 @@ pub async fn resend_verification_email(
             }
 
             // resend verification email
-            match email_service.resend_verification_email(&req.email, &user_model.username).await {
+            match email_service
+                .resend_verification_email(&req.email, &user_model.username)
+                .await
+            {
                 Ok(new_otp_sent) => {
                     let message = if new_otp_sent {
                         "New verification code sent successfully"
                     } else {
                         "Verification code resent successfully"
                     };
-                    
+
                     Ok(HttpResponse::Ok().json(json!({
                         "message": message,
                         "new_code_sent": new_otp_sent,
@@ -556,7 +566,10 @@ pub async fn resend_verification_email(
             }
         }
         None => {
-            tracing::warn!("Resend verification requested for non-existent email: {}", req.email);
+            tracing::warn!(
+                "Resend verification requested for non-existent email: {}",
+                req.email
+            );
             Err(AuthError::UserNotFound)
         }
     }
@@ -589,7 +602,10 @@ pub async fn forgot_password(
         // Check if user has password_hash
         if user.password_hash.is_none() {
             // OAuth-only user - return same success message
-            tracing::debug!("Password reset requested for OAuth-only user: {}", req.email);
+            tracing::debug!(
+                "Password reset requested for OAuth-only user: {}",
+                req.email
+            );
             return Ok(HttpResponse::Ok().json(json!({
                 "message": "If an account exists with this email, a password reset code has been sent.",
                 "timestamp": chrono::Utc::now().to_rfc3339()
@@ -601,8 +617,11 @@ pub async fn forgot_password(
             .send_password_reset_otp(&req.email, &user.username)
             .await?;
     } else {
-        // User not exist 
-        tracing::debug!("Password reset requested for non-existent email: {}", req.email);
+        // User not exist
+        tracing::debug!(
+            "Password reset requested for non-existent email: {}",
+            req.email
+        );
     }
 
     // Always return same success message regardless of email existence
@@ -672,9 +691,7 @@ pub async fn reset_password(
     tracing::debug!("Reset password request");
 
     // Validate reset token and get user_id
-    let user_id = email_service
-        .validate_reset_token(&req.reset_token)
-        .await?;
+    let user_id = email_service.validate_reset_token(&req.reset_token).await?;
 
     // Find user
     let user = user_repo
@@ -704,9 +721,7 @@ pub async fn reset_password(
         .await?;
 
     // Revoke all user sessions
-    let _ = session_service
-        .revoke_all_user_sessions(user_id)
-        .await;
+    let _ = session_service.revoke_all_user_sessions(user_id).await;
 
     // Also revoke refresh tokens (legacy cleanup)
     let _ = token_service.revoke_user_sessions(user_id).await;

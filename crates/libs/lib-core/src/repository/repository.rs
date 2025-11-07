@@ -8,8 +8,10 @@ use crate::model::user_balances::{
 };
 use async_trait::async_trait;
 use clickhouse::Client as ClickHouseClient;
+use rust_decimal::Decimal;
 use sea_orm::prelude::*;
 use sea_orm::*;
+use std::str::FromStr;
 use std::sync::Arc;
 
 // Error type for trading operations
@@ -55,11 +57,16 @@ pub trait TradingRepository: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct PortfolioMetrics {
-    pub balance: u64,
-    pub balance_24h_ago: u64,
-    pub volume_24h: u64,
-    pub pnl_7d: i64,
-    pub max_drawdown_1m: i64,
+    /// Current equity in configured quote as Decimal(38,12)
+    pub balance: Decimal,
+    /// Equity 24h ago in configured quote as Decimal(38,12)
+    pub balance_24h_ago: Decimal,
+    /// Trade volume over the last 24h in configured quote as Decimal(38,12)
+    pub volume_24h: Decimal,
+    /// Accounting PnL over the last 7d in configured quote as Decimal(38,12)
+    pub pnl_7d: Decimal,
+    /// Max drawdown over the last 30d in configured quote as Decimal(38,12)
+    pub max_drawdown_1m: Decimal,
 }
 
 #[async_trait]
@@ -202,16 +209,16 @@ impl TradingRepository for PostgresTradingRepository {
 ///   Raw trade feed for computing user volume.
 ///
 /// Metrics computed:
-/// - balance (now): last equity at or before `now`
-/// - balance_24h_ago: last equity at or before `now - 24h`
+/// - balance (now): last ASOF-valued equity at or before `now`
+/// - balance_24h_ago: last ASOF-valued equity at or before `now - 24h`
 /// - pnl_7d: equity(now) - equity(now - 7d) - cashflow(7d)
-/// - max_drawdown_1m: peak-to-trough decline over equity in the last 30 days
+/// - max_drawdown_1m: peak-to-trough decline over ASOF equity in the last 30 days
 /// - volume_24h: sum(price * size_base) where user is maker or taker in last 24h
 ///
 /// Notes:
 /// - Time parameters are passed as Unix seconds and wrapped with ClickHouse `toDateTime(?)`
-/// - Equity is stored as Decimal(38,12). We coerce to i128 in CH and cast to Rust i64/u64
-///   conservatively (saturating and clamping at 0 for unsigned fields) to match API types.
+/// - Equity, cashflow, and volume are stored as Decimal(38,12); we read them directly as textual
+///   decimals from ClickHouse and parse without applying any manual scaling.
 pub struct ClickHousePortfolioRepository {
     ch: ClickHouseClient,
 }
@@ -219,6 +226,28 @@ pub struct ClickHousePortfolioRepository {
 impl ClickHousePortfolioRepository {
     pub fn new(ch: ClickHouseClient) -> Self {
         Self { ch }
+    }
+
+    async fn fetch_equity_at(&self, user_id: u64, ts_secs: i64) -> Result<Decimal> {
+        Ok(
+            self
+                .ch
+                .query(
+                    "SELECT toString(toDecimal128(coalesce(equity_quote, 0), 12)) AS v\n                 FROM trading.equity_per_minute\n                 WHERE user_id = ?\n                   AND minute <= toDateTime(?)\n                 ORDER BY minute DESC\n                 LIMIT 1",
+                )
+                .bind(user_id)
+                .bind(ts_secs)
+                .fetch_optional::<String>()
+                .await
+                .map_err(|e| TradingError::Database(e.to_string()))?
+                .map(|value| {
+                    Decimal::from_str(&value).map_err(|err| {
+                        TradingError::Database(format!("invalid decimal from ClickHouse: {}", err))
+                    })
+                })
+                .transpose()?
+                .unwrap_or(Decimal::ZERO),
+        )
     }
 }
 
@@ -228,7 +257,7 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
     ///
     /// SQL (conceptual):
     /// - balance_now
-    ///   SELECT toInt128OrZero(equity_quote) FROM trading.equity_per_minute
+    ///   SELECT toDecimal128(coalesce(equity_quote, 0), 12) FROM trading.equity_per_minute
     ///   WHERE user_id = {user} AND minute <= toDateTime({now})
     ///   ORDER BY minute DESC LIMIT 1;
     ///
@@ -239,17 +268,19 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
     ///   same with minute <= toDateTime({now - 7d})
     ///
     /// - cashflow_7d
-    ///   SELECT toInt128OrZero(coalesce(sum(cashflow_quote), 0)) FROM trading.user_cashflow_per_minute
+    ///   SELECT toDecimal128(coalesce(sum(cashflow_quote), 0), 12)
+    ///   FROM trading.user_cashflow_per_minute
     ///   WHERE user_id = {user} AND minute > toDateTime({now - 7d}) AND minute <= toDateTime({now})
     ///
     /// - volume_24h
-    ///   SELECT toInt128OrZero(sum(price * size_base)) FROM trading.trade_events
-    ///   WHERE ts >= toDateTime({now - 24h})
+    ///   SELECT toDecimal128(coalesce(sum(CAST(price * size_base AS Decimal(38, 12))), 0), 12)
+    ///   FROM trading.trade_events
+    ///   WHERE ts >= toDateTime({now - 24h}) AND ts <= toDateTime({now})
     ///     AND (maker_user_id = {user} OR taker_user_id = {user});
     ///
     /// - max_drawdown_1m
     ///   WITH s AS (
-    ///     SELECT minute, toInt128OrZero(equity_quote) AS v
+    ///     SELECT minute, toDecimal128(coalesce(equity_quote, 0), 12) AS v
     ///     FROM trading.equity_per_minute
     ///     WHERE user_id = {user}
     ///       AND minute >= toDateTime({now - 30d})
@@ -257,9 +288,7 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
     ///     ORDER BY minute
     ///   ),
     ///   r AS (
-    ///     SELECT minute, v,
-    ///            runningMax(v) OVER (ORDER BY minute ROWS UNBOUNDED PRECEDING) AS peak
-    ///     FROM s
+    ///     SELECT minute, v,\n                          runningMax(v) OVER (ORDER BY minute ROWS UNBOUNDED PRECEDING) AS peak\n                   FROM s\n                 )\n                 SELECT max(peak - v) AS max_drawdown FROM r",
     ///   )
     ///   SELECT max(peak - v) AS max_drawdown FROM r;
     async fn get_portfolio(&self, user_id: u64, now_ts_secs: i64) -> Result<PortfolioMetrics> {
@@ -267,97 +296,76 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
         let cutoff_7d = now_ts_secs - 7 * 24 * 60 * 60;
         let cutoff_1m = now_ts_secs - 30 * 24 * 60 * 60;
 
+        let parse_decimal = |value: String| {
+            Decimal::from_str(&value).map_err(|e| {
+                TradingError::Database(format!("invalid decimal from ClickHouse: {}", e))
+            })
+        };
+
         // balance_now
-        let balance_now_i128: i128 = self
-            .ch
-            .query(
-                "SELECT toInt128(coalesce(equity_quote, 0)) AS v\n                 FROM trading.equity_per_minute\n                 WHERE user_id = ?\n                   AND minute <= toDateTime(?)\n                 ORDER BY minute DESC\n                 LIMIT 1",
-            )
-            .bind(user_id)
-            .bind(now_ts_secs)
-            .fetch_optional::<i128>()
-            .await
-            .map_err(|e| TradingError::Database(e.to_string()))?
-            .unwrap_or(0);
+        let balance_now = self.fetch_equity_at(user_id, now_ts_secs).await?;
 
         // balance_24h_ago
-        let balance_24h_ago_i128: i128 = self
-            .ch
-            .query(
-                "SELECT toInt128(coalesce(equity_quote, 0)) AS v\n                 FROM trading.equity_per_minute\n                 WHERE user_id = ?\n                   AND minute <= toDateTime(?)\n                 ORDER BY minute DESC\n                 LIMIT 1",
-            )
-            .bind(user_id)
-            .bind(cutoff_24h)
-            .fetch_optional::<i128>()
-            .await
-            .map_err(|e| TradingError::Database(e.to_string()))?
-            .unwrap_or(0);
+        let balance_24h_ago = self.fetch_equity_at(user_id, cutoff_24h).await?;
 
         // balance_7d_ago
-        let balance_7d_ago_i128: i128 = self
-            .ch
-            .query(
-                "SELECT toInt128(coalesce(equity_quote, 0)) AS v\n                 FROM trading.equity_per_minute\n                 WHERE user_id = ?\n                   AND minute <= toDateTime(?)\n                 ORDER BY minute DESC\n                 LIMIT 1",
-            )
-            .bind(user_id)
-            .bind(cutoff_7d)
-            .fetch_optional::<i128>()
-            .await
-            .map_err(|e| TradingError::Database(e.to_string()))?
-            .unwrap_or(0);
+        let balance_7d_ago = self.fetch_equity_at(user_id, cutoff_7d).await?;
 
         // cashflow over last 7d (deposits - withdrawals), already in the same quote
-        let cashflow_7d_i128: i128 = self
+        let cashflow_7d_str: String = self
             .ch
             .query(
-                "SELECT toInt128(coalesce(sum(cashflow_quote), 0)) AS cf\n                 FROM trading.user_cashflow_per_minute\n                 WHERE user_id = ?\n                   AND minute > toDateTime(?)\n                   AND minute <= toDateTime(?)",
+                "SELECT toString(toDecimal128(coalesce(sum(cashflow_quote), 0), 12)) AS cf\n                 FROM trading.user_cashflow_per_minute\n                 WHERE user_id = ?\n                   AND minute > toDateTime(?)\n                   AND minute <= toDateTime(?)",
             )
             .bind(user_id)
             .bind(cutoff_7d)
             .bind(now_ts_secs)
-            .fetch_one::<i128>()
+            .fetch_one::<String>()
             .await
             .map_err(|e| TradingError::Database(e.to_string()))?;
+        let cashflow_7d = parse_decimal(cashflow_7d_str)?;
 
         // volume_24h
-        let volume_24h_i128: i128 = self
+        let volume_24h_str: String = self
             .ch
             .query(
-                "SELECT toInt128(coalesce(sum(price * size_base), 0)) AS vol\n                 FROM trading.trade_events\n                 WHERE ts >= toDateTime(?)\n                   AND (maker_user_id = ? OR taker_user_id = ?)",
+                "SELECT\n                     toString(toDecimal128(coalesce(sum(CAST(price * size_base AS Decimal(38, 12))), 0), 12)) AS vol\n                 FROM trading.trade_events\n                 WHERE ts >= toDateTime(?)\n                   AND ts <= toDateTime(?)\n                   AND (maker_user_id = ? OR taker_user_id = ?)",
             )
             .bind(cutoff_24h)
+            .bind(now_ts_secs)
             .bind(user_id)
             .bind(user_id)
-            .fetch_one::<i128>()
+            .fetch_one::<String>()
             .await
             .map_err(|e| TradingError::Database(e.to_string()))?;
+        let volume_24h = parse_decimal(volume_24h_str)?;
 
         // max_drawdown_1m
-        let max_drawdown_i128: i128 = self
+        let max_drawdown = self
             .ch
             .query(
-                "WITH s AS (\n                   SELECT minute, toInt128(coalesce(equity_quote, 0)) AS v\n                   FROM trading.equity_per_minute\n                   WHERE user_id = ?\n                     AND minute >= toDateTime(?)\n                     AND minute <= toDateTime(?)\n                   ORDER BY minute\n                 ),\n                 r AS (\n                   SELECT minute, v,\n                          runningMax(v) OVER (ORDER BY minute ROWS UNBOUNDED PRECEDING) AS peak\n                   FROM s\n                 )\n                 SELECT toInt128(coalesce(max(peak - v), 0)) AS max_drawdown FROM r",
+                "WITH s AS (\n                   SELECT minute, toDecimal128(coalesce(equity_quote, 0), 12) AS v\n                   FROM trading.equity_per_minute\n                   WHERE user_id = ?\n                     AND minute >= toDateTime(?)\n                     AND minute <= toDateTime(?)\n                   ORDER BY minute\n                 ),\n                 r AS (\n                   SELECT minute, v,\n                          runningMax(v) OVER (ORDER BY minute ROWS UNBOUNDED PRECEDING) AS peak\n                   FROM s\n                 )\n                 SELECT toString(toDecimal128(coalesce(max(peak - v), 0), 12)) AS max_drawdown FROM r",
             )
             .bind(user_id)
             .bind(cutoff_1m)
             .bind(now_ts_secs)
-            .fetch_optional::<i128>()
+            .fetch_optional::<String>()
             .await
             .map_err(|e| TradingError::Database(e.to_string()))?
-            .unwrap_or(0);
+            .map(parse_decimal)
+            .transpose()?
+            .unwrap_or(Decimal::ZERO);
 
         // accounting PnL over 7d
         // PnL = Equity(now) - Equity(7d_ago) - Cashflow(7d)
-        let pnl_7d_i128 = balance_now_i128
-            .saturating_sub(balance_7d_ago_i128)
-            .saturating_sub(cashflow_7d_i128);
+        let pnl_7d = balance_now - balance_7d_ago - cashflow_7d;
 
         Ok(PortfolioMetrics {
-            balance: balance_now_i128.max(0) as u64,
-            balance_24h_ago: balance_24h_ago_i128.max(0) as u64,
-            volume_24h: volume_24h_i128.max(0) as u64,
-            pnl_7d: pnl_7d_i128 as i64,
-            max_drawdown_1m: max_drawdown_i128 as i64,
+            balance: balance_now,
+            balance_24h_ago,
+            volume_24h,
+            pnl_7d,
+            max_drawdown_1m: max_drawdown,
         })
     }
 }

@@ -12,8 +12,8 @@ use lib_core::CorrelationService;
 use lib_core::Publisher;
 use lib_core::repository::repository::{ClickHousePortfolioRepository, PortfolioRepository};
 use lib_core::{
-    OrderCacheConfig, OrderStore, UserBalanceCacheConfig, UserBalanceStore,
-    PostgresTradingRepository, TradingRepository,
+    OrderCacheConfig, OrderStore, PostgresTradingRepository, TradingRepository,
+    UserBalanceCacheConfig, UserBalanceStore,
 };
 use lib_middleware::api_key::middleware::CacheConfig;
 use lib_middleware::{
@@ -163,10 +163,7 @@ impl AppState {
         .await?;
 
         // Initialize session service with 30-minute inactivity TTL
-        let session_service = SessionService::new(
-            Arc::new(redis_pool.clone()),
-            30 * 60,
-        );
+        let session_service = SessionService::new(Arc::new(redis_pool.clone()), 30 * 60);
 
         tracing::info!("AppState initialization completed successfully");
 

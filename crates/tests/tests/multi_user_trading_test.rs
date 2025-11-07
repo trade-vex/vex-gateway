@@ -292,10 +292,7 @@ async fn test_get_open_orders(
 ) -> Result<HttpResponse> {
     let user_id = *user_id;
 
-    println!(
-        "🔍 test_get_open_orders: user_id={}",
-        user_id
-    );
+    println!("🔍 test_get_open_orders: user_id={}", user_id);
 
     match order_store.get_user_orders(user_id).await {
         Ok(orders) => {

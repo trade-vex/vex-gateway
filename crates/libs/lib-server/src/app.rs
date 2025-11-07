@@ -33,8 +33,11 @@ pub fn create_app(
     );
 
     // Create combined auth middleware using the API key middleware and session service from AppState
-    let combined_auth_middleware =
-        CombinedAuthMiddleware::new(jwt_middleware, app_state.api_key_middleware.clone(), Arc::new(app_state.session_service.clone()));
+    let combined_auth_middleware = CombinedAuthMiddleware::new(
+        jwt_middleware,
+        app_state.api_key_middleware.clone(),
+        Arc::new(app_state.session_service.clone()),
+    );
 
     App::new()
         .app_data(web::Data::new(app_state.clone()))

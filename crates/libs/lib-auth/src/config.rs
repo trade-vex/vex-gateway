@@ -219,7 +219,11 @@ impl OAuthConfig {
                     auth_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
                     token_url: "https://oauth2.googleapis.com/token".to_string(),
                     user_info_url: "https://openidconnect.googleapis.com/v1/userinfo".to_string(),
-                    scopes: vec!["openid".to_string(), "email".to_string(), "profile".to_string()],
+                    scopes: vec![
+                        "openid".to_string(),
+                        "email".to_string(),
+                        "profile".to_string(),
+                    ],
                     response_type: "code".to_string(),
                     issuer_url: Some("https://accounts.google.com".to_string()),
                 },
@@ -303,7 +307,8 @@ impl ServerConfig {
             port: env::var("PORT")
                 .unwrap_or_else(|_| "8081".to_string())
                 .parse()?,
-            frontend_url: env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3000".to_string()),
+            frontend_url: env::var("FRONTEND_URL")
+                .unwrap_or_else(|_| "http://localhost:3000".to_string()),
         })
     }
 }

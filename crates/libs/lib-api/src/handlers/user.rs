@@ -325,11 +325,11 @@ pub async fn get_order_history(
 ///   Raw trades for user volume aggregation.
 ///
 /// # Metrics
-/// - `balance` (now): last `equity_quote` at or before current time
-/// - `balance_24h_ago`: last `equity_quote` at or before now - 24h
-/// - `pnl_7d`: `equity(now) - equity(now - 7d)`
-/// - `max_drawdown_1m`: max peak-to-trough drawdown of equity over last 30d using `runningMax`
-/// - `volume_24h`: sum(`price * size_base`) where user is maker or taker and `ts >= now - 24h`
+/// - `balance` (now): last ASOF-valued `equity_quote` at or before current time
+/// - `balance_24h_ago`: last ASOF-valued `equity_quote` at or before now - 24h
+/// - `pnl_7d`: `equity(now) - equity(now - 7d) - cashflow(7d)` with cashflow priced via ASOF joins
+/// - `max_drawdown_1m`: max peak-to-trough drawdown of ASOF-valued equity over last 30d using `runningMax`
+/// - `volume_24h`: sum(`price * size_base`) priced per trade for `ts in (now-24h, now]`
 ///
 /// The handler is backend-agnostic and uses the injected `PortfolioRepository` which is
 /// implemented against ClickHouse in production.

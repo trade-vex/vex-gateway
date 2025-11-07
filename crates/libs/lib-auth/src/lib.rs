@@ -38,9 +38,18 @@ pub fn configure_public_auth_services(cfg: &mut web::ServiceConfig) {
         .route("/signup", web::post().to(handlers::auth::signup))
         .route("/login", web::post().to(handlers::auth::login))
         .route("/refresh", web::post().to(handlers::auth::refresh_token))
-        .route("/session/refresh-tokens", web::post().to(handlers::session::refresh_session_tokens))
-        .route("/check-email", web::post().to(handlers::auth::check_email_exists))
-        .route("/resend-verification", web::post().to(handlers::auth::resend_verification_email))
+        .route(
+            "/session/refresh-tokens",
+            web::post().to(handlers::session::refresh_session_tokens),
+        )
+        .route(
+            "/check-email",
+            web::post().to(handlers::auth::check_email_exists),
+        )
+        .route(
+            "/resend-verification",
+            web::post().to(handlers::auth::resend_verification_email),
+        )
         .route(
             "/check-email",
             web::post().to(handlers::auth::check_email_exists),
@@ -54,9 +63,18 @@ pub fn configure_public_auth_services(cfg: &mut web::ServiceConfig) {
             web::post().to(handlers::auth::verify_email_with_otp),
         )
         // Password reset routes
-        .route("/forgot-password", web::post().to(handlers::auth::forgot_password))
-        .route("/verify-reset-otp", web::post().to(handlers::auth::verify_reset_otp))
-        .route("/reset-password", web::post().to(handlers::auth::reset_password));
+        .route(
+            "/forgot-password",
+            web::post().to(handlers::auth::forgot_password),
+        )
+        .route(
+            "/verify-reset-otp",
+            web::post().to(handlers::auth::verify_reset_otp),
+        )
+        .route(
+            "/reset-password",
+            web::post().to(handlers::auth::reset_password),
+        );
 }
 
 /// Configure protected routes for auth that require authentication
@@ -74,6 +92,12 @@ pub fn configure_protected_auth_services(cfg: &mut web::ServiceConfig) {
             web::post().to(handlers::auth::change_password),
         )
         // Session routes (public but require session cookie)
-        .route("/session/info", web::get().to(handlers::session::get_session_info))
-        .route("/session/refresh", web::post().to(handlers::session::refresh_session));
+        .route(
+            "/session/info",
+            web::get().to(handlers::session::get_session_info),
+        )
+        .route(
+            "/session/refresh",
+            web::post().to(handlers::session::refresh_session),
+        );
 }

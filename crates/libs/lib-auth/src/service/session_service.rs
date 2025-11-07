@@ -214,15 +214,9 @@ impl SessionService {
                         if let Some(session_id) = key.strip_prefix("session:") {
                             // Delete if it's not the session we want to keep
                             if session_id != keep_session_id {
-                                let _: () = conn
-                                    .del(key)
-                                    .await
-                                    .map_err(|e| {
-                                        AuthError::Redis(format!(
-                                            "Failed to delete session: {}",
-                                            e
-                                        ))
-                                    })?;
+                                let _: () = conn.del(key).await.map_err(|e| {
+                                    AuthError::Redis(format!("Failed to delete session: {}", e))
+                                })?;
                                 revoked_count += 1;
                             }
                         }
@@ -257,12 +251,9 @@ impl SessionService {
                 if let Ok(session_data) = serde_json::from_str::<SessionData>(&session_json) {
                     // Check if this session belongs to the user
                     if session_data.user_id == user_id {
-                        let _: () = conn
-                            .del(key)
-                            .await
-                            .map_err(|e| {
-                                AuthError::Redis(format!("Failed to delete session: {}", e))
-                            })?;
+                        let _: () = conn.del(key).await.map_err(|e| {
+                            AuthError::Redis(format!("Failed to delete session: {}", e))
+                        })?;
                         revoked_count += 1;
                     }
                 }
@@ -272,4 +263,3 @@ impl SessionService {
         Ok(revoked_count)
     }
 }
-

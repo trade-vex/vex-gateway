@@ -1,3 +1,4 @@
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 // Re-export models from separate modules
@@ -88,11 +89,11 @@ pub struct OrdersHistoryListResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PortfolioOverviewResponse {
-    pub balance: u64,
-    pub balance_24h_ago: u64,
-    pub volume_24h: u64,
-    pub pnl_7d: i64,
-    pub max_drawdown_1m: i64,
+    pub balance: Decimal,
+    pub balance_24h_ago: Decimal,
+    pub volume_24h: Decimal,
+    pub pnl_7d: Decimal,
+    pub max_drawdown_1m: Decimal,
 }
 
 // Conversion implementations

@@ -92,7 +92,7 @@ pub struct OAuthService {
 
     /// User repository for database operations
     user_repo: Arc<dyn UserRepository>,
-    
+
     /// Frontend URL for redirects after OAuth success
     frontend_url: String,
 }
@@ -103,7 +103,8 @@ impl OAuthService {
         // Map invalid chars to '-' and allow [a-z0-9._-]
         let mut out = String::with_capacity(lower.len());
         for ch in lower.chars() {
-            if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '.' || ch == '_' || ch == '-' {
+            if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '.' || ch == '_' || ch == '-'
+            {
                 out.push(ch);
             } else if ch.is_whitespace() {
                 out.push('-');
@@ -116,7 +117,9 @@ impl OAuthService {
         let mut prev_dash = false;
         for ch in out.chars() {
             if ch == '-' {
-                if !prev_dash { collapsed.push('-'); }
+                if !prev_dash {
+                    collapsed.push('-');
+                }
                 prev_dash = true;
             } else {
                 collapsed.push(ch);
@@ -126,10 +129,23 @@ impl OAuthService {
         // Trim leading/trailing '-'
         let trimmed = collapsed.trim_matches('-').to_string();
         // Enforce max length
-        let mut trimmed = if trimmed.len() > 30 { trimmed[..30].to_string() } else { trimmed };
+        let mut trimmed = if trimmed.len() > 30 {
+            trimmed[..30].to_string()
+        } else {
+            trimmed
+        };
         // Ensure starts with alphanumeric
-        if trimmed.chars().next().map(|c| c.is_ascii_alphanumeric()).unwrap_or(false) {
-            if trimmed.is_empty() { "user".to_string() } else { trimmed }
+        if trimmed
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_alphanumeric())
+            .unwrap_or(false)
+        {
+            if trimmed.is_empty() {
+                "user".to_string()
+            } else {
+                trimmed
+            }
         } else {
             trimmed.insert_str(0, "user-");
             trimmed
@@ -140,41 +156,64 @@ impl OAuthService {
         email.split('@').next().map(|s| s.to_string())
     }
 
-    fn generate_username(provider: &str, info: &crate::dto::auth_response_dto::OAuthUserInfo) -> String {
+    fn generate_username(
+        provider: &str,
+        info: &crate::dto::auth_response_dto::OAuthUserInfo,
+    ) -> String {
         match provider {
             // GitHub: prefer handle (`login`) if provided in parsed info.username
             "github" => {
                 if let Some(uname) = &info.username {
                     let norm = Self::normalize_username_candidate(uname);
-                    if !norm.is_empty() { return norm; }
+                    if !norm.is_empty() {
+                        return norm;
+                    }
                 }
                 // fallback to display name, then email local-part
                 let from_name = Self::normalize_username_candidate(&info.name);
-                if !from_name.is_empty() { return from_name; }
-                let from_email = Self::email_local_part(&info.email).map(|s| Self::normalize_username_candidate(&s)).unwrap_or_default();
-                if !from_email.is_empty() { return from_email; }
+                if !from_name.is_empty() {
+                    return from_name;
+                }
+                let from_email = Self::email_local_part(&info.email)
+                    .map(|s| Self::normalize_username_candidate(&s))
+                    .unwrap_or_default();
+                if !from_email.is_empty() {
+                    return from_email;
+                }
                 "user".to_string()
             }
             // Google: prefer email local-part; fallback to name
             "google" => {
                 if let Some(local) = Self::email_local_part(&info.email) {
                     let norm = Self::normalize_username_candidate(&local);
-                    if !norm.is_empty() { return norm; }
+                    if !norm.is_empty() {
+                        return norm;
+                    }
                 }
                 let from_name = Self::normalize_username_candidate(&info.name);
-                if !from_name.is_empty() { return from_name; }
+                if !from_name.is_empty() {
+                    return from_name;
+                }
                 "user".to_string()
             }
             _ => {
                 // Other providers: try username field, then name, then email local-part
                 if let Some(uname) = &info.username {
                     let norm = Self::normalize_username_candidate(uname);
-                    if !norm.is_empty() { return norm; }
+                    if !norm.is_empty() {
+                        return norm;
+                    }
                 }
                 let from_name = Self::normalize_username_candidate(&info.name);
-                if !from_name.is_empty() { return from_name; }
-                let from_email = Self::email_local_part(&info.email).map(|s| Self::normalize_username_candidate(&s)).unwrap_or_default();
-                if !from_email.is_empty() { return from_email; }
+                if !from_name.is_empty() {
+                    return from_name;
+                }
+                let from_email = Self::email_local_part(&info.email)
+                    .map(|s| Self::normalize_username_candidate(&s))
+                    .unwrap_or_default();
+                if !from_email.is_empty() {
+                    return from_email;
+                }
                 "user".to_string()
             }
         }
@@ -509,7 +548,8 @@ impl OAuthService {
         // validate ID token for OIDC providers
         // this validates signature, issuer, audience, expiration, and nonce
         if provider == "google" {
-            self.validate_id_token(client, &token_response, state).await?;
+            self.validate_id_token(client, &token_response, state)
+                .await?;
         }
 
         // Extract access token from response
@@ -712,13 +752,9 @@ impl OAuthService {
         state: &str,
     ) -> Result<(), AuthError> {
         // Extract ID token from response
-        let id_token = token_response
-            .id_token()
-            .ok_or_else(|| {
-                AuthError::CodeExchangeFailed(
-                    "ID token missing from OIDC response".to_string(),
-                )
-            })?;
+        let id_token = token_response.id_token().ok_or_else(|| {
+            AuthError::CodeExchangeFailed("ID token missing from OIDC response".to_string())
+        })?;
 
         // Retrieve stored nonce from Redis
         let stored_nonce_secret = self.get_stored_nonce("google", state).await?;
@@ -732,14 +768,9 @@ impl OAuthService {
         // - Expiration (exp) and issued-at (iat) claims
         // - Nonce claim must match the stored nonce
         let verifier = client.id_token_verifier();
-        id_token
-            .claims(&verifier, &stored_nonce)
-            .map_err(|e| {
-                AuthError::CodeExchangeFailed(format!(
-                    "ID token validation failed: {}",
-                    e
-                ))
-            })?;
+        id_token.claims(&verifier, &stored_nonce).map_err(|e| {
+            AuthError::CodeExchangeFailed(format!("ID token validation failed: {}", e))
+        })?;
 
         tracing::debug!("ID token validated successfully for Google OAuth");
         Ok(())
@@ -812,7 +843,11 @@ impl OAuthService {
 
         // Debug logging for Google OAuth issues
         if provider == "google" {
-            tracing::debug!("Google user info response: {}", serde_json::to_string_pretty(&user_info).unwrap_or_else(|_| "Failed to serialize".to_string()));
+            tracing::debug!(
+                "Google user info response: {}",
+                serde_json::to_string_pretty(&user_info)
+                    .unwrap_or_else(|_| "Failed to serialize".to_string())
+            );
         }
 
         // Special handling for GitHub - fetch emails separately
@@ -899,22 +934,33 @@ impl OAuthService {
     /// }
     /// ```
     fn parse_google_user_info(&self, data: Value) -> Result<OAuthUserInfo, AuthError> {
-        tracing::debug!("Parsing Google user info: {}", serde_json::to_string_pretty(&data).unwrap_or_else(|_| "Failed to serialize".to_string()));
-        
-        let provider_id = data["sub"].as_str().ok_or_else(|| {
-                let available_fields: Vec<String> = data.as_object()
+        tracing::debug!(
+            "Parsing Google user info: {}",
+            serde_json::to_string_pretty(&data)
+                .unwrap_or_else(|_| "Failed to serialize".to_string())
+        );
+
+        let provider_id = data["sub"]
+            .as_str()
+            .ok_or_else(|| {
+                let available_fields: Vec<String> = data
+                    .as_object()
                     .map(|obj| obj.keys().cloned().collect())
                     .unwrap_or_default();
                 AuthError::UserInfoFetchFailed(format!(
                     "Missing Google 'sub' field. Available fields: {:?}. Response: {}",
                     available_fields,
-                    serde_json::to_string(&data).unwrap_or_else(|_| "Failed to serialize".to_string())
+                    serde_json::to_string(&data)
+                        .unwrap_or_else(|_| "Failed to serialize".to_string())
                 ))
             })?
             .to_string();
-            
-        let email = data["email"].as_str().ok_or_else(|| AuthError::UserInfoFetchFailed("Missing Google email".to_string()))?.to_string();
-            
+
+        let email = data["email"]
+            .as_str()
+            .ok_or_else(|| AuthError::UserInfoFetchFailed("Missing Google email".to_string()))?
+            .to_string();
+
         Ok(OAuthUserInfo {
             provider_id,
             email,
