@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 // Re-export models from separate modules
 pub use crate::model::orders::Model as OrderModel;
 pub use crate::model::user_balances::Model as UserBalanceModel;
+use crate::{PnlPoint, PnlResolution};
 
 // Simple types as specified
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -94,6 +95,8 @@ pub struct PortfolioOverviewResponse {
     pub volume_24h: Decimal,
     pub pnl_7d: Decimal,
     pub max_drawdown_1m: Decimal,
+    pub pnl_series: Vec<PnlPoint>,
+    pub pnl_resolution: String,
 }
 
 // Conversion implementations
@@ -136,6 +139,28 @@ impl From<OrderModel> for OrderHistoryResponse {
             timestamp: model.order_timestamp as u64,
             status: "Open".to_string(),
             filled_size: 0,
+        }
+    }
+}
+
+impl PortfolioOverviewResponse {
+    pub fn with_metrics(
+        balance: Decimal,
+        balance_24h_ago: Decimal,
+        volume_24h: Decimal,
+        pnl_7d: Decimal,
+        max_drawdown_1m: Decimal,
+        pnl_series: Vec<PnlPoint>,
+        resolution: PnlResolution,
+    ) -> Self {
+        Self {
+            balance,
+            balance_24h_ago,
+            volume_24h,
+            pnl_7d,
+            max_drawdown_1m,
+            pnl_series,
+            pnl_resolution: resolution.as_str().to_string(),
         }
     }
 }

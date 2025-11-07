@@ -9,8 +9,10 @@ use crate::model::user_balances::{
 use async_trait::async_trait;
 use clickhouse::Client as ClickHouseClient;
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use sea_orm::prelude::*;
 use sea_orm::*;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -55,6 +57,103 @@ pub trait TradingRepository: Send + Sync {
     async fn count_user_orders(&self, user_id: u64) -> Result<u64>;
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PnlPoint {
+    pub timestamp: i64,
+    pub pnl: Decimal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PnlResolution {
+    Day,
+    Week,
+    Month,
+    Year,
+}
+
+impl Default for PnlResolution {
+    fn default() -> Self {
+        PnlResolution::Day
+    }
+}
+
+impl PnlResolution {
+    fn window_seconds(self) -> i64 {
+        match self {
+            PnlResolution::Day => 24 * 60 * 60,
+            PnlResolution::Week => 7 * 24 * 60 * 60,
+            PnlResolution::Month => 30 * 24 * 60 * 60,
+            PnlResolution::Year => 365 * 24 * 60 * 60,
+        }
+    }
+
+    fn bucket_expression(self) -> &'static str {
+        match self {
+            PnlResolution::Day => "toStartOfHour(minute)",
+            PnlResolution::Week => "toStartOfDay(minute)",
+            PnlResolution::Month => "toStartOfDay(minute)",
+            PnlResolution::Year => "toStartOfMonth(minute)",
+        }
+    }
+
+    fn bucket_floor(self, ts_secs: i64) -> i64 {
+        use chrono::{Datelike, Duration, NaiveDate, TimeZone, Timelike, Utc};
+
+        let Some(dt) = chrono::DateTime::<Utc>::from_timestamp(ts_secs, 0) else {
+            return ts_secs;
+        };
+        let date = dt.date_naive();
+
+        let to_ts = |date: NaiveDate| -> i64 {
+            date.and_hms_opt(0, 0, 0)
+                .map(|naive_dt| Utc.from_utc_datetime(&naive_dt).timestamp())
+                .unwrap_or(ts_secs)
+        };
+
+        match self {
+            PnlResolution::Day => dt
+                .with_minute(0)
+                .and_then(|d| d.with_second(0))
+                .and_then(|d| d.with_nanosecond(0))
+                .unwrap_or(dt)
+                .timestamp(),
+            PnlResolution::Week => {
+                let weekday = date.weekday().num_days_from_monday() as i64;
+                let start_date = date - Duration::days(weekday);
+                to_ts(start_date)
+            }
+            PnlResolution::Month => {
+                let floored =
+                    NaiveDate::from_ymd_opt(date.year(), date.month(), 1).unwrap_or(date);
+                to_ts(floored)
+            }
+            PnlResolution::Year => {
+                let floored = NaiveDate::from_ymd_opt(date.year(), 1, 1).unwrap_or(date);
+                to_ts(floored)
+            }
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PnlResolution::Day => "1d",
+            PnlResolution::Week => "1w",
+            PnlResolution::Month => "1m",
+            PnlResolution::Year => "1y",
+        }
+    }
+
+    pub fn from_query(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "1d" | "d1" | "day" => Some(PnlResolution::Day),
+            "1w" | "w1" | "week" => Some(PnlResolution::Week),
+            "1m" | "m1" | "month" => Some(PnlResolution::Month),
+            "1y" | "y1" | "year" => Some(PnlResolution::Year),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PortfolioMetrics {
     /// Current equity in configured quote as Decimal(38,12)
@@ -67,11 +166,20 @@ pub struct PortfolioMetrics {
     pub pnl_7d: Decimal,
     /// Max drawdown over the last 30d in configured quote as Decimal(38,12)
     pub max_drawdown_1m: Decimal,
+    /// Time-series accounting PnL data for the requested window
+    pub pnl_series: Vec<PnlPoint>,
+    /// Resolution used to compute the PnL series
+    pub pnl_resolution: PnlResolution,
 }
 
 #[async_trait]
 pub trait PortfolioRepository: Send + Sync {
-    async fn get_portfolio(&self, user_id: u64, now_ts_secs: i64) -> Result<PortfolioMetrics>;
+    async fn get_portfolio(
+        &self,
+        user_id: u64,
+        now_ts_secs: i64,
+        resolution: PnlResolution,
+    ) -> Result<PortfolioMetrics>;
 }
 
 // PostgreSQL implementation
@@ -278,20 +386,13 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
     ///   WHERE ts >= toDateTime({now - 24h}) AND ts <= toDateTime({now})
     ///     AND (maker_user_id = {user} OR taker_user_id = {user});
     ///
-    /// - max_drawdown_1m
-    ///   WITH s AS (
-    ///     SELECT minute, toDecimal128(coalesce(equity_quote, 0), 12) AS v
-    ///     FROM trading.equity_per_minute
-    ///     WHERE user_id = {user}
-    ///       AND minute >= toDateTime({now - 30d})
-    ///       AND minute <= toDateTime({now})
-    ///     ORDER BY minute
-    ///   ),
-    ///   r AS (
-    ///     SELECT minute, v,\n                          runningMax(v) OVER (ORDER BY minute ROWS UNBOUNDED PRECEDING) AS peak\n                   FROM s\n                 )\n                 SELECT max(peak - v) AS max_drawdown FROM r",
-    ///   )
-    ///   SELECT max(peak - v) AS max_drawdown FROM r;
-    async fn get_portfolio(&self, user_id: u64, now_ts_secs: i64) -> Result<PortfolioMetrics> {
+    /// - max_drawdown_1m: running maximum drawdown over equity snapshots between now-30d and now
+    async fn get_portfolio(
+        &self,
+        user_id: u64,
+        now_ts_secs: i64,
+        resolution: PnlResolution,
+    ) -> Result<PortfolioMetrics> {
         let cutoff_24h = now_ts_secs - 24 * 60 * 60;
         let cutoff_7d = now_ts_secs - 7 * 24 * 60 * 60;
         let cutoff_1m = now_ts_secs - 30 * 24 * 60 * 60;
@@ -360,12 +461,135 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
         // PnL = Equity(now) - Equity(7d_ago) - Cashflow(7d)
         let pnl_7d = balance_now - balance_7d_ago - cashflow_7d;
 
+        let pnl_series = self
+            .fetch_pnl_series(user_id, now_ts_secs, resolution)
+            .await?;
+
         Ok(PortfolioMetrics {
             balance: balance_now,
             balance_24h_ago,
             volume_24h,
             pnl_7d,
             max_drawdown_1m: max_drawdown,
+            pnl_series,
+            pnl_resolution: resolution,
         })
+    }
+}
+
+impl ClickHousePortfolioRepository {
+    async fn fetch_pnl_series(
+        &self,
+        user_id: u64,
+        now_ts_secs: i64,
+        resolution: PnlResolution,
+    ) -> Result<Vec<PnlPoint>> {
+        let window_start = now_ts_secs - resolution.window_seconds();
+        let bucket_expr = resolution.bucket_expression();
+
+        let equity_sql = format!(
+            "SELECT toUnixTimestamp(bucket) AS ts, toString(anyLast(equity_quote)) AS eq \
+             FROM ( \
+                SELECT {bucket} AS bucket, minute, equity_quote \
+                FROM trading.equity_per_minute \
+                WHERE user_id = ? \
+                  AND minute >= toDateTime(?) \
+                  AND minute <= toDateTime(?) \
+             ) \
+             GROUP BY bucket \
+             ORDER BY bucket",
+            bucket = bucket_expr
+        );
+
+        let equity_rows: Vec<(i64, String)> = self
+            .ch
+            .query(equity_sql.as_str())
+            .bind(user_id)
+            .bind(window_start)
+            .bind(now_ts_secs)
+            .fetch_all::<(i64, String)>()
+            .await
+            .map_err(|e| TradingError::Database(e.to_string()))?;
+
+        let cashflow_sql = format!(
+            "SELECT toUnixTimestamp(bucket) AS ts, toString(sum(cashflow_quote)) AS cf \
+             FROM ( \
+                SELECT {bucket} AS bucket, cashflow_quote \
+                FROM trading.user_cashflow_per_minute \
+                WHERE user_id = ? \
+                  AND minute > toDateTime(?) \
+                  AND minute <= toDateTime(?) \
+             ) \
+             GROUP BY bucket \
+             ORDER BY bucket",
+            bucket = bucket_expr
+        );
+
+        let cashflow_rows: Vec<(i64, String)> = self
+            .ch
+            .query(cashflow_sql.as_str())
+            .bind(user_id)
+            .bind(window_start)
+            .bind(now_ts_secs)
+            .fetch_all::<(i64, String)>()
+            .await
+            .map_err(|e| TradingError::Database(e.to_string()))?;
+
+        let mut equity_map = BTreeMap::new();
+        for (ts, eq_str) in equity_rows {
+            let value = Decimal::from_str(&eq_str).map_err(|err| {
+                TradingError::Database(format!("invalid decimal from ClickHouse: {}", err))
+            })?;
+            equity_map.insert(ts, value);
+        }
+
+        let mut cashflow_map = BTreeMap::new();
+        for (ts, cf_str) in cashflow_rows {
+            let value = Decimal::from_str(&cf_str).map_err(|err| {
+                TradingError::Database(format!("invalid decimal from ClickHouse: {}", err))
+            })?;
+            cashflow_map.insert(ts, value);
+        }
+
+        let mut cumulative_cashflow = Decimal::ZERO;
+        let mut cashflow_cumulative_map = BTreeMap::new();
+        for (ts, value) in &cashflow_map {
+            cumulative_cashflow += *value;
+            cashflow_cumulative_map.insert(*ts, cumulative_cashflow);
+        }
+
+        let baseline_equity = self.fetch_equity_at(user_id, window_start).await?;
+
+        let mut bucket_keys: BTreeSet<i64> = BTreeSet::new();
+        bucket_keys.extend(equity_map.keys().copied());
+        bucket_keys.extend(cashflow_map.keys().copied());
+        bucket_keys.insert(resolution.bucket_floor(window_start));
+        bucket_keys.insert(resolution.bucket_floor(now_ts_secs));
+        bucket_keys.insert(window_start);
+        bucket_keys.insert(now_ts_secs);
+
+        let mut last_equity = baseline_equity;
+        let mut series = Vec::with_capacity(bucket_keys.len());
+
+        for bucket_ts in bucket_keys {
+            if let Some(value) = equity_map.get(&bucket_ts) {
+                last_equity = *value;
+            }
+
+            let cf_up_to_bucket = cashflow_cumulative_map
+                .range(..=bucket_ts)
+                .next_back()
+                .map(|(_, v)| *v)
+                .unwrap_or(Decimal::ZERO);
+
+            let pnl = last_equity - baseline_equity - cf_up_to_bucket;
+            series.push(PnlPoint {
+                timestamp: bucket_ts,
+                pnl,
+            });
+        }
+
+        series.sort_by_key(|point| point.timestamp);
+        Ok(series)
     }
 }

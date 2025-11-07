@@ -1,13 +1,14 @@
 //! User Account Data API Handlers
 
 use actix_web::{HttpResponse, Result, web};
-use lib_core::PortfolioRepository;
+use lib_core::{PnlResolution, PortfolioRepository};
 use lib_core::dto::trading::PortfolioOverviewResponse;
 use lib_core::{
     BalancesListResponse, OrderHistoryResponse, OrderResponse, OrderStore,
     OrdersHistoryListResponse, OrdersListResponse, UserBalanceResponse, UserBalanceStore,
 };
 use lib_utils::auth_extractors::AuthenticatedUserId;
+use serde::Deserialize;
 use std::sync::Arc;
 
 /// Get user balances for all assets
@@ -333,26 +334,40 @@ pub async fn get_order_history(
 ///
 /// The handler is backend-agnostic and uses the injected `PortfolioRepository` which is
 /// implemented against ClickHouse in production.
+#[derive(Debug, Deserialize)]
+pub struct PortfolioOverviewQuery {
+    pub resolution: Option<String>,
+}
+
 pub async fn get_portfolio_overview(
     user: AuthenticatedUserId,
+    query: web::Query<PortfolioOverviewQuery>,
     portfolio_repo: web::Data<Arc<dyn PortfolioRepository>>,
 ) -> Result<HttpResponse> {
     let raw = user.0.as_u128();
     let user_id = ((raw >> 64) as u64) ^ (raw as u64);
     let now_secs = chrono::Utc::now().timestamp();
 
+    let resolution = query
+        .resolution
+        .as_deref()
+        .and_then(PnlResolution::from_query)
+        .unwrap_or_default();
+
     let metrics = portfolio_repo
-        .get_portfolio(user_id, now_secs)
+        .get_portfolio(user_id, now_secs, resolution)
         .await
         .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
 
-    let response = PortfolioOverviewResponse {
-        balance: metrics.balance,
-        balance_24h_ago: metrics.balance_24h_ago,
-        volume_24h: metrics.volume_24h,
-        pnl_7d: metrics.pnl_7d,
-        max_drawdown_1m: metrics.max_drawdown_1m,
-    };
+    let response = PortfolioOverviewResponse::with_metrics(
+        metrics.balance,
+        metrics.balance_24h_ago,
+        metrics.volume_24h,
+        metrics.pnl_7d,
+        metrics.max_drawdown_1m,
+        metrics.pnl_series,
+        metrics.pnl_resolution,
+    );
 
     Ok(HttpResponse::Ok().json(response))
 }
