@@ -271,7 +271,7 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
         let balance_now_i128: i128 = self
             .ch
             .query(
-                "SELECT toInt128OrZero(equity_quote) AS v\n                 FROM trading.equity_per_minute\n                 WHERE user_id = ?\n                   AND minute <= toDateTime(?)\n                 ORDER BY minute DESC\n                 LIMIT 1",
+                "SELECT toInt128(coalesce(equity_quote, 0)) AS v\n                 FROM trading.equity_per_minute\n                 WHERE user_id = ?\n                   AND minute <= toDateTime(?)\n                 ORDER BY minute DESC\n                 LIMIT 1",
             )
             .bind(user_id)
             .bind(now_ts_secs)
@@ -284,7 +284,7 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
         let balance_24h_ago_i128: i128 = self
             .ch
             .query(
-                "SELECT toInt128OrZero(equity_quote) AS v\n                 FROM trading.equity_per_minute\n                 WHERE user_id = ?\n                   AND minute <= toDateTime(?)\n                 ORDER BY minute DESC\n                 LIMIT 1",
+                "SELECT toInt128(coalesce(equity_quote, 0)) AS v\n                 FROM trading.equity_per_minute\n                 WHERE user_id = ?\n                   AND minute <= toDateTime(?)\n                 ORDER BY minute DESC\n                 LIMIT 1",
             )
             .bind(user_id)
             .bind(cutoff_24h)
@@ -297,7 +297,7 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
         let balance_7d_ago_i128: i128 = self
             .ch
             .query(
-                "SELECT toInt128OrZero(equity_quote) AS v\n                 FROM trading.equity_per_minute\n                 WHERE user_id = ?\n                   AND minute <= toDateTime(?)\n                 ORDER BY minute DESC\n                 LIMIT 1",
+                "SELECT toInt128(coalesce(equity_quote, 0)) AS v\n                 FROM trading.equity_per_minute\n                 WHERE user_id = ?\n                   AND minute <= toDateTime(?)\n                 ORDER BY minute DESC\n                 LIMIT 1",
             )
             .bind(user_id)
             .bind(cutoff_7d)
@@ -310,7 +310,7 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
         let cashflow_7d_i128: i128 = self
             .ch
             .query(
-                "SELECT toInt128OrZero(coalesce(sum(cashflow_quote), 0)) AS cf\n                 FROM trading.user_cashflow_per_minute\n                 WHERE user_id = ?\n                   AND minute > toDateTime(?)\n                   AND minute <= toDateTime(?)",
+                "SELECT toInt128(coalesce(sum(cashflow_quote), 0)) AS cf\n                 FROM trading.user_cashflow_per_minute\n                 WHERE user_id = ?\n                   AND minute > toDateTime(?)\n                   AND minute <= toDateTime(?)",
             )
             .bind(user_id)
             .bind(cutoff_7d)
@@ -323,7 +323,7 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
         let volume_24h_i128: i128 = self
             .ch
             .query(
-                "SELECT toInt128OrZero(coalesce(sum(price * size_base), 0)) AS vol\n                 FROM trading.trade_events\n                 WHERE ts >= toDateTime(?)\n                   AND (maker_user_id = ? OR taker_user_id = ?)",
+                "SELECT toInt128(coalesce(sum(price * size_base), 0)) AS vol\n                 FROM trading.trade_events\n                 WHERE ts >= toDateTime(?)\n                   AND (maker_user_id = ? OR taker_user_id = ?)",
             )
             .bind(cutoff_24h)
             .bind(user_id)
@@ -336,7 +336,7 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
         let max_drawdown_i128: i128 = self
             .ch
             .query(
-                "WITH s AS (\n                   SELECT minute, toInt128OrZero(equity_quote) AS v\n                   FROM trading.equity_per_minute\n                   WHERE user_id = ?\n                     AND minute >= toDateTime(?)\n                     AND minute <= toDateTime(?)\n                   ORDER BY minute\n                 ),\n                 r AS (\n                   SELECT minute, v,\n                          runningMax(v) OVER (ORDER BY minute ROWS UNBOUNDED PRECEDING) AS peak\n                   FROM s\n                 )\n                 SELECT toInt128OrZero(max(peak - v)) AS max_drawdown FROM r",
+                "WITH s AS (\n                   SELECT minute, toInt128(coalesce(equity_quote, 0)) AS v\n                   FROM trading.equity_per_minute\n                   WHERE user_id = ?\n                     AND minute >= toDateTime(?)\n                     AND minute <= toDateTime(?)\n                   ORDER BY minute\n                 ),\n                 r AS (\n                   SELECT minute, v,\n                          runningMax(v) OVER (ORDER BY minute ROWS UNBOUNDED PRECEDING) AS peak\n                   FROM s\n                 )\n                 SELECT toInt128(coalesce(max(peak - v), 0)) AS max_drawdown FROM r",
             )
             .bind(user_id)
             .bind(cutoff_1m)
