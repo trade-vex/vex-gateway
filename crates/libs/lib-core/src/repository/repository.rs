@@ -329,11 +329,23 @@ impl TradingRepository for PostgresTradingRepository {
 ///   decimals from ClickHouse and parse without applying any manual scaling.
 pub struct ClickHousePortfolioRepository {
     ch: ClickHouseClient,
+    schema: String,
 }
 
 impl ClickHousePortfolioRepository {
     pub fn new(ch: ClickHouseClient) -> Self {
-        Self { ch }
+        Self::new_with_schema(ch, "trading")
+    }
+
+    pub fn new_with_schema<S: Into<String>>(ch: ClickHouseClient, schema: S) -> Self {
+        Self {
+            ch,
+            schema: schema.into(),
+        }
+    }
+
+    fn table(&self, name: &str) -> String {
+        format!("{}.{}", self.schema, name)
     }
 
     async fn fetch_equity_at(&self, user_id: u64, ts_secs: i64) -> Result<Decimal> {
@@ -341,7 +353,16 @@ impl ClickHousePortfolioRepository {
             self
                 .ch
                 .query(
-                    "SELECT toString(toDecimal128(coalesce(equity_quote, 0), 12)) AS v\n                 FROM trading.equity_per_minute\n                 WHERE user_id = ?\n                   AND minute <= toDateTime(?)\n                 ORDER BY minute DESC\n                 LIMIT 1",
+                    format!(
+                        "SELECT toString(toDecimal128(coalesce(equity_quote, 0), 12)) AS v
+                 FROM {}
+                 WHERE user_id = ?
+                   AND minute <= toDateTime(?)
+                 ORDER BY minute DESC
+                 LIMIT 1",
+                        self.table("equity_per_minute")
+                    )
+                    .as_str(),
                 )
                 .bind(user_id)
                 .bind(ts_secs)
@@ -413,11 +434,17 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
         let balance_7d_ago = self.fetch_equity_at(user_id, cutoff_7d).await?;
 
         // cashflow over last 7d (deposits - withdrawals), already in the same quote
+        let cashflow_7d_query = format!(
+            "SELECT toString(toDecimal128(coalesce(sum(cashflow_quote), 0), 12)) AS cf
+                 FROM {}
+                 WHERE user_id = ?
+                   AND minute > toDateTime(?)
+                   AND minute <= toDateTime(?)",
+            self.table("user_cashflow_per_minute")
+        );
         let cashflow_7d_str: String = self
             .ch
-            .query(
-                "SELECT toString(toDecimal128(coalesce(sum(cashflow_quote), 0), 12)) AS cf\n                 FROM trading.user_cashflow_per_minute\n                 WHERE user_id = ?\n                   AND minute > toDateTime(?)\n                   AND minute <= toDateTime(?)",
-            )
+            .query(cashflow_7d_query.as_str())
             .bind(user_id)
             .bind(cutoff_7d)
             .bind(now_ts_secs)
@@ -427,11 +454,18 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
         let cashflow_7d = parse_decimal(cashflow_7d_str)?;
 
         // volume_24h
+        let volume_query = format!(
+            "SELECT
+                     toString(toDecimal128(coalesce(sum(CAST(price * size_base AS Decimal(38, 12))), 0), 12)) AS vol
+                 FROM {}
+                 WHERE ts >= toDateTime(?)
+                   AND ts <= toDateTime(?)
+                   AND (maker_user_id = ? OR taker_user_id = ?)",
+            self.table("trade_events")
+        );
         let volume_24h_str: String = self
             .ch
-            .query(
-                "SELECT\n                     toString(toDecimal128(coalesce(sum(CAST(price * size_base AS Decimal(38, 12))), 0), 12)) AS vol\n                 FROM trading.trade_events\n                 WHERE ts >= toDateTime(?)\n                   AND ts <= toDateTime(?)\n                   AND (maker_user_id = ? OR taker_user_id = ?)",
-            )
+            .query(volume_query.as_str())
             .bind(cutoff_24h)
             .bind(now_ts_secs)
             .bind(user_id)
@@ -442,11 +476,28 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
         let volume_24h = parse_decimal(volume_24h_str)?;
 
         // max_drawdown_1m
+        let max_drawdown_query = format!(
+            "WITH s AS (
+                   SELECT minute, toDecimal128(coalesce(equity_quote, 0), 12) AS v
+                   FROM {equity}
+                   WHERE user_id = ?
+                     AND minute >= toDateTime(?)
+                     AND minute <= toDateTime(?)
+                   ORDER BY minute
+                 ),
+                 r AS (
+                   SELECT
+                       minute,
+                       v,
+                       max(v) OVER (ORDER BY minute ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS peak
+                   FROM s
+                 )
+                 SELECT toString(toDecimal128(coalesce(max(peak - v), 0), 12)) AS max_drawdown FROM r",
+            equity = self.table("equity_per_minute")
+        );
         let max_drawdown = self
             .ch
-            .query(
-                "WITH s AS (\n                   SELECT minute, toDecimal128(coalesce(equity_quote, 0), 12) AS v\n                   FROM trading.equity_per_minute\n                   WHERE user_id = ?\n                     AND minute >= toDateTime(?)\n                     AND minute <= toDateTime(?)\n                   ORDER BY minute\n                 ),\n                 r AS (\n                   SELECT minute, v,\n                          runningMax(v) OVER (ORDER BY minute ROWS UNBOUNDED PRECEDING) AS peak\n                   FROM s\n                 )\n                 SELECT toString(toDecimal128(coalesce(max(peak - v), 0), 12)) AS max_drawdown FROM r",
-            )
+            .query(max_drawdown_query.as_str())
             .bind(user_id)
             .bind(cutoff_1m)
             .bind(now_ts_secs)
@@ -488,17 +539,18 @@ impl ClickHousePortfolioRepository {
         let bucket_expr = resolution.bucket_expression();
 
         let equity_sql = format!(
-            "SELECT toUnixTimestamp(bucket) AS ts, toString(anyLast(equity_quote)) AS eq \
+            "SELECT CAST(toUnixTimestamp(bucket) AS Int64) AS ts, toString(anyLast(equity_quote)) AS eq \
              FROM ( \
                 SELECT {bucket} AS bucket, minute, equity_quote \
-                FROM trading.equity_per_minute \
+                FROM {equity_table} \
                 WHERE user_id = ? \
                   AND minute >= toDateTime(?) \
                   AND minute <= toDateTime(?) \
              ) \
              GROUP BY bucket \
              ORDER BY bucket",
-            bucket = bucket_expr
+            bucket = bucket_expr,
+            equity_table = self.table("equity_per_minute")
         );
 
         let equity_rows: Vec<(i64, String)> = self
@@ -512,17 +564,18 @@ impl ClickHousePortfolioRepository {
             .map_err(|e| TradingError::Database(e.to_string()))?;
 
         let cashflow_sql = format!(
-            "SELECT toUnixTimestamp(bucket) AS ts, toString(sum(cashflow_quote)) AS cf \
+            "SELECT CAST(toUnixTimestamp(bucket) AS Int64) AS ts, toString(sum(cashflow_quote)) AS cf \
              FROM ( \
                 SELECT {bucket} AS bucket, cashflow_quote \
-                FROM trading.user_cashflow_per_minute \
+                FROM {cashflow_table} \
                 WHERE user_id = ? \
                   AND minute > toDateTime(?) \
                   AND minute <= toDateTime(?) \
              ) \
              GROUP BY bucket \
              ORDER BY bucket",
-            bucket = bucket_expr
+            bucket = bucket_expr,
+            cashflow_table = self.table("user_cashflow_per_minute")
         );
 
         let cashflow_rows: Vec<(i64, String)> = self
