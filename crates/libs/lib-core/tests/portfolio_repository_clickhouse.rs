@@ -1,13 +1,15 @@
 use std::str::FromStr;
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{Datelike, Duration as ChronoDuration, NaiveDate, Utc};
 use clickhouse::Client as ClickHouseClient;
 use lib_core::repository::repository::{ClickHousePortfolioRepository, PortfolioRepository};
 use lib_core::{PnlResolution, PortfolioMetrics};
 use rust_decimal::Decimal;
 use tokio::time::sleep;
 use uuid::Uuid;
+use tracing::info;
+use std::sync::Once;
 
 const DEFAULT_URL: &str = "http://localhost:8123";
 const DEFAULT_USER: &str = "default";
@@ -16,6 +18,13 @@ const BASE_ASSET_ID: u16 = 2;
 
 fn market_id(base: u16, quote: u16) -> u32 {
     ((base as u32) << 16) | quote as u32
+}
+
+#[derive(Debug, Clone)]
+struct SeedContext {
+    now: i64,
+    equity_points: Vec<(i64, Decimal)>,
+    cashflow_points: Vec<(i64, Decimal)>,
 }
 
 async fn ensure_clickhouse_available(client: &ClickHouseClient) -> Option<()> {
@@ -372,7 +381,7 @@ async fn apply_schema(
 async fn seed_data(
     client: &ClickHouseClient,
     database: &str,
-) -> Result<(), clickhouse::error::Error> {
+) -> Result<SeedContext, clickhouse::error::Error> {
     const DAY: i64 = 24 * 60 * 60;
     const HOUR: i64 = 60 * 60;
 
@@ -478,7 +487,19 @@ async fn seed_data(
     client.query("SYSTEM FLUSH LOGS").execute().await?;
     sleep(Duration::from_millis(200)).await;
 
-    Ok(())
+    Ok(SeedContext {
+        now: aligned_now,
+        equity_points: vec![
+            (baseline, Decimal::from_str("1000").unwrap()),
+            (three_days_ago, Decimal::from_str("1200").unwrap()),
+            (one_day_ago, Decimal::from_str("1400").unwrap()),
+            (aligned_now, Decimal::from_str("1600").unwrap()),
+        ],
+        cashflow_points: vec![
+            (three_days_ago, Decimal::from_str("200").unwrap()),
+            (now_minus_hour, Decimal::from_str("-50").unwrap()),
+        ],
+    })
 }
 
 fn assert_metrics(metrics: &PortfolioMetrics) {
@@ -500,8 +521,178 @@ fn assert_metrics(metrics: &PortfolioMetrics) {
     );
 }
 
+static INIT_TRACING: Once = Once::new();
+
+fn init_tracing() {
+    INIT_TRACING.call_once(|| {
+        if tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .try_init()
+            .is_err()
+        {
+            // ignore double init during concurrent tests
+        }
+    });
+}
+
+fn window_start(now: i64, resolution: PnlResolution) -> i64 {
+    let span = match resolution {
+        PnlResolution::Day => 24 * 60 * 60,
+        PnlResolution::Week => 7 * 24 * 60 * 60,
+        PnlResolution::Month => 30 * 24 * 60 * 60,
+        PnlResolution::Year => 365 * 24 * 60 * 60,
+    };
+    now - span
+}
+
+fn bucket_floor(resolution: PnlResolution, ts: i64) -> i64 {
+    use chrono::Timelike;
+
+    let Some(dt) = chrono::DateTime::<Utc>::from_timestamp(ts, 0) else {
+        return ts;
+    };
+    let date = dt.date_naive();
+
+    match resolution {
+        PnlResolution::Day => dt
+            .with_minute(0)
+            .and_then(|d| d.with_second(0))
+            .and_then(|d| d.with_nanosecond(0))
+            .unwrap_or(dt)
+            .timestamp(),
+        PnlResolution::Week => {
+            let weekday = date.weekday().num_days_from_monday() as i64;
+            let start_date = date - ChronoDuration::days(weekday);
+            start_date
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp()
+        }
+        PnlResolution::Month => {
+            let floored = NaiveDate::from_ymd_opt(date.year(), date.month(), 1).unwrap_or(date);
+            floored
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp()
+        }
+        PnlResolution::Year => {
+            let floored = NaiveDate::from_ymd_opt(date.year(), 1, 1).unwrap_or(date);
+            floored
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp()
+        }
+    }
+}
+
+fn bucket_key(resolution: PnlResolution, ts: i64) -> i64 {
+    use chrono::Timelike;
+
+    let Some(dt) = chrono::DateTime::<Utc>::from_timestamp(ts, 0) else {
+        return ts;
+    };
+    match resolution {
+        PnlResolution::Day => dt
+            .with_minute(0)
+            .and_then(|d| d.with_second(0))
+            .and_then(|d| d.with_nanosecond(0))
+            .unwrap_or(dt)
+            .timestamp(),
+        PnlResolution::Week | PnlResolution::Month => dt
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp(),
+        PnlResolution::Year => {
+            let date = dt.date_naive();
+            NaiveDate::from_ymd_opt(date.year(), date.month(), 1)
+                .unwrap_or(date)
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp()
+        }
+    }
+}
+
+fn expected_series(
+    resolution: PnlResolution,
+    now: i64,
+    ctx: &SeedContext,
+) -> Vec<(i64, Decimal)> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let start = window_start(now, resolution);
+
+    let baseline = ctx
+        .equity_points
+        .iter()
+        .filter(|(ts, _)| *ts <= start)
+        .max_by_key(|(ts, _)| *ts)
+        .map(|(_, value)| *value)
+        .unwrap_or(Decimal::ZERO);
+
+    let mut equity_map = BTreeMap::new();
+    for &(ts, value) in &ctx.equity_points {
+        if ts >= start && ts <= now {
+            equity_map.insert(bucket_key(resolution, ts), value);
+        }
+    }
+
+    let mut cashflow_map = BTreeMap::new();
+    for &(ts, value) in &ctx.cashflow_points {
+        if ts > start && ts <= now {
+            let bucket = bucket_key(resolution, ts);
+            cashflow_map
+                .entry(bucket)
+                .and_modify(|sum| *sum += value)
+                .or_insert(value);
+        }
+    }
+
+    let mut cumulative_cashflow = Decimal::ZERO;
+    let mut cashflow_cumulative_map = BTreeMap::new();
+    for (ts, value) in &cashflow_map {
+        cumulative_cashflow += *value;
+        cashflow_cumulative_map.insert(*ts, cumulative_cashflow);
+    }
+
+    let mut bucket_keys = BTreeSet::new();
+    bucket_keys.extend(equity_map.keys().copied());
+    bucket_keys.extend(cashflow_map.keys().copied());
+    bucket_keys.insert(bucket_floor(resolution, start));
+    bucket_keys.insert(bucket_floor(resolution, now));
+    bucket_keys.insert(start);
+    bucket_keys.insert(now);
+
+    let mut last_equity = baseline;
+    let mut result = Vec::with_capacity(bucket_keys.len());
+
+    for ts in bucket_keys {
+        if let Some(value) = equity_map.get(&ts) {
+            last_equity = *value;
+        }
+        let cashflow_up_to_ts = cashflow_cumulative_map
+            .range(..=ts)
+            .next_back()
+            .map(|(_, value)| *value)
+            .unwrap_or(Decimal::ZERO);
+        let pnl = last_equity - baseline - cashflow_up_to_ts;
+        result.push((ts, pnl));
+    }
+
+    result.sort_by_key(|(ts, _)| *ts);
+    result
+}
+
 #[tokio::test]
 async fn clickhouse_portfolio_repository_integration() {
+    init_tracing();
+
     let url = std::env::var("TEST_CLICKHOUSE_URL").unwrap_or_else(|_| DEFAULT_URL.to_string());
     let user = std::env::var("TEST_CLICKHOUSE_USER").unwrap_or_else(|_| DEFAULT_USER.to_string());
     let password = std::env::var("TEST_CLICKHOUSE_PASSWORD").unwrap_or_default();
@@ -531,20 +722,95 @@ async fn clickhouse_portfolio_repository_integration() {
     apply_schema(&db_client, &database_name)
         .await
         .expect("failed to apply schema");
-    seed_data(&db_client, &database_name)
+    let seed_ctx = seed_data(&db_client, &database_name)
         .await
         .expect("failed to seed test data");
 
     let repo = ClickHousePortfolioRepository::new_with_schema(db_client, &database_name);
     let user_id = 42;
-    let now_ts = Utc::now().timestamp();
+    let now_ts = seed_ctx.now;
 
-    let metrics = repo
+    // Weekly summary assertions
+    let metrics_week = repo
         .get_portfolio(user_id, now_ts, PnlResolution::Week)
         .await
         .expect("portfolio query failed");
 
-    assert_metrics(&metrics);
+    info!(?metrics_week, "weekly portfolio metrics");
+    assert_metrics(&metrics_week);
+
+    let expected_day_pnl = Decimal::from_str("250").unwrap();
+    let expected_week_series = expected_series(PnlResolution::Week, now_ts, &seed_ctx);
+    let actual_week_series: Vec<(i64, Decimal)> = metrics_week
+        .pnl_series
+        .iter()
+        .map(|point| (point.timestamp, point.pnl))
+        .collect();
+    assert_eq!(
+        actual_week_series,
+        expected_week_series,
+        "weekly pnl series must match expected accounting pnl"
+    );
+    let expected_month_pnl = Decimal::from_str("1450").unwrap();
+
+    // Daily series should produce hourly buckets (> 1 point) and align with accounting PnL
+    let metrics_day = repo
+        .get_portfolio(user_id, now_ts, PnlResolution::Day)
+        .await
+        .expect("day portfolio query failed");
+    let expected_day_series = expected_series(PnlResolution::Day, now_ts, &seed_ctx);
+    info!(points = metrics_day.pnl_series.len(), "daily pnl series points");
+    assert!(
+        metrics_day.pnl_series.len() >= 2,
+        "expect at least two hourly pnl points for 1d resolution"
+    );
+    let actual_day_series: Vec<(i64, Decimal)> = metrics_day
+        .pnl_series
+        .iter()
+        .map(|point| (point.timestamp, point.pnl))
+        .collect();
+    assert_eq!(
+        actual_day_series,
+        expected_day_series,
+        "daily pnl series must match expected accounting pnl"
+    );
+    assert_eq!(
+        metrics_day.pnl_series.last().unwrap().pnl,
+        expected_day_pnl,
+        "daily last point should match expected daily accounting pnl"
+    );
+
+    // Month resolution should include baseline and final points
+    let metrics_month = repo
+        .get_portfolio(user_id, now_ts, PnlResolution::Month)
+        .await
+        .expect("month portfolio query failed");
+    let expected_month_series = expected_series(PnlResolution::Month, now_ts, &seed_ctx);
+    info!(
+        baseline_pnl = ?metrics_month.pnl_series.first().map(|p| p.pnl),
+        final_pnl = ?metrics_month.pnl_series.last().map(|p| p.pnl),
+        "monthly pnl endpoints"
+    );
+    let actual_month_series: Vec<(i64, Decimal)> = metrics_month
+        .pnl_series
+        .iter()
+        .map(|point| (point.timestamp, point.pnl))
+        .collect();
+    assert_eq!(
+        actual_month_series,
+        expected_month_series,
+        "monthly pnl series must match expected accounting pnl"
+    );
+    assert_eq!(
+        metrics_month.pnl_series.last().unwrap().pnl,
+        expected_month_pnl,
+        "monthly final point should equal expected monthly accounting pnl"
+    );
+    assert_eq!(
+        metrics_month.pnl_series.first().unwrap().pnl,
+        Decimal::ZERO,
+        "first monthly point should be zero baseline pnl"
+    );
 
     let drop_db_stmt = format!("DROP DATABASE IF EXISTS {}", database_name);
     if let Err(err) = base_client.query(&drop_db_stmt).execute().await {
@@ -554,4 +820,3 @@ async fn clickhouse_portfolio_repository_integration() {
         );
     }
 }
-

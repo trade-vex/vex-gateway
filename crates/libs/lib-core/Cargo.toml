@@ -28,3 +28,4 @@ rust_decimal = "1"
 actix-web = "4.4"
 serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }
+tracing-subscriber = { workspace = true }
