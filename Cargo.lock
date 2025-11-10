@@ -759,7 +759,7 @@ dependencies = [
 [[package]]
 name = "common"
 version = "0.1.0"
-source = "git+https://github.com/trade-vex/vex-core?rev=ab476e86#ab476e86aa51c569017056e5c529a39573fff627"
+source = "git+https://github.com/trade-vex/vex-core?rev=56ee430#56ee430dd8d1bf358d37fc7643f40a12239971ad"
 dependencies = [
  "ahash 0.8.12",
  "borsh",
@@ -905,42 +905,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "crossbeam"
-version = "0.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1137cd7e7fc0fb5d3c5a8678be38ec56e819125d8d7907411fe24ccb943faca8"
-dependencies = [
- "crossbeam-channel",
- "crossbeam-deque",
- "crossbeam-epoch",
- "crossbeam-queue",
- "crossbeam-utils",
-]
-
-[[package]]
 name = "crossbeam-channel"
 version = "0.5.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "82b8f8f868b36967f9606790d1903570de9ceaf870a7bf9fbbd3016d636a2cb2"
-dependencies = [
- "crossbeam-utils",
-]
-
-[[package]]
-name = "crossbeam-deque"
-version = "0.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dd111b7b7f7d55b72c0a6ae361660ee5853c9af73f70c3c2ef6858b950e2e51"
-dependencies = [
- "crossbeam-epoch",
- "crossbeam-utils",
-]
-
-[[package]]
-name = "crossbeam-epoch"
-version = "0.9.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -3780,6 +3748,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusteron-archive"
+version = "0.1.154"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a364647001114613e3822620c54e034abb68e3f9349276f3aaffc79d98ff6347"
+dependencies = [
+ "bindgen",
+ "cmake",
+ "dunce",
+ "flate2",
+ "log",
+ "pkg-config",
+ "proc-macro2",
+ "regex",
+ "reqwest 0.12.23",
+ "rusteron-code-gen",
+ "tar",
+ "walkdir",
+]
+
+[[package]]
 name = "rusteron-client"
 version = "0.1.154"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3939,7 +3927,7 @@ dependencies = [
 [[package]]
 name = "sbe_order"
 version = "0.1.0"
-source = "git+https://github.com/trade-vex/vex-core?rev=ab476e86#ab476e86aa51c569017056e5c529a39573fff627"
+source = "git+https://github.com/trade-vex/vex-core?rev=56ee430#56ee430dd8d1bf358d37fc7643f40a12239971ad"
 
 [[package]]
 name = "schannel"
@@ -5396,7 +5384,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vex-config"
 version = "0.1.0"
-source = "git+https://github.com/trade-vex/vex-core?rev=ab476e86#ab476e86aa51c569017056e5c529a39573fff627"
+source = "git+https://github.com/trade-vex/vex-core?rev=56ee430#56ee430dd8d1bf358d37fc7643f40a12239971ad"
 dependencies = [
  "common",
  "config",
@@ -5412,14 +5400,13 @@ dependencies = [
 [[package]]
 name = "vex-networking"
 version = "0.1.0"
-source = "git+https://github.com/trade-vex/vex-core?rev=ab476e86#ab476e86aa51c569017056e5c529a39573fff627"
+source = "git+https://github.com/trade-vex/vex-core?rev=56ee430#56ee430dd8d1bf358d37fc7643f40a12239971ad"
 dependencies = [
+ "arc-swap",
  "common",
- "crossbeam",
- "dashmap 6.1.0",
  "disruptor",
  "rand 0.8.5",
- "rusteron-client",
+ "rusteron-archive",
  "rusteron-media-driver",
  "thiserror 2.0.17",
  "tracing",
