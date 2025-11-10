@@ -2,7 +2,7 @@
 
 use actix_web::{HttpResponse, Result, web};
 use lib_core::{PnlResolution, PortfolioRepository};
-use lib_core::dto::trading::PortfolioOverviewResponse;
+use lib_core::dto::trading::{BalanceChartResponse, PortfolioOverviewResponse};
 use lib_core::{
     BalancesListResponse, OrderHistoryResponse, OrderResponse, OrderStore,
     OrdersHistoryListResponse, OrdersListResponse, UserBalanceResponse, UserBalanceStore,
@@ -368,6 +368,82 @@ pub async fn get_portfolio_overview(
         metrics.pnl_series,
         metrics.pnl_resolution,
     );
+
+    Ok(HttpResponse::Ok().json(response))
+}
+
+/// Get balance chart
+///
+/// Returns account balance over time with different resolutions.
+/// Uses ClickHouse equity_per_minute table to compute balance series.
+///
+/// # Endpoint
+/// `GET /api/user/balance-chart?resolution={resolution}`
+///
+/// # Query Parameters
+/// - `resolution` (optional): Time resolution for the chart (1d, 1w, 1m, 1y). Defaults to 1d.
+///
+/// # Authentication
+/// Requires valid JWT token in Authorization header: `Bearer <token>`
+///
+/// # Data Sources (ClickHouse)
+/// - `trading.equity_per_minute(user_id, minute, equity_quote)`
+///   Per-minute equity valued in configured quote asset.
+///
+/// # Response
+/// Returns [`BalanceChartResponse`] containing balance time series.
+///
+/// # Example Request
+/// ```bash
+/// curl -X GET "http://localhost:8080/api/user/balance-chart?resolution=1w" \
+///   -H "Authorization: Bearer <jwt_token>"
+/// ```
+///
+/// # Example Success Response (200 OK)
+/// ```json
+/// {
+///   "balance_series": [
+///     {
+///       "timestamp": 1697452800,
+///       "balance": "10500.50"
+///     },
+///     {
+///       "timestamp": 1697539200,
+///       "balance": "10750.25"
+///     }
+///   ],
+///   "resolution": "1w"
+/// }
+/// ```
+#[derive(Debug, Deserialize)]
+pub struct BalanceChartQuery {
+    pub resolution: Option<String>,
+}
+
+pub async fn get_balance_chart(
+    user: AuthenticatedUserId,
+    query: web::Query<BalanceChartQuery>,
+    portfolio_repo: web::Data<Arc<dyn PortfolioRepository>>,
+) -> Result<HttpResponse> {
+    let raw = user.0.as_u128();
+    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
+    let now_secs = chrono::Utc::now().timestamp();
+
+    let resolution = query
+        .resolution
+        .as_deref()
+        .and_then(PnlResolution::from_query)
+        .unwrap_or_default();
+
+    let balance_series = portfolio_repo
+        .get_balance_chart(user_id, now_secs, resolution)
+        .await
+        .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
+
+    let response = BalanceChartResponse {
+        balance_series,
+        resolution: resolution.as_str().to_string(),
+    };
 
     Ok(HttpResponse::Ok().json(response))
 }

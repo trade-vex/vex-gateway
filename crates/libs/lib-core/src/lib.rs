@@ -5,12 +5,12 @@ pub mod model;
 pub mod repository;
 
 pub use dto::trading::{
-    BalancesListResponse, OrderHistoryResponse, OrderResponse, OrdersHistoryListResponse,
+    BalanceChartResponse, BalancesListResponse, OrderHistoryResponse, OrderResponse, OrdersHistoryListResponse,
     OrdersListResponse, Side, UserBalanceResponse,
 };
 
 pub use repository::repository::{
-    PnlPoint, PnlResolution, PortfolioMetrics, PortfolioRepository, PostgresTradingRepository,
+    BalancePoint, PnlPoint, PnlResolution, PortfolioMetrics, PortfolioRepository, PostgresTradingRepository,
     Result as TradingResult, TradingError, TradingRepository,
 };
 

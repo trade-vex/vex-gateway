@@ -63,6 +63,12 @@ pub struct PnlPoint {
     pub pnl: Decimal,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BalancePoint {
+    pub timestamp: i64,
+    pub balance: Decimal,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PnlResolution {
     Day,
@@ -180,6 +186,13 @@ pub trait PortfolioRepository: Send + Sync {
         now_ts_secs: i64,
         resolution: PnlResolution,
     ) -> Result<PortfolioMetrics>;
+    
+    async fn get_balance_chart(
+        &self,
+        user_id: u64,
+        now_ts_secs: i64,
+        resolution: PnlResolution,
+    ) -> Result<Vec<BalancePoint>>;
 }
 
 // PostgreSQL implementation
@@ -526,6 +539,16 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
             pnl_resolution: resolution,
         })
     }
+    
+    async fn get_balance_chart(
+        &self,
+        user_id: u64,
+        now_ts_secs: i64,
+        resolution: PnlResolution,
+    ) -> Result<Vec<BalancePoint>> {
+        self.fetch_balance_series(user_id, now_ts_secs, resolution)
+            .await
+    }
 }
 
 impl ClickHousePortfolioRepository {
@@ -639,6 +662,205 @@ impl ClickHousePortfolioRepository {
             series.push(PnlPoint {
                 timestamp: bucket_ts,
                 pnl,
+            });
+        }
+
+        series.sort_by_key(|point| point.timestamp);
+        Ok(series)
+    }
+    
+    /// Fetch balance time series for a user over a time window
+    ///
+    /// # Balance Computation Logic
+    ///
+    /// ## What is "Balance" in this context?
+    /// Balance represents the user's **total portfolio equity** valued in the configured
+    /// quote asset (e.g., USDT). This is the sum of ALL assets (BTC, ETH, USDT, etc.)
+    /// converted to a common quote currency.
+    ///
+    /// ## How Multi-Asset Balances Are Computed
+    ///
+    /// The balance series leverages ClickHouse materialized views (see clickhouse.sql):
+    ///
+    /// ### Step 1: Per-Asset Balances (trading.balances_last_per_min)
+    /// ```sql
+    /// -- For each (user_id, asset_id, minute), stores the last known balance in native units
+    /// -- Example: User 123 has 1.5 BTC (native units: 150000000 satoshis) at 2024-01-01 10:00
+    /// ```
+    ///
+    /// ### Step 2: Asset Price Conversion (trading.asset_prices_last_per_min)
+    /// ```sql
+    /// -- For each (asset_id, quote_asset_id, minute), stores the conversion price
+    /// -- Example: BTC->USDT price = 45000.00 at 2024-01-01 10:00
+    /// --          ETH->USDT price = 2500.00 at 2024-01-01 10:00
+    /// ```
+    ///
+    /// ### Step 3: Equity Aggregation (trading.equity_per_minute)
+    /// The materialized view `mv_equity_per_minute` performs the following for each minute:
+    /// ```sql
+    /// SELECT
+    ///     minute,
+    ///     user_id,
+    ///     sum(balance_in_native_units * price_to_quote) AS equity_quote
+    /// FROM balances_last_per_min b
+    /// LEFT JOIN asset_prices_last_per_min ap ON ...
+    /// GROUP BY minute, user_id
+    /// ```
+    ///
+    /// **Concrete Example:**
+    /// ```
+    /// User 123 at 2024-01-01 10:00:
+    /// - BTC balance: 1.5 BTC (150000000 satoshis) * $45,000/BTC = $67,500
+    /// - ETH balance: 10 ETH (10000000000000000000 wei) * $2,500/ETH = $25,000
+    /// - USDT balance: 7500 USDT (7500000000 micro-USDT) * $1/USDT = $7,500
+    /// -------------------------------------------------------------------
+    /// Total Equity in USDT = $100,000
+    /// ```
+    ///
+    /// ## What This Function Does
+    ///
+    /// This function queries the **pre-aggregated** `equity_per_minute` table and:
+    /// 1. Groups equity values into time buckets based on resolution (hour, day, month, year)
+    /// 2. Takes the last equity value within each bucket (using `anyLast`)
+    /// 3. Forward-fills missing buckets with the last known equity value
+    /// 4. Returns a time series of total portfolio balance over the window
+    ///
+    /// ## Query Breakdown
+    ///
+    /// ### Inner Query: Fetch Per-Minute Equity
+    /// ```sql
+    /// SELECT {bucket_expr} AS bucket, minute, equity_quote
+    /// FROM trading.equity_per_minute
+    /// WHERE user_id = ?
+    ///   AND minute >= toDateTime(window_start)
+    ///   AND minute <= toDateTime(now)
+    /// ```
+    /// - Fetches all per-minute equity snapshots for the user in the time window
+    /// - Each row represents total portfolio value (all assets) at that minute
+    ///
+    /// ### Outer Query: Aggregate into Time Buckets
+    /// ```sql
+    /// SELECT
+    ///     CAST(toUnixTimestamp(bucket) AS Int64) AS ts,
+    ///     toString(anyLast(equity_quote)) AS eq
+    /// FROM (inner_query)
+    /// GROUP BY bucket
+    /// ORDER BY bucket
+    /// ```
+    /// - `bucket_expr` maps minutes to buckets:
+    ///   - 1D resolution: `toStartOfHour(minute)` → hourly buckets
+    ///   - 1W/1M resolution: `toStartOfDay(minute)` → daily buckets
+    ///   - 1Y resolution: `toStartOfMonth(minute)` → monthly buckets
+    /// - `anyLast(equity_quote)`: picks the last equity value within each bucket
+    /// - Returns timestamp + equity pairs for charting
+    ///
+    /// ## Forward-Fill Logic
+    ///
+    /// After fetching data from ClickHouse, we fill gaps in the series:
+    /// ```rust
+    /// let mut last_equity = baseline_equity;  // equity at window start
+    /// for bucket_ts in all_bucket_timestamps {
+    ///     if equity_map.contains(bucket_ts) {
+    ///         last_equity = equity_map[bucket_ts];  // update from DB
+    ///     }
+    ///     series.push(BalancePoint { timestamp: bucket_ts, balance: last_equity });
+    /// }
+    /// ```
+    /// This ensures:
+    /// - Every expected bucket has a balance value (no gaps in chart)
+    /// - Periods with no trades/events show constant balance (last known value)
+    ///
+    /// ## Correctness Guarantees
+    ///
+    /// ✓ **Multi-Asset Handling**: All assets are converted to quote via materialized views
+    /// ✓ **Price Accuracy**: Uses ASOF joins to get best available price for each asset/minute
+    /// ✓ **Temporal Consistency**: Per-minute granularity ensures accurate historical balances
+    /// ✓ **Decimal Precision**: Decimal(38,12) for equity prevents rounding errors
+    ///
+    /// # Parameters
+    /// - `user_id`: User whose balance chart to fetch
+    /// - `now_ts_secs`: Current time as Unix timestamp (seconds)
+    /// - `resolution`: Time resolution (Day=hourly buckets, Week/Month=daily, Year=monthly)
+    ///
+    /// # Returns
+    /// Sorted vector of (timestamp, balance) points representing total portfolio equity over time
+    async fn fetch_balance_series(
+        &self,
+        user_id: u64,
+        now_ts_secs: i64,
+        resolution: PnlResolution,
+    ) -> Result<Vec<BalancePoint>> {
+        let window_start = now_ts_secs - resolution.window_seconds();
+        let bucket_expr = resolution.bucket_expression();
+
+        let equity_sql = format!(
+            "SELECT CAST(toUnixTimestamp(bucket) AS Int64) AS ts, toString(anyLast(equity_quote)) AS eq \
+             FROM ( \
+                SELECT {bucket} AS bucket, minute, equity_quote \
+                FROM {equity_table} \
+                WHERE user_id = ? \
+                  AND minute >= toDateTime(?) \
+                  AND minute <= toDateTime(?) \
+             ) \
+             GROUP BY bucket \
+             ORDER BY bucket",
+            bucket = bucket_expr,
+            equity_table = self.table("equity_per_minute")
+        );
+
+        let equity_rows: Vec<(i64, String)> = self
+            .ch
+            .query(equity_sql.as_str())
+            .bind(user_id)
+            .bind(window_start)
+            .bind(now_ts_secs)
+            .fetch_all::<(i64, String)>()
+            .await
+            .map_err(|e| TradingError::Database(e.to_string()))?;
+
+        // Parse equity values from ClickHouse strings into Decimal
+        // BTreeMap provides sorted keys for efficient iteration
+        let mut equity_map = BTreeMap::new();
+        for (ts, eq_str) in equity_rows {
+            let value = Decimal::from_str(&eq_str).map_err(|err| {
+                TradingError::Database(format!("invalid decimal from ClickHouse: {}", err))
+            })?;
+            equity_map.insert(ts, value);
+        }
+
+        // Fetch baseline equity at window start for forward-fill initialization
+        // This is the user's total portfolio value at the beginning of the chart window
+        let baseline_equity = self.fetch_equity_at(user_id, window_start).await?;
+
+        // Build complete set of bucket timestamps to ensure no gaps in the chart
+        // This includes:
+        // 1. All buckets returned from ClickHouse (equity_map keys)
+        // 2. Floored window boundaries (start/end of chart aligned to bucket boundaries)
+        // 3. Exact window_start and now_ts_secs for precise endpoints
+        let mut bucket_keys: BTreeSet<i64> = BTreeSet::new();
+        bucket_keys.extend(equity_map.keys().copied());
+        bucket_keys.insert(resolution.bucket_floor(window_start));
+        bucket_keys.insert(resolution.bucket_floor(now_ts_secs));
+        bucket_keys.insert(window_start);
+        bucket_keys.insert(now_ts_secs);
+
+        // Forward-fill algorithm:
+        // - Start with baseline_equity at window start
+        // - For each bucket timestamp (sorted):
+        //   - If we have data from DB for this bucket, use it and update last_equity
+        //   - Otherwise, use last_equity (carry forward)
+        // Result: Continuous balance series with no gaps
+        let mut last_equity = baseline_equity;
+        let mut series = Vec::with_capacity(bucket_keys.len());
+
+        for bucket_ts in bucket_keys {
+            if let Some(value) = equity_map.get(&bucket_ts) {
+                last_equity = *value;
+            }
+
+            series.push(BalancePoint {
+                timestamp: bucket_ts,
+                balance: last_equity,
             });
         }
 

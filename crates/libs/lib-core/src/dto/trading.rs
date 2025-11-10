@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 // Re-export models from separate modules
 pub use crate::model::orders::Model as OrderModel;
 pub use crate::model::user_balances::Model as UserBalanceModel;
-use crate::{PnlPoint, PnlResolution};
+use crate::{BalancePoint, PnlPoint, PnlResolution};
 
 // Simple types as specified
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -97,6 +97,12 @@ pub struct PortfolioOverviewResponse {
     pub max_drawdown_1m: Decimal,
     pub pnl_series: Vec<PnlPoint>,
     pub pnl_resolution: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BalanceChartResponse {
+    pub balance_series: Vec<BalancePoint>,
+    pub resolution: String,
 }
 
 // Conversion implementations
