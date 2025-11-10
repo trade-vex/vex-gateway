@@ -193,6 +193,16 @@ impl OrderStore {
             match repo.get_open_orders(user_id).await {
                 Ok(orders) => {
                     debug!("Database hit for user order history: {}", user_id);
+                    
+                    // Populate cache with data from database (cache-aside pattern)
+                    if self.config.enabled && !orders.is_empty() {
+                        if let Some(cache) = &self.cache {
+                            if let Err(e) = self.write_orders_to_cache(user_id, &orders, cache).await {
+                                warn!("Failed to write orders to cache for user {}: {}", user_id, e);
+                            }
+                        }
+                    }
+                    
                     return Ok(orders);
                 }
                 Err(e) => {
@@ -295,6 +305,16 @@ impl OrderStore {
             match repo.get_open_orders(user_id).await {
                 Ok(orders) => {
                     debug!("Database hit for user orders: {}", user_id);
+                    
+                    // Populate cache with data from database (cache-aside pattern)
+                    if self.config.enabled && !orders.is_empty() {
+                        if let Some(cache) = &self.cache {
+                            if let Err(e) = self.write_orders_to_cache(user_id, &orders, cache).await {
+                                warn!("Failed to write orders to cache for user {}: {}", user_id, e);
+                            }
+                        }
+                    }
+                    
                     return Ok(orders);
                 }
                 Err(e) => {
@@ -376,6 +396,59 @@ impl OrderStore {
                 }
             }
         }
+    }
+
+    /// Write orders to Redis cache (cache-aside pattern)
+    /// Called when data is fetched from database to populate cache for future requests
+    async fn write_orders_to_cache(
+        &self,
+        user_id: u64,
+        orders: &[OrderModel],
+        cache: &RedisDb,
+    ) -> Result<(), TradingError> {
+        let user_id_i64 = user_id as i64;
+        let set_key = format!("user:{}:orders", user_id_i64);
+
+        for order in orders {
+            let order_id = order.order_order_id;
+            let order_key = format!("order:{}", order_id);
+
+            // Create hash map for order data
+            let mut order_hash = HashMap::new();
+            order_hash.insert("order_id".to_string(), order_id.to_string());
+            order_hash.insert("user_id".to_string(), order.order_user_id.to_string());
+            order_hash.insert("price".to_string(), order.order_price.to_string());
+            order_hash.insert("size".to_string(), order.order_size.to_string());
+            order_hash.insert("side".to_string(), order.order_side.clone());
+            order_hash.insert("timestamp".to_string(), order.order_timestamp.to_string());
+            order_hash.insert("market_id".to_string(), order.market_id.to_string());
+            // Status defaults to "Processing" for open orders
+            order_hash.insert("status".to_string(), "Processing".to_string());
+
+            // Write order hash
+            if let Err(e) = cache.hset_string(&order_key, &order_hash).await {
+                warn!("Failed to write order {} to cache: {}", order_id, e);
+                continue;
+            }
+
+            // Set TTL on order hash
+            if let Err(e) = cache.expire(&order_key, self.config.ttl.as_secs()).await {
+                warn!("Failed to set TTL on order {}: {}", order_id, e);
+            }
+
+            // Add order ID to user's order set
+            if let Err(e) = cache.sadd_string(&set_key, &order_id.to_string()).await {
+                warn!("Failed to add order {} to user set: {}", order_id, e);
+            }
+        }
+
+        // Set TTL on user orders set
+        if let Err(e) = cache.expire(&set_key, self.config.ttl.as_secs()).await {
+            warn!("Failed to set TTL on user orders set: {}", e);
+        }
+
+        debug!("Wrote {} orders to cache for user: {}", orders.len(), user_id);
+        Ok(())
     }
 
     // Helper: Parse order hash from Redis into OrderModel

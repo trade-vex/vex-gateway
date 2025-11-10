@@ -563,4 +563,47 @@ impl RedisDb {
 
         Ok(keys)
     }
+
+    /// Set hash fields (HSET)
+    /// Sets multiple fields in a hash
+    pub async fn hset_string(&self, key: &str, hash: &std::collections::HashMap<String, String>) -> Result<()> {
+        let key = key.to_string();
+        let hash = hash.clone();
+        
+        for (field, value) in hash {
+            let _: () = self
+                .execute_with_retry(|conn| {
+                    let key = key.clone();
+                    let field = field.clone();
+                    let value = value.clone();
+                    Box::pin(async move { conn.hset(key, field, value).await })
+                })
+                .await?;
+        }
+        
+        Ok(())
+    }
+
+    /// Add member to set (SADD)
+    pub async fn sadd_string(&self, key: &str, member: &str) -> Result<()> {
+        let _: () = self
+            .execute_with_retry(|conn| {
+                let key = key.to_string();
+                let member = member.to_string();
+                Box::pin(async move { conn.sadd(key, member).await })
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Set TTL on a key (EXPIRE)
+    pub async fn expire(&self, key: &str, seconds: u64) -> Result<()> {
+        let _: () = self
+            .execute_with_retry(|conn| {
+                let key = key.to_string();
+                Box::pin(async move { conn.expire(key, seconds as i64).await })
+            })
+            .await?;
+        Ok(())
+    }
 }

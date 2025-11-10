@@ -124,6 +124,16 @@ impl UserBalanceStore {
             match repo.get_user_balances(user_id).await {
                 Ok(balances) => {
                     debug!("Database hit for user balances: {}", user_id);
+                    
+                    // Populate cache with data from database (cache-aside pattern)
+                    if self.config.enabled && !balances.is_empty() {
+                        if let Some(cache) = &self.cache {
+                            if let Err(e) = self.write_balances_to_cache(user_id, &balances, cache).await {
+                                warn!("Failed to write balances to cache for user {}: {}", user_id, e);
+                            }
+                        }
+                    }
+                    
                     return Ok(balances);
                 }
                 Err(e) => {
@@ -165,6 +175,44 @@ impl UserBalanceStore {
                 }
             }
         }
+    }
+
+    /// Write balances to Redis cache (cache-aside pattern)
+    /// Called when data is fetched from database to populate cache for future requests
+    async fn write_balances_to_cache(
+        &self,
+        user_id: u64,
+        balances: &[UserBalanceModel],
+        cache: &RedisDb,
+    ) -> Result<(), TradingError> {
+        let user_id_i64 = user_id as i64;
+
+        for balance in balances {
+            let balance_key = format!("user:{}:asset:{}:balance", user_id_i64, balance.asset_id);
+
+            // Create hash map for balance data
+            let mut balance_hash = HashMap::new();
+            balance_hash.insert("user_id".to_string(), balance.user_id.to_string());
+            balance_hash.insert("asset_id".to_string(), balance.asset_id.to_string());
+            balance_hash.insert("available".to_string(), balance.available.to_string());
+            balance_hash.insert("locked".to_string(), balance.locked.to_string());
+            balance_hash.insert("total".to_string(), balance.total.to_string());
+            balance_hash.insert("timestamp".to_string(), balance.timestamp.to_string());
+
+            // Write balance hash
+            if let Err(e) = cache.hset_string(&balance_key, &balance_hash).await {
+                warn!("Failed to write balance {} to cache: {}", balance_key, e);
+                continue;
+            }
+
+            // Set TTL on balance hash
+            if let Err(e) = cache.expire(&balance_key, self.config.ttl.as_secs()).await {
+                warn!("Failed to set TTL on balance {}: {}", balance_key, e);
+            }
+        }
+
+        debug!("Wrote {} balances to cache for user: {}", balances.len(), user_id);
+        Ok(())
     }
 
     // Helper: Parse balance hash from Redis into UserBalanceModel
