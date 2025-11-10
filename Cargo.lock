@@ -2513,6 +2513,7 @@ dependencies = [
  "lib-middleware",
  "num_cpus",
  "reqwest 0.11.27",
+ "rusteron-archive",
  "rusteron-client",
  "sea-orm",
  "serde_json",

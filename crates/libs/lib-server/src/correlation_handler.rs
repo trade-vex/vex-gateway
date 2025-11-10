@@ -1,7 +1,7 @@
 //! Aeron handler that routes responses to correlation service
 
 use lib_core::CorrelationService;
-use rusteron_client::{AeronFragmentHandlerCallback, AeronHeader};
+use rusteron_archive::{AeronFragmentHandlerCallback, AeronHeader};
 use tracing::{debug, error};
 
 /// Aeron handler that routes responses to correlation service
