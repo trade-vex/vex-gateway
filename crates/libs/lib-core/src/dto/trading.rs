@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 // Re-export models from separate modules
 pub use crate::model::orders::Model as OrderModel;
 pub use crate::model::user_balances::Model as UserBalanceModel;
+pub use crate::model::user_favorite_markets::Model as UserFavoriteMarketModel;
 use crate::{BalancePoint, PnlPoint, PnlResolution};
 
 // Simple types as specified
@@ -125,6 +126,18 @@ pub struct PnlChartResponse {
     pub resolution: String,
 }
 
+/// List of favorite markets response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FavoriteMarketsListResponse {
+    pub market_ids: Vec<u32>,
+}
+
+/// Request to add/toggle a favorite market
+#[derive(Debug, Deserialize)]
+pub struct ToggleFavoriteMarketRequest {
+    pub market_id: u32,
+}
+
 // Conversion implementations
 impl From<OrderModel> for OrderResponse {
     fn from(model: OrderModel) -> Self {
@@ -211,3 +224,4 @@ impl PortfolioMetricsResponse {
         }
     }
 }
+

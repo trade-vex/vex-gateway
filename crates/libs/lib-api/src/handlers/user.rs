@@ -1,11 +1,12 @@
 //! User Account Data API Handlers
 
 use actix_web::{HttpResponse, Result, web};
-use lib_core::{PnlResolution, PortfolioRepository};
+use lib_core::{PnlResolution, PortfolioRepository, TradingRepository};
 use lib_core::dto::trading::{BalanceChartResponse, PnlChartResponse, PortfolioMetricsResponse};
 use lib_core::{
-    BalancesListResponse, OrderHistoryResponse, OrderResponse, OrderStore,
-    OrdersHistoryListResponse, OrdersListResponse, UserBalanceResponse, UserBalanceStore,
+    BalancesListResponse, FavoriteMarketsListResponse,
+    OrderHistoryResponse, OrderResponse, OrderStore, OrdersHistoryListResponse,
+    OrdersListResponse, ToggleFavoriteMarketRequest, UserBalanceResponse, UserBalanceStore,
 };
 use lib_utils::auth_extractors::AuthenticatedUserId;
 use serde::Deserialize;
@@ -542,4 +543,179 @@ pub async fn get_pnl_chart(
     };
 
     Ok(HttpResponse::Ok().json(response))
+}
+
+/// Get user's favorite markets
+///
+/// Retrieves all markets that the authenticated user has marked as favorites.
+/// Returns a list of favorite markets with metadata about when they were favorited.
+///
+/// # Endpoint
+/// `GET /api/user/favorites`
+///
+/// # Authentication
+/// Requires valid JWT token in Authorization header: `Bearer <token>`
+///
+/// # Response
+/// Returns [`FavoriteMarketsListResponse`] containing all favorited markets.
+///
+/// # Example Request
+/// ```bash
+/// curl -X GET http://localhost:8080/api/user/favorites \
+///   -H "Authorization: Bearer <jwt_token>"
+/// ```
+///
+/// # Example Success Response (200 OK)
+/// ```json
+/// {
+///   "market_ids": [1, 5, 10]
+/// }
+/// ```
+///
+/// # Example Error Response (500)
+/// ```json
+/// {
+///   "error": "failed to retrieve favorite markets",
+///   "message": "database connection lost"
+/// }
+/// ```
+///
+/// # Data Source
+/// - Primary: PostgreSQL database
+pub async fn get_favorite_markets(
+    user: AuthenticatedUserId,
+    trading_repo: web::Data<Arc<dyn TradingRepository>>,
+) -> Result<HttpResponse> {
+    let raw = user.0.as_u128();
+    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
+
+    match trading_repo.get_user_favorite_markets(user_id).await {
+        Ok(favorites) => {
+            let market_ids: Vec<u32> =
+                favorites.into_iter().map(|fav| fav.market_id as u32).collect();
+
+            let response = FavoriteMarketsListResponse { market_ids };
+
+            Ok(HttpResponse::Ok().json(response))
+        }
+        Err(e) => {
+            tracing::error!("failed to get favorite markets: {}", e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "failed to retrieve favorite markets",
+                "message": e.to_string()
+            })))
+        }
+    }
+}
+
+/// Toggle a market as favorite
+///
+/// Adds or removes a market from the user's favorites list.
+/// If the market is already favorited, it will be removed. If not, it will be added.
+///
+/// # Endpoint
+/// `POST /api/user/favorites`
+///
+/// # Authentication
+/// Requires valid JWT token in Authorization header: `Bearer <token>`
+///
+/// # Request Body
+/// ```json
+/// {
+///   "market_id": 1
+/// }
+/// ```
+///
+/// # Response
+/// Returns a success message indicating whether the market was added or removed.
+///
+/// # Example Request
+/// ```bash
+/// curl -X POST http://localhost:8080/api/user/favorites \
+///   -H "Authorization: Bearer <jwt_token>" \
+///   -H "Content-Type: application/json" \
+///   -d '{"market_id": 1}'
+/// ```
+///
+/// # Example Success Response (200 OK)
+/// ```json
+/// {
+///   "success": true,
+///   "action": "added",
+///   "market_id": 1
+/// }
+/// ```
+/// or
+/// ```json
+/// {
+///   "success": true,
+///   "action": "removed",
+///   "market_id": 1
+/// }
+/// ```
+///
+/// # Example Error Response (500)
+/// ```json
+/// {
+///   "error": "failed to toggle favorite market",
+///   "message": "database error"
+/// }
+/// ```
+///
+/// # Data Source
+/// - Primary: PostgreSQL database
+pub async fn toggle_favorite_market(
+    user: AuthenticatedUserId,
+    request: web::Json<ToggleFavoriteMarketRequest>,
+    trading_repo: web::Data<Arc<dyn TradingRepository>>,
+) -> Result<HttpResponse> {
+    let raw = user.0.as_u128();
+    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
+    let market_id = request.market_id;
+
+    // Check if market is already favorited
+    match trading_repo.is_market_favorited(user_id, market_id).await {
+        Ok(is_favorited) => {
+            if is_favorited {
+                // Remove from favorites
+                match trading_repo.remove_favorite_market(user_id, market_id).await {
+                    Ok(_) => Ok(HttpResponse::Ok().json(serde_json::json!({
+                        "success": true,
+                        "action": "removed",
+                        "market_id": market_id
+                    }))),
+                    Err(e) => {
+                        tracing::error!("failed to remove favorite market: {}", e);
+                        Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                            "error": "failed to remove favorite market",
+                            "message": e.to_string()
+                        })))
+                    }
+                }
+            } else {
+                // Add to favorites
+                match trading_repo.add_favorite_market(user_id, market_id).await {
+                    Ok(_) => Ok(HttpResponse::Ok().json(serde_json::json!({
+                        "success": true,
+                        "action": "added",
+                        "market_id": market_id
+                    }))),
+                    Err(e) => {
+                        tracing::error!("failed to add favorite market: {}", e);
+                        Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                            "error": "failed to add favorite market",
+                            "message": e.to_string()
+                        })))
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::error!("failed to check if market is favorited: {}", e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "failed to toggle favorite market",
+                "message": e.to_string()
+            })))
+        }
+    }
 }

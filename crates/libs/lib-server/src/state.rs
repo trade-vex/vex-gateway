@@ -43,6 +43,7 @@ pub struct AppState {
     pub user_repo: Arc<dyn UserRepository>,
     pub api_key_repository: Arc<dyn ApiKeyRepository>,
     pub portfolio_repository: Arc<dyn PortfolioRepository>,
+    pub trading_repository: Arc<dyn TradingRepository>,
 
     // Auth configuration
     pub jwt_config: JwtConfig,
@@ -185,6 +186,7 @@ impl AppState {
             api_key_middleware: Arc::new(TokioMutex::new(api_key_middleware)),
             api_key_repository,
             portfolio_repository,
+            trading_repository: trading_repo,
             correlation_service: Arc::new(correlation_service),
             balance_store,
             order_store,

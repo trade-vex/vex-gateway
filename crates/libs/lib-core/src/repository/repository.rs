@@ -6,6 +6,10 @@ use crate::model::user_balances::{
     ActiveModel as UserBalanceActiveModel, Column as UserBalanceColumn,
     Entity as UserBalanceEntity, Model as UserBalanceModel,
 };
+use crate::model::user_favorite_markets::{
+    ActiveModel as UserFavoriteMarketActiveModel, Column as UserFavoriteMarketColumn,
+    Entity as UserFavoriteMarketEntity, Model as UserFavoriteMarketModel,
+};
 use async_trait::async_trait;
 use clickhouse::Client as ClickHouseClient;
 use rust_decimal::Decimal;
@@ -55,6 +59,12 @@ pub trait TradingRepository: Send + Sync {
     async fn get_order_by_id(&self, order_id: u64, user_id: u64) -> Result<Option<OrderModel>>;
     async fn create_order(&self, order: OrderModel) -> Result<u64>;
     async fn count_user_orders(&self, user_id: u64) -> Result<u64>;
+    
+    // Favorite markets operations
+    async fn get_user_favorite_markets(&self, user_id: u64) -> Result<Vec<UserFavoriteMarketModel>>;
+    async fn add_favorite_market(&self, user_id: u64, market_id: u32) -> Result<()>;
+    async fn remove_favorite_market(&self, user_id: u64, market_id: u32) -> Result<()>;
+    async fn is_market_favorited(&self, user_id: u64, market_id: u32) -> Result<bool>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,6 +328,80 @@ impl TradingRepository for PostgresTradingRepository {
             .count(&*self.db)
             .await?;
         Ok(count as u64)
+    }
+    
+    async fn get_user_favorite_markets(&self, user_id: u64) -> Result<Vec<UserFavoriteMarketModel>> {
+        let user_id_i64 = user_id as i64;
+
+        UserFavoriteMarketEntity::find()
+            .filter(UserFavoriteMarketColumn::UserId.eq(user_id_i64))
+            .order_by_desc(UserFavoriteMarketColumn::FavoritedAt)
+            .all(&*self.db)
+            .await
+            .map_err(Into::into)
+    }
+    
+    async fn add_favorite_market(&self, user_id: u64, market_id: u32) -> Result<()> {
+        let user_id_i64 = user_id as i64;
+        let market_id_i32 = market_id as i32;
+
+        let favorite = UserFavoriteMarketActiveModel {
+            user_id: Set(user_id_i64),
+            market_id: Set(market_id_i32),
+            favorited_at: Set(Some(chrono::Utc::now())),
+            ..Default::default()
+        };
+
+        // Use insert with on_conflict to handle duplicate key constraint
+        let result = UserFavoriteMarketEntity::insert(favorite)
+            .on_conflict(
+                sea_orm::sea_query::OnConflict::columns([
+                    UserFavoriteMarketColumn::UserId,
+                    UserFavoriteMarketColumn::MarketId,
+                ])
+                .do_nothing()
+                .to_owned(),
+            )
+            .exec(&*self.db)
+            .await;
+
+        match result {
+            Ok(_) => Ok(()),
+            Err(DbErr::RecordNotInserted) => Ok(()), // Already exists, treat as success
+            Err(e) => Err(e.into()),
+        }
+    }
+    
+    async fn remove_favorite_market(&self, user_id: u64, market_id: u32) -> Result<()> {
+        let user_id_i64 = user_id as i64;
+        let market_id_i32 = market_id as i32;
+
+        UserFavoriteMarketEntity::delete_many()
+            .filter(
+                UserFavoriteMarketColumn::UserId
+                    .eq(user_id_i64)
+                    .and(UserFavoriteMarketColumn::MarketId.eq(market_id_i32)),
+            )
+            .exec(&*self.db)
+            .await?;
+
+        Ok(())
+    }
+    
+    async fn is_market_favorited(&self, user_id: u64, market_id: u32) -> Result<bool> {
+        let user_id_i64 = user_id as i64;
+        let market_id_i32 = market_id as i32;
+
+        let count = UserFavoriteMarketEntity::find()
+            .filter(
+                UserFavoriteMarketColumn::UserId
+                    .eq(user_id_i64)
+                    .and(UserFavoriteMarketColumn::MarketId.eq(market_id_i32)),
+            )
+            .count(&*self.db)
+            .await?;
+
+        Ok(count > 0)
     }
 }
 

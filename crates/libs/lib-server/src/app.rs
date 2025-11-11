@@ -82,6 +82,7 @@ pub fn create_app(
                                 .app_data(web::Data::new(Arc::new(app_state.balance_store.clone())))
                                 .app_data(web::Data::new(Arc::new(app_state.order_store.clone())))
                                 .app_data(web::Data::new(app_state.portfolio_repository.clone()))
+                                .app_data(web::Data::new(app_state.trading_repository.clone()))
                                 .configure(routes::order_route::configure)
                                 .configure(routes::user_route::configure),
                         ),

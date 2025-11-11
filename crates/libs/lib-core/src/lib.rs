@@ -5,8 +5,9 @@ pub mod model;
 pub mod repository;
 
 pub use dto::trading::{
-    BalanceChartResponse, BalancesListResponse, OrderHistoryResponse, OrderResponse, OrdersHistoryListResponse,
-    OrdersListResponse, Side, UserBalanceResponse,
+    BalanceChartResponse, BalancesListResponse, FavoriteMarketsListResponse,
+    OrderHistoryResponse, OrderResponse, OrdersHistoryListResponse, OrdersListResponse, Side,
+    ToggleFavoriteMarketRequest, UserBalanceResponse,
 };
 
 pub use repository::repository::{
