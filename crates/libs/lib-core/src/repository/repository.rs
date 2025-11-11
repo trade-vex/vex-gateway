@@ -301,6 +301,8 @@ impl TradingRepository for PostgresTradingRepository {
             order_side: Set(order.order_side.to_string()),
             order_timestamp: Set(order.order_timestamp),
             market_id: Set(order.market_id),
+            time_in_force: Set(order.time_in_force),
+            status: Set(order.status),
             ..Default::default()
         };
 

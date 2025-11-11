@@ -18,6 +18,8 @@ pub struct Model {
     pub order_side: String,
     pub order_timestamp: i64,
     pub market_id: i32,
+    pub time_in_force: String,
+    pub status: String,
     #[sea_orm(column_type = "Timestamp")]
     pub created_at: Option<DateTime>,
 }

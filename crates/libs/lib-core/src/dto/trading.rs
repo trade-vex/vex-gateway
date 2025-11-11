@@ -44,6 +44,8 @@ pub struct OrderResponse {
     pub size: u64,
     pub side: Side,
     pub timestamp: u64,
+    pub time_in_force: String,
+    pub status: String,
 }
 
 /// Enhanced order response for order history with status and fill information
@@ -56,6 +58,7 @@ pub struct OrderHistoryResponse {
     pub size: u64,
     pub side: Side,
     pub timestamp: u64,
+    pub time_in_force: String,
     pub status: String,
     pub filled_size: u64,
 }
@@ -133,6 +136,8 @@ impl From<OrderModel> for OrderResponse {
             size: model.order_size as u64,
             side: model.order_side.parse().unwrap_or(Side::Bid),
             timestamp: model.order_timestamp as u64,
+            time_in_force: model.time_in_force,
+            status: model.status,
         }
     }
 }
@@ -160,7 +165,8 @@ impl From<OrderModel> for OrderHistoryResponse {
             size: model.order_size as u64,
             side: model.order_side.parse().unwrap_or(Side::Bid),
             timestamp: model.order_timestamp as u64,
-            status: "Open".to_string(),
+            time_in_force: model.time_in_force,
+            status: model.status,
             filled_size: 0,
         }
     }
