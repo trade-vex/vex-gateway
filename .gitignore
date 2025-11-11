@@ -25,3 +25,5 @@ crates/libs/lib-auth/src/keys/
 /aeron-test-client
 
 *.sql
+
+docs/
