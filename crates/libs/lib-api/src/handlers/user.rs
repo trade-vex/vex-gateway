@@ -2,7 +2,7 @@
 
 use actix_web::{HttpResponse, Result, web};
 use lib_core::{PnlResolution, PortfolioRepository};
-use lib_core::dto::trading::{BalanceChartResponse, PortfolioOverviewResponse};
+use lib_core::dto::trading::{BalanceChartResponse, PnlChartResponse, PortfolioMetricsResponse};
 use lib_core::{
     BalancesListResponse, OrderHistoryResponse, OrderResponse, OrderStore,
     OrdersHistoryListResponse, OrdersListResponse, UserBalanceResponse, UserBalanceStore,
@@ -315,9 +315,16 @@ pub async fn get_order_history(
     }
 }
 
-/// Get portfolio overview
+/// Get portfolio metrics
 ///
-/// Computes portfolio metrics using ClickHouse materialized views and raw events.
+/// Returns portfolio metrics including balance, volume, PnL, and drawdown.
+/// Does not include PnL time series (use /api/pnl-chart for that).
+///
+/// # Endpoint
+/// `GET /api/portfolio`
+///
+/// # Authentication
+/// Requires valid JWT token in Authorization header: `Bearer <token>`
 ///
 /// # Data Sources (ClickHouse)
 /// - `trading.equity_per_minute(user_id, minute, equity_quote)`
@@ -334,39 +341,45 @@ pub async fn get_order_history(
 ///
 /// The handler is backend-agnostic and uses the injected `PortfolioRepository` which is
 /// implemented against ClickHouse in production.
-#[derive(Debug, Deserialize)]
-pub struct PortfolioOverviewQuery {
-    pub resolution: Option<String>,
-}
-
+///
+/// # Example Request
+/// ```bash
+/// curl -X GET "http://localhost:8081/api/portfolio" \
+///   -H "Authorization: Bearer <jwt_token>"
+/// ```
+///
+/// # Example Success Response (200 OK)
+/// ```json
+/// {
+///   "balance": "10500.50",
+///   "balance_24h_ago": "10000.00",
+///   "volume_24h": "2500.75",
+///   "pnl_7d": "500.50",
+///   "max_drawdown_1m": "250.25"
+/// }
+/// ```
 pub async fn get_portfolio_overview(
     user: AuthenticatedUserId,
-    query: web::Query<PortfolioOverviewQuery>,
     portfolio_repo: web::Data<Arc<dyn PortfolioRepository>>,
 ) -> Result<HttpResponse> {
     let raw = user.0.as_u128();
     let user_id = ((raw >> 64) as u64) ^ (raw as u64);
     let now_secs = chrono::Utc::now().timestamp();
 
-    let resolution = query
-        .resolution
-        .as_deref()
-        .and_then(PnlResolution::from_query)
-        .unwrap_or_default();
+    // Use default resolution (Day) for metrics - resolution only affects pnl_series which we don't need here
+    let resolution = PnlResolution::Day;
 
     let metrics = portfolio_repo
         .get_portfolio(user_id, now_secs, resolution)
         .await
         .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
 
-    let response = PortfolioOverviewResponse::with_metrics(
+    let response = PortfolioMetricsResponse::new(
         metrics.balance,
         metrics.balance_24h_ago,
         metrics.volume_24h,
         metrics.pnl_7d,
         metrics.max_drawdown_1m,
-        metrics.pnl_series,
-        metrics.pnl_resolution,
     );
 
     Ok(HttpResponse::Ok().json(response))
@@ -442,6 +455,89 @@ pub async fn get_balance_chart(
 
     let response = BalanceChartResponse {
         balance_series,
+        resolution: resolution.as_str().to_string(),
+    };
+
+    Ok(HttpResponse::Ok().json(response))
+}
+
+/// Get PnL chart
+///
+/// Returns profit & loss time series with different resolutions.
+/// Uses ClickHouse equity_per_minute and cashflow tables to compute PnL series.
+///
+/// # Endpoint
+/// `GET /api/pnl-chart?resolution={resolution}`
+///
+/// # Query Parameters
+/// - `resolution` (optional): Time resolution for the chart (1d, 1w, 1m, 1y). Defaults to 1d.
+///
+/// # Authentication
+/// Requires valid JWT token in Authorization header: `Bearer <token>`
+///
+/// # Data Sources (ClickHouse)
+/// - `trading.equity_per_minute(user_id, minute, equity_quote)`
+///   Per-minute equity valued in configured quote asset.
+/// - `trading.user_cashflow_per_minute(user_id, minute, cashflow_quote)`
+///   Per-minute cashflow for accounting PnL calculation.
+///
+/// # Response
+/// Returns [`PnlChartResponse`] containing PnL time series.
+///
+/// # Example Request
+/// ```bash
+/// curl -X GET "http://localhost:8081/api/pnl-chart?resolution=1w" \
+///   -H "Authorization: Bearer <jwt_token>"
+/// ```
+///
+/// # Example Success Response (200 OK)
+/// ```json
+/// {
+///   "pnl_series": [
+///     {
+///       "timestamp": 1697452800,
+///       "pnl": "100.00"
+///     },
+///     {
+///       "timestamp": 1697539200,
+///       "pnl": "200.00"
+///     },
+///     {
+///       "timestamp": 1697625600,
+///       "pnl": "300.00"
+///     }
+///   ],
+///   "resolution": "1w"
+/// }
+/// ```
+#[derive(Debug, Deserialize)]
+pub struct PnlChartQuery {
+    pub resolution: Option<String>,
+}
+
+pub async fn get_pnl_chart(
+    user: AuthenticatedUserId,
+    query: web::Query<PnlChartQuery>,
+    portfolio_repo: web::Data<Arc<dyn PortfolioRepository>>,
+) -> Result<HttpResponse> {
+    let raw = user.0.as_u128();
+    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
+    let now_secs = chrono::Utc::now().timestamp();
+
+    let resolution = query
+        .resolution
+        .as_deref()
+        .and_then(PnlResolution::from_query)
+        .unwrap_or_default();
+
+    // Get portfolio metrics to extract pnl_series
+    let metrics = portfolio_repo
+        .get_portfolio(user_id, now_secs, resolution)
+        .await
+        .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
+
+    let response = PnlChartResponse {
+        pnl_series: metrics.pnl_series,
         resolution: resolution.as_str().to_string(),
     };
 

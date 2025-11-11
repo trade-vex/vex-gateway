@@ -8,5 +8,6 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/orders/open", web::get().to(user::get_open_orders))
         .route("/orders/history", web::get().to(user::get_order_history))
         .route("/portfolio", web::get().to(user::get_portfolio_overview))
-        .route("/balance-chart", web::get().to(user::get_balance_chart));
+        .route("/balance-chart", web::get().to(user::get_balance_chart))
+        .route("/pnl-chart", web::get().to(user::get_pnl_chart));
 }

@@ -99,9 +99,26 @@ pub struct PortfolioOverviewResponse {
     pub pnl_resolution: String,
 }
 
+/// Portfolio metrics response (without PnL series)
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PortfolioMetricsResponse {
+    pub balance: Decimal,
+    pub balance_24h_ago: Decimal,
+    pub volume_24h: Decimal,
+    pub pnl_7d: Decimal,
+    pub max_drawdown_1m: Decimal,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BalanceChartResponse {
     pub balance_series: Vec<BalancePoint>,
+    pub resolution: String,
+}
+
+/// PnL chart response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PnlChartResponse {
+    pub pnl_series: Vec<PnlPoint>,
     pub resolution: String,
 }
 
@@ -167,6 +184,24 @@ impl PortfolioOverviewResponse {
             max_drawdown_1m,
             pnl_series,
             pnl_resolution: resolution.as_str().to_string(),
+        }
+    }
+}
+
+impl PortfolioMetricsResponse {
+    pub fn new(
+        balance: Decimal,
+        balance_24h_ago: Decimal,
+        volume_24h: Decimal,
+        pnl_7d: Decimal,
+        max_drawdown_1m: Decimal,
+    ) -> Self {
+        Self {
+            balance,
+            balance_24h_ago,
+            volume_24h,
+            pnl_7d,
+            max_drawdown_1m,
         }
     }
 }
