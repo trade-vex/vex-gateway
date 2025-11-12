@@ -69,6 +69,8 @@ pub fn create_app(
                     web::scope("")
                         .wrap(combined_auth_middleware)
                         .configure(lib_auth::configure_protected_auth_services)
+                        // Session check route (requires authentication)
+                        .configure(routes::session_check_route::configure)
                         // Configure API routes
                         .service(
                             web::scope("/api-key")

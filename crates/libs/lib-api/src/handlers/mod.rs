@@ -3,4 +3,5 @@
 pub mod api_key;
 pub mod health_check;
 pub mod order;
+pub mod session_check;
 pub mod user;
