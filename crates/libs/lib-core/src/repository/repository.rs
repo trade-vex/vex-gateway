@@ -280,12 +280,26 @@ impl TradingRepository for PostgresTradingRepository {
     async fn get_open_orders(&self, user_id: u64) -> Result<Vec<OrderModel>> {
         let user_id_i64 = user_id as i64;
 
-        OrderEntity::find()
+        let all_orders = OrderEntity::find()
             .filter(OrderColumn::OrderUserId.eq(user_id_i64))
             .order_by_desc(OrderColumn::OrderTimestamp)
             .all(&*self.db)
             .await
-            .map_err(Into::into)
+            .map_err(TradingError::from)?;
+
+        // Filter to only include "open" orders: Pending, PartiallyFilled, Processing
+        // Exclude: Filled, Cancelled, Rejected, Placed
+        let orders: Vec<_> = all_orders
+            .into_iter()
+            .filter(|order| {
+                let status_lower = order.status.to_lowercase();
+                status_lower == "pending" 
+                    || status_lower == "partiallyfilled" 
+                    || status_lower == "processing"
+            })
+            .collect();
+
+        Ok(orders)
     }
 
     async fn get_order_by_id(&self, order_id: u64, user_id: u64) -> Result<Option<OrderModel>> {

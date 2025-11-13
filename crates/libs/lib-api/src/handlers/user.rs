@@ -190,7 +190,7 @@ pub async fn get_open_orders(
             Ok(HttpResponse::Ok().json(response))
         }
         Err(e) => {
-            tracing::error!("failed to get open orders: {}", e);
+            tracing::error!("failed to get open orders for user_id {}: {}", user_id, e);
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "failed to retrieve open orders",
                 "message": e.to_string()
@@ -307,7 +307,7 @@ pub async fn get_order_history(
             Ok(HttpResponse::Ok().json(response))
         }
         Err(e) => {
-            tracing::error!("failed to get order history: {}", e);
+            tracing::error!("failed to get order history for user_id {}: {}", user_id, e);
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "failed to retrieve order history",
                 "message": e.to_string()

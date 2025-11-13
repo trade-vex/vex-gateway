@@ -201,10 +201,7 @@ impl OrderStore {
             }
         }
 
-        debug!(
-            "No repository available for user order history: {}",
-            user_id
-        );
+        debug!("No repository available for user order history: {}", user_id);
         Ok(vec![])
     }
 
@@ -239,30 +236,30 @@ impl OrderStore {
                             let order_key = format!("order:{}", order_id_str);
                             match cache.hgetall_string(&order_key).await {
                                 Ok(hash) if !hash.is_empty() => {
-                                    println!(
-                                        "   Fetched hash for order {}: {:?}",
-                                        order_id_str, hash
-                                    );
-
-                                    // Check if order is cancelled - skip cancelled orders
-                                    // Kafka consumer sets status='cancelled' but doesn't remove from user:{user_id}:orders SET
+                                    // Filter orders by status - only include "open" orders
+                                    // Open orders: Pending, PartiallyFilled, Processing
+                                    // Exclude: Filled, Cancelled, Rejected, Placed
                                     if let Some(status) = hash.get("status") {
-                                        println!("   Order {} status: {}", order_id_str, status);
-                                        if status.eq_ignore_ascii_case("cancelled") {
-                                            println!(
-                                                "   ✓ SKIPPING cancelled order {}",
-                                                order_id_str
-                                            );
-                                            debug!(
-                                                "Skipping cancelled order {} for user {}",
-                                                order_id_str, user_id
-                                            );
+                                        
+                                        let status_lower = status.to_lowercase();
+                                        
+                                        // Skip orders that are not in "open" states
+                                        if status_lower == "cancelled" 
+                                            || status_lower == "filled" 
+                                            || status_lower == "rejected" 
+                                            || status_lower == "placed" {
+                                            continue;
+                                        }
+                                        
+                                        // Only include: Pending, PartiallyFilled, Processing
+                                        if status_lower != "pending" 
+                                            && status_lower != "partiallyfilled" 
+                                            && status_lower != "processing" {
                                             continue;
                                         }
                                     }
 
                                     if let Some(order) = Self::parse_order_hash(hash) {
-                                        println!("   ✓ Adding order {} to results", order_id_str);
                                         orders.push(order);
                                     }
                                 }
@@ -380,11 +377,32 @@ impl OrderStore {
 
     // Helper: Parse order hash from Redis into OrderModel
     // Kafka writes: order_id, user_id, price, size, side, timestamp, market_id, time_in_force, status
+    // Note: Redis stores price and size as decimal strings (e.g., "0.1", "0.001"), need to parse as f64 first
     fn parse_order_hash(hash: HashMap<String, String>) -> Option<OrderModel> {
         let order_order_id = hash.get("order_id")?.parse::<i64>().ok()?;
         let order_user_id = hash.get("user_id")?.parse::<i64>().ok()?;
-        let order_price = hash.get("price")?.parse::<i64>().ok()?;
-        let order_size = hash.get("size")?.parse::<i64>().ok()?;
+        
+        // Parse price - Redis stores as decimal string (e.g., "0.1"), but DB expects integer
+        let price_str = hash.get("price")?;
+        let order_price = if let Ok(price_i64) = price_str.parse::<i64>() {
+            price_i64
+        } else if let Ok(price_f64) = price_str.parse::<f64>() {
+            // Convert decimal to integer with 12 decimal places precision
+            (price_f64 * 1_000_000_000_000.0) as i64
+        } else {
+            return None;
+        };
+        
+        // Parse size - same logic as price
+        let size_str = hash.get("size")?;
+        let order_size = if let Ok(size_i64) = size_str.parse::<i64>() {
+            size_i64
+        } else if let Ok(size_f64) = size_str.parse::<f64>() {
+            (size_f64 * 1_000_000_000_000.0) as i64
+        } else {
+            return None;
+        };
+        
         let order_side = hash.get("side")?.clone();
         let order_timestamp = hash.get("timestamp")?.parse::<i64>().ok()?;
         let market_id = hash.get("market_id")?.parse::<i32>().ok()?;
@@ -406,3 +424,4 @@ impl OrderStore {
         })
     }
 }
+
