@@ -233,22 +233,22 @@ impl OrderStore {
                             match cache.hgetall_string(&order_key).await {
                                 Ok(hash) if !hash.is_empty() => {
                                     // Filter orders by status - only include "open" orders
-                                    // Open orders: Pending, PartiallyFilled, Processing
-                                    // Exclude: Filled, Cancelled, Rejected, Placed
+                                    // Open orders: Placed, Pending, PartiallyFilled, Processing
+                                    // Exclude: Filled, Cancelled, Rejected
                                     if let Some(status) = hash.get("status") {
                                         
                                         let status_lower = status.to_lowercase();
                                         
-                                        // Skip orders that are not in "open" states
+                                        // Skip orders that are in terminal states (not open)
                                         if status_lower == "cancelled" 
                                             || status_lower == "filled" 
-                                            || status_lower == "rejected" 
-                                            || status_lower == "placed" {
+                                            || status_lower == "rejected" {
                                             continue;
                                         }
                                         
-                                        // Only include: Pending, PartiallyFilled, Processing
-                                        if status_lower != "pending" 
+                                        // Only include: Placed, Pending, PartiallyFilled, Processing
+                                        if status_lower != "placed"
+                                            && status_lower != "pending" 
                                             && status_lower != "partiallyfilled" 
                                             && status_lower != "processing" {
                                             continue;
