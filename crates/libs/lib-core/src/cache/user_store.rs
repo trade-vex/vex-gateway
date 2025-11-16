@@ -2,7 +2,9 @@ use crate::model::user_balances::Model as UserBalanceModel;
 use crate::repository::repository::{TradingError, TradingRepository};
 use lib_db::backends::kv::redis::RedisDb;
 use lib_db::traits::BasicKvStore;
+use rust_decimal::Decimal;
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -166,12 +168,13 @@ impl UserBalanceStore {
 
     // Helper: Parse balance hash from Redis into UserBalanceModel
     // Kafka writes: user_id, asset_id, available, locked, total, timestamp
+    // Parse decimal strings directly without any conversion - values returned as-is
     fn parse_balance_hash(hash: HashMap<String, String>) -> Option<UserBalanceModel> {
         let user_id = hash.get("user_id")?.parse::<u64>().ok()?;
         let asset_id = hash.get("asset_id")?.parse::<i32>().ok()?;
-        let available = hash.get("available")?.parse::<i64>().ok()?;
-        let locked = hash.get("locked")?.parse::<i64>().ok()?;
-        let total = hash.get("total")?.parse::<i64>().ok()?;
+        let available = Decimal::from_str(hash.get("available")?).ok()?;
+        let locked = Decimal::from_str(hash.get("locked")?).ok()?;
+        let total = Decimal::from_str(hash.get("total")?).ok()?;
         let timestamp = hash.get("timestamp")?.parse::<i64>().ok()?;
 
         Some(UserBalanceModel {

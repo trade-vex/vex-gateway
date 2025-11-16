@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use sea_orm::prelude::*;
 use serde::{Deserialize, Serialize};
+use rust_decimal::Decimal;
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
@@ -14,9 +15,12 @@ pub struct Model {
     pub id: i64,
     pub user_id: u64,
     pub asset_id: i32,
-    pub available: i64,
-    pub locked: i64,
-    pub total: i64,
+    #[sea_orm(column_type = "Decimal(Some((38, 18)))")]
+    pub available: Decimal,
+    #[sea_orm(column_type = "Decimal(Some((38, 18)))")]
+    pub locked: Decimal,
+    #[sea_orm(column_type = "Decimal(Some((38, 18)))")]
+    pub total: Decimal,
     pub timestamp: i64,
     #[sea_orm(column_type = "Timestamp")]
     pub created_at: Option<DateTime<Utc>>,

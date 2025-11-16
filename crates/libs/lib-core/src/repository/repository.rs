@@ -243,9 +243,9 @@ impl TradingRepository for PostgresTradingRepository {
         let balance = UserBalanceActiveModel {
             user_id: Set(user_id),
             asset_id: Set(0), // Default asset, adjust as needed
-            available: Set(available as i64),
-            locked: Set(locked as i64),
-            total: Set(total as i64),
+            available: Set(Decimal::from(available)),
+            locked: Set(Decimal::from(locked)),
+            total: Set(Decimal::from(total)),
             timestamp: Set(chrono::Utc::now().timestamp()),
             ..Default::default()
         };
@@ -260,9 +260,9 @@ impl TradingRepository for PostgresTradingRepository {
         let balance = UserBalanceActiveModel {
             user_id: Set(user_id),
             asset_id: Set(0), // Default asset, adjust as needed
-            available: Set(available as i64),
-            locked: Set(locked as i64),
-            total: Set(total as i64),
+            available: Set(Decimal::from(available)),
+            locked: Set(Decimal::from(locked)),
+            total: Set(Decimal::from(total)),
             timestamp: Set(chrono::Utc::now().timestamp()),
             ..Default::default()
         };

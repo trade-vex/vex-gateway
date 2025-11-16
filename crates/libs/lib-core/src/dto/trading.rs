@@ -68,9 +68,9 @@ pub struct OrderHistoryResponse {
 pub struct UserBalanceResponse {
     pub user_id: u64, // Changed from Uuid to u64 to match DB schema
     pub asset_id: u32,
-    pub available: u64,
-    pub locked: u64,
-    pub total: u64,
+    pub available: Decimal,
+    pub locked: Decimal,
+    pub total: Decimal,
     pub timestamp: u64, // Changed from DateTime to unix timestamp
 }
 
@@ -160,9 +160,9 @@ impl From<UserBalanceModel> for UserBalanceResponse {
         Self {
             user_id: model.user_id as u64,
             asset_id: model.asset_id as u32,
-            available: model.available as u64,
-            locked: model.locked as u64,
-            total: model.total as u64,
+            available: model.available,
+            locked: model.locked,
+            total: model.total,
             timestamp: model.timestamp as u64,
         }
     }
