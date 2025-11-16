@@ -121,84 +121,60 @@ impl OrderStore {
         Ok(None)
     }
 
-    /// Get user's order history with caching (all orders including filled, cancelled, etc.)
-    /// Uses Redis set user:{user_id}:orders -> fetches each order:{order_id} hash
-    /// Unlike get_user_orders, this includes ALL orders regardless of status
+    /// Get user's order history with filled_size from orders table only
+    /// Returns Cancelled, PartiallyFilled, and Filled orders
     pub async fn get_user_order_history(
         &self,
         user_id: u64,
     ) -> Result<Vec<OrderModel>, TradingError> {
-        // Cache: Query user:{user_id}:orders SET, then fetch each order hash
+        // Try Redis first if cache enabled
         if self.config.enabled {
             if let Some(cache) = &self.cache {
                 let set_key = format!("user:{}:orders", user_id);
-
-                println!(
-                    "🔍 OrderStore: Querying Redis SET for order history: {}",
-                    set_key
-                );
+                debug!("Redis: Querying orders from SET: {}", set_key);
 
                 match cache.smembers_string(&set_key).await {
                     Ok(order_ids) if !order_ids.is_empty() => {
-                        debug!(
-                            "User order history cache hit for user: {} ({} orders in SET)",
-                            user_id,
-                            order_ids.len()
-                        );
-                        println!(
-                            "   Found {} order IDs in SET: {:?}",
-                            order_ids.len(),
-                            order_ids
-                        );
-
                         let mut orders = Vec::new();
-                        // Fetch each order hash - include ALL orders regardless of status
-                        for order_id_str in order_ids {
+                        for order_id_str in &order_ids {
                             let order_key = format!("order:{}", order_id_str);
-                            match cache.hgetall_string(&order_key).await {
-                                Ok(hash) if !hash.is_empty() => {
-                                    println!(
-                                        "   Fetched hash for order {}: {:?}",
-                                        order_id_str, hash
-                                    );
-
-                                    // Include ALL orders - don't filter by status
-                                    if let Some(order) = Self::parse_order_hash(hash) {
-                                        println!(
-                                            "   ✓ Adding order {} to history results",
-                                            order_id_str
-                                        );
-                                        orders.push(order);
+                            if let Ok(hash) = cache.hgetall_string(&order_key).await {
+                                if !hash.is_empty() {
+                                    // Only include Cancelled, PartiallyFilled, Filled
+                                    if let Some(status) = hash.get("status") {
+                                        let status_lower = status.to_lowercase();
+                                        if status_lower == "cancelled" 
+                                            || status_lower == "partiallyfilled" 
+                                            || status_lower == "filled" {
+                                            if let Some(order) = Self::parse_order_hash(hash) {
+                                                orders.push(order);
+                                            }
+                                        }
                                     }
                                 }
-                                _ => continue,
                             }
                         }
 
-                        println!("   Returning {} orders in history", orders.len());
-                        return Ok(orders);
+                        if !orders.is_empty() {
+                            debug!("Redis cache hit: {} history orders (includes filled_size)", orders.len());
+                            return Ok(orders);
+                        }
                     }
                     Ok(_) => {
-                        debug!("User order history cache miss for user: {}", user_id);
+                        debug!("Redis cache miss for user orders: {}", user_id);
                     }
                     Err(e) => {
-                        warn!("User order history cache error for user {}: {}", user_id, e);
+                        warn!("Redis error for user {}: {}", user_id, e);
                     }
                 }
             }
         }
 
-        // Database fallback - get all orders (not just open ones)
+        // Database fallback - Query orders_events table only (filled_size is already there)
         if let Some(repo) = &self.trading_repo {
-            match repo.get_open_orders(user_id).await {
-                Ok(orders) => {
-                    debug!("Database hit for user order history: {}", user_id);
-                    return Ok(orders);
-                }
-                Err(e) => {
-                    return Err(e);
-                }
-            }
+            let orders = repo.get_order_history(user_id).await?;
+            debug!("Postgres: Got {} history orders (includes filled_size)", orders.len());
+            return Ok(orders);
         }
 
         debug!("No repository available for user order history: {}", user_id);
@@ -371,13 +347,14 @@ impl OrderStore {
     }
 
     // Helper: Parse order hash from Redis into OrderModel
-    // Kafka writes: order_id, user_id, price, size, side, timestamp, market_id, time_in_force, status
+    // Kafka writes: order_id, user_id, price, size, filled_size, side, timestamp, market_id, time_in_force, status
     // Parse decimal strings directly without any conversion - values returned as-is
     fn parse_order_hash(hash: HashMap<String, String>) -> Option<OrderModel> {
         let order_order_id = hash.get("order_id")?.parse::<u64>().ok()?;
         let order_user_id = hash.get("user_id")?.parse::<u64>().ok()?;
         let order_price = Decimal::from_str(hash.get("price")?).ok()?;
         let order_size = Decimal::from_str(hash.get("size")?).ok()?;
+        let filled_size = Decimal::from_str(hash.get("filled_size").unwrap_or(&"0".to_string())).unwrap_or(Decimal::ZERO);
         let order_side = hash.get("side")?.clone();
         let order_timestamp = hash.get("timestamp")?.parse::<i64>().ok()?;
         let market_id = hash.get("market_id")?.parse::<i32>().ok()?;
@@ -390,6 +367,7 @@ impl OrderStore {
             order_user_id,
             order_price,
             order_size,
+            filled_size,
             order_side,
             order_timestamp,
             market_id,

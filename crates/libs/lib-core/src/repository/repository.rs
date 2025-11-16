@@ -59,6 +59,7 @@ pub trait TradingRepository: Send + Sync {
     async fn get_order_by_id(&self, order_id: u64, user_id: u64) -> Result<Option<OrderModel>>;
     async fn create_order(&self, order: OrderModel) -> Result<u64>;
     async fn count_user_orders(&self, user_id: u64) -> Result<u64>;
+    async fn get_order_history(&self, user_id: u64) -> Result<Vec<OrderModel>>;
     
     // Favorite markets operations
     async fn get_user_favorite_markets(&self, user_id: u64) -> Result<Vec<UserFavoriteMarketModel>>;
@@ -330,6 +331,21 @@ impl TradingRepository for PostgresTradingRepository {
             .count(&*self.db)
             .await?;
         Ok(count as u64)
+    }
+    
+    async fn get_order_history(&self, user_id: u64) -> Result<Vec<OrderModel>> {
+        // Only return Cancelled, PartiallyFilled, and Filled orders for history
+        OrderEntity::find()
+            .filter(OrderColumn::OrderUserId.eq(user_id))
+            .filter(
+                OrderColumn::Status.eq("Cancelled")
+                    .or(OrderColumn::Status.eq("PartiallyFilled"))
+                    .or(OrderColumn::Status.eq("Filled"))
+            )
+            .order_by_desc(OrderColumn::OrderTimestamp)
+            .all(&*self.db)
+            .await
+            .map_err(Into::into)
     }
     
     async fn get_user_favorite_markets(&self, user_id: u64) -> Result<Vec<UserFavoriteMarketModel>> {

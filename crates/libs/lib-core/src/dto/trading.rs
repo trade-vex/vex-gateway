@@ -61,7 +61,7 @@ pub struct OrderHistoryResponse {
     pub timestamp: u64,
     pub time_in_force: String,
     pub status: String,
-    pub filled_size: u64,
+    pub filled_size: Decimal,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -180,7 +180,7 @@ impl From<OrderModel> for OrderHistoryResponse {
             timestamp: model.order_timestamp as u64,
             time_in_force: model.time_in_force,
             status: model.status,
-            filled_size: 0,
+            filled_size: model.filled_size,
         }
     }
 }

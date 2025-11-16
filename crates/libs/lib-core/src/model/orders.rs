@@ -18,6 +18,8 @@ pub struct Model {
     pub order_price: Decimal,
     #[sea_orm(column_type = "Decimal(Some((38, 18)))")]
     pub order_size: Decimal,
+    #[sea_orm(column_type = "Decimal(Some((38, 18)))")]
+    pub filled_size: Decimal,
     pub order_side: String,
     pub order_timestamp: i64,
     pub market_id: i32,
