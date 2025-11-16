@@ -11,13 +11,13 @@ pub enum Relation {}
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
     pub id: i64,
-    pub maker_user_id: i64,
-    pub taker_user_id: i64,
+    pub maker_user_id: u64,
+    pub taker_user_id: u64,
     pub market_id: i32,
     pub price: i64,
     pub size: i64,
-    pub maker_order_id: i64,
-    pub taker_order_id: i64,
+    pub maker_order_id: u64,
+    pub taker_order_id: u64,
     pub timestamp: i64,
     #[sea_orm(column_type = "Timestamp")]
     pub created_at: Option<DateTime<Utc>>,

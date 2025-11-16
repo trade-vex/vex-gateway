@@ -13,7 +13,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
     pub id: i32,
     /// User ID as u64 (derived from UUID via XOR operation)
-    pub user_id: i64,
+    pub user_id: u64,
     /// Market ID (bit-packed u32)
     pub market_id: i32,
     /// Timestamp when the market was favorited

@@ -219,10 +219,8 @@ impl PostgresTradingRepository {
 #[async_trait]
 impl TradingRepository for PostgresTradingRepository {
     async fn get_user_balances(&self, user_id: u64) -> Result<Vec<UserBalanceModel>> {
-        let user_id_i64 = user_id as i64;
-
         UserBalanceEntity::find()
-            .filter(UserBalanceColumn::UserId.eq(user_id_i64))
+            .filter(UserBalanceColumn::UserId.eq(user_id))
             .order_by_desc(UserBalanceColumn::Timestamp)
             .all(&*self.db)
             .await
@@ -230,10 +228,8 @@ impl TradingRepository for PostgresTradingRepository {
     }
 
     async fn get_user_balance(&self, user_id: u64) -> Result<Option<UserBalanceModel>> {
-        let user_id_i64 = user_id as i64;
-
         UserBalanceEntity::find()
-            .filter(UserBalanceColumn::UserId.eq(user_id_i64))
+            .filter(UserBalanceColumn::UserId.eq(user_id))
             .order_by_desc(UserBalanceColumn::Timestamp)
             .one(&*self.db)
             .await
@@ -241,12 +237,11 @@ impl TradingRepository for PostgresTradingRepository {
     }
 
     async fn update_user_balance(&self, user_id: u64, available: u64, locked: u64) -> Result<()> {
-        let user_id_i64 = user_id as i64;
         let total = available + locked;
 
         // Insert new balance event (this is an event log table, not mutable state)
         let balance = UserBalanceActiveModel {
-            user_id: Set(user_id_i64),
+            user_id: Set(user_id),
             asset_id: Set(0), // Default asset, adjust as needed
             available: Set(available as i64),
             locked: Set(locked as i64),
@@ -260,11 +255,10 @@ impl TradingRepository for PostgresTradingRepository {
     }
 
     async fn create_user_balance(&self, user_id: u64, available: u64, locked: u64) -> Result<()> {
-        let user_id_i64 = user_id as i64;
         let total = available + locked;
 
         let balance = UserBalanceActiveModel {
-            user_id: Set(user_id_i64),
+            user_id: Set(user_id),
             asset_id: Set(0), // Default asset, adjust as needed
             available: Set(available as i64),
             locked: Set(locked as i64),
@@ -278,10 +272,8 @@ impl TradingRepository for PostgresTradingRepository {
     }
 
     async fn get_open_orders(&self, user_id: u64) -> Result<Vec<OrderModel>> {
-        let user_id_i64 = user_id as i64;
-
         let all_orders = OrderEntity::find()
-            .filter(OrderColumn::OrderUserId.eq(user_id_i64))
+            .filter(OrderColumn::OrderUserId.eq(user_id))
             .order_by_desc(OrderColumn::OrderTimestamp)
             .all(&*self.db)
             .await
@@ -303,13 +295,11 @@ impl TradingRepository for PostgresTradingRepository {
     }
 
     async fn get_order_by_id(&self, order_id: u64, user_id: u64) -> Result<Option<OrderModel>> {
-        let user_id_i64 = user_id as i64;
-
         OrderEntity::find()
             .filter(
                 OrderColumn::OrderOrderId
-                    .eq(order_id as i64)
-                    .and(OrderColumn::OrderUserId.eq(user_id_i64)),
+                    .eq(order_id)
+                    .and(OrderColumn::OrderUserId.eq(user_id)),
             )
             .one(&*self.db)
             .await
@@ -331,24 +321,20 @@ impl TradingRepository for PostgresTradingRepository {
         };
 
         let result = active_model.insert(&*self.db).await?;
-        Ok(result.order_order_id as u64)
+        Ok(result.order_order_id)
     }
 
     async fn count_user_orders(&self, user_id: u64) -> Result<u64> {
-        let user_id_i64 = user_id as i64;
-
         let count = OrderEntity::find()
-            .filter(OrderColumn::OrderUserId.eq(user_id_i64))
+            .filter(OrderColumn::OrderUserId.eq(user_id))
             .count(&*self.db)
             .await?;
         Ok(count as u64)
     }
     
     async fn get_user_favorite_markets(&self, user_id: u64) -> Result<Vec<UserFavoriteMarketModel>> {
-        let user_id_i64 = user_id as i64;
-
         UserFavoriteMarketEntity::find()
-            .filter(UserFavoriteMarketColumn::UserId.eq(user_id_i64))
+            .filter(UserFavoriteMarketColumn::UserId.eq(user_id))
             .order_by_desc(UserFavoriteMarketColumn::FavoritedAt)
             .all(&*self.db)
             .await
@@ -356,11 +342,10 @@ impl TradingRepository for PostgresTradingRepository {
     }
     
     async fn add_favorite_market(&self, user_id: u64, market_id: u32) -> Result<()> {
-        let user_id_i64 = user_id as i64;
         let market_id_i32 = market_id as i32;
 
         let favorite = UserFavoriteMarketActiveModel {
-            user_id: Set(user_id_i64),
+            user_id: Set(user_id),
             market_id: Set(market_id_i32),
             favorited_at: Set(Some(chrono::Utc::now())),
             ..Default::default()
@@ -387,13 +372,12 @@ impl TradingRepository for PostgresTradingRepository {
     }
     
     async fn remove_favorite_market(&self, user_id: u64, market_id: u32) -> Result<()> {
-        let user_id_i64 = user_id as i64;
         let market_id_i32 = market_id as i32;
 
         UserFavoriteMarketEntity::delete_many()
             .filter(
                 UserFavoriteMarketColumn::UserId
-                    .eq(user_id_i64)
+                    .eq(user_id)
                     .and(UserFavoriteMarketColumn::MarketId.eq(market_id_i32)),
             )
             .exec(&*self.db)
@@ -403,13 +387,12 @@ impl TradingRepository for PostgresTradingRepository {
     }
     
     async fn is_market_favorited(&self, user_id: u64, market_id: u32) -> Result<bool> {
-        let user_id_i64 = user_id as i64;
         let market_id_i32 = market_id as i32;
 
         let count = UserFavoriteMarketEntity::find()
             .filter(
                 UserFavoriteMarketColumn::UserId
-                    .eq(user_id_i64)
+                    .eq(user_id)
                     .and(UserFavoriteMarketColumn::MarketId.eq(market_id_i32)),
             )
             .count(&*self.db)

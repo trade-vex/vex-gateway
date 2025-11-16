@@ -76,12 +76,10 @@ impl UserBalanceStore {
         &self,
         user_id: u64,
     ) -> Result<Vec<UserBalanceModel>, TradingError> {
-        let user_id_i64 = user_id as i64;
-
         // Cache: Scan for user:{user_id}:asset:*:balance keys, then fetch each hash
         if self.config.enabled {
             if let Some(cache) = &self.cache {
-                let pattern = format!("user:{}:asset:*:balance", user_id_i64);
+                let pattern = format!("user:{}:asset:*:balance", user_id);
 
                 // Use SCAN to find all balance keys for this user
                 match cache.scan_keys(&pattern).await {
@@ -142,8 +140,7 @@ impl UserBalanceStore {
         }
 
         if let Some(cache) = &self.cache {
-            let user_id_i64 = user_id as i64;
-            let pattern = format!("user:{}:asset:*:balance", user_id_i64);
+            let pattern = format!("user:{}:asset:*:balance", user_id);
 
             // Scan for all balance keys
             match cache.scan_keys(&pattern).await {
@@ -170,7 +167,7 @@ impl UserBalanceStore {
     // Helper: Parse balance hash from Redis into UserBalanceModel
     // Kafka writes: user_id, asset_id, available, locked, total, timestamp
     fn parse_balance_hash(hash: HashMap<String, String>) -> Option<UserBalanceModel> {
-        let user_id = hash.get("user_id")?.parse::<i64>().ok()?;
+        let user_id = hash.get("user_id")?.parse::<u64>().ok()?;
         let asset_id = hash.get("asset_id")?.parse::<i32>().ok()?;
         let available = hash.get("available")?.parse::<i64>().ok()?;
         let locked = hash.get("locked")?.parse::<i64>().ok()?;

@@ -12,7 +12,7 @@ pub enum Relation {}
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
     pub id: i64,
-    pub user_id: i64,
+    pub user_id: u64,
     pub asset_id: i32,
     pub available: i64,
     pub locked: i64,

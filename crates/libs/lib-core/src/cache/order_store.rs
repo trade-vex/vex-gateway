@@ -126,12 +126,10 @@ impl OrderStore {
         &self,
         user_id: u64,
     ) -> Result<Vec<OrderModel>, TradingError> {
-        let user_id_i64 = user_id as i64;
-
         // Cache: Query user:{user_id}:orders SET, then fetch each order hash
         if self.config.enabled {
             if let Some(cache) = &self.cache {
-                let set_key = format!("user:{}:orders", user_id_i64);
+                let set_key = format!("user:{}:orders", user_id);
 
                 println!(
                     "🔍 OrderStore: Querying Redis SET for order history: {}",
@@ -208,12 +206,10 @@ impl OrderStore {
     /// Get user's open orders with caching
     /// Uses Redis set user:{user_id}:orders -> fetches each order:{order_id} hash
     pub async fn get_user_orders(&self, user_id: u64) -> Result<Vec<OrderModel>, TradingError> {
-        let user_id_i64 = user_id as i64;
-
         // Cache: Query user:{user_id}:orders SET, then fetch each order hash
         if self.config.enabled {
             if let Some(cache) = &self.cache {
-                let set_key = format!("user:{}:orders", user_id_i64);
+                let set_key = format!("user:{}:orders", user_id);
 
                 println!("🔍 OrderStore: Querying Redis SET: {}", set_key);
 
@@ -310,8 +306,6 @@ impl OrderStore {
         }
 
         if let Some(cache) = &self.cache {
-            let user_id_i64 = user_id as i64;
-
             // Delete order:{order_id} hash
             let order_key = format!("order:{}", order_id);
             if let Err(e) = cache.del_key(&order_key).await {
@@ -319,7 +313,7 @@ impl OrderStore {
             }
 
             // Remove from user:{user_id}:orders set
-            let user_set_key = format!("user:{}:orders", user_id_i64);
+            let user_set_key = format!("user:{}:orders", user_id);
             if let Err(e) = cache
                 .srem_string(&user_set_key, &order_id.to_string())
                 .await
@@ -343,8 +337,7 @@ impl OrderStore {
         }
 
         if let Some(cache) = &self.cache {
-            let user_id_i64 = user_id as i64;
-            let user_set_key = format!("user:{}:orders", user_id_i64);
+            let user_set_key = format!("user:{}:orders", user_id);
 
             // Get all order IDs first
             match cache.smembers_string(&user_set_key).await {
@@ -379,8 +372,8 @@ impl OrderStore {
     // Kafka writes: order_id, user_id, price, size, side, timestamp, market_id, time_in_force, status
     // Note: Redis stores price and size as decimal strings (e.g., "0.1", "0.001"), need to parse as f64 first
     fn parse_order_hash(hash: HashMap<String, String>) -> Option<OrderModel> {
-        let order_order_id = hash.get("order_id")?.parse::<i64>().ok()?;
-        let order_user_id = hash.get("user_id")?.parse::<i64>().ok()?;
+        let order_order_id = hash.get("order_id")?.parse::<u64>().ok()?;
+        let order_user_id = hash.get("user_id")?.parse::<u64>().ok()?;
         
         // Parse price - Redis stores as decimal string (e.g., "0.1"), but DB expects integer
         let price_str = hash.get("price")?;

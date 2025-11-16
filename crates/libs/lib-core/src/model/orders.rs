@@ -11,8 +11,8 @@ pub enum Relation {}
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
     pub id: i64,
-    pub order_order_id: i64,
-    pub order_user_id: i64,
+    pub order_order_id: u64,
+    pub order_user_id: u64,
     pub order_price: i64,
     pub order_size: i64,
     pub order_side: String,
