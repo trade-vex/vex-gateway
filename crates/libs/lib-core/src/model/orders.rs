@@ -7,15 +7,16 @@ pub enum Relation {}
 
 /// Order events from trading.orders_events table
 /// Populated by Kafka consumer from OrderEvent messages
+/// Note: order_order_id and order_user_id stored as Decimal to handle u64 range (> i64::MAX)
 #[derive(Debug, Clone, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "orders_events", schema_name = "trading")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
     pub id: i64,
-    #[sea_orm(column_type = "BigUnsigned")]
-    pub order_order_id: u64,
-    #[sea_orm(column_type = "BigUnsigned")]
-    pub order_user_id: u64,
+    #[sea_orm(column_type = "Decimal(Some((20, 0)))")]
+    pub order_order_id: Decimal,
+    #[sea_orm(column_type = "Decimal(Some((20, 0)))")]
+    pub order_user_id: Decimal,
     #[sea_orm(column_type = "Decimal(Some((38, 12)))")]
     pub order_price: Decimal,
     #[sea_orm(column_type = "Decimal(Some((38, 18)))")]

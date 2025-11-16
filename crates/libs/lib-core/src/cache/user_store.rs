@@ -168,9 +168,9 @@ impl UserBalanceStore {
 
     // Helper: Parse balance hash from Redis into UserBalanceModel
     // Kafka writes: user_id, asset_id, available, locked, total, timestamp
-    // Parse decimal strings directly without any conversion - values returned as-is
+    // Parse all values as Decimal to handle full u64 range without overflow
     fn parse_balance_hash(hash: HashMap<String, String>) -> Option<UserBalanceModel> {
-        let user_id = hash.get("user_id")?.parse::<u64>().ok()?;
+        let user_id = Decimal::from_str(hash.get("user_id")?).ok()?;
         let asset_id = hash.get("asset_id")?.parse::<i32>().ok()?;
         let available = Decimal::from_str(hash.get("available")?).ok()?;
         let locked = Decimal::from_str(hash.get("locked")?).ok()?;

@@ -38,8 +38,8 @@ impl std::str::FromStr for Side {
 // API Response DTOs
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OrderResponse {
-    pub order_id: u64,
-    pub user_id: u64, // Changed from Uuid to u64 to match DB schema
+    pub order_id: Decimal,
+    pub user_id: Decimal,
     pub market_id: u32,
     pub price: Decimal,
     pub size: Decimal,
@@ -52,8 +52,8 @@ pub struct OrderResponse {
 /// Enhanced order response for order history with status and fill information
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OrderHistoryResponse {
-    pub order_id: u64,
-    pub user_id: u64,
+    pub order_id: Decimal,
+    pub user_id: Decimal,
     pub market_id: u32,
     pub price: Decimal,
     pub size: Decimal,
@@ -66,12 +66,12 @@ pub struct OrderHistoryResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserBalanceResponse {
-    pub user_id: u64, // Changed from Uuid to u64 to match DB schema
+    pub user_id: Decimal,
     pub asset_id: u32,
     pub available: Decimal,
     pub locked: Decimal,
     pub total: Decimal,
-    pub timestamp: u64, // Changed from DateTime to unix timestamp
+    pub timestamp: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -142,8 +142,8 @@ pub struct ToggleFavoriteMarketRequest {
 impl From<OrderModel> for OrderResponse {
     fn from(model: OrderModel) -> Self {
         Self {
-            order_id: model.order_order_id as u64,
-            user_id: model.order_user_id as u64,
+            order_id: model.order_order_id,
+            user_id: model.order_user_id,
             market_id: model.market_id as u32,
             price: model.order_price,
             size: model.order_size,
@@ -158,7 +158,7 @@ impl From<OrderModel> for OrderResponse {
 impl From<UserBalanceModel> for UserBalanceResponse {
     fn from(model: UserBalanceModel) -> Self {
         Self {
-            user_id: model.user_id as u64,
+            user_id: model.user_id,
             asset_id: model.asset_id as u32,
             available: model.available,
             locked: model.locked,
@@ -171,8 +171,8 @@ impl From<UserBalanceModel> for UserBalanceResponse {
 impl From<OrderModel> for OrderHistoryResponse {
     fn from(model: OrderModel) -> Self {
         Self {
-            order_id: model.order_order_id as u64,
-            user_id: model.order_user_id as u64,
+            order_id: model.order_order_id,
+            user_id: model.order_user_id,
             market_id: model.market_id as u32,
             price: model.order_price,
             size: model.order_size,

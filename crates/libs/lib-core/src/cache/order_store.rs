@@ -348,10 +348,10 @@ impl OrderStore {
 
     // Helper: Parse order hash from Redis into OrderModel
     // Kafka writes: order_id, user_id, price, size, filled_size, side, timestamp, market_id, time_in_force, status
-    // Parse decimal strings directly without any conversion - values returned as-is
+    // Parse all values as Decimal to handle full u64 range without overflow
     fn parse_order_hash(hash: HashMap<String, String>) -> Option<OrderModel> {
-        let order_order_id = hash.get("order_id")?.parse::<u64>().ok()?;
-        let order_user_id = hash.get("user_id")?.parse::<u64>().ok()?;
+        let order_order_id = Decimal::from_str(hash.get("order_id")?).ok()?;
+        let order_user_id = Decimal::from_str(hash.get("user_id")?).ok()?;
         let order_price = Decimal::from_str(hash.get("price")?).ok()?;
         let order_size = Decimal::from_str(hash.get("size")?).ok()?;
         let filled_size = Decimal::from_str(hash.get("filled_size").unwrap_or(&"0".to_string())).unwrap_or(Decimal::ZERO);

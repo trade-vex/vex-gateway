@@ -221,7 +221,7 @@ impl PostgresTradingRepository {
 impl TradingRepository for PostgresTradingRepository {
     async fn get_user_balances(&self, user_id: u64) -> Result<Vec<UserBalanceModel>> {
         UserBalanceEntity::find()
-            .filter(UserBalanceColumn::UserId.eq(user_id))
+            .filter(UserBalanceColumn::UserId.eq(Decimal::from(user_id)))
             .order_by_desc(UserBalanceColumn::Timestamp)
             .all(&*self.db)
             .await
@@ -230,7 +230,7 @@ impl TradingRepository for PostgresTradingRepository {
 
     async fn get_user_balance(&self, user_id: u64) -> Result<Option<UserBalanceModel>> {
         UserBalanceEntity::find()
-            .filter(UserBalanceColumn::UserId.eq(user_id))
+            .filter(UserBalanceColumn::UserId.eq(Decimal::from(user_id)))
             .order_by_desc(UserBalanceColumn::Timestamp)
             .one(&*self.db)
             .await
@@ -242,7 +242,7 @@ impl TradingRepository for PostgresTradingRepository {
 
         // Insert new balance event (this is an event log table, not mutable state)
         let balance = UserBalanceActiveModel {
-            user_id: Set(user_id),
+            user_id: Set(Decimal::from(user_id)),
             asset_id: Set(0), // Default asset, adjust as needed
             available: Set(Decimal::from(available)),
             locked: Set(Decimal::from(locked)),
@@ -259,7 +259,7 @@ impl TradingRepository for PostgresTradingRepository {
         let total = available + locked;
 
         let balance = UserBalanceActiveModel {
-            user_id: Set(user_id),
+            user_id: Set(Decimal::from(user_id)),
             asset_id: Set(0), // Default asset, adjust as needed
             available: Set(Decimal::from(available)),
             locked: Set(Decimal::from(locked)),
@@ -274,7 +274,7 @@ impl TradingRepository for PostgresTradingRepository {
 
     async fn get_open_orders(&self, user_id: u64) -> Result<Vec<OrderModel>> {
         let all_orders = OrderEntity::find()
-            .filter(OrderColumn::OrderUserId.eq(user_id))
+            .filter(OrderColumn::OrderUserId.eq(Decimal::from(user_id)))
             .order_by_desc(OrderColumn::OrderTimestamp)
             .all(&*self.db)
             .await
@@ -299,8 +299,8 @@ impl TradingRepository for PostgresTradingRepository {
         OrderEntity::find()
             .filter(
                 OrderColumn::OrderOrderId
-                    .eq(order_id)
-                    .and(OrderColumn::OrderUserId.eq(user_id)),
+                    .eq(Decimal::from(order_id))
+                    .and(OrderColumn::OrderUserId.eq(Decimal::from(user_id))),
             )
             .one(&*self.db)
             .await
@@ -322,12 +322,12 @@ impl TradingRepository for PostgresTradingRepository {
         };
 
         let result = active_model.insert(&*self.db).await?;
-        Ok(result.order_order_id)
+        Ok(result.order_order_id.to_string().parse::<u64>().unwrap_or(0))
     }
 
     async fn count_user_orders(&self, user_id: u64) -> Result<u64> {
         let count = OrderEntity::find()
-            .filter(OrderColumn::OrderUserId.eq(user_id))
+            .filter(OrderColumn::OrderUserId.eq(Decimal::from(user_id)))
             .count(&*self.db)
             .await?;
         Ok(count as u64)
@@ -336,7 +336,7 @@ impl TradingRepository for PostgresTradingRepository {
     async fn get_order_history(&self, user_id: u64) -> Result<Vec<OrderModel>> {
         // Only return Cancelled, PartiallyFilled, and Filled orders for history
         OrderEntity::find()
-            .filter(OrderColumn::OrderUserId.eq(user_id))
+            .filter(OrderColumn::OrderUserId.eq(Decimal::from(user_id)))
             .filter(
                 OrderColumn::Status.eq("Cancelled")
                     .or(OrderColumn::Status.eq("PartiallyFilled"))
@@ -393,7 +393,7 @@ impl TradingRepository for PostgresTradingRepository {
         UserFavoriteMarketEntity::delete_many()
             .filter(
                 UserFavoriteMarketColumn::UserId
-                    .eq(user_id)
+                    .eq(user_id as i64)
                     .and(UserFavoriteMarketColumn::MarketId.eq(market_id_i32)),
             )
             .exec(&*self.db)
@@ -408,7 +408,7 @@ impl TradingRepository for PostgresTradingRepository {
         let count = UserFavoriteMarketEntity::find()
             .filter(
                 UserFavoriteMarketColumn::UserId
-                    .eq(user_id)
+                    .eq(user_id as i64)
                     .and(UserFavoriteMarketColumn::MarketId.eq(market_id_i32)),
             )
             .count(&*self.db)
