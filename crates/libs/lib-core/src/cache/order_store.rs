@@ -2,7 +2,9 @@ use crate::model::orders::Model as OrderModel;
 use crate::repository::repository::{TradingError, TradingRepository};
 use lib_db::backends::kv::redis::RedisDb;
 use lib_db::traits::BasicKvStore;
+use rust_decimal::Decimal;
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -370,32 +372,12 @@ impl OrderStore {
 
     // Helper: Parse order hash from Redis into OrderModel
     // Kafka writes: order_id, user_id, price, size, side, timestamp, market_id, time_in_force, status
-    // Note: Redis stores price and size as decimal strings (e.g., "0.1", "0.001"), need to parse as f64 first
+    // Parse decimal strings directly without any conversion - values returned as-is
     fn parse_order_hash(hash: HashMap<String, String>) -> Option<OrderModel> {
         let order_order_id = hash.get("order_id")?.parse::<u64>().ok()?;
         let order_user_id = hash.get("user_id")?.parse::<u64>().ok()?;
-        
-        // Parse price - Redis stores as decimal string (e.g., "0.1"), but DB expects integer
-        let price_str = hash.get("price")?;
-        let order_price = if let Ok(price_i64) = price_str.parse::<i64>() {
-            price_i64
-        } else if let Ok(price_f64) = price_str.parse::<f64>() {
-            // Convert decimal to integer with 12 decimal places precision
-            (price_f64 * 1_000_000_000_000.0) as i64
-        } else {
-            return None;
-        };
-        
-        // Parse size - same logic as price
-        let size_str = hash.get("size")?;
-        let order_size = if let Ok(size_i64) = size_str.parse::<i64>() {
-            size_i64
-        } else if let Ok(size_f64) = size_str.parse::<f64>() {
-            (size_f64 * 1_000_000_000_000.0) as i64
-        } else {
-            return None;
-        };
-        
+        let order_price = Decimal::from_str(hash.get("price")?).ok()?;
+        let order_size = Decimal::from_str(hash.get("size")?).ok()?;
         let order_side = hash.get("side")?.clone();
         let order_timestamp = hash.get("timestamp")?.parse::<i64>().ok()?;
         let market_id = hash.get("market_id")?.parse::<i32>().ok()?;
