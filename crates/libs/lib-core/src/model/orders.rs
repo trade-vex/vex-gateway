@@ -12,7 +12,9 @@ pub enum Relation {}
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
     pub id: i64,
+    #[sea_orm(column_type = "BigUnsigned")]
     pub order_order_id: u64,
+    #[sea_orm(column_type = "BigUnsigned")]
     pub order_user_id: u64,
     #[sea_orm(column_type = "Decimal(Some((38, 12)))")]
     pub order_price: Decimal,
