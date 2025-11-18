@@ -49,6 +49,9 @@ pub enum AuthError {
     #[error("Email already exists")]
     EmailAlreadyExists,
 
+    #[error("Username already taken")]
+    UsernameAlreadyExists,
+
     #[error("Invalid password")]
     InvalidPassword,
 
@@ -134,6 +137,11 @@ impl ResponseError for AuthError {
                 409,
                 "EMAIL_EXISTS",
                 "Email address is already registered".to_string(),
+            ),
+            AuthError::UsernameAlreadyExists => (
+                409,
+                "USERNAME_TAKEN",
+                "Username already taken".to_string(),
             ),
             AuthError::InvalidPassword => (
                 400,
