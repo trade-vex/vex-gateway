@@ -22,6 +22,7 @@ use lib_core::model::orders::Model as OrderModel;
 use lib_core::model::user_balances::Model as UserBalanceModel;
 use lib_core::model::user_favorite_markets::Model as UserFavoriteMarketModel;
 use lib_core::repository::repository::{TradingError, TradingRepository};
+use rust_decimal::Decimal;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -62,7 +63,7 @@ impl TradingRepository for MockTradingRepository {
         Ok(self
             .balances
             .iter()
-            .filter(|b| b.user_id == user_id as i64)
+            .filter(|b| b.user_id == Decimal::from(user_id))
             .cloned()
             .collect())
     }
@@ -74,7 +75,7 @@ impl TradingRepository for MockTradingRepository {
         Ok(self
             .balances
             .iter()
-            .find(|b| b.user_id == user_id as i64)
+            .find(|b| b.user_id == Decimal::from(user_id))
             .cloned())
     }
 
@@ -98,6 +99,14 @@ impl TradingRepository for MockTradingRepository {
 
     async fn get_open_orders(&self, _user_id: u64) -> Result<Vec<OrderModel>> {
         Ok(vec![])
+    }
+
+    async fn get_open_orders_paginated(&self, _user_id: u64, _offset: u64, _limit: u64) -> Result<Vec<OrderModel>> {
+        Ok(vec![])
+    }
+
+    async fn count_open_orders(&self, _user_id: u64) -> Result<u64> {
+        Ok(0)
     }
 
     async fn get_order_by_id(&self, _order_id: u64, _user_id: u64) -> Result<Option<OrderModel>> {
@@ -130,6 +139,18 @@ impl TradingRepository for MockTradingRepository {
     async fn is_market_favorited(&self, _user_id: u64, _market_id: u32) -> Result<bool> {
         Ok(false)
     }
+
+    async fn get_order_history(&self, _user_id: u64) -> Result<Vec<OrderModel>> {
+        Ok(vec![])
+    }
+
+    async fn get_order_history_paginated(&self, _user_id: u64, _offset: u64, _limit: u64) -> Result<Vec<OrderModel>> {
+        Ok(vec![])
+    }
+
+    async fn count_order_history(&self, _user_id: u64) -> Result<u64> {
+        Ok(0)
+    }
 }
 
 /// Helper: Create test balance
@@ -142,11 +163,11 @@ fn create_test_balance(
 ) -> UserBalanceModel {
     UserBalanceModel {
         id: 0,
-        user_id,
+        user_id: Decimal::from(user_id),
         asset_id,
-        available,
-        locked,
-        total,
+        available: Decimal::from(available),
+        locked: Decimal::from(locked),
+        total: Decimal::from(total),
         timestamp: 1700000000,
         created_at: None,
     }
@@ -184,9 +205,9 @@ async fn test_user_balance_store_with_repository() {
     let fetched_balances = result.unwrap();
     assert_eq!(fetched_balances.len(), 2);
     assert_eq!(fetched_balances[0].asset_id, 1);
-    assert_eq!(fetched_balances[0].available, 10000);
+    assert_eq!(fetched_balances[0].available, Decimal::from(10000));
     assert_eq!(fetched_balances[1].asset_id, 2);
-    assert_eq!(fetched_balances[1].available, 50000);
+    assert_eq!(fetched_balances[1].available, Decimal::from(50000));
 }
 
 #[tokio::test]
@@ -220,11 +241,11 @@ async fn test_get_user_balances_single_asset() {
     assert!(result.is_ok());
     let fetched_balances = result.unwrap();
     assert_eq!(fetched_balances.len(), 1);
-    assert_eq!(fetched_balances[0].user_id, 100);
+    assert_eq!(fetched_balances[0].user_id, Decimal::from(100));
     assert_eq!(fetched_balances[0].asset_id, 1);
-    assert_eq!(fetched_balances[0].available, 10000);
-    assert_eq!(fetched_balances[0].locked, 500);
-    assert_eq!(fetched_balances[0].total, 10500);
+    assert_eq!(fetched_balances[0].available, Decimal::from(10000));
+    assert_eq!(fetched_balances[0].locked, Decimal::from(500));
+    assert_eq!(fetched_balances[0].total, Decimal::from(10500));
 }
 
 #[tokio::test]
@@ -252,23 +273,23 @@ async fn test_get_user_balances_multiple_assets() {
     // Verify each balance
     let btc_balance = &fetched_balances[0];
     assert_eq!(btc_balance.asset_id, 1);
-    assert_eq!(btc_balance.available, 10000);
-    assert_eq!(btc_balance.locked, 500);
+    assert_eq!(btc_balance.available, Decimal::from(10000));
+    assert_eq!(btc_balance.locked, Decimal::from(500));
 
     let eth_balance = &fetched_balances[1];
     assert_eq!(eth_balance.asset_id, 2);
-    assert_eq!(eth_balance.available, 50000);
-    assert_eq!(eth_balance.locked, 1000);
+    assert_eq!(eth_balance.available, Decimal::from(50000));
+    assert_eq!(eth_balance.locked, Decimal::from(1000));
 
     let usdt_balance = &fetched_balances[2];
     assert_eq!(usdt_balance.asset_id, 3);
-    assert_eq!(usdt_balance.available, 100000);
-    assert_eq!(usdt_balance.locked, 0);
+    assert_eq!(usdt_balance.available, Decimal::from(100000));
+    assert_eq!(usdt_balance.locked, Decimal::from(0));
 
     let sol_balance = &fetched_balances[3];
     assert_eq!(sol_balance.asset_id, 4);
-    assert_eq!(sol_balance.available, 5000);
-    assert_eq!(sol_balance.locked, 2500);
+    assert_eq!(sol_balance.available, Decimal::from(5000));
+    assert_eq!(sol_balance.locked, Decimal::from(2500));
 }
 
 #[tokio::test]
@@ -327,23 +348,23 @@ async fn test_multiple_users() {
     assert!(result.is_ok());
     let user100_balances = result.unwrap();
     assert_eq!(user100_balances.len(), 2);
-    assert_eq!(user100_balances[0].user_id, 100);
-    assert_eq!(user100_balances[1].user_id, 100);
+    assert_eq!(user100_balances[0].user_id, Decimal::from(100));
+    assert_eq!(user100_balances[1].user_id, Decimal::from(100));
 
     // User 200 should have 1 balance
     let result = store.get_user_balances(200).await;
     assert!(result.is_ok());
     let user200_balances = result.unwrap();
     assert_eq!(user200_balances.len(), 1);
-    assert_eq!(user200_balances[0].user_id, 200);
-    assert_eq!(user200_balances[0].available, 20000);
+    assert_eq!(user200_balances[0].user_id, Decimal::from(200));
+    assert_eq!(user200_balances[0].available, Decimal::from(20000));
 
     // User 300 should have 1 balance
     let result = store.get_user_balances(300).await;
     assert!(result.is_ok());
     let user300_balances = result.unwrap();
     assert_eq!(user300_balances.len(), 1);
-    assert_eq!(user300_balances[0].user_id, 300);
+    assert_eq!(user300_balances[0].user_id, Decimal::from(300));
 
     // User 999 (non-existent) should have empty balances
     let result = store.get_user_balances(999).await;
@@ -368,9 +389,9 @@ async fn test_zero_balances() {
     assert!(result.is_ok());
     let fetched_balances = result.unwrap();
     assert_eq!(fetched_balances.len(), 1);
-    assert_eq!(fetched_balances[0].available, 0);
-    assert_eq!(fetched_balances[0].locked, 0);
-    assert_eq!(fetched_balances[0].total, 0);
+    assert_eq!(fetched_balances[0].available, Decimal::from(0));
+    assert_eq!(fetched_balances[0].locked, Decimal::from(0));
+    assert_eq!(fetched_balances[0].total, Decimal::from(0));
 }
 
 #[tokio::test]
@@ -400,9 +421,9 @@ async fn test_large_balance_values() {
     assert!(result.is_ok());
     let fetched_balances = result.unwrap();
     assert_eq!(fetched_balances.len(), 1);
-    assert_eq!(fetched_balances[0].available, large_available);
-    assert_eq!(fetched_balances[0].locked, large_locked);
-    assert_eq!(fetched_balances[0].total, large_total);
+    assert_eq!(fetched_balances[0].available, Decimal::from(large_available));
+    assert_eq!(fetched_balances[0].locked, Decimal::from(large_locked));
+    assert_eq!(fetched_balances[0].total, Decimal::from(large_total));
 }
 
 #[tokio::test]
@@ -501,9 +522,9 @@ async fn test_balance_with_only_available() {
     assert!(result.is_ok());
     let fetched_balances = result.unwrap();
     assert_eq!(fetched_balances.len(), 1);
-    assert_eq!(fetched_balances[0].available, 10000);
-    assert_eq!(fetched_balances[0].locked, 0);
-    assert_eq!(fetched_balances[0].total, 10000);
+    assert_eq!(fetched_balances[0].available, Decimal::from(10000));
+    assert_eq!(fetched_balances[0].locked, Decimal::from(0));
+    assert_eq!(fetched_balances[0].total, Decimal::from(10000));
 }
 
 #[tokio::test]
@@ -522,9 +543,9 @@ async fn test_balance_with_only_locked() {
     assert!(result.is_ok());
     let fetched_balances = result.unwrap();
     assert_eq!(fetched_balances.len(), 1);
-    assert_eq!(fetched_balances[0].available, 0);
-    assert_eq!(fetched_balances[0].locked, 5000);
-    assert_eq!(fetched_balances[0].total, 5000);
+    assert_eq!(fetched_balances[0].available, Decimal::from(0));
+    assert_eq!(fetched_balances[0].locked, Decimal::from(5000));
+    assert_eq!(fetched_balances[0].total, Decimal::from(5000));
 }
 
 #[tokio::test]

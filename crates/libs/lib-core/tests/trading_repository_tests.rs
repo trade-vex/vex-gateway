@@ -22,6 +22,7 @@ use lib_core::model::user_favorite_markets::Model as UserFavoriteMarketModel;
 use lib_core::repository::repository::{
     PostgresTradingRepository, TradingError, TradingRepository,
 };
+use rust_decimal::Decimal;
 use sea_orm::{Database, DbErr};
 use std::sync::Arc;
 
@@ -80,7 +81,7 @@ impl TradingRepository for MockTradingRepository {
         Ok(self
             .balances
             .iter()
-            .filter(|b| b.user_id == user_id as i64)
+            .filter(|b| b.user_id == Decimal::from(user_id))
             .cloned()
             .collect())
     }
@@ -92,7 +93,7 @@ impl TradingRepository for MockTradingRepository {
         Ok(self
             .balances
             .iter()
-            .find(|b| b.user_id == user_id as i64)
+            .find(|b| b.user_id == Decimal::from(user_id))
             .cloned())
     }
 
@@ -128,7 +129,7 @@ impl TradingRepository for MockTradingRepository {
             .orders
             .iter()
             .filter(|o| {
-                o.order_user_id == user_id as i64
+                o.order_user_id == Decimal::from(user_id)
                     && (o.status.to_lowercase() == "pending"
                         || o.status.to_lowercase() == "partiallyfilled"
                         || o.status.to_lowercase() == "processing")
@@ -138,6 +139,46 @@ impl TradingRepository for MockTradingRepository {
         Ok(orders)
     }
 
+    async fn get_open_orders_paginated(&self, user_id: u64, offset: u64, limit: u64) -> Result<Vec<OrderModel>> {
+        if self.should_error {
+            return Err(TradingError::Database("Mock database error".to_string()));
+        }
+        let mut orders: Vec<_> = self
+            .orders
+            .iter()
+            .filter(|o| {
+                o.order_user_id == Decimal::from(user_id)
+                    && (o.status.to_lowercase() == "pending"
+                        || o.status.to_lowercase() == "partiallyfilled"
+                        || o.status.to_lowercase() == "processing")
+            })
+            .cloned()
+            .collect();
+        // Sort by timestamp descending (most recent first)
+        orders.sort_by(|a, b| b.order_timestamp.cmp(&a.order_timestamp));
+        // Apply pagination
+        let start = offset as usize;
+        let end = (offset + limit) as usize;
+        Ok(orders.into_iter().skip(start).take((end - start).min(limit as usize)).collect())
+    }
+
+    async fn count_open_orders(&self, user_id: u64) -> Result<u64> {
+        if self.should_error {
+            return Err(TradingError::Database("Mock database error".to_string()));
+        }
+        let count = self
+            .orders
+            .iter()
+            .filter(|o| {
+                o.order_user_id == Decimal::from(user_id)
+                    && (o.status.to_lowercase() == "pending"
+                        || o.status.to_lowercase() == "partiallyfilled"
+                        || o.status.to_lowercase() == "processing")
+            })
+            .count();
+        Ok(count as u64)
+    }
+
     async fn get_order_by_id(&self, order_id: u64, user_id: u64) -> Result<Option<OrderModel>> {
         if self.should_error {
             return Err(TradingError::Database("Mock database error".to_string()));
@@ -145,7 +186,7 @@ impl TradingRepository for MockTradingRepository {
         Ok(self
             .orders
             .iter()
-            .find(|o| o.order_order_id == order_id as i64 && o.order_user_id == user_id as i64)
+            .find(|o| o.order_order_id == Decimal::from(order_id) && o.order_user_id == Decimal::from(user_id))
             .cloned())
     }
 
@@ -153,7 +194,7 @@ impl TradingRepository for MockTradingRepository {
         if self.should_error {
             return Err(TradingError::Database("Mock database error".to_string()));
         }
-        Ok(order.order_order_id as u64)
+        Ok(order.order_order_id.to_string().parse::<u64>().unwrap_or(0))
     }
 
     async fn count_user_orders(&self, user_id: u64) -> Result<u64> {
@@ -163,8 +204,65 @@ impl TradingRepository for MockTradingRepository {
         Ok(self
             .orders
             .iter()
-            .filter(|o| o.order_user_id == user_id as i64)
+            .filter(|o| o.order_user_id == Decimal::from(user_id))
             .count() as u64)
+    }
+
+    async fn get_order_history(&self, user_id: u64) -> Result<Vec<OrderModel>> {
+        if self.should_error {
+            return Err(TradingError::Database("Mock database error".to_string()));
+        }
+        Ok(self
+            .orders
+            .iter()
+            .filter(|o| {
+                o.order_user_id == Decimal::from(user_id)
+                    && (o.status.to_lowercase() == "cancelled"
+                        || o.status.to_lowercase() == "partiallyfilled"
+                        || o.status.to_lowercase() == "filled")
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn get_order_history_paginated(&self, user_id: u64, offset: u64, limit: u64) -> Result<Vec<OrderModel>> {
+        if self.should_error {
+            return Err(TradingError::Database("Mock database error".to_string()));
+        }
+        let mut orders: Vec<_> = self
+            .orders
+            .iter()
+            .filter(|o| {
+                o.order_user_id == Decimal::from(user_id)
+                    && (o.status.to_lowercase() == "cancelled"
+                        || o.status.to_lowercase() == "partiallyfilled"
+                        || o.status.to_lowercase() == "filled")
+            })
+            .cloned()
+            .collect();
+        // Sort by timestamp descending (most recent first)
+        orders.sort_by(|a, b| b.order_timestamp.cmp(&a.order_timestamp));
+        // Apply pagination
+        let start = offset as usize;
+        let end = (offset + limit) as usize;
+        Ok(orders.into_iter().skip(start).take((end - start).min(limit as usize)).collect())
+    }
+
+    async fn count_order_history(&self, user_id: u64) -> Result<u64> {
+        if self.should_error {
+            return Err(TradingError::Database("Mock database error".to_string()));
+        }
+        let count = self
+            .orders
+            .iter()
+            .filter(|o| {
+                o.order_user_id == Decimal::from(user_id)
+                    && (o.status.to_lowercase() == "cancelled"
+                        || o.status.to_lowercase() == "partiallyfilled"
+                        || o.status.to_lowercase() == "filled")
+            })
+            .count();
+        Ok(count as u64)
     }
 
     async fn get_user_favorite_markets(
@@ -177,7 +275,7 @@ impl TradingRepository for MockTradingRepository {
         Ok(self
             .favorite_markets
             .iter()
-            .filter(|m| m.user_id == user_id as i64)
+            .filter(|m| m.user_id == user_id)
             .cloned()
             .collect())
     }
@@ -203,7 +301,7 @@ impl TradingRepository for MockTradingRepository {
         Ok(self
             .favorite_markets
             .iter()
-            .any(|m| m.user_id == user_id as i64 && m.market_id == market_id as i32))
+            .any(|m| m.user_id == user_id && m.market_id == market_id as i32))
     }
 }
 
@@ -214,11 +312,11 @@ impl TradingRepository for MockTradingRepository {
 fn create_test_balance(user_id: i64, asset_id: i32, available: i64, locked: i64) -> UserBalanceModel {
     UserBalanceModel {
         id: 1,
-        user_id,
+        user_id: Decimal::from(user_id),
         asset_id,
-        available,
-        locked,
-        total: available + locked,
+        available: Decimal::from(available),
+        locked: Decimal::from(locked),
+        total: Decimal::from(available) + Decimal::from(locked),
         timestamp: Utc::now().timestamp(),
         created_at: Some(Utc::now()),
     }
@@ -234,10 +332,11 @@ fn create_test_order(
 ) -> OrderModel {
     OrderModel {
         id: order_id,
-        order_order_id: order_id,
-        order_user_id: user_id,
-        order_price: price,
-        order_size: size,
+        order_order_id: Decimal::from(order_id),
+        order_user_id: Decimal::from(user_id),
+        order_price: Decimal::from(price),
+        order_size: Decimal::from(size),
+        filled_size: Decimal::ZERO,
         order_side: side.to_string(),
         order_timestamp: Utc::now().timestamp(),
         market_id: 1,
@@ -247,7 +346,7 @@ fn create_test_order(
     }
 }
 
-fn create_test_favorite_market(user_id: i64, market_id: i32) -> UserFavoriteMarketModel {
+fn create_test_favorite_market(user_id: u64, market_id: i32) -> UserFavoriteMarketModel {
     UserFavoriteMarketModel {
         id: 1,
         user_id,
@@ -276,7 +375,7 @@ async fn test_get_user_balances_success() {
     assert_eq!(result.len(), 2);
     assert!(result.iter().any(|b| b.asset_id == 0));
     assert!(result.iter().any(|b| b.asset_id == 1));
-    assert!(result.iter().all(|b| b.user_id == 100));
+    assert!(result.iter().all(|b| b.user_id == Decimal::from(100)));
 }
 
 #[tokio::test]
@@ -305,9 +404,9 @@ async fn test_get_user_balance_success() {
     let result = repo.get_user_balance(100).await.unwrap();
     assert!(result.is_some());
     let balance = result.unwrap();
-    assert_eq!(balance.user_id, 100);
-    assert_eq!(balance.available, 1000000);
-    assert_eq!(balance.locked, 500000);
+    assert_eq!(balance.user_id, Decimal::from(100));
+    assert_eq!(balance.available, Decimal::from(1000000));
+    assert_eq!(balance.locked, Decimal::from(500000));
 }
 
 #[tokio::test]
@@ -365,7 +464,7 @@ async fn test_get_open_orders_filters_by_user() {
 
     let result = repo.get_open_orders(100).await.unwrap();
     assert_eq!(result.len(), 1);
-    assert_eq!(result[0].order_user_id, 100);
+    assert_eq!(result[0].order_user_id, Decimal::from(100));
 }
 
 #[tokio::test]
@@ -376,8 +475,8 @@ async fn test_get_order_by_id_success() {
     let result = repo.get_order_by_id(1, 100).await.unwrap();
     assert!(result.is_some());
     let order = result.unwrap();
-    assert_eq!(order.order_order_id, 1);
-    assert_eq!(order.order_user_id, 100);
+    assert_eq!(order.order_order_id, Decimal::from(1));
+    assert_eq!(order.order_user_id, Decimal::from(100));
 }
 
 #[tokio::test]
@@ -402,7 +501,7 @@ async fn test_create_order_success() {
     let repo = MockTradingRepository::new();
 
     let result = repo.create_order(order).await.unwrap();
-    assert_eq!(result, 1);
+    assert_eq!(result, 1u64);
 }
 
 #[tokio::test]
@@ -591,7 +690,7 @@ async fn test_get_open_orders_case_insensitive_status() {
 #[tokio::test]
 async fn test_balance_total_calculation() {
     let balance = create_test_balance(100, 0, 1000000, 500000);
-    assert_eq!(balance.total, 1500000);
+    assert_eq!(balance.total, Decimal::from(1500000));
     assert_eq!(balance.total, balance.available + balance.locked);
 }
 
