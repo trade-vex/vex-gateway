@@ -101,21 +101,26 @@ pub async fn get_balances(
 
 /// Get user's open orders
 ///
-/// Retrieves all currently open (unfilled) orders for the authenticated user across all markets.
+/// Retrieves currently open (unfilled) orders for the authenticated user across all markets.
 /// Returns detailed information about each order including price, size, side, and current status.
+/// Supports pagination via query parameters.
 ///
 /// # Endpoint
-/// `GET /api/user/orders/open`
+/// `GET /api/user/orders/open?page=1&limit=20`
+///
+/// # Query Parameters
+/// - `page` (optional): Page number (1-indexed). Defaults to 1.
+/// - `limit` (optional): Number of orders per page. Defaults to 20, max 100.
 ///
 /// # Authentication
 /// Requires valid JWT token in Authorization header: `Bearer <token>`
 ///
 /// # Response
-/// Returns [`OrdersListResponse`] containing all open orders.
+/// Returns [`OrdersListResponse`] containing paginated open orders with pagination metadata.
 ///
 /// # Example Request
 /// ```bash
-/// curl -X GET http://localhost:8080/api/user/orders/open \
+/// curl -X GET "http://localhost:8080/api/user/orders/open?page=1&limit=20" \
 ///   -H "Authorization: Bearer <jwt_token>"
 /// ```
 ///
@@ -131,18 +136,14 @@ pub async fn get_balances(
 ///       "size": 100,
 ///       "side": "Bid",
 ///       "timestamp": 1697452800000000
-///     },
-///     {
-///       "order_id": 987654321,
-///       "user_id": 123456,
-///       "market_id": 2,
-///       "price": 10000000,
-///       "size": 50,
-///       "side": "Ask",
-///       "timestamp": 1697452900000000
 ///     }
 ///   ],
-///   "total": 2
+///   "total": 2,
+///   "page": 1,
+///   "limit": 20,
+///   "total_pages": 1,
+///   "has_next": false,
+///   "has_prev": false
 /// }
 /// ```
 ///
@@ -169,22 +170,56 @@ pub async fn get_balances(
 /// - Filled - Completely executed orders
 /// - Cancelled - User-cancelled orders
 /// - Rejected - Orders rejected by matching engine
+#[derive(Debug, Deserialize)]
+pub struct OrdersQuery {
+    pub page: Option<usize>,
+    pub limit: Option<usize>,
+}
+
 pub async fn get_open_orders(
     user: AuthenticatedUserId,
+    query: web::Query<OrdersQuery>,
     order_store: web::Data<Arc<OrderStore>>,
+    trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
     let raw = user.0.as_u128();
     let user_id = ((raw >> 64) as u64) ^ (raw as u64);
 
-    match order_store.get_user_orders(user_id).await {
+    // Parse pagination parameters
+    let page = query.page.unwrap_or(1).max(1);
+    let limit = query.limit.unwrap_or(20).min(100).max(1);
+    let offset = ((page - 1) * limit) as u64;
+    let limit_u64 = limit as u64;
+
+    // Get total count for pagination metadata
+    let total_count = match trading_repo.count_open_orders(user_id).await {
+        Ok(count) => count as usize,
+        Err(e) => {
+            tracing::error!("failed to count open orders for user_id {}: {}", user_id, e);
+            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "failed to retrieve open orders",
+                "message": e.to_string()
+            })));
+        }
+    };
+
+    match order_store.get_user_orders_paginated(user_id, offset, limit_u64).await {
         Ok(orders) => {
-            let total = orders.len();
             let order_responses: Vec<OrderResponse> =
                 orders.into_iter().map(|order| order.into()).collect();
 
+            let total_pages = (total_count + limit - 1) / limit;
+            let has_next = page < total_pages;
+            let has_prev = page > 1;
+
             let response = OrdersListResponse {
                 orders: order_responses,
-                total,
+                total: total_count,
+                page,
+                limit,
+                total_pages,
+                has_next,
+                has_prev,
             };
 
             Ok(HttpResponse::Ok().json(response))
@@ -201,21 +236,26 @@ pub async fn get_open_orders(
 
 /// Get user's complete order history
 ///
-/// Retrieves all orders (open, filled, cancelled, rejected) for the authenticated user across all markets.
+/// Retrieves orders (filled, cancelled, partially filled) for the authenticated user across all markets.
 /// Returns detailed information about each order including price, size, side, status, and fill information.
+/// Supports pagination via query parameters.
 ///
 /// # Endpoint
-/// `GET /api/user/orders/history`
+/// `GET /api/user/orders/history?page=1&limit=20`
+///
+/// # Query Parameters
+/// - `page` (optional): Page number (1-indexed). Defaults to 1.
+/// - `limit` (optional): Number of orders per page. Defaults to 20, max 100.
 ///
 /// # Authentication
 /// Requires valid JWT token in Authorization header: `Bearer <token>`
 ///
 /// # Response
-/// Returns [`OrdersHistoryListResponse`] containing all orders with status and fill information.
+/// Returns [`OrdersHistoryListResponse`] containing paginated orders with status and fill information.
 ///
 /// # Example Request
 /// ```bash
-/// curl -X GET http://localhost:8080/api/user/orders/history \
+/// curl -X GET "http://localhost:8080/api/user/orders/history?page=1&limit=20" \
 ///   -H "Authorization: Bearer <jwt_token>"
 /// ```
 ///
@@ -233,31 +273,14 @@ pub async fn get_open_orders(
 ///       "timestamp": 1697452800000000,
 ///       "status": "Filled",
 ///       "filled_size": 100
-///     },
-///     {
-///       "order_id": 987654321,
-///       "user_id": 123456,
-///       "market_id": 2,
-///       "price": 10000000,
-///       "size": 50,
-///       "side": "Ask",
-///       "timestamp": 1697452900000000,
-///       "status": "PartiallyFilled",
-///       "filled_size": 25
-///     },
-///     {
-///       "order_id": 456789123,
-///       "user_id": 123456,
-///       "market_id": 1,
-///       "price": 4500000,
-///       "size": 75,
-///       "side": "Bid",
-///       "timestamp": 1697453000000000,
-///       "status": "Cancelled",
-///       "filled_size": 0
 ///     }
 ///   ],
-///   "total": 3
+///   "total": 3,
+///   "page": 1,
+///   "limit": 20,
+///   "total_pages": 1,
+///   "has_next": false,
+///   "has_prev": false
 /// }
 /// ```
 ///
@@ -275,33 +298,58 @@ pub async fn get_open_orders(
 /// - Updates: Real-time via Kafka event streaming from VEX Core
 ///
 /// # Order States
-/// Returns orders in ALL states:
-/// - Pending - Order submitted but not yet processed
+/// Returns orders in terminal states:
 /// - PartiallyFilled - Order partially executed
-/// - Processing - Order being matched
 /// - Filled - Completely executed orders
 /// - Cancelled - User-cancelled orders
-/// - Rejected - Orders rejected by matching engine
 ///
 /// # Fill Information
 /// - `filled_size`: Amount of the order that has been executed
-/// - `status`: Current status of the order (Pending, PartiallyFilled, Filled, Cancelled, Rejected)
+/// - `status`: Current status of the order (PartiallyFilled, Filled, Cancelled)
 pub async fn get_order_history(
     user: AuthenticatedUserId,
+    query: web::Query<OrdersQuery>,
     order_store: web::Data<Arc<OrderStore>>,
+    trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
     let raw = user.0.as_u128();
     let user_id = ((raw >> 64) as u64) ^ (raw as u64);
 
-    match order_store.get_user_order_history(user_id).await {
+    // Parse pagination parameters
+    let page = query.page.unwrap_or(1).max(1);
+    let limit = query.limit.unwrap_or(20).min(100).max(1);
+    let offset = ((page - 1) * limit) as u64;
+    let limit_u64 = limit as u64;
+
+    // Get total count for pagination metadata
+    let total_count = match trading_repo.count_order_history(user_id).await {
+        Ok(count) => count as usize,
+        Err(e) => {
+            tracing::error!("failed to count order history for user_id {}: {}", user_id, e);
+            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "failed to retrieve order history",
+                "message": e.to_string()
+            })));
+        }
+    };
+
+    match order_store.get_user_order_history_paginated(user_id, offset, limit_u64).await {
         Ok(orders) => {
-            let total = orders.len();
             let order_responses: Vec<OrderHistoryResponse> =
                 orders.into_iter().map(|order| order.into()).collect();
 
+            let total_pages = (total_count + limit - 1) / limit;
+            let has_next = page < total_pages;
+            let has_prev = page > 1;
+
             let response = OrdersHistoryListResponse {
                 orders: order_responses,
-                total,
+                total: total_count,
+                page,
+                limit,
+                total_pages,
+                has_next,
+                has_prev,
             };
 
             Ok(HttpResponse::Ok().json(response))

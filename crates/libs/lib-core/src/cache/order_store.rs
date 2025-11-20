@@ -121,6 +121,74 @@ impl OrderStore {
         Ok(None)
     }
 
+    /// Get user's order history with filled_size from orders table only (paginated)
+    /// Returns Cancelled, PartiallyFilled, and Filled orders
+    pub async fn get_user_order_history_paginated(
+        &self,
+        user_id: u64,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<OrderModel>, TradingError> {
+        // Try Redis first if cache enabled
+        if self.config.enabled {
+            if let Some(cache) = &self.cache {
+                let set_key = format!("user:{}:orders", user_id);
+                debug!("Redis: Querying orders from SET: {}", set_key);
+
+                match cache.smembers_string(&set_key).await {
+                    Ok(order_ids) if !order_ids.is_empty() => {
+                        let mut orders = Vec::new();
+                        for order_id_str in &order_ids {
+                            let order_key = format!("order:{}", order_id_str);
+                            if let Ok(hash) = cache.hgetall_string(&order_key).await {
+                                if !hash.is_empty() {
+                                    // Only include Cancelled, PartiallyFilled, Filled
+                                    if let Some(status) = hash.get("status") {
+                                        let status_lower = status.to_lowercase();
+                                        if status_lower == "cancelled" 
+                                            || status_lower == "partiallyfilled" 
+                                            || status_lower == "filled" {
+                                            if let Some(order) = Self::parse_order_hash(hash) {
+                                                orders.push(order);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Sort by timestamp descending and apply pagination
+                        orders.sort_by(|a, b| b.order_timestamp.cmp(&a.order_timestamp));
+                        let start = offset as usize;
+                        let end = (offset + limit) as usize;
+                        let paginated_orders: Vec<_> = orders.into_iter().skip(start).take((end - start).min(limit as usize)).collect();
+
+                        if !paginated_orders.is_empty() {
+                            debug!("Redis cache hit: {} history orders (paginated)", paginated_orders.len());
+                            return Ok(paginated_orders);
+                        }
+                    }
+                    Ok(_) => {
+                        debug!("Redis cache miss for user orders: {}", user_id);
+                    }
+                    Err(e) => {
+                        warn!("Redis error for user {}: {}", user_id, e);
+                    }
+                }
+            }
+        }
+
+        // Database fallback
+        if let Some(repo) = &self.trading_repo {
+            let orders = repo.get_order_history_paginated(user_id, offset, limit).await?;
+            debug!("Postgres: Got {} history orders (paginated)", orders.len());
+            return Ok(orders);
+        }
+
+        debug!("No repository available for user order history: {}", user_id);
+        Ok(vec![])
+    }
+
     /// Get user's order history with filled_size from orders table only
     /// Returns Cancelled, PartiallyFilled, and Filled orders
     pub async fn get_user_order_history(
@@ -178,6 +246,92 @@ impl OrderStore {
         }
 
         debug!("No repository available for user order history: {}", user_id);
+        Ok(vec![])
+    }
+
+    /// Get user's open orders with caching (paginated)
+    /// Uses Redis set user:{user_id}:orders -> fetches each order:{order_id} hash
+    pub async fn get_user_orders_paginated(
+        &self,
+        user_id: u64,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<OrderModel>, TradingError> {
+        // Cache: Query user:{user_id}:orders SET, then fetch each order hash
+        if self.config.enabled {
+            if let Some(cache) = &self.cache {
+                let set_key = format!("user:{}:orders", user_id);
+
+                match cache.smembers_string(&set_key).await {
+                    Ok(order_ids) if !order_ids.is_empty() => {
+                        let mut orders = Vec::new();
+                        // Fetch each order hash
+                        for order_id_str in order_ids {
+                            let order_key = format!("order:{}", order_id_str);
+                            match cache.hgetall_string(&order_key).await {
+                                Ok(hash) if !hash.is_empty() => {
+                                    // Filter orders by status - only include "open" orders
+                                    if let Some(status) = hash.get("status") {
+                                        let status_lower = status.to_lowercase();
+                                        
+                                        // Skip orders that are in terminal states (not open)
+                                        if status_lower == "cancelled" 
+                                            || status_lower == "filled" 
+                                            || status_lower == "rejected" {
+                                            continue;
+                                        }
+                                        
+                                        // Only include: Placed, Pending, PartiallyFilled, Processing
+                                        if status_lower != "placed"
+                                            && status_lower != "pending" 
+                                            && status_lower != "partiallyfilled" 
+                                            && status_lower != "processing" {
+                                            continue;
+                                        }
+                                    }
+
+                                    if let Some(order) = Self::parse_order_hash(hash) {
+                                        orders.push(order);
+                                    }
+                                }
+                                _ => continue,
+                            }
+                        }
+
+                        // Sort by timestamp descending and apply pagination
+                        orders.sort_by(|a, b| b.order_timestamp.cmp(&a.order_timestamp));
+                        let start = offset as usize;
+                        let end = (offset + limit) as usize;
+                        let paginated_orders: Vec<_> = orders.into_iter().skip(start).take((end - start).min(limit as usize)).collect();
+
+                        if !paginated_orders.is_empty() {
+                            return Ok(paginated_orders);
+                        }
+                    }
+                    Ok(_) => {
+                        debug!("User orders cache miss for user: {}", user_id);
+                    }
+                    Err(e) => {
+                        warn!("User orders cache error for user {}: {}", user_id, e);
+                    }
+                }
+            }
+        }
+
+        // Database fallback
+        if let Some(repo) = &self.trading_repo {
+            match repo.get_open_orders_paginated(user_id, offset, limit).await {
+                Ok(orders) => {
+                    debug!("Database hit for user orders (paginated): {}", user_id);
+                    return Ok(orders);
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+
+        debug!("No repository available for user orders: {}", user_id);
         Ok(vec![])
     }
 
