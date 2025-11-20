@@ -22,7 +22,7 @@ use tracing::{error, info, warn};
 /// * `side` - Order side (Bid for buy, Ask for sell)
 /// * `time_in_force` - Order duration policy (GTC, IOC, FOK, etc.)
 /// * `order_type` - Determines how the order is handled (`Limit` submits at the provided price,
-///   `Market` ignores the price and sets it to 0 for vex-core processing)
+///   `Market` ignores the price: Ask orders use 0, Bid orders use u64::MAX for vex-core processing)
 ///
 /// # Example
 /// ```json
@@ -162,8 +162,8 @@ pub struct OrderResponse {
 ///   }'
 /// ```
 ///
-/// Market orders automatically set the submitted price to `0` when forwarded to the
-/// matching engine.
+/// Market orders automatically adjust the submitted price when forwarded to the
+/// matching engine: Ask orders use `0`, Bid orders use `u64::MAX`.
 ///
 /// # Example Success Response (200 OK)
 /// ```json
@@ -218,7 +218,13 @@ pub async fn place_order(
 
     let command_price = match order_type {
         OrderType::Limit => price,
-        OrderType::Market => 0,
+        OrderType::Market => {
+            // Market orders: Ask uses 0, Bid uses u64::MAX
+            match side {
+                Side::Ask => 0,
+                Side::Bid => u64::MAX,
+            }
+        }
     };
 
     // Generate unique client order ID for correlation
