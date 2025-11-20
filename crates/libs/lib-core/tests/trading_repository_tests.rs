@@ -130,7 +130,8 @@ impl TradingRepository for MockTradingRepository {
             .iter()
             .filter(|o| {
                 o.order_user_id == Decimal::from(user_id)
-                    && (o.status.to_lowercase() == "pending"
+                    && (o.status.to_lowercase() == "placed"
+                        || o.status.to_lowercase() == "pending"
                         || o.status.to_lowercase() == "partiallyfilled"
                         || o.status.to_lowercase() == "processing")
             })
@@ -148,7 +149,8 @@ impl TradingRepository for MockTradingRepository {
             .iter()
             .filter(|o| {
                 o.order_user_id == Decimal::from(user_id)
-                    && (o.status.to_lowercase() == "pending"
+                    && (o.status.to_lowercase() == "placed"
+                        || o.status.to_lowercase() == "pending"
                         || o.status.to_lowercase() == "partiallyfilled"
                         || o.status.to_lowercase() == "processing")
             })
@@ -171,7 +173,8 @@ impl TradingRepository for MockTradingRepository {
             .iter()
             .filter(|o| {
                 o.order_user_id == Decimal::from(user_id)
-                    && (o.status.to_lowercase() == "pending"
+                    && (o.status.to_lowercase() == "placed"
+                        || o.status.to_lowercase() == "pending"
                         || o.status.to_lowercase() == "partiallyfilled"
                         || o.status.to_lowercase() == "processing")
             })

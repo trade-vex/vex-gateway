@@ -284,13 +284,14 @@ impl TradingRepository for PostgresTradingRepository {
             .await
             .map_err(TradingError::from)?;
 
-        // Filter to only include "open" orders: Pending, PartiallyFilled, Processing
-        // Exclude: Filled, Cancelled, Rejected, Placed
+        // Filter to only include "open" orders: Placed, Pending, PartiallyFilled, Processing
+        // Exclude: Filled, Cancelled, Rejected
         let orders: Vec<_> = all_orders
             .into_iter()
             .filter(|order| {
                 let status_lower = order.status.to_lowercase();
-                status_lower == "pending" 
+                status_lower == "placed"
+                    || status_lower == "pending" 
                     || status_lower == "partiallyfilled" 
                     || status_lower == "processing"
             })
@@ -309,13 +310,14 @@ impl TradingRepository for PostgresTradingRepository {
             .await
             .map_err(TradingError::from)?;
 
-        // Filter to only include "open" orders: Pending, PartiallyFilled, Processing
-        // Exclude: Filled, Cancelled, Rejected, Placed
+        // Filter to only include "open" orders: Placed, Pending, PartiallyFilled, Processing
+        // Exclude: Filled, Cancelled, Rejected
         let orders: Vec<_> = all_orders
             .into_iter()
             .filter(|order| {
                 let status_lower = order.status.to_lowercase();
-                status_lower == "pending" 
+                status_lower == "placed"
+                    || status_lower == "pending" 
                     || status_lower == "partiallyfilled" 
                     || status_lower == "processing"
             })
@@ -331,12 +333,13 @@ impl TradingRepository for PostgresTradingRepository {
             .await
             .map_err(TradingError::from)?;
 
-        // Count only "open" orders: Pending, PartiallyFilled, Processing
+        // Count only "open" orders: Placed, Pending, PartiallyFilled, Processing
         let count = all_orders
             .into_iter()
             .filter(|order| {
                 let status_lower = order.status.to_lowercase();
-                status_lower == "pending" 
+                status_lower == "placed"
+                    || status_lower == "pending" 
                     || status_lower == "partiallyfilled" 
                     || status_lower == "processing"
             })
