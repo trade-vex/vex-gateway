@@ -12,8 +12,9 @@ pub enum Relation {}
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
     pub id: i32,
-    /// User ID as u64 (derived from UUID via XOR operation)
-    pub user_id: u64,
+    /// User ID stored as i64 in database (u64 values cast to i64)
+    #[sea_orm(column_type = "BigInteger")]
+    pub user_id: i64,
     /// Market ID (bit-packed u32)
     pub market_id: i32,
     /// Timestamp when the market was favorited

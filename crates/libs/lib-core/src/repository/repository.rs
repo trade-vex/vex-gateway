@@ -434,7 +434,7 @@ impl TradingRepository for PostgresTradingRepository {
     
     async fn get_user_favorite_markets(&self, user_id: u64) -> Result<Vec<UserFavoriteMarketModel>> {
         UserFavoriteMarketEntity::find()
-            .filter(UserFavoriteMarketColumn::UserId.eq(user_id))
+            .filter(UserFavoriteMarketColumn::UserId.eq(user_id as i64))
             .order_by_desc(UserFavoriteMarketColumn::FavoritedAt)
             .all(&*self.db)
             .await
@@ -445,7 +445,7 @@ impl TradingRepository for PostgresTradingRepository {
         let market_id_i32 = market_id as i32;
 
         let favorite = UserFavoriteMarketActiveModel {
-            user_id: Set(user_id),
+            user_id: Set(user_id as i64),
             market_id: Set(market_id_i32),
             favorited_at: Set(Some(chrono::Utc::now())),
             ..Default::default()

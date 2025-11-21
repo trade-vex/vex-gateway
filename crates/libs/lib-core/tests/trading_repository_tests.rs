@@ -278,7 +278,7 @@ impl TradingRepository for MockTradingRepository {
         Ok(self
             .favorite_markets
             .iter()
-            .filter(|m| m.user_id == user_id)
+            .filter(|m| m.user_id == user_id as i64)
             .cloned()
             .collect())
     }
@@ -304,7 +304,7 @@ impl TradingRepository for MockTradingRepository {
         Ok(self
             .favorite_markets
             .iter()
-            .any(|m| m.user_id == user_id && m.market_id == market_id as i32))
+            .any(|m| m.user_id == user_id as i64 && m.market_id == market_id as i32))
     }
 }
 
@@ -352,7 +352,7 @@ fn create_test_order(
 fn create_test_favorite_market(user_id: u64, market_id: i32) -> UserFavoriteMarketModel {
     UserFavoriteMarketModel {
         id: 1,
-        user_id,
+        user_id: user_id as i64,
         market_id,
         favorited_at: Some(Utc::now()),
     }
