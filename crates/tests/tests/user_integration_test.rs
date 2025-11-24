@@ -325,6 +325,11 @@ async fn test_get_open_orders(
             let response = OrdersListResponse {
                 orders: order_responses,
                 total,
+                page: 1,
+                limit: 100,
+                total_pages: 1,
+                has_next: false,
+                has_prev: false,
             };
 
             Ok(HttpResponse::Ok().json(response))
@@ -837,7 +842,7 @@ async fn test_user_balance_and_order_retrieval() {
             println!("      Price: {}", order.price);
             println!("      Size: {}", order.size);
 
-            if order.order_id == placed_order_id {
+            if u64::try_from(order.order_id).unwrap_or(0) == placed_order_id {
                 println!("      ✓ THIS IS OUR PLACED ORDER!");
                 found_our_order = true;
             }

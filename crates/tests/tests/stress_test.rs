@@ -313,6 +313,11 @@ async fn test_get_open_orders(
             Ok(HttpResponse::Ok().json(OrdersListResponse {
                 orders: vec![],
                 total,
+                page: 1,
+                limit: 100,
+                total_pages: 1,
+                has_next: false,
+                has_prev: false,
             }))
         }
         Err(e) => Ok(HttpResponse::InternalServerError().json(serde_json::json!({
@@ -559,7 +564,7 @@ async fn test_high_frequency_stress_test() {
             let cancel_count = (orders_data.total / 2).max(1); // Cancel at least 1
             for i in 0..cancel_count.min(orders_data.orders.len()) {
                 let order = &orders_data.orders[i];
-                let order_id = order.order_id; // Already u64
+                let order_id: u64 = order.order_id.try_into().unwrap_or(0); // Convert Decimal to u64
 
                 let resp = client
                     .post(format!("{}/test/order/cancel", server_address))

@@ -25,6 +25,7 @@ use lib_core::{
     OrderCacheConfig, OrderStore, OrdersListResponse, PostgresTradingRepository, Publisher,
     UserBalanceCacheConfig, UserBalanceStore,
 };
+use rust_decimal::Decimal;
 use sea_orm::{Database, DatabaseConnection};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -310,6 +311,11 @@ async fn test_get_open_orders(
             let response = OrdersListResponse {
                 orders: order_responses,
                 total,
+                page: 1,
+                limit: 100,
+                total_pages: 1,
+                has_next: false,
+                has_prev: false,
             };
 
             Ok(HttpResponse::Ok().json(response))
@@ -513,7 +519,7 @@ async fn check_orders(
 
         // Assert order belongs to this user
         assert_eq!(
-            order.user_id, user_id,
+            order.user_id, Decimal::from(user_id),
             "Order {} belongs to user {} but queried for user {}",
             order.order_id, order.user_id, user_id
         );
@@ -743,7 +749,7 @@ async fn test_multi_user_trading_scenario() {
         alice_bal
             .balances
             .iter()
-            .any(|b| b.asset_id == base_asset_id && b.total == 20000000000),
+            .any(|b| b.asset_id == base_asset_id && b.total == Decimal::from(20000000000u64)),
         "Alice should have 200 base"
     );
 
@@ -1032,7 +1038,7 @@ async fn test_multi_user_trading_scenario() {
         .find(|b| b.asset_id == quote_asset_id)
         .unwrap();
     assert!(
-        bob_quote_bal.locked > 0,
+        bob_quote_bal.locked > Decimal::ZERO,
         "Bob should have locked quote funds after placing BUY orders, got locked={}",
         bob_quote_bal.locked
     );
@@ -1048,7 +1054,7 @@ async fn test_multi_user_trading_scenario() {
         .find(|b| b.asset_id == quote_asset_id)
         .unwrap();
     assert!(
-        frank_quote_bal.locked > 0,
+        frank_quote_bal.locked > Decimal::ZERO,
         "Frank should have locked quote funds after placing BUY orders"
     );
     println!(
@@ -1315,7 +1321,7 @@ async fn test_multi_user_trading_scenario() {
         .find(|b| b.asset_id == quote_asset_id)
         .unwrap();
     assert_eq!(
-        dave_quote_after.locked, 0,
+        dave_quote_after.locked, Decimal::ZERO,
         "Dave's quote should be unlocked after cancel, got locked={}",
         dave_quote_after.locked
     );
@@ -1380,7 +1386,7 @@ async fn test_multi_user_trading_scenario() {
             .find(|b| b.asset_id == quote_asset_id)
             .unwrap()
             .locked,
-        0,
+        Decimal::ZERO,
         "Dave final: should have 0 locked quote after cancel"
     );
 
