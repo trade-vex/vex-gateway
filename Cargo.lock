@@ -2352,6 +2352,7 @@ name = "lib-api"
 version = "0.1.0"
 dependencies = [
  "actix-web",
+ "async-trait",
  "base64 0.21.7",
  "chrono",
  "common",
@@ -2361,6 +2362,7 @@ dependencies = [
  "lib-middleware",
  "lib-utils",
  "rand 0.8.5",
+ "rust_decimal",
  "sea-orm",
  "serde",
  "serde_json",
