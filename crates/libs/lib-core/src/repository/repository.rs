@@ -551,7 +551,7 @@ impl ClickHousePortfolioRepository {
                 .query(
                     format!(
                         "SELECT toString(toDecimal128(coalesce(equity_quote, 0), 12)) AS v
-                 FROM {}
+                 FROM {} FINAL
                  WHERE user_id = ?
                    AND minute <= toDateTime(?)
                  ORDER BY minute DESC
@@ -672,10 +672,11 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
         let volume_24h = parse_decimal(volume_24h_str)?;
 
         // max_drawdown_1m
+        // Use FINAL to ensure we get deduplicated equity values from ReplacingMergeTree
         let max_drawdown_query = format!(
             "WITH s AS (
                    SELECT minute, toDecimal128(coalesce(equity_quote, 0), 12) AS v
-                   FROM {equity}
+                   FROM {equity} FINAL
                    WHERE user_id = ?
                      AND minute >= toDateTime(?)
                      AND minute <= toDateTime(?)
@@ -748,7 +749,7 @@ impl ClickHousePortfolioRepository {
             "SELECT CAST(toUnixTimestamp(bucket) AS Int64) AS ts, toString(anyLast(equity_quote)) AS eq \
              FROM ( \
                 SELECT {bucket} AS bucket, minute, equity_quote \
-                FROM {equity_table} \
+                FROM {equity_table} FINAL \
                 WHERE user_id = ? \
                   AND minute >= toDateTime(?) \
                   AND minute <= toDateTime(?) \
@@ -980,7 +981,7 @@ impl ClickHousePortfolioRepository {
             "SELECT CAST(toUnixTimestamp(bucket) AS Int64) AS ts, toString(anyLast(equity_quote)) AS eq \
              FROM ( \
                 SELECT {bucket} AS bucket, minute, equity_quote \
-                FROM {equity_table} \
+                FROM {equity_table} FINAL \
                 WHERE user_id = ? \
                   AND minute >= toDateTime(?) \
                   AND minute <= toDateTime(?) \
