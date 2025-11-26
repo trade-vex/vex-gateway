@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::NaiveDateTime;
 use sea_orm::prelude::*;
 use serde::{Deserialize, Serialize};
 use rust_decimal::Decimal;
@@ -28,7 +28,7 @@ pub struct Model {
     pub taker_order_id: Decimal,
     pub timestamp: i64,
     #[sea_orm(column_type = "Timestamp")]
-    pub created_at: Option<DateTime<Utc>>,
+    pub created_at: Option<NaiveDateTime>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

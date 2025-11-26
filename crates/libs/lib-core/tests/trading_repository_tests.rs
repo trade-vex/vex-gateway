@@ -321,7 +321,7 @@ fn create_test_balance(user_id: i64, asset_id: i32, available: i64, locked: i64)
         locked: Decimal::from(locked),
         total: Decimal::from(available) + Decimal::from(locked),
         timestamp: Utc::now().timestamp(),
-        created_at: Some(Utc::now()),
+        created_at: Some(Utc::now().naive_utc()),
     }
 }
 
