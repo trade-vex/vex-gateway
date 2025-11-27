@@ -117,44 +117,6 @@ impl PnlResolution {
         }
     }
 
-    fn bucket_floor(self, ts_secs: i64) -> i64 {
-        use chrono::{Datelike, Duration, NaiveDate, TimeZone, Timelike, Utc};
-
-        let Some(dt) = chrono::DateTime::<Utc>::from_timestamp(ts_secs, 0) else {
-            return ts_secs;
-        };
-        let date = dt.date_naive();
-
-        let to_ts = |date: NaiveDate| -> i64 {
-            date.and_hms_opt(0, 0, 0)
-                .map(|naive_dt| Utc.from_utc_datetime(&naive_dt).timestamp())
-                .unwrap_or(ts_secs)
-        };
-
-        match self {
-            PnlResolution::Day => dt
-                .with_minute(0)
-                .and_then(|d| d.with_second(0))
-                .and_then(|d| d.with_nanosecond(0))
-                .unwrap_or(dt)
-                .timestamp(),
-            PnlResolution::Week => {
-                let weekday = date.weekday().num_days_from_monday() as i64;
-                let start_date = date - Duration::days(weekday);
-                to_ts(start_date)
-            }
-            PnlResolution::Month => {
-                let floored =
-                    NaiveDate::from_ymd_opt(date.year(), date.month(), 1).unwrap_or(date);
-                to_ts(floored)
-            }
-            PnlResolution::Year => {
-                let floored = NaiveDate::from_ymd_opt(date.year(), 1, 1).unwrap_or(date);
-                to_ts(floored)
-            }
-        }
-    }
-
     pub fn as_str(self) -> &'static str {
         match self {
             PnlResolution::Day => "1d",
@@ -544,146 +506,163 @@ impl ClickHousePortfolioRepository {
         format!("{}.{}", self.schema, name)
     }
 
-    /// Fetches total portfolio equity at a point in time by summing across all assets.
-    ///
-    /// With the per-asset equity schema, we need to:
-    /// 1. Get the latest equity value for each asset at or before ts_secs
-    /// 2. Sum all asset equity values to get total portfolio equity
-    ///
-    /// Note: Currently unused but kept for ad-hoc queries and debugging.
-    #[allow(dead_code)]
-    async fn fetch_equity_at(&self, user_id: u64, ts_secs: i64) -> Result<Decimal> {
-        // For each asset, get the latest equity value at or before the target timestamp,
-        // then sum across all assets
-        let sql = format!(
-            "SELECT toString(sum(eq)) AS v
-             FROM (
-                 SELECT asset_id, argMax(equity_quote, minute) AS eq
-                 FROM {} FINAL
-                 WHERE user_id = ?
-                   AND minute <= toDateTime(?)
-                 GROUP BY asset_id
-             )",
-            self.table("equity_per_minute")
-        );
-
+    /// Fetches the configured quote asset ID from ClickHouse.
+    async fn fetch_quote_asset_id(&self) -> Result<u16> {
+        let sql = "SELECT quote_asset_id FROM trading.equity_quote_config LIMIT 1";
         self.ch
-            .query(sql.as_str())
-            .bind(user_id)
-            .bind(ts_secs)
-            .fetch_optional::<String>()
+            .query(sql)
+            .fetch_optional::<u16>()
             .await
             .map_err(|e| TradingError::Database(e.to_string()))?
-            .map(|value| {
-                Decimal::from_str(&value).map_err(|err| {
-                    TradingError::Database(format!("invalid decimal from ClickHouse: {}", err))
-                })
-            })
-            .transpose()
-            .map(|opt| opt.unwrap_or(Decimal::ZERO))
+            .ok_or_else(|| TradingError::Database("equity_quote_config not seeded".to_string()))
     }
 
-    /// Fetches per-asset equity components and performs forward-fill sum in Rust.
+    /// Fetches total portfolio equity series using DYNAMIC VALUATION.
     ///
-    /// This generates a mathematically correct total equity curve by:
-    /// 1. Fetching all asset equity values bucketed by time
-    /// 2. Forward-filling each asset's value across time
-    /// 3. Summing all asset values at each bucket timestamp
+    /// # Why Dynamic Valuation?
     ///
-    /// This approach fixes balance charts by ensuring BTC and ETH updates
-    /// don't overwrite each other - the sum always reflects all assets.
+    /// The `equity_per_minute` materialized view has a fundamental flaw: it only
+    /// triggers when balance events occur, NOT when prices change. This means:
+    /// - User deposits Asset 2 → Balance recorded, but price is 0 (no trades yet)
+    /// - User trades Asset 2 → Price updates to 1.0, but balance didn't change
+    /// - Result: MV still has stale equity = balance * 0 = 0
+    ///
+    /// # Solution: Query-Time Valuation
+    ///
+    /// This method fetches raw balances and raw prices separately, then calculates
+    /// equity dynamically in Rust. This ensures that price changes are immediately
+    /// reflected in portfolio valuations, even for assets whose balance didn't change.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Fetch ALL balance history for user (asset_id, timestamp, total)
+    /// 2. Fetch ALL price history (asset_id, timestamp, price)
+    /// 3. Collect all timestamps where either balance or price changed
+    /// 4. At each timestamp, forward-fill both balances and prices
+    /// 5. Calculate total_equity = Σ(balance[asset] × price[asset])
+    ///
+    /// # Performance
+    ///
+    /// This approach fetches more data from ClickHouse but avoids the stale MV issue.
+    /// For single-user dashboards, this is fast (milliseconds). The Rust iteration
+    /// over thousands of points takes microseconds.
     async fn fetch_total_equity_series(
         &self,
         user_id: u64,
         start_ts: i64,
         end_ts: i64,
-        resolution: PnlResolution,
+        _resolution: PnlResolution,
     ) -> Result<Vec<BalancePoint>> {
-        let bucket_expr = resolution.bucket_expression();
+        // Get quote asset ID (e.g., USD = 1)
+        let quote_asset_id = self.fetch_quote_asset_id().await?;
 
-        // Fetch raw components: timestamp, asset_id, equity value
-        // argMax gets the last value within each bucket for each asset
-        let sql = format!(
-            "SELECT
-                CAST(toUnixTimestamp(bucket) AS Int64) AS ts,
-                asset_id,
-                toString(argMax(equity_quote, minute)) AS equity_val
-             FROM (
-                SELECT {bucket} AS bucket, minute, asset_id, equity_quote
-                FROM {table} FINAL
-                WHERE user_id = ?
-                  AND minute >= toDateTime(?)
-                  AND minute <= toDateTime(?)
-             )
-             GROUP BY bucket, asset_id
-             ORDER BY bucket ASC",
-            bucket = bucket_expr,
-            table = self.table("equity_per_minute")
+        // 1. Fetch ALL balance updates for this user up to end_ts
+        // We need full history to reconstruct state at any point
+        let balance_sql = format!(
+            "SELECT asset_id, CAST(toUnixTimestamp(minute) AS Int64), toString(total)
+             FROM {} FINAL
+             WHERE user_id = ? AND minute <= toDateTime(?)
+             ORDER BY minute ASC",
+            self.table("balances_last_per_min")
         );
 
-        let rows: Vec<(i64, u16, String)> = self
+        let balance_rows: Vec<(u16, i64, String)> = self
             .ch
-            .query(sql.as_str())
+            .query(balance_sql.as_str())
             .bind(user_id)
-            .bind(start_ts)
             .bind(end_ts)
-            .fetch_all::<(i64, u16, String)>()
+            .fetch_all::<(u16, i64, String)>()
             .await
             .map_err(|e| TradingError::Database(e.to_string()))?;
 
-        // Organize data: Map<Timestamp, Vec<(AssetId, Value)>>
-        let mut updates_by_time: BTreeMap<i64, Vec<(u16, Decimal)>> = BTreeMap::new();
-
-        // Ensure we have data points for chart boundaries
-        updates_by_time.entry(resolution.bucket_floor(start_ts)).or_default();
-        updates_by_time.entry(resolution.bucket_floor(end_ts)).or_default();
-
-        for (ts, asset_id, val_str) in rows {
-            let val = Decimal::from_str(&val_str).unwrap_or(Decimal::ZERO);
-            updates_by_time.entry(ts).or_default().push((asset_id, val));
-        }
-
-        // Fetch baseline state (latest value of every asset before start_ts)
-        // This ensures the chart doesn't incorrectly start at 0
-        let baseline_sql = format!(
-            "SELECT asset_id, toString(argMax(equity_quote, minute)) AS eq
+        // 2. Fetch ALL price updates up to end_ts
+        // Prices are global (not per-user), filtered by quote_asset_id
+        let price_sql = format!(
+            "SELECT asset_id, CAST(toUnixTimestamp(minute) AS Int64), toString(price)
              FROM {} FINAL
-             WHERE user_id = ?
-               AND minute < toDateTime(?)
-             GROUP BY asset_id",
-            self.table("equity_per_minute")
+             WHERE quote_asset_id = ? AND minute <= toDateTime(?)
+             ORDER BY minute ASC",
+            self.table("asset_prices_last_per_min")
         );
 
-        let baseline_rows: Vec<(u16, String)> = self
+        let price_rows: Vec<(u16, i64, String)> = self
             .ch
-            .query(baseline_sql.as_str())
-            .bind(user_id)
-            .bind(start_ts)
-            .fetch_all::<(u16, String)>()
+            .query(price_sql.as_str())
+            .bind(quote_asset_id)
+            .bind(end_ts)
+            .fetch_all::<(u16, i64, String)>()
             .await
-            .unwrap_or_default();
+            .map_err(|e| TradingError::Database(e.to_string()))?;
 
-        let mut current_portfolio_state: BTreeMap<u16, Decimal> = BTreeMap::new();
-        for (asset, val_str) in baseline_rows {
-            if let Ok(val) = Decimal::from_str(&val_str) {
-                current_portfolio_state.insert(asset, val);
-            }
+        // 3. Build history maps: asset_id -> (timestamp -> value)
+        let mut balances: BTreeMap<u16, BTreeMap<i64, Decimal>> = BTreeMap::new();
+        for (asset, ts, val) in balance_rows {
+            let v = Decimal::from_str(&val).unwrap_or(Decimal::ZERO);
+            balances.entry(asset).or_default().insert(ts, v);
         }
 
-        // Forward-fill and sum: iterate through time buckets
-        let mut series = Vec::with_capacity(updates_by_time.len());
-        for (ts, updates) in updates_by_time {
-            // Apply updates for this timestamp
-            for (asset_id, value) in updates {
-                current_portfolio_state.insert(asset_id, value);
+        let mut prices: BTreeMap<u16, BTreeMap<i64, Decimal>> = BTreeMap::new();
+        for (asset, ts, val) in price_rows {
+            let v = Decimal::from_str(&val).unwrap_or(Decimal::ZERO);
+            prices.entry(asset).or_default().insert(ts, v);
+        }
+
+        // 4. Collect all timestamps where state changes occur
+        let mut timestamps: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+        timestamps.insert(start_ts);
+        timestamps.insert(end_ts);
+        for inner in balances.values() {
+            timestamps.extend(inner.keys());
+        }
+        for inner in prices.values() {
+            timestamps.extend(inner.keys());
+        }
+
+        // 5. Forward-fill and calculate equity at each timestamp
+        let mut current_balances: BTreeMap<u16, Decimal> = BTreeMap::new();
+        let mut current_prices: BTreeMap<u16, Decimal> = BTreeMap::new();
+
+        // Quote asset always has price = 1.0 (it's the reference)
+        current_prices.insert(quote_asset_id, Decimal::ONE);
+
+        let mut series = Vec::new();
+        for ts in timestamps {
+            if ts > end_ts {
+                break;
             }
 
-            // Sum the state of all assets at this moment
-            let total_equity: Decimal = current_portfolio_state.values().copied().sum();
-            series.push(BalancePoint {
-                timestamp: ts,
-                balance: total_equity,
-            });
+            // Update balance state: forward-fill each asset's balance
+            for (asset, history) in &balances {
+                if let Some((_, val)) = history.range(..=ts).next_back() {
+                    current_balances.insert(*asset, *val);
+                }
+            }
+
+            // Update price state: forward-fill each asset's price
+            for (asset, history) in &prices {
+                if let Some((_, val)) = history.range(..=ts).next_back() {
+                    current_prices.insert(*asset, *val);
+                }
+            }
+
+            // Only include points within our requested window
+            if ts >= start_ts {
+                // Calculate total equity: Σ(balance × price) for all assets
+                let mut total_equity = Decimal::ZERO;
+                for (asset, balance) in &current_balances {
+                    let price = if *asset == quote_asset_id {
+                        Decimal::ONE // Quote asset is always 1:1
+                    } else {
+                        *current_prices.get(asset).unwrap_or(&Decimal::ZERO)
+                    };
+                    total_equity += *balance * price;
+                }
+
+                series.push(BalancePoint {
+                    timestamp: ts,
+                    balance: total_equity,
+                });
+            }
         }
 
         Ok(series)
