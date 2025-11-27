@@ -108,15 +108,6 @@ impl PnlResolution {
         }
     }
 
-    fn bucket_expression(self) -> &'static str {
-        match self {
-            PnlResolution::Day => "toStartOfHour(minute)",
-            PnlResolution::Week => "toStartOfDay(minute)",
-            PnlResolution::Month => "toStartOfDay(minute)",
-            PnlResolution::Year => "toStartOfMonth(minute)",
-        }
-    }
-
     pub fn as_str(self) -> &'static str {
         match self {
             PnlResolution::Day => "1d",
@@ -506,77 +497,157 @@ impl ClickHousePortfolioRepository {
         format!("{}.{}", self.schema, name)
     }
 
-    /// Fetches the configured quote asset ID from ClickHouse.
-    async fn fetch_quote_asset_id(&self) -> Result<u16> {
-        let sql = "SELECT quote_asset_id FROM trading.equity_quote_config LIMIT 1";
-        self.ch
-            .query(sql)
-            .fetch_optional::<u16>()
-            .await
-            .map_err(|e| TradingError::Database(e.to_string()))?
-            .ok_or_else(|| TradingError::Database("equity_quote_config not seeded".to_string()))
-    }
+    /// Quote asset ID (USD = 1). This is a constant since the system
+    /// always values portfolios in USD.
+    const QUOTE_ASSET_ID: u16 = 1;
 
-    /// Fetches total portfolio equity series using DYNAMIC VALUATION.
+    /// Fetch Equity Series using ClickHouse ASOF JOINs.
     ///
-    /// # Why Dynamic Valuation?
-    ///
-    /// The `equity_per_minute` materialized view has a fundamental flaw: it only
-    /// triggers when balance events occur, NOT when prices change. This means:
-    /// - User deposits Asset 2 → Balance recorded, but price is 0 (no trades yet)
-    /// - User trades Asset 2 → Price updates to 1.0, but balance didn't change
-    /// - Result: MV still has stale equity = balance * 0 = 0
-    ///
-    /// # Solution: Query-Time Valuation
-    ///
-    /// This method fetches raw balances and raw prices separately, then calculates
-    /// equity dynamically in Rust. This ensures that price changes are immediately
-    /// reflected in portfolio valuations, even for assets whose balance didn't change.
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Fetch ALL balance history for user (asset_id, timestamp, total)
-    /// 2. Fetch ALL price history (asset_id, timestamp, price)
-    /// 3. Collect all timestamps where either balance or price changed
-    /// 4. At each timestamp, forward-fill both balances and prices
-    /// 5. Calculate total_equity = Σ(balance[asset] × price[asset])
-    ///
-    /// # Performance
-    ///
-    /// This approach fetches more data from ClickHouse but avoids the stale MV issue.
-    /// For single-user dashboards, this is fast (milliseconds). The Rust iteration
-    /// over thousands of points takes microseconds.
+    /// Instead of fetching raw history, we ask ClickHouse to:
+    /// 1. Generate time buckets (e.g., every hour).
+    /// 2. Find the balance of every asset at that specific time (ASOF JOIN).
+    /// 3. Find the price of every asset at that specific time (ASOF JOIN).
+    /// 4. Multiply and Sum.
     async fn fetch_total_equity_series(
         &self,
         user_id: u64,
         start_ts: i64,
         end_ts: i64,
-        _resolution: PnlResolution,
+        resolution: PnlResolution,
     ) -> Result<Vec<BalancePoint>> {
-        // Get quote asset ID (e.g., USD = 1)
-        let quote_asset_id = self.fetch_quote_asset_id().await?;
+        let quote_asset_id = Self::QUOTE_ASSET_ID;
 
-        // 1. Fetch ALL balance updates for this user up to end_ts
-        // We need full history to reconstruct state at any point
-        let balance_sql = format!(
-            "SELECT asset_id, CAST(toUnixTimestamp(minute) AS Int64), toString(total)
-             FROM {} FINAL
-             WHERE user_id = ? AND minute <= toDateTime(?)
-             ORDER BY minute ASC",
-            self.table("balances_last_per_min")
+        // Determine step size in seconds for the buckets
+        let step_seconds = match resolution {
+            PnlResolution::Day => 3600,      // 1 hour
+            PnlResolution::Week => 21600,    // 6 hours
+            PnlResolution::Month => 86400,   // 1 day
+            PnlResolution::Year => 604800,   // 1 week
+        };
+
+        // Complex optimized query using ASOF JOINs
+        let sql = format!(
+            "
+            WITH
+                toDateTime(?) AS start_time,
+                toDateTime(?) AS end_time,
+                -- Generate time points
+                range(toUnixTimestamp(start_time), toUnixTimestamp(end_time) + 1, {step}) AS ticks,
+                arrayJoin(ticks) AS tick_ts,
+                toDateTime(tick_ts) AS bucket_time,
+                {quote} AS quote_id
+            
+            SELECT
+                CAST(tick_ts AS Int64) as ts,
+                toString(
+                    sum(
+                        -- Equity = Balance * Price
+                        -- If asset is Quote (USD), Price is 1.0. Otherwise lookup.
+                        coalesce(b.total, 0) * if(user_assets.asset_id = quote_id, 1.0, coalesce(p.price, 0))
+                    )
+                ) as total_equity
+            FROM (
+                -- Virtual table of time buckets
+                SELECT bucket_time FROM system.one ARRAY JOIN ticks 
+            ) as t
+            
+            -- Get list of assets this user has EVER interacted with
+            -- Cross Join ensures we calculate value for every asset at every time step
+            CROSS JOIN (
+                SELECT DISTINCT asset_id 
+                FROM {balances_table}
+                WHERE user_id = ?
+            ) as user_assets
+            
+            -- 1. Find Last Balance State at Bucket Time
+            LEFT ASOF JOIN {balances_table} b
+                ON b.user_id = ? 
+                AND b.asset_id = user_assets.asset_id 
+                AND b.minute <= t.bucket_time
+            
+            -- 2. Find Last Price State at Bucket Time
+            LEFT ASOF JOIN {prices_table} p
+                ON p.asset_id = user_assets.asset_id 
+                AND p.quote_asset_id = quote_id 
+                AND p.minute <= t.bucket_time
+            
+            GROUP BY ts
+            ORDER BY ts ASC
+            ",
+            step = step_seconds,
+            quote = quote_asset_id,
+            balances_table = self.table("balances_last_per_min"),
+            prices_table = self.table("asset_prices_last_per_min")
         );
 
-        let balance_rows: Vec<(u16, i64, String)> = self
+        let rows: Vec<(i64, String)> = self
             .ch
-            .query(balance_sql.as_str())
-            .bind(user_id)
+            .query(&sql)
+            .bind(start_ts)
             .bind(end_ts)
-            .fetch_all::<(u16, i64, String)>()
+            .bind(user_id) // For user_assets subquery
+            .bind(user_id) // For balances join
+            .fetch_all()
             .await
             .map_err(|e| TradingError::Database(e.to_string()))?;
 
-        // 2. Fetch ALL price updates up to end_ts
-        // Prices are global (not per-user), filtered by quote_asset_id
+        let mut series = Vec::with_capacity(rows.len());
+        for (ts, val_str) in rows {
+            let balance = Decimal::from_str(&val_str).unwrap_or(Decimal::ZERO);
+            series.push(BalancePoint { timestamp: ts, balance });
+        }
+
+        Ok(series)
+    }
+
+    /// Dynamic Cashflow Calculation.
+    ///
+    /// Fetches raw Deposit/Withdrawal events and values them against the Price History.
+    async fn fetch_cashflow_series(
+        &self,
+        user_id: u64,
+        start_ts: i64,
+        end_ts: i64,
+        _resolution: PnlResolution,
+    ) -> Result<BTreeMap<i64, Decimal>> {
+        let quote_asset_id = Self::QUOTE_ASSET_ID;
+
+        // 1. Fetch Raw Flows (Deposits +, Withdrawals -)
+        let flow_sql = format!(
+            "
+            SELECT 
+                CAST(toUnixTimestamp(ts) as Int64) as t,
+                asset_id, 
+                toString(amount) as amt
+            FROM {} 
+            WHERE user_id = ? AND ts > toDateTime(?) AND ts <= toDateTime(?)
+            UNION ALL
+            SELECT 
+                CAST(toUnixTimestamp(ts) as Int64) as t,
+                asset_id, 
+                toString(amount * -1) as amt
+            FROM {} 
+            WHERE user_id = ? AND ts > toDateTime(?) AND ts <= toDateTime(?)
+            ORDER BY t ASC
+            ",
+            self.table("deposit_events"),
+            self.table("withdrawal_events")
+        );
+
+        let flow_rows: Vec<(i64, u16, String)> = self
+            .ch
+            .query(&flow_sql)
+            .bind(user_id)
+            .bind(start_ts)
+            .bind(end_ts)
+            .bind(user_id)
+            .bind(start_ts)
+            .bind(end_ts)
+            .fetch_all()
+            .await
+            .map_err(|e| TradingError::Database(e.to_string()))?;
+
+        // 2. Fetch Price History to value these flows
         let price_sql = format!(
             "SELECT asset_id, CAST(toUnixTimestamp(minute) AS Int64), toString(price)
              FROM {} FINAL
@@ -587,160 +658,51 @@ impl ClickHousePortfolioRepository {
 
         let price_rows: Vec<(u16, i64, String)> = self
             .ch
-            .query(price_sql.as_str())
+            .query(&price_sql)
             .bind(quote_asset_id)
             .bind(end_ts)
-            .fetch_all::<(u16, i64, String)>()
+            .fetch_all()
             .await
             .map_err(|e| TradingError::Database(e.to_string()))?;
 
-        // 3. Build history maps: asset_id -> (timestamp -> value)
-        let mut balances: BTreeMap<u16, BTreeMap<i64, Decimal>> = BTreeMap::new();
-        for (asset, ts, val) in balance_rows {
-            let v = Decimal::from_str(&val).unwrap_or(Decimal::ZERO);
-            balances.entry(asset).or_default().insert(ts, v);
-        }
-
+        // 3. Build Price Map
         let mut prices: BTreeMap<u16, BTreeMap<i64, Decimal>> = BTreeMap::new();
         for (asset, ts, val) in price_rows {
             let v = Decimal::from_str(&val).unwrap_or(Decimal::ZERO);
             prices.entry(asset).or_default().insert(ts, v);
         }
 
-        // 4. Collect all timestamps where state changes occur
-        let mut timestamps: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
-        timestamps.insert(start_ts);
-        timestamps.insert(end_ts);
-        for inner in balances.values() {
-            timestamps.extend(inner.keys());
-        }
-        for inner in prices.values() {
-            timestamps.extend(inner.keys());
-        }
+        // 4. Calculate Cumulative Cost Basis
+        let mut cumulative_map = BTreeMap::new();
+        let mut running_total = Decimal::ZERO;
 
-        // 5. Forward-fill and calculate equity at each timestamp
-        let mut current_balances: BTreeMap<u16, Decimal> = BTreeMap::new();
-        let mut current_prices: BTreeMap<u16, Decimal> = BTreeMap::new();
+        for (ts, asset_id, amt_str) in flow_rows {
+            let amount = Decimal::from_str(&amt_str).unwrap_or(Decimal::ZERO);
 
-        // Quote asset always has price = 1.0 (it's the reference)
-        current_prices.insert(quote_asset_id, Decimal::ONE);
+            // Value the flow at the time it happened
+            let price = if asset_id == quote_asset_id {
+                Decimal::ONE
+            } else {
+                // Find price AT or BEFORE the transaction
+                prices
+                    .get(&asset_id)
+                    .and_then(|h| h.range(..=ts).next_back())
+                    .map(|(_, p)| *p)
+                    .unwrap_or(Decimal::ZERO)
+            };
 
-        let mut series = Vec::new();
-        for ts in timestamps {
-            if ts > end_ts {
-                break;
-            }
+            let flow_value = amount * price;
+            running_total += flow_value;
 
-            // Update balance state: forward-fill each asset's balance
-            for (asset, history) in &balances {
-                if let Some((_, val)) = history.range(..=ts).next_back() {
-                    current_balances.insert(*asset, *val);
-                }
-            }
-
-            // Update price state: forward-fill each asset's price
-            for (asset, history) in &prices {
-                if let Some((_, val)) = history.range(..=ts).next_back() {
-                    current_prices.insert(*asset, *val);
-                }
-            }
-
-            // Only include points within our requested window
-            if ts >= start_ts {
-                // Calculate total equity: Σ(balance × price) for all assets
-                let mut total_equity = Decimal::ZERO;
-                for (asset, balance) in &current_balances {
-                    let price = if *asset == quote_asset_id {
-                        Decimal::ONE // Quote asset is always 1:1
-                    } else {
-                        *current_prices.get(asset).unwrap_or(&Decimal::ZERO)
-                    };
-                    total_equity += *balance * price;
-                }
-
-                series.push(BalancePoint {
-                    timestamp: ts,
-                    balance: total_equity,
-                });
-            }
+            cumulative_map.insert(ts, running_total);
         }
 
-        Ok(series)
-    }
-
-    /// Fetches cumulative cashflow series bucketed by resolution.
-    ///
-    /// Returns a map from bucket timestamp to cumulative cashflow up to that bucket.
-    async fn fetch_cashflow_series(
-        &self,
-        user_id: u64,
-        start_ts: i64,
-        end_ts: i64,
-        resolution: PnlResolution,
-    ) -> Result<BTreeMap<i64, Decimal>> {
-        let bucket_expr = resolution.bucket_expression();
-
-        let sql = format!(
-            "SELECT
-                CAST(toUnixTimestamp({bucket}) AS Int64) AS ts,
-                toString(sum(cashflow_quote)) AS cf
-             FROM {table}
-             WHERE user_id = ?
-               AND minute > toDateTime(?)
-               AND minute <= toDateTime(?)
-             GROUP BY ts
-             ORDER BY ts",
-            bucket = bucket_expr,
-            table = self.table("user_cashflow_per_minute")
-        );
-
-        let rows: Vec<(i64, String)> = self
-            .ch
-            .query(sql.as_str())
-            .bind(user_id)
-            .bind(start_ts)
-            .bind(end_ts)
-            .fetch_all::<(i64, String)>()
-            .await
-            .map_err(|e| TradingError::Database(e.to_string()))?;
-
-        let mut map = BTreeMap::new();
-        let mut cumulative = Decimal::ZERO;
-
-        for (ts, cf_str) in rows {
-            let val = Decimal::from_str(&cf_str).unwrap_or(Decimal::ZERO);
-            cumulative += val;
-            map.insert(ts, cumulative);
-        }
-
-        Ok(map)
-    }
-
-    /// Helper to get cumulative cashflow up to a specific bucket timestamp.
-    fn get_cumulative_cashflow_at(
-        cashflow_map: &BTreeMap<i64, Decimal>,
-        target_ts: i64,
-    ) -> Decimal {
-        cashflow_map
-            .range(..=target_ts)
-            .next_back()
-            .map(|(_, v)| *v)
-            .unwrap_or(Decimal::ZERO)
+        Ok(cumulative_map)
     }
 }
 
 #[async_trait]
 impl PortfolioRepository for ClickHousePortfolioRepository {
-    /// ClickHouse implementation using per-asset equity with Rust-side aggregation.
-    ///
-    /// The new schema stores equity per asset (not aggregated), so we:
-    /// 1. Fetch the total equity series with forward-fill sum for drawdown calculation
-    /// 2. Extract scalar values (balance_now, balance_24h_ago, etc.) from the series
-    /// 3. Compute max drawdown by iterating through the series
-    /// 4. Build PnL series by adjusting equity for cashflow
-    ///
-    /// This approach ensures mathematically correct portfolio values even when
-    /// different assets update at different times.
     async fn get_portfolio(
         &self,
         user_id: u64,
@@ -751,95 +713,118 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
         let cutoff_7d = now_ts_secs - 7 * 24 * 60 * 60;
         let cutoff_1m = now_ts_secs - 30 * 24 * 60 * 60;
 
-        let parse_decimal = |value: String| {
-            Decimal::from_str(&value).map_err(|e| {
-                TradingError::Database(format!("invalid decimal from ClickHouse: {}", e))
-            })
-        };
-
-        // Fetch total equity series for the last 31 days (covers drawdown window)
-        // Using Day resolution for scalar extraction (hourly buckets)
-        let full_equity_series = self
+        // 1. Fetch Equity Series
+        // We fetch enough for drawdown calculation (30d)
+        let full_series = self
             .fetch_total_equity_series(user_id, cutoff_1m, now_ts_secs, PnlResolution::Day)
             .await?;
 
-        // Helper to extract value from series at a target timestamp
-        let get_equity_at = |target_ts: i64| -> Decimal {
-            full_equity_series
+        // Helper to get value from series
+        let get_val = |ts: i64| -> Decimal {
+            full_series
                 .iter()
-                .filter(|p| p.timestamp <= target_ts)
+                .filter(|p| p.timestamp <= ts)
                 .last()
                 .map(|p| p.balance)
                 .unwrap_or(Decimal::ZERO)
         };
 
-        // Extract scalar values from the series
-        let balance_now = get_equity_at(now_ts_secs);
-        let balance_24h_ago = get_equity_at(cutoff_24h);
-        let balance_7d_ago = get_equity_at(cutoff_7d);
+        let balance_now = get_val(now_ts_secs);
+        let balance_24h_ago = get_val(cutoff_24h);
+        let balance_7d_ago = get_val(cutoff_7d);
 
-        // Cashflow over last 7d (deposits - withdrawals)
-        let cashflow_7d_query = format!(
-            "SELECT toString(toDecimal128(coalesce(sum(cashflow_quote), 0), 12)) AS cf
-             FROM {}
-             WHERE user_id = ?
-               AND minute > toDateTime(?)
-               AND minute <= toDateTime(?)",
-            self.table("user_cashflow_per_minute")
-        );
-        let cashflow_7d_str: String = self
-            .ch
-            .query(cashflow_7d_query.as_str())
-            .bind(user_id)
-            .bind(cutoff_7d)
-            .bind(now_ts_secs)
-            .fetch_one::<String>()
-            .await
-            .map_err(|e| TradingError::Database(e.to_string()))?;
-        let cashflow_7d = parse_decimal(cashflow_7d_str)?;
+        // 2. Calculate Cashflow (Dynamic)
+        // We need net cashflow over the last 7 days to calculate true PnL
+        // PnL = (Equity_Now - Equity_Start) - Net_Cashflow
+        let cashflow_map = self
+            .fetch_cashflow_series(user_id, cutoff_7d, now_ts_secs, resolution)
+            .await?;
 
-        // volume_24h
+        let cf_start = cashflow_map
+            .range(..=cutoff_7d)
+            .next_back()
+            .map(|(_, v)| *v)
+            .unwrap_or(Decimal::ZERO);
+        let cf_end = cashflow_map
+            .range(..=now_ts_secs)
+            .next_back()
+            .map(|(_, v)| *v)
+            .unwrap_or(Decimal::ZERO);
+        let net_cashflow_7d = cf_end - cf_start;
+
+        let pnl_7d = (balance_now - balance_7d_ago) - net_cashflow_7d;
+
+        // 3. Calculate Drawdown
+        let mut peak = Decimal::MIN;
+        let mut max_drawdown = Decimal::ZERO;
+        for point in &full_series {
+            if point.timestamp < cutoff_1m {
+                continue;
+            }
+            if point.balance > peak {
+                peak = point.balance;
+            }
+            let dd = peak - point.balance;
+            if dd > max_drawdown {
+                max_drawdown = dd;
+            }
+        }
+
+        // 4. Volume (Still simple SQL is fine)
         let volume_query = format!(
-            "SELECT
-                 toString(toDecimal128(coalesce(sum(CAST(price * size_base AS Decimal(38, 12))), 0), 12)) AS vol
-             FROM {}
-             WHERE ts >= toDateTime(?)
-               AND ts <= toDateTime(?)
-               AND (maker_user_id = ? OR taker_user_id = ?)",
+            "SELECT toString(toDecimal128(coalesce(sum(CAST(price * size_base AS Decimal(38, 12))), 0), 12)) 
+             FROM {} WHERE ts >= toDateTime(?) AND ts <= toDateTime(?) 
+             AND (maker_user_id = ? OR taker_user_id = ?)",
             self.table("trade_events")
         );
-        let volume_24h_str: String = self
+        let vol_str: String = self
             .ch
-            .query(volume_query.as_str())
+            .query(&volume_query)
             .bind(cutoff_24h)
             .bind(now_ts_secs)
             .bind(user_id)
             .bind(user_id)
-            .fetch_one::<String>()
+            .fetch_one()
             .await
             .map_err(|e| TradingError::Database(e.to_string()))?;
-        let volume_24h = parse_decimal(volume_24h_str)?;
+        let volume_24h = Decimal::from_str(&vol_str).unwrap_or(Decimal::ZERO);
 
-        // Compute max_drawdown from the equity series (peak to trough)
-        let mut peak = Decimal::ZERO;
-        let mut max_drawdown = Decimal::ZERO;
-        for point in full_equity_series.iter().filter(|p| p.timestamp >= cutoff_1m) {
-            if point.balance > peak {
-                peak = point.balance;
-            }
-            let drawdown = peak - point.balance;
-            if drawdown > max_drawdown {
-                max_drawdown = drawdown;
-            }
-        }
-
-        // Accounting PnL over 7d: Equity(now) - Equity(7d_ago) - Cashflow(7d)
-        let pnl_7d = balance_now - balance_7d_ago - cashflow_7d;
-
-        // Build PnL series for the requested resolution
-        let pnl_series = self
-            .fetch_pnl_series(user_id, now_ts_secs, resolution)
+        // 5. Build PnL Series for Chart
+        // We need the specific resolution requested by the user (e.g. 1w or 1m)
+        let window_start = now_ts_secs - resolution.window_seconds();
+        let chart_series_equity = self
+            .fetch_total_equity_series(user_id, window_start, now_ts_secs, resolution)
             .await?;
+
+        let chart_cashflows = self
+            .fetch_cashflow_series(user_id, window_start, now_ts_secs, resolution)
+            .await?;
+
+        // Baseline for chart is the start of the window
+        let baseline_equity = chart_series_equity
+            .first()
+            .map(|x| x.balance)
+            .unwrap_or(Decimal::ZERO);
+        let baseline_cf = chart_cashflows
+            .iter()
+            .next()
+            .map(|(_, v)| *v)
+            .unwrap_or(Decimal::ZERO);
+
+        let mut pnl_series = Vec::new();
+        for point in chart_series_equity {
+            let current_cf = chart_cashflows
+                .range(..=point.timestamp)
+                .next_back()
+                .map(|(_, v)| *v)
+                .unwrap_or(Decimal::ZERO);
+            // PnL = (CurrentEquity - BaselineEquity) - (CurrentCashflow - BaselineCashflow)
+            let pnl = (point.balance - baseline_equity) - (current_cf - baseline_cf);
+            pnl_series.push(PnlPoint {
+                timestamp: point.timestamp,
+                pnl,
+            });
+        }
 
         Ok(PortfolioMetrics {
             balance: balance_now,
@@ -851,107 +836,14 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
             pnl_resolution: resolution,
         })
     }
-    
+
     async fn get_balance_chart(
         &self,
         user_id: u64,
         now_ts_secs: i64,
         resolution: PnlResolution,
     ) -> Result<Vec<BalancePoint>> {
-        self.fetch_balance_series(user_id, now_ts_secs, resolution)
-            .await
-    }
-}
-
-impl ClickHousePortfolioRepository {
-    /// Fetch PnL time series for a user over a time window
-    ///
-    /// PnL = Equity(t) - Equity(baseline) - Cashflow(baseline..t)
-    ///
-    /// Uses the per-asset equity series (forward-fill summed in Rust) combined
-    /// with cumulative cashflow to produce accurate accounting PnL.
-    async fn fetch_pnl_series(
-        &self,
-        user_id: u64,
-        now_ts_secs: i64,
-        resolution: PnlResolution,
-    ) -> Result<Vec<PnlPoint>> {
         let window_start = now_ts_secs - resolution.window_seconds();
-
-        // Get total equity series using per-asset forward-fill sum
-        let equity_series = self
-            .fetch_total_equity_series(user_id, window_start, now_ts_secs, resolution)
-            .await?;
-
-        // Get cumulative cashflow series
-        let cashflow_map = self
-            .fetch_cashflow_series(user_id, window_start, now_ts_secs, resolution)
-            .await?;
-
-        // Baseline equity at window start
-        let baseline_equity = equity_series
-            .first()
-            .map(|p| p.balance)
-            .unwrap_or(Decimal::ZERO);
-
-        // Build PnL series: PnL = Equity(t) - Equity(baseline) - Cashflow(baseline..t)
-        let mut series = Vec::with_capacity(equity_series.len());
-        for point in equity_series {
-            let cumulative_cashflow =
-                Self::get_cumulative_cashflow_at(&cashflow_map, point.timestamp);
-            let pnl = point.balance - baseline_equity - cumulative_cashflow;
-            series.push(PnlPoint {
-                timestamp: point.timestamp,
-                pnl,
-            });
-        }
-
-        Ok(series)
-    }
-    
-    /// Fetch balance time series for a user over a time window
-    ///
-    /// # Balance Computation Logic
-    ///
-    /// ## What is "Balance" in this context?
-    /// Balance represents the user's **total portfolio equity** valued in the configured
-    /// quote asset (e.g., USDT). This is the sum of ALL assets (BTC, ETH, USDT, etc.)
-    /// converted to a common quote currency.
-    ///
-    /// ## How Multi-Asset Balances Are Computed
-    ///
-    /// The new schema stores equity PER ASSET in ClickHouse. This function:
-    /// 1. Fetches all per-asset equity values bucketed by resolution
-    /// 2. Performs forward-fill for each asset in Rust
-    /// 3. Sums across all assets at each time bucket
-    ///
-    /// This approach ensures BTC and ETH updates don't overwrite each other,
-    /// producing mathematically correct total portfolio equity.
-    ///
-    /// ## Correctness Guarantees
-    ///
-    /// ✓ **Multi-Asset Handling**: Each asset tracked separately, summed in Rust
-    /// ✓ **Forward-Fill**: Missing buckets carry forward last known value per asset
-    /// ✓ **Temporal Consistency**: Per-asset forward-fill prevents asset overwrites
-    /// ✓ **Decimal Precision**: Decimal(38,12) for equity prevents rounding errors
-    ///
-    /// # Parameters
-    /// - `user_id`: User whose balance chart to fetch
-    /// - `now_ts_secs`: Current time as Unix timestamp (seconds)
-    /// - `resolution`: Time resolution (Day=hourly buckets, Week/Month=daily, Year=monthly)
-    ///
-    /// # Returns
-    /// Sorted vector of (timestamp, balance) points representing total portfolio equity over time
-    async fn fetch_balance_series(
-        &self,
-        user_id: u64,
-        now_ts_secs: i64,
-        resolution: PnlResolution,
-    ) -> Result<Vec<BalancePoint>> {
-        let window_start = now_ts_secs - resolution.window_seconds();
-        
-        // Delegate to fetch_total_equity_series which handles per-asset
-        // forward-fill and aggregation in Rust
         self.fetch_total_equity_series(user_id, window_start, now_ts_secs, resolution)
             .await
     }
