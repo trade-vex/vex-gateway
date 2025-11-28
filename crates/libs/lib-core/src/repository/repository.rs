@@ -525,47 +525,43 @@ impl ClickHousePortfolioRepository {
             PnlResolution::Year => 604800,   // 1 week
         };
 
-        // Complex optimized query using ASOF JOINs
+        // Move time generation into the FROM subquery (arrayJoin cannot be in WITH clause)
         let sql = format!(
             "
             WITH
                 toDateTime(?) AS start_time,
                 toDateTime(?) AS end_time,
-                -- Generate time points
-                range(toUnixTimestamp(start_time), toUnixTimestamp(end_time) + 1, {step}) AS ticks,
-                arrayJoin(ticks) AS tick_ts,
-                toDateTime(tick_ts) AS bucket_time,
                 {quote} AS quote_id
             
             SELECT
-                CAST(tick_ts AS Int64) as ts,
+                -- Convert back to Int64 timestamp for Rust
+                CAST(toUnixTimestamp(t.bucket_time) AS Int64) as ts,
                 toString(
                     sum(
                         -- Equity = Balance * Price
-                        -- If asset is Quote (USD), Price is 1.0. Otherwise lookup.
                         coalesce(b.total, 0) * if(user_assets.asset_id = quote_id, 1.0, coalesce(p.price, 0))
                     )
                 ) as total_equity
             FROM (
-                -- Virtual table of time buckets
-                SELECT bucket_time FROM system.one ARRAY JOIN ticks 
+                -- 1. GENERATE TIME BUCKETS
+                -- Create a virtual table 't' with a single column 'bucket_time'
+                SELECT toDateTime(arrayJoin(range(toUnixTimestamp(start_time), toUnixTimestamp(end_time) + 1, {step}))) as bucket_time
             ) as t
             
-            -- Get list of assets this user has EVER interacted with
-            -- Cross Join ensures we calculate value for every asset at every time step
+            -- 2. Get list of assets this user has EVER held
             CROSS JOIN (
                 SELECT DISTINCT asset_id 
                 FROM {balances_table}
                 WHERE user_id = ?
             ) as user_assets
             
-            -- 1. Find Last Balance State at Bucket Time
+            -- 3. Find Last Balance State at Bucket Time (ASOF JOIN)
             LEFT ASOF JOIN {balances_table} b
                 ON b.user_id = ? 
                 AND b.asset_id = user_assets.asset_id 
                 AND b.minute <= t.bucket_time
             
-            -- 2. Find Last Price State at Bucket Time
+            -- 4. Find Last Price State at Bucket Time (ASOF JOIN)
             LEFT ASOF JOIN {prices_table} p
                 ON p.asset_id = user_assets.asset_id 
                 AND p.quote_asset_id = quote_id 
