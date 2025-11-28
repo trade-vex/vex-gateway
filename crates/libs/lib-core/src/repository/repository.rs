@@ -501,13 +501,11 @@ impl ClickHousePortfolioRepository {
     /// always values portfolios in USD.
     const QUOTE_ASSET_ID: u16 = 1;
 
-    /// Fetch Equity Series using ClickHouse ASOF JOINs.
+    /// Fetch Equity Series using Rust-side forward-fill aggregation.
     ///
-    /// Instead of fetching raw history, we ask ClickHouse to:
-    /// 1. Generate time buckets (e.g., every hour).
-    /// 2. Find the balance of every asset at that specific time (ASOF JOIN).
-    /// 3. Find the price of every asset at that specific time (ASOF JOIN).
-    /// 4. Multiply and Sum.
+    /// This approach fetches raw balance and price data, then calculates equity
+    /// in Rust with proper forward-fill semantics. More reliable than complex
+    /// SQL ASOF JOINs which have edge cases with empty data.
     async fn fetch_total_equity_series(
         &self,
         user_id: u64,
@@ -518,83 +516,98 @@ impl ClickHousePortfolioRepository {
         let quote_asset_id = Self::QUOTE_ASSET_ID;
 
         // Determine step size in seconds for the buckets
-        let step_seconds = match resolution {
+        let step_seconds: i64 = match resolution {
             PnlResolution::Day => 3600,      // 1 hour
             PnlResolution::Week => 21600,    // 6 hours
             PnlResolution::Month => 86400,   // 1 day
             PnlResolution::Year => 604800,   // 1 week
         };
 
-        // Move time generation into the FROM subquery (arrayJoin cannot be in WITH clause)
-        let sql = format!(
-            "
-            WITH
-                toDateTime(?) AS start_time,
-                toDateTime(?) AS end_time,
-                {quote} AS quote_id
-            
-            SELECT
-                CAST(toUnixTimestamp(t.bucket_time) AS Int64) as ts,
-                toString(
-                    sum(
-                        -- Equity = Balance * Price
-                        -- Explicit Decimal cast to match p.price type
-                        coalesce(b.total, 0) * if(
-                            user_assets.asset_id = quote_id, 
-                            CAST(1.0 AS Decimal(38, 12)), 
-                            coalesce(p.price, CAST(0 AS Decimal(38, 12)))
-                        )
-                    )
-                ) as total_equity
-            FROM (
-                -- 1. GENERATE TIME BUCKETS
-                -- Create a virtual table 't' with a single column 'bucket_time'
-                SELECT toDateTime(arrayJoin(range(toUnixTimestamp(start_time), toUnixTimestamp(end_time) + 1, {step}))) as bucket_time
-            ) as t
-            
-            -- 2. Get list of assets this user has EVER held
-            CROSS JOIN (
-                SELECT DISTINCT asset_id 
-                FROM {balances_table}
-                WHERE user_id = ?
-            ) as user_assets
-            
-            -- 3. Find Last Balance State at Bucket Time (ASOF JOIN)
-            LEFT ASOF JOIN {balances_table} b
-                ON b.user_id = ? 
-                AND b.asset_id = user_assets.asset_id 
-                AND b.minute <= t.bucket_time
-            
-            -- 4. Find Last Price State at Bucket Time (ASOF JOIN)
-            LEFT ASOF JOIN {prices_table} p
-                ON p.asset_id = user_assets.asset_id 
-                AND p.quote_asset_id = quote_id 
-                AND p.minute <= t.bucket_time
-            
-            GROUP BY ts
-            ORDER BY ts ASC
-            ",
-            step = step_seconds,
-            quote = quote_asset_id,
-            balances_table = self.table("balances_last_per_min"),
-            prices_table = self.table("asset_prices_last_per_min")
+        // 1. Fetch ALL balance updates for this user up to end_ts
+        let balance_sql = format!(
+            "SELECT asset_id, CAST(toUnixTimestamp(minute) AS Int64) as ts, toString(total)
+             FROM {} FINAL
+             WHERE user_id = ? AND minute <= toDateTime(?)
+             ORDER BY minute ASC",
+            self.table("balances_last_per_min")
         );
 
-        let rows: Vec<(i64, String)> = self
+        let balance_rows: Vec<(u16, i64, String)> = self
             .ch
-            .query(&sql)
-            .bind(start_ts)
+            .query(&balance_sql)
+            .bind(user_id)
             .bind(end_ts)
-            .bind(user_id) // For user_assets subquery
-            .bind(user_id) // For balances join
             .fetch_all()
             .await
             .map_err(|e| TradingError::Database(e.to_string()))?;
 
-        let mut series = Vec::with_capacity(rows.len());
-        for (ts, val_str) in rows {
-            let balance = Decimal::from_str(&val_str).unwrap_or(Decimal::ZERO);
-            series.push(BalancePoint { timestamp: ts, balance });
+        // 2. Fetch ALL price updates up to end_ts
+        let price_sql = format!(
+            "SELECT asset_id, CAST(toUnixTimestamp(minute) AS Int64) as ts, toString(price)
+             FROM {} FINAL
+             WHERE quote_asset_id = ? AND minute <= toDateTime(?)
+             ORDER BY minute ASC",
+            self.table("asset_prices_last_per_min")
+        );
+
+        let price_rows: Vec<(u16, i64, String)> = self
+            .ch
+            .query(&price_sql)
+            .bind(quote_asset_id)
+            .bind(end_ts)
+            .fetch_all()
+            .await
+            .map_err(|e| TradingError::Database(e.to_string()))?;
+
+        // 3. Build history maps: asset_id -> (timestamp -> value)
+        let mut balances: BTreeMap<u16, BTreeMap<i64, Decimal>> = BTreeMap::new();
+        for (asset, ts, val) in balance_rows {
+            let v = Decimal::from_str(&val).unwrap_or(Decimal::ZERO);
+            balances.entry(asset).or_default().insert(ts, v);
+        }
+
+        let mut prices: BTreeMap<u16, BTreeMap<i64, Decimal>> = BTreeMap::new();
+        for (asset, ts, val) in price_rows {
+            let v = Decimal::from_str(&val).unwrap_or(Decimal::ZERO);
+            prices.entry(asset).or_default().insert(ts, v);
+        }
+
+        // 4. Generate time buckets and calculate equity at each
+        let mut series = Vec::new();
+        let mut current_ts = start_ts;
+
+        while current_ts <= end_ts {
+            // Forward-fill balances and prices at this timestamp
+            let mut total_equity = Decimal::ZERO;
+
+            for (asset_id, balance_history) in &balances {
+                // Get balance at or before current_ts
+                let balance = balance_history
+                    .range(..=current_ts)
+                    .next_back()
+                    .map(|(_, v)| *v)
+                    .unwrap_or(Decimal::ZERO);
+
+                // Get price at or before current_ts
+                let price = if *asset_id == quote_asset_id {
+                    Decimal::ONE // Quote asset always worth 1.0
+                    } else {
+                    prices
+                        .get(asset_id)
+                        .and_then(|h| h.range(..=current_ts).next_back())
+                        .map(|(_, v)| *v)
+                        .unwrap_or(Decimal::ZERO)
+                };
+
+                total_equity += balance * price;
+                }
+
+                series.push(BalancePoint {
+                timestamp: current_ts,
+                    balance: total_equity,
+                });
+
+            current_ts += step_seconds;
         }
 
         Ok(series)
@@ -602,7 +615,8 @@ impl ClickHousePortfolioRepository {
 
     /// Dynamic Cashflow Calculation.
     ///
-    /// Fetches raw Deposit/Withdrawal events and values them against the Price History.
+    /// Fetches raw Deposit/Withdrawal events and values them using the price
+    /// AT THE TIME of the deposit/withdrawal. This ensures consistent cost basis.
     async fn fetch_cashflow_series(
         &self,
         user_id: u64,
@@ -614,22 +628,20 @@ impl ClickHousePortfolioRepository {
 
         // 1. Fetch Raw Flows (Deposits +, Withdrawals -)
         let flow_sql = format!(
-            "
-            SELECT 
+            "SELECT
                 CAST(toUnixTimestamp(ts) as Int64) as t,
                 asset_id, 
                 toString(amount) as amt
-            FROM {} 
-            WHERE user_id = ? AND ts > toDateTime(?) AND ts <= toDateTime(?)
-            UNION ALL
-            SELECT 
+             FROM {} 
+             WHERE user_id = ? AND ts > toDateTime(?) AND ts <= toDateTime(?)
+             UNION ALL
+             SELECT 
                 CAST(toUnixTimestamp(ts) as Int64) as t,
                 asset_id, 
                 toString(amount * -1) as amt
-            FROM {} 
-            WHERE user_id = ? AND ts > toDateTime(?) AND ts <= toDateTime(?)
-            ORDER BY t ASC
-            ",
+             FROM {} 
+             WHERE user_id = ? AND ts > toDateTime(?) AND ts <= toDateTime(?)
+             ORDER BY t ASC",
             self.table("deposit_events"),
             self.table("withdrawal_events")
         );
@@ -648,6 +660,9 @@ impl ClickHousePortfolioRepository {
             .map_err(|e| TradingError::Database(e.to_string()))?;
 
         // 2. Fetch Price History to value these flows
+        // Include ALL prices (including genesis at timestamp 0) so cashflow valuation
+        // matches equity valuation. This ensures deposits made before trading are
+        // valued consistently in both calculations.
         let price_sql = format!(
             "SELECT asset_id, CAST(toUnixTimestamp(minute) AS Int64), toString(price)
              FROM {} FINAL
@@ -681,9 +696,10 @@ impl ClickHousePortfolioRepository {
 
             // Value the flow at the time it happened
             let price = if asset_id == quote_asset_id {
-                Decimal::ONE
+                Decimal::ONE // USD always worth 1.0
             } else {
                 // Find price AT or BEFORE the transaction
+                // If genesis price exists (timestamp 0), deposits before trading use that
                 prices
                     .get(&asset_id)
                     .and_then(|h| h.range(..=ts).next_back())
@@ -734,23 +750,25 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
         let balance_7d_ago = get_val(cutoff_7d);
 
         // 2. Calculate Cashflow (Dynamic)
-        // We need net cashflow over the last 7 days to calculate true PnL
+        // Fetch ALL cashflows from beginning to get correct cumulative totals
         // PnL = (Equity_Now - Equity_Start) - Net_Cashflow
         let cashflow_map = self
-            .fetch_cashflow_series(user_id, cutoff_7d, now_ts_secs, resolution)
+            .fetch_cashflow_series(user_id, 0, now_ts_secs, resolution)
             .await?;
 
-        let cf_start = cashflow_map
+        // Get cumulative cashflow at 7d ago and now
+        let cf_at_7d_ago = cashflow_map
             .range(..=cutoff_7d)
             .next_back()
             .map(|(_, v)| *v)
             .unwrap_or(Decimal::ZERO);
-        let cf_end = cashflow_map
+        let cf_at_now = cashflow_map
             .range(..=now_ts_secs)
             .next_back()
             .map(|(_, v)| *v)
             .unwrap_or(Decimal::ZERO);
-        let net_cashflow_7d = cf_end - cf_start;
+        // Net cashflow in the 7d window
+        let net_cashflow_7d = cf_at_now - cf_at_7d_ago;
 
         let pnl_7d = (balance_now - balance_7d_ago) - net_cashflow_7d;
 
@@ -774,7 +792,7 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
         let volume_query = format!(
             "SELECT toString(toDecimal128(coalesce(sum(CAST(price * size_base AS Decimal(38, 12))), 0), 12)) 
              FROM {} WHERE ts >= toDateTime(?) AND ts <= toDateTime(?) 
-             AND (maker_user_id = ? OR taker_user_id = ?)",
+               AND (maker_user_id = ? OR taker_user_id = ?)",
             self.table("trade_events")
         );
         let vol_str: String = self
@@ -796,8 +814,10 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
             .fetch_total_equity_series(user_id, window_start, now_ts_secs, resolution)
             .await?;
 
+        // Fetch ALL cashflows from the beginning (timestamp 0) to now
+        // This ensures we capture the full cumulative history to calculate correct baseline
         let chart_cashflows = self
-            .fetch_cashflow_series(user_id, window_start, now_ts_secs, resolution)
+            .fetch_cashflow_series(user_id, 0, now_ts_secs, resolution)
             .await?;
 
         // Baseline for chart is the start of the window
@@ -805,9 +825,12 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
             .first()
             .map(|x| x.balance)
             .unwrap_or(Decimal::ZERO);
+
+        // Baseline cashflow is the cumulative cashflow AT or BEFORE window_start
+        // This includes all historical deposits/withdrawals before the chart window
         let baseline_cf = chart_cashflows
-            .iter()
-            .next()
+            .range(..=window_start)
+            .next_back()
             .map(|(_, v)| *v)
             .unwrap_or(Decimal::ZERO);
 
@@ -819,6 +842,7 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
                 .map(|(_, v)| *v)
                 .unwrap_or(Decimal::ZERO);
             // PnL = (CurrentEquity - BaselineEquity) - (CurrentCashflow - BaselineCashflow)
+            // This gives: change in equity minus new money added/removed
             let pnl = (point.balance - baseline_equity) - (current_cf - baseline_cf);
             pnl_series.push(PnlPoint {
                 timestamp: point.timestamp,
