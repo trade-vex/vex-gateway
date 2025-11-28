@@ -613,10 +613,14 @@ impl ClickHousePortfolioRepository {
         Ok(series)
     }
 
-    /// Dynamic Cashflow Calculation.
+    /// Dynamic Cashflow Calculation 
     ///
-    /// Fetches raw Deposit/Withdrawal events and values them using the price
-    /// AT THE TIME of the deposit/withdrawal. This ensures consistent cost basis.
+    /// Fetches raw Deposit/Withdrawal events and values them using:
+    /// 1. The price AT THE TIME of the deposit/withdrawal (historical cost basis)
+    /// 2. If no real price exists (only genesis $0), falls back to LATEST price
+    ///
+    /// This ensures deposits made before any trading activity are valued
+    /// consistently with equity (both use the same latest price).
     async fn fetch_cashflow_series(
         &self,
         user_id: u64,
@@ -661,8 +665,7 @@ impl ClickHousePortfolioRepository {
 
         // 2. Fetch Price History to value these flows
         // Include ALL prices (including genesis at timestamp 0) so cashflow valuation
-        // matches equity valuation. This ensures deposits made before trading are
-        // valued consistently in both calculations.
+        // matches equity valuation.
         let price_sql = format!(
             "SELECT asset_id, CAST(toUnixTimestamp(minute) AS Int64), toString(price)
              FROM {} FINAL
@@ -694,17 +697,28 @@ impl ClickHousePortfolioRepository {
         for (ts, asset_id, amt_str) in flow_rows {
             let amount = Decimal::from_str(&amt_str).unwrap_or(Decimal::ZERO);
 
-            // Value the flow at the time it happened
+            // Value the flow using historical cost basis with genesis fallback
             let price = if asset_id == quote_asset_id {
                 Decimal::ONE // USD always worth 1.0
             } else {
-                // Find price AT or BEFORE the transaction
-                // If genesis price exists (timestamp 0), deposits before trading use that
-                prices
+                // Try to find price AT or BEFORE the deposit time (historical cost)
+                let historical_price = prices
                     .get(&asset_id)
                     .and_then(|h| h.range(..=ts).next_back())
-                    .map(|(_, p)| *p)
-                    .unwrap_or(Decimal::ZERO)
+                    .map(|(_, p)| *p);
+
+                match historical_price {
+                    Some(p) if p != Decimal::ZERO => p, // Real price exists, use it
+                    _ => {
+                        // No real price at deposit time (genesis case)
+                        // Fall back to LATEST available price to match equity valuation
+                        prices
+                            .get(&asset_id)
+                            .and_then(|h| h.iter().next_back())
+                            .map(|(_, p)| *p)
+                            .unwrap_or(Decimal::ZERO)
+                    }
+                }
             };
 
             let flow_value = amount * price;
