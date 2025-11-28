@@ -534,12 +534,16 @@ impl ClickHousePortfolioRepository {
                 {quote} AS quote_id
             
             SELECT
-                -- Convert back to Int64 timestamp for Rust
                 CAST(toUnixTimestamp(t.bucket_time) AS Int64) as ts,
                 toString(
                     sum(
                         -- Equity = Balance * Price
-                        coalesce(b.total, 0) * if(user_assets.asset_id = quote_id, 1.0, coalesce(p.price, 0))
+                        -- Explicit Decimal cast to match p.price type
+                        coalesce(b.total, 0) * if(
+                            user_assets.asset_id = quote_id, 
+                            CAST(1.0 AS Decimal(38, 12)), 
+                            coalesce(p.price, CAST(0 AS Decimal(38, 12)))
+                        )
                     )
                 ) as total_equity
             FROM (
