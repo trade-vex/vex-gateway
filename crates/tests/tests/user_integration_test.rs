@@ -90,7 +90,7 @@ async fn test_deposit_funds(
         timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_micros() as u64,
+            .as_nanos() as u64,
         status: Status::Processing,
         events: None,
         balance: [UserBalance::default(); 2],
@@ -191,7 +191,7 @@ async fn test_place_order(
         timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_micros() as u64,
+            .as_nanos() as u64,
         status: Status::Processing,
         events: None,
         balance: [UserBalance::default(); 2],

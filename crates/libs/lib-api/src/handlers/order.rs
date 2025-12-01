@@ -247,7 +247,7 @@ pub async fn place_order(
         timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_micros() as u64,
+            .as_nanos() as u64,
         status: Status::Processing,
         events: None,
         balance: [UserBalance::default(); 2],
@@ -416,7 +416,7 @@ pub async fn cancel_order(
         timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_micros() as u64,
+            .as_nanos() as u64,
         status: Status::Processing,
         events: None,
         balance: [UserBalance::default(); 2],
