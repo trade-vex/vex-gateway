@@ -3,13 +3,15 @@
 use actix_web::{HttpResponse, web};
 use common::{OrderCommand, OrderCommandType, Side, Status, TimeInForce, UserBalance};
 use lib_core::{
-    CorrelationService, Publisher, ResponseError, generate_client_order_id, wait_for_response,
+    CorrelationService, Publisher, ResponseError, TradingRepository, generate_client_order_id, wait_for_response,
+    model::orders::Model as OrderModel,
 };
 use lib_utils::AuthenticatedUserId;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 // Request/Response DTOs
 
@@ -199,6 +201,7 @@ pub async fn place_order(
     auth_user: AuthenticatedUserId,
     publisher: web::Data<Arc<tokio::sync::Mutex<Publisher>>>,
     correlation_service: web::Data<Arc<CorrelationService>>,
+    trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> HttpResponse {
     let start = Instant::now();
 
@@ -280,6 +283,7 @@ pub async fn place_order(
     match wait_for_response(response_receiver, Duration::from_secs(5)).await {
         Ok(response) => {
             let latency = start.elapsed();
+            let status_str = format!("{:?}", response.status);
 
             info!(
                 client_order_id = client_order_id,
@@ -290,10 +294,59 @@ pub async fn place_order(
                 "Order processed successfully"
             );
 
+            // Store cancelled/rejected orders in database if they won't come via Kafka
+            // This ensures FOK orders that are cancelled appear in order history
+            if response.order_id != 0 && matches!(response.status, Status::Cancelled) {
+                // Check if order already exists (might have been stored via Kafka)
+                match trading_repo.get_order_by_id(response.order_id, user_id).await {
+                    Ok(Some(_)) => {
+                        // Order already exists, skip insertion
+                        debug!("Order {} already exists in database, skipping insertion", response.order_id);
+                    }
+                    Ok(None) => {
+                        // Order doesn't exist, create it
+                        let order_model = OrderModel {
+                            id: 0, // Will be auto-generated
+                            order_order_id: Decimal::from(response.order_id),
+                            order_user_id: Decimal::from(user_id),
+                            order_price: Decimal::from(price),
+                            order_size: Decimal::from(volume),
+                            filled_size: Decimal::from(0),
+                            order_side: format!("{:?}", side),
+                            order_timestamp: command.timestamp as i64, // Store nanoseconds as i64
+                            market_id: market_id as i32,
+                            time_in_force: format!("{:?}", time_in_force),
+                            status: status_str.clone(),
+                            created_at: None,
+                        };
+
+                        if let Err(e) = trading_repo.create_order(order_model).await {
+                            warn!(
+                                order_id = response.order_id,
+                                error = %e,
+                                "Failed to store cancelled order in database"
+                            );
+                        } else {
+                            info!(
+                                order_id = response.order_id,
+                                "Stored cancelled FOK order in database for order history"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            order_id = response.order_id,
+                            error = %e,
+                            "Failed to check if order exists before storing"
+                        );
+                    }
+                }
+            }
+
             HttpResponse::Ok().json(OrderResponse {
                 order_id: response.order_id,
                 client_order_id: response.client_order_id,
-                status: format!("{:?}", response.status),
+                status: status_str,
                 message: "Order processed successfully".to_string(),
             })
         }
