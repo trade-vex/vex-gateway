@@ -150,13 +150,14 @@ pub struct ToggleFavoriteMarketRequest {
 
 // Conversion implementations
 impl From<OrderModel> for OrderResponse {
-    fn from(model: OrderModel) -> Self {
+    fn from(model: OrderModel) -> Self {       
+        let remaining_size = model.order_size - model.filled_size;
         Self {
             order_id: model.order_order_id,
             user_id: model.order_user_id,
             market_id: model.market_id as u32,
             price: model.order_price,
-            size: model.order_size,
+            size: remaining_size,
             side: model.order_side.parse().unwrap_or(Side::Bid),
             timestamp: model.order_timestamp as u64,
             time_in_force: model.time_in_force,
