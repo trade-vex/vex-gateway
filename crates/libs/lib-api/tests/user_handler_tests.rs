@@ -20,8 +20,8 @@ use lib_api::handlers::user::{
 };
 use lib_core::{
     cache::{
-        order_store::{OrderCacheConfig, OrderStore},
-        user_store::{UserBalanceCacheConfig, UserBalanceStore},
+        order_store::{OrderCacheConfig},
+        user_store::{UserBalanceCacheConfig},
     },
     model::{
         orders::Model as OrderModel,
