@@ -67,20 +67,20 @@ pub struct OrderRequest {
 /// Request payload for cancelling an existing order
 ///
 /// # Fields
-/// * `order_id` - Unique identifier of the order to cancel
+/// * `order_id` - Unique identifier of the order to cancel (as string to support JavaScript BigInt)
 /// * `market_id` - Market identifier where the order exists
 ///
 /// # Example
 /// ```json
 /// {
-///   "order_id": 123456789,
+///   "order_id": "123456789",
 ///   "market_id": 1
 /// }
 /// ```
 #[derive(Debug, Deserialize)]
 pub struct CancelOrderRequest {
-    /// Unique identifier of the order to cancel
-    pub order_id: u64,
+    /// Unique identifier of the order to cancel (string format for JavaScript BigInt support)
+    pub order_id: String,
 
     /// Market identifier for validation
     pub market_id: u32,
@@ -405,7 +405,7 @@ pub async fn place_order(
 ///   -H "Authorization: Bearer <jwt_token>" \
 ///   -H "Content-Type: application/json" \
 ///   -d '{
-///     "order_id": 123456789,
+///     "order_id": "123456789",
 ///     "market_id": 1
 ///   }'
 /// ```
@@ -451,6 +451,24 @@ pub async fn cancel_order(
     let user_id = ((raw >> 64) as u64) ^ (raw as u64);
     let cancel_data = cancel_data.into_inner();
 
+    // Parse order_id from string to u64
+    let order_id = match cancel_data.order_id.parse::<u64>() {
+        Ok(id) => id,
+        Err(e) => {
+            error!(
+                order_id = cancel_data.order_id,
+                error = %e,
+                "Invalid order_id format"
+            );
+            return HttpResponse::BadRequest().json(OrderResponse {
+                order_id: 0,
+                client_order_id: 0,
+                status: "error".to_string(),
+                message: format!("Invalid order_id: must be a valid u64 integer string",),
+            });
+        }
+    };
+
     // Generate NEW client order ID for THIS cancel request
     let client_order_id = generate_client_order_id();
     let response_receiver = correlation_service.register_request(client_order_id);
@@ -458,7 +476,7 @@ pub async fn cancel_order(
     // Build cancel command
     let command = OrderCommand {
         command: OrderCommandType::CancelOrder,
-        order_id: cancel_data.order_id, // The order to cancel
+        order_id, // The order to cancel
         client_order_id,                // NEW correlation ID for this cancel request
         market_id: cancel_data.market_id,
         user_id,
@@ -485,7 +503,7 @@ pub async fn cancel_order(
     if let Err(e) = send_result {
         correlation_service.cancel_request(client_order_id);
         return HttpResponse::InternalServerError().json(OrderResponse {
-            order_id: cancel_data.order_id,
+            order_id,
             client_order_id,
             status: "error".to_string(),
             message: format!("Failed to send cancel: {}", e),
@@ -515,14 +533,14 @@ pub async fn cancel_order(
         Err(ResponseError::Timeout) => {
             correlation_service.cancel_request(client_order_id);
             HttpResponse::RequestTimeout().json(OrderResponse {
-                order_id: cancel_data.order_id,
+                order_id,
                 client_order_id,
                 status: "timeout".to_string(),
                 message: "Cancel timeout".to_string(),
             })
         }
         Err(ResponseError::Cancelled) => HttpResponse::InternalServerError().json(OrderResponse {
-            order_id: cancel_data.order_id,
+            order_id,
             client_order_id,
             status: "error".to_string(),
             message: "Internal error".to_string(),
