@@ -236,25 +236,21 @@ impl TradingRepository for PostgresTradingRepository {
     }
 
     async fn get_open_orders(&self, user_id: u64) -> Result<Vec<OrderModel>> {
-        let all_orders = OrderEntity::find()
+        // Filter for "open" orders: Placed, Pending, PartiallyFilled, Processing
+        // Exclude: Filled, Cancelled, Rejected
+        let open_status_condition = Condition::any()
+            .add(OrderColumn::Status.eq("Placed"))
+            .add(OrderColumn::Status.eq("Pending"))
+            .add(OrderColumn::Status.eq("PartiallyFilled"))
+            .add(OrderColumn::Status.eq("Processing"));
+
+        let orders = OrderEntity::find()
             .filter(OrderColumn::OrderUserId.eq(Decimal::from(user_id)))
+            .filter(open_status_condition)
             .order_by_desc(OrderColumn::OrderTimestamp)
             .all(&*self.db)
             .await
             .map_err(TradingError::from)?;
-
-        // Filter to only include "open" orders: Placed, Pending, PartiallyFilled, Processing
-        // Exclude: Filled, Cancelled, Rejected
-        let orders: Vec<_> = all_orders
-            .into_iter()
-            .filter(|order| {
-                let status_lower = order.status.to_lowercase();
-                status_lower == "placed"
-                    || status_lower == "pending"
-                    || status_lower == "partiallyfilled"
-                    || status_lower == "processing"
-            })
-            .collect();
 
         Ok(orders)
     }
@@ -265,8 +261,17 @@ impl TradingRepository for PostgresTradingRepository {
         offset: u64,
         limit: u64,
     ) -> Result<Vec<OrderModel>> {
-        let all_orders = OrderEntity::find()
+        // Filter for "open" orders: Placed, Pending, PartiallyFilled, Processing
+        // Exclude: Filled, Cancelled, Rejected
+        let open_status_condition = Condition::any()
+            .add(OrderColumn::Status.eq("Placed"))
+            .add(OrderColumn::Status.eq("Pending"))
+            .add(OrderColumn::Status.eq("PartiallyFilled"))
+            .add(OrderColumn::Status.eq("Processing"));
+
+        let orders = OrderEntity::find()
             .filter(OrderColumn::OrderUserId.eq(Decimal::from(user_id)))
+            .filter(open_status_condition)
             .order_by_desc(OrderColumn::OrderTimestamp)
             .offset(offset)
             .limit(limit)
@@ -274,42 +279,26 @@ impl TradingRepository for PostgresTradingRepository {
             .await
             .map_err(TradingError::from)?;
 
-        // Filter to only include "open" orders: Placed, Pending, PartiallyFilled, Processing
-        // Exclude: Filled, Cancelled, Rejected
-        let orders: Vec<_> = all_orders
-            .into_iter()
-            .filter(|order| {
-                let status_lower = order.status.to_lowercase();
-                status_lower == "placed"
-                    || status_lower == "pending"
-                    || status_lower == "partiallyfilled"
-                    || status_lower == "processing"
-            })
-            .collect();
-
         Ok(orders)
     }
 
     async fn count_open_orders(&self, user_id: u64) -> Result<u64> {
-        let all_orders = OrderEntity::find()
+        // Count only "open" orders: Placed, Pending, PartiallyFilled, Processing
+        // Exclude: Filled, Cancelled, Rejected
+        let open_status_condition = Condition::any()
+            .add(OrderColumn::Status.eq("Placed"))
+            .add(OrderColumn::Status.eq("Pending"))
+            .add(OrderColumn::Status.eq("PartiallyFilled"))
+            .add(OrderColumn::Status.eq("Processing"));
+
+        let count = OrderEntity::find()
             .filter(OrderColumn::OrderUserId.eq(Decimal::from(user_id)))
-            .all(&*self.db)
+            .filter(open_status_condition)
+            .count(&*self.db)
             .await
             .map_err(TradingError::from)?;
 
-        // Count only "open" orders: Placed, Pending, PartiallyFilled, Processing
-        let count = all_orders
-            .into_iter()
-            .filter(|order| {
-                let status_lower = order.status.to_lowercase();
-                status_lower == "placed"
-                    || status_lower == "pending"
-                    || status_lower == "partiallyfilled"
-                    || status_lower == "processing"
-            })
-            .count();
-
-        Ok(count as u64)
+        Ok(count)
     }
 
     async fn get_order_by_id(&self, order_id: u64, user_id: u64) -> Result<Option<OrderModel>> {
