@@ -81,7 +81,7 @@ async fn setup_test_database(schema: &str) -> Result<(), Box<dyn std::error::Err
 async fn insert_test_equity_data(
     schema: &str,
     user_id: u64,
-    data: Vec<(i64, &str)>, // (timestamp, equity_in_quote)
+    data: Vec<(i64, String)>, // (timestamp, equity_in_quote)
 ) -> Result<(), Box<dyn std::error::Error>> {
     let client = create_test_client();
 
@@ -93,7 +93,7 @@ async fn insert_test_equity_data(
             ))
             .bind(ts)
             .bind(user_id)
-            .bind(equity_str)
+            .bind(equity_str.as_str())
             .bind(ts * 1000) // ver in milliseconds
             .execute()
             .await?;
@@ -135,11 +135,11 @@ async fn test_balance_chart_single_day_resolution() {
     // Hour 18: BTC=$60k, ETH=$36k, USDT=$10k = $106k total
     // Hour 24: BTC=$75k, ETH=$45k, USDT=$10k = $130k total
     let equity_data = vec![
-        (base_ts, "70000.00"),              // 00:00
-        (base_ts + 6 * 3600, "82000.00"),   // 06:00
-        (base_ts + 12 * 3600, "94000.00"),  // 12:00
-        (base_ts + 18 * 3600, "106000.00"), // 18:00
-        (base_ts + 24 * 3600, "130000.00"), // 24:00 (next day)
+        (base_ts, "70000.00".to_string()),              // 00:00
+        (base_ts + 6 * 3600, "82000.00".to_string()),   // 06:00
+        (base_ts + 12 * 3600, "94000.00".to_string()),  // 12:00
+        (base_ts + 18 * 3600, "106000.00".to_string()), // 18:00
+        (base_ts + 24 * 3600, "130000.00".to_string()), // 24:00 (next day)
     ];
 
     insert_test_equity_data(schema, user_id, equity_data)
@@ -219,13 +219,13 @@ async fn test_multi_asset_portfolio_price_changes() {
     // Day 5: New high - $135k
     // Day 6: Profit taking - $128k
     let equity_data = vec![
-        (base_ts, "100000.00"),             // Day 0
-        (base_ts + 86400, "120000.00"),     // Day 1 (+20%)
-        (base_ts + 2 * 86400, "118000.00"), // Day 2 (-2%)
-        (base_ts + 3 * 86400, "95000.00"),  // Day 3 (-20% correction)
-        (base_ts + 4 * 86400, "105000.00"), // Day 4 (+10%)
-        (base_ts + 5 * 86400, "135000.00"), // Day 5 (+28% ATH)
-        (base_ts + 6 * 86400, "128000.00"), // Day 6 (-5%)
+        (base_ts, "100000.00".to_string()),             // Day 0
+        (base_ts + 86400, "120000.00".to_string()),     // Day 1 (+20%)
+        (base_ts + 2 * 86400, "118000.00".to_string()), // Day 2 (-2%)
+        (base_ts + 3 * 86400, "95000.00".to_string()),  // Day 3 (-20% correction)
+        (base_ts + 4 * 86400, "105000.00".to_string()), // Day 4 (+10%)
+        (base_ts + 5 * 86400, "135000.00".to_string()), // Day 5 (+28% ATH)
+        (base_ts + 6 * 86400, "128000.00".to_string()), // Day 6 (-5%)
     ];
 
     insert_test_equity_data(schema, user_id, equity_data)
@@ -277,9 +277,9 @@ async fn test_forward_fill_missing_periods() {
 
     // Insert sparse data: Day 0, Day 3, Day 6 (gaps on days 1,2,4,5)
     let equity_data = vec![
-        (base_ts, "50000.00"),             // Day 0
-        (base_ts + 3 * 86400, "52000.00"), // Day 3 (gap: days 1-2)
-        (base_ts + 6 * 86400, "55000.00"), // Day 6 (gap: days 4-5)
+        (base_ts, "50000.00".to_string()),             // Day 0
+        (base_ts + 3 * 86400, "52000.00".to_string()), // Day 3 (gap: days 1-2)
+        (base_ts + 6 * 86400, "55000.00".to_string()), // Day 6 (gap: days 4-5)
     ];
 
     insert_test_equity_data(schema, user_id, equity_data)
@@ -338,7 +338,7 @@ async fn test_different_resolutions() {
     for month in 0..12 {
         let ts = base_ts + month * 30 * 86400;
         let equity = format!("{}.00", 100000 + month * 5000); // Growing from $100k to $155k
-        equity_data.push((ts, equity.leak() as &str));
+        equity_data.push((ts, equity));
     }
 
     insert_test_equity_data(schema, user_id, equity_data)
@@ -426,9 +426,9 @@ async fn test_high_precision_decimals() {
 
     // Insert high-precision equity values
     let equity_data = vec![
-        (base_ts, "1234567.123456789012"), // 12 decimal places
-        (base_ts + 3600, "1234890.987654321098"),
-        (base_ts + 7200, "1235123.456789012345"),
+        (base_ts, "1234567.123456789012".to_string()), // 12 decimal places
+        (base_ts + 3600, "1234890.987654321098".to_string()),
+        (base_ts + 7200, "1235123.456789012345".to_string()),
     ];
 
     insert_test_equity_data(schema, user_id, equity_data)
