@@ -206,20 +206,18 @@ impl SessionService {
 
         // Check each session and delete if it belongs to this user but isn't the current session
         for key in keys {
-            if let Ok(Some(session_json)) = conn.get::<String, Option<String>>(key.clone()).await {
-                if let Ok(session_data) = serde_json::from_str::<SessionData>(&session_json) {
-                    // Check if this session belongs to the user
-                    if session_data.user_id == user_id {
-                        // Extract session_id from key (format: "session:{session_id}")
-                        if let Some(session_id) = key.strip_prefix("session:") {
-                            // Delete if it's not the session we want to keep
-                            if session_id != keep_session_id {
-                                let _: () = conn.del(key).await.map_err(|e| {
-                                    AuthError::Redis(format!("Failed to delete session: {}", e))
-                                })?;
-                                revoked_count += 1;
-                            }
-                        }
+            if let Ok(Some(session_json)) = conn.get::<String, Option<String>>(key.clone()).await
+                && let Ok(session_data) = serde_json::from_str::<SessionData>(&session_json)
+                && session_data.user_id == user_id
+            {
+                // Extract session_id from key (format: "session:{session_id}")
+                if let Some(session_id) = key.strip_prefix("session:") {
+                    // Delete if it's not the session we want to keep
+                    if session_id != keep_session_id {
+                        let _: () = conn.del(key).await.map_err(|e| {
+                            AuthError::Redis(format!("Failed to delete session: {}", e))
+                        })?;
+                        revoked_count += 1;
                     }
                 }
             }
@@ -247,16 +245,14 @@ impl SessionService {
 
         // Check each session and delete if it belongs to this user
         for key in keys {
-            if let Ok(Some(session_json)) = conn.get::<String, Option<String>>(key.clone()).await {
-                if let Ok(session_data) = serde_json::from_str::<SessionData>(&session_json) {
-                    // Check if this session belongs to the user
-                    if session_data.user_id == user_id {
-                        let _: () = conn.del(key).await.map_err(|e| {
-                            AuthError::Redis(format!("Failed to delete session: {}", e))
-                        })?;
-                        revoked_count += 1;
-                    }
-                }
+            if let Ok(Some(session_json)) = conn.get::<String, Option<String>>(key.clone()).await
+                && let Ok(session_data) = serde_json::from_str::<SessionData>(&session_json)
+                && session_data.user_id == user_id
+            {
+                let _: () = conn.del(key).await.map_err(|e| {
+                    AuthError::Redis(format!("Failed to delete session: {}", e))
+                })?;
+                revoked_count += 1;
             }
         }
 

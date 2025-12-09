@@ -471,7 +471,7 @@ async fn test_balance_consistency() {
 async fn test_config_default_values() {
     let config = UserBalanceCacheConfig::default();
     assert_eq!(config.ttl, Duration::from_secs(1800));
-    assert_eq!(config.enabled, false);
+    assert!(!config.enabled);
 }
 
 #[tokio::test]
@@ -481,7 +481,7 @@ async fn test_config_custom_values() {
         enabled: true,
     };
     assert_eq!(config.ttl, Duration::from_secs(600));
-    assert_eq!(config.enabled, true);
+    assert!(config.enabled);
 }
 
 #[tokio::test]

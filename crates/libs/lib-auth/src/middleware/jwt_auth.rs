@@ -253,59 +253,59 @@ where
                                     tracing::debug!(
                                         "JWT middleware: Token not blacklisted; checking session inactivity if cookie present"
                                     );
-                                    if let Some(cookie) = req.cookie("session_id") {
-                                        if let Some(session_service) = &session_service_opt {
-                                            match session_service
-                                                .refresh_session(cookie.value())
-                                                .await
-                                            {
-                                                Ok(()) => {
-                                                    tracing::debug!(
-                                                        "Session TTL refreshed for session_id={}",
-                                                        cookie.value()
-                                                    );
-                                                }
-                                                Err(_) => {
-                                                    // Session missing → idle-expired: blacklist and 401
-                                                    let now = chrono::Utc::now().timestamp();
-                                                    if token_exp > now {
-                                                        let ttl_secs = (token_exp - now) as u64;
-                                                        if let Some(token_service) =
-                                                            &token_service_opt
+                                    if let Some(cookie) = req.cookie("session_id")
+                                        && let Some(session_service) = &session_service_opt
+                                    {
+                                        match session_service
+                                            .refresh_session(cookie.value())
+                                            .await
+                                        {
+                                            Ok(()) => {
+                                                tracing::debug!(
+                                                    "Session TTL refreshed for session_id={}",
+                                                    cookie.value()
+                                                );
+                                            }
+                                            Err(_) => {
+                                                // Session missing → idle-expired: blacklist and 401
+                                                let now = chrono::Utc::now().timestamp();
+                                                if token_exp > now {
+                                                    let ttl_secs = (token_exp - now) as u64;
+                                                    if let Some(token_service) =
+                                                        &token_service_opt
+                                                    {
+                                                        if let Err(e) = token_service
+                                                            .blacklist_jti(&jti, ttl_secs)
+                                                            .await
                                                         {
-                                                            if let Err(e) = token_service
-                                                                .blacklist_jti(&jti, ttl_secs)
-                                                                .await
-                                                            {
-                                                                tracing::warn!(
-                                                                    "Failed to blacklist JTI on idle-expiry: {}",
-                                                                    e
-                                                                );
-                                                            }
-                                                        } else if let Ok(mut conn) =
-                                                            redis_pool.get().await
-                                                        {
-                                                            let _: Result<(), _> = conn
-                                                                .set_ex(
-                                                                    format!("blacklist:{}", jti),
-                                                                    "1",
-                                                                    ttl_secs,
-                                                                )
-                                                                .await;
+                                                            tracing::warn!(
+                                                                "Failed to blacklist JTI on idle-expiry: {}",
+                                                                e
+                                                            );
                                                         }
+                                                    } else if let Ok(mut conn) =
+                                                        redis_pool.get().await
+                                                    {
+                                                        let _: Result<(), _> = conn
+                                                            .set_ex(
+                                                                format!("blacklist:{}", jti),
+                                                                "1",
+                                                                ttl_secs,
+                                                            )
+                                                            .await;
                                                     }
-
-                                                    let (req, _) = req.into_parts();
-                                                    let response = HttpResponse::Unauthorized().json(serde_json::json!({
-                                                        "error": {
-                                                            "code": "session_expired",
-                                                            "message": "Session expired due to inactivity",
-                                                            "status": 401
-                                                        }
-                                                    }));
-                                                    return Ok(ServiceResponse::new(req, response)
-                                                        .map_into_boxed_body());
                                                 }
+
+                                                let (req, _) = req.into_parts();
+                                                let response = HttpResponse::Unauthorized().json(serde_json::json!({
+                                                    "error": {
+                                                        "code": "session_expired",
+                                                        "message": "Session expired due to inactivity",
+                                                        "status": 401
+                                                    }
+                                                }));
+                                                return Ok(ServiceResponse::new(req, response)
+                                                    .map_into_boxed_body());
                                             }
                                         }
                                     }
@@ -332,26 +332,25 @@ where
                 }
                 Err(e) => {
                     // Check if token expired and we have auto-refresh enabled
-                    if let ErrorKind::ExpiredSignature = *e.kind() {
-                        if let (Some(token_service), Some(session_service)) =
+                    if let ErrorKind::ExpiredSignature = *e.kind()
+                        && let (Some(token_service), Some(session_service)) =
                             (self.token_service.clone(), self.session_service.clone())
-                        {
-                            tracing::debug!(
-                                "JWT middleware: Token expired, attempting auto-refresh"
-                            );
+                        && let Some(cookie) = req.cookie("session_id")
+                    {
+                        tracing::debug!(
+                            "JWT middleware: Token expired, attempting auto-refresh"
+                        );
 
-                            // Try to get session_id from cookie
-                            if let Some(cookie) = req.cookie("session_id") {
-                                let svc = self.service.clone();
-                                let decoding_key = self.decoding_key.clone();
-                                let issuer = self.issuer.clone();
-                                let audience = self.audience.clone();
-                                let algorithm = self.algorithm;
-                                let redis_pool = self.redis_pool.clone();
+                        let svc = self.service.clone();
+                        let decoding_key = self.decoding_key.clone();
+                        let issuer = self.issuer.clone();
+                        let audience = self.audience.clone();
+                        let algorithm = self.algorithm;
+                        let redis_pool = self.redis_pool.clone();
 
-                                return Box::pin(async move {
-                                    let mut req = req;
-                                    let session_id = cookie.value();
+                        return Box::pin(async move {
+                            let mut req = req;
+                            let session_id = cookie.value();
 
                                     // Get session data
                                     match session_service.get_session(session_id).await {
@@ -426,14 +425,14 @@ where
                                                                             &blacklist_key,
                                                                         )
                                                                         .await
+                                                                        && exists
                                                                     {
-                                                                        if exists {
-                                                                            tracing::warn!(
-                                                                                "Refreshed token is blacklisted"
-                                                                            );
-                                                                            let (req, _) =
-                                                                                req.into_parts();
-                                                                            let response = HttpResponse::Unauthorized().json(
+                                                                        tracing::warn!(
+                                                                            "Refreshed token is blacklisted"
+                                                                        );
+                                                                        let (req, _) =
+                                                                            req.into_parts();
+                                                                        let response = HttpResponse::Unauthorized().json(
                                                                 serde_json::json!({
                                                                     "error": {
                                                                         "code": "token_revoked",
@@ -442,8 +441,7 @@ where
                                                                     }
                                                                 })
                                                             );
-                                                                            return Ok(ServiceResponse::new(req, response).map_into_boxed_body());
-                                                                        }
+                                                                        return Ok(ServiceResponse::new(req, response).map_into_boxed_body());
                                                                     }
                                                                 }
 
@@ -500,10 +498,8 @@ where
                                             "status": 401
                                         }
                                     }));
-                                    Ok(ServiceResponse::new(req, response).map_into_boxed_body())
-                                });
-                            }
-                        }
+                            Ok(ServiceResponse::new(req, response).map_into_boxed_body())
+                        });
                     }
 
                     let (error_code, error_message) = match *e.kind() {

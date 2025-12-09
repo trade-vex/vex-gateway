@@ -254,6 +254,7 @@ async fn insert_test_balance(
 }
 
 /// Insert test order data
+#[allow(clippy::too_many_arguments)]
 async fn insert_test_order(
     db: &DatabaseConnection,
     order_id: u64,
@@ -298,7 +299,7 @@ impl ErrorMockTradingRepository {
     }
 
     fn should_error(&self, method: &str) -> bool {
-        self.error_method.map_or(false, |m| m == method)
+        self.error_method.is_some_and(|m| m == method)
     }
 }
 

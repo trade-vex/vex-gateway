@@ -188,7 +188,7 @@ pub async fn get_open_orders(
 
     // Parse pagination parameters
     let page = query.page.unwrap_or(1).max(1);
-    let limit = query.limit.unwrap_or(20).min(100).max(1);
+    let limit = query.limit.unwrap_or(20).clamp(1, 100);
     let offset = ((page - 1) * limit) as u64;
     let limit_u64 = limit as u64;
 
@@ -212,7 +212,7 @@ pub async fn get_open_orders(
             let order_responses: Vec<OrderResponse> =
                 orders.into_iter().map(|order| order.into()).collect();
 
-            let total_pages = (total_count + limit - 1) / limit;
+            let total_pages = total_count.div_ceil(limit);
             let has_next = page < total_pages;
             let has_prev = page > 1;
 
@@ -321,7 +321,7 @@ pub async fn get_order_history(
 
     // Parse pagination parameters
     let page = query.page.unwrap_or(1).max(1);
-    let limit = query.limit.unwrap_or(20).min(100).max(1);
+    let limit = query.limit.unwrap_or(20).clamp(1, 100);
     let offset = ((page - 1) * limit) as u64;
     let limit_u64 = limit as u64;
 
@@ -349,7 +349,7 @@ pub async fn get_order_history(
             let order_responses: Vec<OrderHistoryResponse> =
                 orders.into_iter().map(|order| order.into()).collect();
 
-            let total_pages = (total_count + limit - 1) / limit;
+            let total_pages = total_count.div_ceil(limit);
             let has_next = page < total_pages;
             let has_prev = page > 1;
 

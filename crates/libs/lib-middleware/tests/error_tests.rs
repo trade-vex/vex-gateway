@@ -1,6 +1,5 @@
 use lib_middleware::api_key::error::ApiKeyError;
 use sea_orm::DbErr;
-use serde_json;
 
 #[test]
 fn test_api_key_error_variants() {

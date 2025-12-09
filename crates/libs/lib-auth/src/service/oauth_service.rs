@@ -103,11 +103,8 @@ impl OAuthService {
         // Map invalid chars to '-' and allow [a-z0-9._-]
         let mut out = String::with_capacity(lower.len());
         for ch in lower.chars() {
-            if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '.' || ch == '_' || ch == '-'
-            {
+            if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '.' || ch == '_' || ch == '-' {
                 out.push(ch);
-            } else if ch.is_whitespace() {
-                out.push('-');
             } else {
                 out.push('-');
             }

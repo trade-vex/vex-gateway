@@ -517,7 +517,7 @@ The Team"#,
             .send_email(
                 recipient_email,
                 recipient_name,
-                &subject,
+                subject,
                 &html_content,
                 &text_content,
             )

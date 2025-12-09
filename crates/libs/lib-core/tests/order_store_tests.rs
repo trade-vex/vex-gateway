@@ -519,7 +519,7 @@ async fn test_large_order_values() {
 async fn test_config_default_values() {
     let config = OrderCacheConfig::default();
     assert_eq!(config.ttl, Duration::from_secs(1800));
-    assert_eq!(config.enabled, false);
+    assert!(!config.enabled);
 }
 
 #[tokio::test]
@@ -529,7 +529,7 @@ async fn test_config_custom_values() {
         enabled: true,
     };
     assert_eq!(config.ttl, Duration::from_secs(600));
-    assert_eq!(config.enabled, true);
+    assert!(config.enabled);
 }
 
 #[tokio::test]

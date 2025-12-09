@@ -570,8 +570,8 @@ async fn test_user_balance_and_order_retrieval() {
     //   - base_asset = 5991 & 0xFFFF = 5991
     //   - quote_asset = 5991 >> 16 = 0
     let market_id = 5991u32;
-    let base_asset_id = (market_id & 0xFFFF) as u32; // Lower 16 bits
-    let quote_asset_id = (market_id >> 16) as u32; // Upper 16 bits
+    let base_asset_id = market_id & 0xFFFF; // Lower 16 bits
+    let quote_asset_id = market_id >> 16; // Upper 16 bits
 
     println!("📊 Market Configuration:");
     println!("   Market ID: {}", market_id);

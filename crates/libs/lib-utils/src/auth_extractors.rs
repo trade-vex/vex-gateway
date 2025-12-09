@@ -44,15 +44,15 @@ impl FromRequest for AuthenticatedUserId {
             // For API key authentication, we need to get the user_id from the request
             // This could be from query params, headers, or request body
             // For now, we'll return an error indicating that user_id must be provided
-            return ready(Err(ActixError::from(actix_web::error::ErrorBadRequest(
+            return ready(Err(actix_web::error::ErrorBadRequest(
                 "API key authentication requires user_id to be provided in request",
-            ))));
+            )));
         }
 
         // No authentication found
-        ready(Err(ActixError::from(actix_web::error::ErrorUnauthorized(
+        ready(Err(actix_web::error::ErrorUnauthorized(
             "Authentication required",
-        ))))
+        )))
     }
 }
 
@@ -79,9 +79,9 @@ impl FromRequest for AuthContext {
         }
 
         // No authentication found
-        ready(Err(ActixError::from(actix_web::error::ErrorUnauthorized(
+        ready(Err(actix_web::error::ErrorUnauthorized(
             "Authentication required",
-        ))))
+        )))
     }
 }
 
@@ -136,15 +136,15 @@ pub fn extract_user_id_from_request(
         if let Some(user_id) = fallback_user_id {
             return Ok(user_id);
         }
-        return Err(ActixError::from(actix_web::error::ErrorBadRequest(
+        return Err(actix_web::error::ErrorBadRequest(
             "API key authentication requires user_id to be provided",
-        )));
+        ));
     }
 
     // No authentication found
-    Err(ActixError::from(actix_web::error::ErrorUnauthorized(
+    Err(actix_web::error::ErrorUnauthorized(
         "Authentication required",
-    )))
+    ))
 }
 
 /// Helper function to extract user ID from query parameters
@@ -152,19 +152,19 @@ pub fn extract_user_id_from_query(req: &HttpRequest) -> Result<Uuid, ActixError>
     let query =
         web::Query::<std::collections::HashMap<String, String>>::from_query(req.query_string())
             .map_err(|_| {
-                ActixError::from(actix_web::error::ErrorBadRequest(
+                actix_web::error::ErrorBadRequest(
                     "Invalid query parameters",
-                ))
+                )
             })?;
 
     let user_id_str = query.get("user_id").ok_or_else(|| {
-        ActixError::from(actix_web::error::ErrorBadRequest(
+        actix_web::error::ErrorBadRequest(
             "user_id query parameter required",
-        ))
+        )
     })?;
 
     let user_id = Uuid::parse_str(user_id_str).map_err(|_| {
-        ActixError::from(actix_web::error::ErrorBadRequest("Invalid user_id format"))
+        actix_web::error::ErrorBadRequest("Invalid user_id format")
     })?;
 
     Ok(user_id)

@@ -383,6 +383,7 @@ async fn init_database() -> Option<Arc<DatabaseConnection>> {
 
 // ==================== Helper Functions ====================
 
+#[allow(clippy::too_many_arguments)]
 async fn deposit_for_user(
     client: &reqwest::Client,
     server_address: &str,
@@ -618,8 +619,8 @@ async fn test_multi_user_trading_scenario() {
 
     let client = reqwest::Client::new();
     let market_id = 5991u32;
-    let base_asset_id = (market_id & 0xFFFF) as u32;
-    let quote_asset_id = (market_id >> 16) as u32;
+    let base_asset_id = market_id & 0xFFFF;
+    let quote_asset_id = market_id >> 16;
 
     println!("✓ Server running at: {}", server_address);
     println!(

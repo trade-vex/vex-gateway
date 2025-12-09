@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
     Eq,
     Serialize,
     Deserialize,
+    Default,
     sea_orm::DeriveActiveEnum,
     sea_orm::EnumIter,
 )]
@@ -17,6 +18,7 @@ use serde::{Deserialize, Serialize};
 pub enum SecurityType {
     /// Endpoint can be accessed freely
     #[sea_orm(string_value = "none")]
+    #[default]
     None,
     /// Endpoint requires sending a valid API-Key and signature
     #[sea_orm(string_value = "trade")]
@@ -27,12 +29,6 @@ pub enum SecurityType {
     /// Endpoint requires sending a valid API-Key
     #[sea_orm(string_value = "user_stream")]
     UserStream,
-}
-
-impl Default for SecurityType {
-    fn default() -> Self {
-        SecurityType::None
-    }
 }
 
 impl std::fmt::Display for SecurityType {

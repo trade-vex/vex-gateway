@@ -95,18 +95,13 @@ pub struct BalancePoint {
     pub balance: Decimal,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PnlResolution {
+    #[default]
     Day,
     Week,
     Month,
     Year,
-}
-
-impl Default for PnlResolution {
-    fn default() -> Self {
-        PnlResolution::Day
-    }
 }
 
 impl PnlResolution {
@@ -784,8 +779,8 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
         let get_val = |ts: i64| -> Decimal {
             full_series
                 .iter()
-                .filter(|p| p.timestamp <= ts)
-                .last()
+                .rev()
+                .find(|p| p.timestamp <= ts)
                 .map(|p| p.balance)
                 .unwrap_or(Decimal::ZERO)
         };

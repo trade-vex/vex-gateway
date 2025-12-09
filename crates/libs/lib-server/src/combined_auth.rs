@@ -31,12 +31,11 @@ impl CombinedAuthMiddleware {
     }
 
     fn detect_auth_type(req: &HttpRequest) -> AuthType {
-        if let Some(auth_header) = req.headers().get("authorization") {
-            if let Ok(auth_str) = auth_header.to_str() {
-                if auth_str.starts_with("Bearer ") {
-                    return AuthType::Jwt;
-                }
-            }
+        if let Some(auth_header) = req.headers().get("authorization")
+            && let Ok(auth_str) = auth_header.to_str()
+            && auth_str.starts_with("Bearer ")
+        {
+            return AuthType::Jwt;
         }
 
         if req.headers().get("X-MBX-APIKEY").is_some() {
@@ -183,9 +182,9 @@ where
 
                 AuthType::None => {
                     error!("No authentication provided");
-                    return Err(actix_web::error::ErrorUnauthorized(
+                    Err(actix_web::error::ErrorUnauthorized(
                         "Authentication required",
-                    ));
+                    ))
                 }
             }
         })

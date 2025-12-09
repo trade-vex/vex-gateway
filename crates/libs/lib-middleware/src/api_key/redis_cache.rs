@@ -137,7 +137,7 @@ impl RedisApiKeyCache {
                     Ok(result) => return Ok(result),
                     Err(e) => {
                         last_error = Some(e);
-                        if !self.is_retryable(&last_error.as_ref().unwrap()) {
+                        if !self.is_retryable(last_error.as_ref().unwrap()) {
                             break;
                         }
                         if attempt < 3 {
@@ -250,7 +250,7 @@ impl ApiKeyCache for RedisApiKeyCache {
         self.execute_with_retry(|conn| {
             let cache_key = cache_key.clone();
             let serialized = serialized.clone();
-            let ttl_secs = ttl.as_secs() as u64;
+            let ttl_secs = ttl.as_secs();
             Box::pin(async move {
                 if ttl_secs > 0 {
                     conn.set_ex::<_, _, ()>(&cache_key, serialized, ttl_secs)

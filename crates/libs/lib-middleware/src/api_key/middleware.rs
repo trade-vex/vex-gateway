@@ -93,13 +93,19 @@ pub struct CacheMetrics {
     pub db_queries: std::sync::atomic::AtomicU64,
 }
 
-impl CacheMetrics {
-    pub fn new() -> Self {
+impl Default for CacheMetrics {
+    fn default() -> Self {
         Self {
             l1_hits: std::sync::atomic::AtomicU64::new(0),
             l1_misses: std::sync::atomic::AtomicU64::new(0),
             db_queries: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+}
+
+impl CacheMetrics {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Get L1 cache hit rate for monitoring
@@ -167,7 +173,7 @@ impl ApiKeyStore {
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     debug!(
                         "L1 cache hit for key: {}",
-                        ApiKeyStore::mask_api_key(&api_key)
+                        ApiKeyStore::mask_api_key(api_key)
                     );
                     return Some(cached.config.clone());
                 } else {
@@ -199,13 +205,13 @@ impl ApiKeyStore {
 
                         debug!(
                             "Database hit for key: {}",
-                            ApiKeyStore::mask_api_key(&api_key)
+                            ApiKeyStore::mask_api_key(api_key)
                         );
                         return Some(config_arc);
                     } else {
                         debug!(
                             "API key found but invalid (disabled/expired): {}",
-                            ApiKeyStore::mask_api_key(&api_key)
+                            ApiKeyStore::mask_api_key(api_key)
                         );
                         return None;
                     }
@@ -213,13 +219,13 @@ impl ApiKeyStore {
                 Ok(None) => {
                     debug!(
                         "API key not found in database: {}",
-                        ApiKeyStore::mask_api_key(&api_key)
+                        ApiKeyStore::mask_api_key(api_key)
                     );
                 }
                 Err(e) => {
                     error!(
                         "Database error while fetching API key {}: {}",
-                        ApiKeyStore::mask_api_key(&api_key),
+                        ApiKeyStore::mask_api_key(api_key),
                         e
                     );
                 }
@@ -240,7 +246,7 @@ impl ApiKeyStore {
 
             debug!(
                 "Memory store hit for key: {}",
-                ApiKeyStore::mask_api_key(&api_key)
+                ApiKeyStore::mask_api_key(api_key)
             );
             return Some(config_arc);
         }
@@ -262,7 +268,7 @@ impl ApiKeyStore {
         // TODO: Invalidate Redis cache when implemented
         info!(
             "Invalidated cache for key: {}",
-            ApiKeyStore::mask_api_key(&api_key)
+            ApiKeyStore::mask_api_key(api_key)
         );
     }
 
@@ -317,15 +323,21 @@ pub struct ApiKeyMiddleware {
     strict_timestamp_validation: bool,
 }
 
-impl ApiKeyMiddleware {
-    /// Create new middleware
-    pub fn new() -> Self {
+impl Default for ApiKeyMiddleware {
+    fn default() -> Self {
         Self {
             api_key_store: ApiKeyStore::new(CacheConfig::default()),
             default_security: SecurityType::None,
             route_configs: Arc::new(vec![]),
             strict_timestamp_validation: true,
         }
+    }
+}
+
+impl ApiKeyMiddleware {
+    /// Create new middleware
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Configure with custom cache settings
@@ -467,13 +479,13 @@ impl ApiKeyMiddleware {
         // Verify signature based on algorithm
         let is_valid = match key_material {
             KeyMaterial::HmacSecret(secret) => {
-                SignatureVerifier::verify_hmac(&payload, signature, &secret)?
+                SignatureVerifier::verify_hmac(&payload, signature, secret)?
             }
             KeyMaterial::RsaPublicKey(public_key) => {
-                SignatureVerifier::verify_rsa(&payload, signature, &public_key)?
+                SignatureVerifier::verify_rsa(&payload, signature, public_key)?
             }
             KeyMaterial::Ed25519PublicKey(public_key) => {
-                SignatureVerifier::verify_ed25519(&payload, signature, &public_key)?
+                SignatureVerifier::verify_ed25519(&payload, signature, public_key)?
             }
         };
 
