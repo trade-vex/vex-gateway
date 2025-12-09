@@ -849,21 +849,44 @@ impl OAuthService {
         }
 
         // Special handling for GitHub - fetch emails separately
-        if provider == "github"
-            && let Ok(emails) = self.fetch_github_emails(access_token).await
-        {
-            // Find the primary verified email
-            if let Some(primary_email) = emails.iter().find(|email| {
-                email
-                    .get("primary")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-            }) {
-                if let Some(email_str) = primary_email.get("email").and_then(|v| v.as_str()) {
-                    user_info["email"] = serde_json::Value::String(email_str.to_string());
+        if provider == "github" {
+            match self.fetch_github_emails(access_token).await {
+                Ok(emails) => {
+                    // Find the primary verified email
+                    if let Some(primary_email) = emails.iter().find(|email| {
+                        email
+                            .get("primary")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                    }) {
+                        if let Some(email_str) = primary_email.get("email").and_then(|v| v.as_str()) {
+                            user_info["email"] = serde_json::Value::String(email_str.to_string());
+                        }
+                        if let Some(verified) = primary_email.get("verified").and_then(|v| v.as_bool()) {
+                            user_info["email_verified"] = serde_json::Value::Bool(verified);
+                        }
+                    }
                 }
-                if let Some(verified) = primary_email.get("verified").and_then(|v| v.as_bool()) {
-                    user_info["email_verified"] = serde_json::Value::Bool(verified);
+                Err(e) => {
+                    // Extract user identifier for logging context
+                    let user_id = user_info["id"]
+                        .as_u64()
+                        .map(|id| id.to_string())
+                        .or_else(|| user_info["login"].as_str().map(|s| s.to_string()))
+                        .unwrap_or_else(|| "unknown".to_string());
+                    
+                    tracing::error!(
+                        provider = "github",
+                        user_id = %user_id,
+                        error = %e,
+                        "Failed to fetch GitHub email addresses"
+                    );
+                    
+                    // Return the error with additional context
+                    return Err(AuthError::UserInfoFetchFailed(format!(
+                        "Failed to fetch GitHub email addresses for user {}: {}",
+                        user_id, e
+                    )));
                 }
             }
         }
