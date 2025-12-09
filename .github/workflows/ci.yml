@@ -51,6 +51,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libbsd-dev libssl-dev pkg-config build-essential cmake
+
       - name: Generate test keys
         run: |
           mkdir -p crates/libs/lib-auth/src/keys
@@ -90,6 +95,11 @@ jobs:
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libbsd-dev libssl-dev pkg-config build-essential cmake
 
       - name: Linting
         run: cargo clippy --workspace --all-features --all-targets -- -D warnings -A clippy::missing_errors_doc -A clippy::missing_panics_doc -A clippy::must_use_candidate -A clippy::default_trait_access -A clippy::ignored_unit_patterns -A clippy::module_name_repetitions -A clippy::cast_possible_truncation
@@ -134,6 +144,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libbsd-dev libssl-dev pkg-config build-essential cmake
 
       - name: Generate test keys
         run: |
