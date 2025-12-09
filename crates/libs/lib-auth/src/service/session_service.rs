@@ -175,14 +175,6 @@ impl SessionService {
         Ok(())
     }
 
-    /// Get the session ID from a cookie name
-    pub async fn get_session_id_from_cookie(&self, cookie_value: &str) -> Option<String> {
-        if cookie_value.is_empty() {
-            return None;
-        }
-        Some(cookie_value.to_string())
-    }
-
     /// Revoke all sessions for a user except the specified session
     pub async fn revoke_user_sessions_except(
         &self,
