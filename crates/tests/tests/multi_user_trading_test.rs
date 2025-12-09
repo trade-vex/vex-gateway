@@ -519,9 +519,12 @@ async fn check_orders(
 
         // Assert order belongs to this user
         assert_eq!(
-            order.user_id, Decimal::from(user_id),
+            order.user_id,
+            Decimal::from(user_id),
             "Order {} belongs to user {} but queried for user {}",
-            order.order_id, order.user_id, user_id
+            order.order_id,
+            order.user_id,
+            user_id
         );
     }
 
@@ -1321,7 +1324,8 @@ async fn test_multi_user_trading_scenario() {
         .find(|b| b.asset_id == quote_asset_id)
         .unwrap();
     assert_eq!(
-        dave_quote_after.locked, Decimal::ZERO,
+        dave_quote_after.locked,
+        Decimal::ZERO,
         "Dave's quote should be unlocked after cancel, got locked={}",
         dave_quote_after.locked
     );

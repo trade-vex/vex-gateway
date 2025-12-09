@@ -5,14 +5,14 @@ pub mod model;
 pub mod repository;
 
 pub use dto::trading::{
-    BalanceChartResponse, BalancesListResponse, FavoriteMarketsListResponse,
-    OrderHistoryResponse, OrderResponse, OrdersHistoryListResponse, OrdersListResponse, Side,
+    BalanceChartResponse, BalancesListResponse, FavoriteMarketsListResponse, OrderHistoryResponse,
+    OrderResponse, OrdersHistoryListResponse, OrdersListResponse, Side,
     ToggleFavoriteMarketRequest, UserBalanceResponse,
 };
 
 pub use repository::repository::{
-    BalancePoint, PnlPoint, PnlResolution, PortfolioMetrics, PortfolioRepository, PostgresTradingRepository,
-    Result as TradingResult, TradingError, TradingRepository,
+    BalancePoint, PnlPoint, PnlResolution, PortfolioMetrics, PortfolioRepository,
+    PostgresTradingRepository, Result as TradingResult, TradingError, TradingRepository,
 };
 
 pub use cache::user_store::{UserBalanceCacheConfig, UserBalanceStore};

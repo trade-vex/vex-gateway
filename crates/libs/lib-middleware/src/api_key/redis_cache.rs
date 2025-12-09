@@ -1,11 +1,11 @@
 use crate::api_key::{
     cache::{ApiKeyCache, CacheStats},
-    security::ApiKeyConfig,
     error::ApiKeyError,
+    security::ApiKeyConfig,
 };
 use async_trait::async_trait;
 use bb8::Pool;
-use redis::{AsyncCommands, Client, ErrorKind, RedisError, aio::ConnectionManager};
+use redis::{aio::ConnectionManager, AsyncCommands, Client, ErrorKind, RedisError};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, warn};
@@ -14,8 +14,8 @@ use tracing::{debug, error, warn};
 /// or "***" for short keys to avoid leaking sensitive data
 fn redact_key(key: &str) -> String {
     let n = key.chars().count();
-    if n <= 4 { 
-        "***".into() 
+    if n <= 4 {
+        "***".into()
     } else {
         format!("***{}", &key[key.len().saturating_sub(4)..])
     }
@@ -94,7 +94,7 @@ impl RedisApiKeyCache {
             .map_err(|e| ApiKeyError::Internal(format!("Failed to create Redis client: {}", e)))?;
 
         let manager = RedisConnectionManager { client };
-        
+
         let pool = Pool::builder()
             .max_size(config.max_connections)
             .min_idle(Some(config.min_connections))
@@ -112,7 +112,9 @@ impl RedisApiKeyCache {
         })
     }
 
-    async fn get_conn(&self) -> Result<bb8::PooledConnection<'_, RedisConnectionManager>, ApiKeyError> {
+    async fn get_conn(
+        &self,
+    ) -> Result<bb8::PooledConnection<'_, RedisConnectionManager>, ApiKeyError> {
         self.pool.get().await.map_err(|e| {
             error!("Failed to get Redis connection: {}", e);
             ApiKeyError::Internal(format!("Redis connection error: {}", e))
@@ -128,35 +130,48 @@ impl RedisApiKeyCache {
         >,
     {
         let mut last_error = None;
-        
+
         for attempt in 0..=3 {
             match self.get_conn().await {
-                Ok(mut conn) => {
-                    match f(&mut conn).await {
-                        Ok(result) => return Ok(result),
-                        Err(e) => {
-                            last_error = Some(e);
-                            if !self.is_retryable(&last_error.as_ref().unwrap()) {
-                                break;
-                            }
-                            if attempt < 3 {
-                                debug!("Redis operation failed, retrying (attempt {}/3): {}", attempt + 1, last_error.as_ref().unwrap());
-                                tokio::time::sleep(Duration::from_millis(100 * (attempt + 1) as u64)).await;
-                            }
+                Ok(mut conn) => match f(&mut conn).await {
+                    Ok(result) => return Ok(result),
+                    Err(e) => {
+                        last_error = Some(e);
+                        if !self.is_retryable(&last_error.as_ref().unwrap()) {
+                            break;
+                        }
+                        if attempt < 3 {
+                            debug!(
+                                "Redis operation failed, retrying (attempt {}/3): {}",
+                                attempt + 1,
+                                last_error.as_ref().unwrap()
+                            );
+                            tokio::time::sleep(Duration::from_millis(100 * (attempt + 1) as u64))
+                                .await;
                         }
                     }
-                }
+                },
                 Err(e) => {
-                    last_error = Some(RedisError::from((ErrorKind::IoError, "Connection pool error", e.to_string())));
+                    last_error = Some(RedisError::from((
+                        ErrorKind::IoError,
+                        "Connection pool error",
+                        e.to_string(),
+                    )));
                     if attempt < 3 {
-                        debug!("Redis connection failed, retrying (attempt {}/3): {}", attempt + 1, last_error.as_ref().unwrap());
+                        debug!(
+                            "Redis connection failed, retrying (attempt {}/3): {}",
+                            attempt + 1,
+                            last_error.as_ref().unwrap()
+                        );
                         tokio::time::sleep(Duration::from_millis(100 * (attempt + 1) as u64)).await;
                     }
                 }
             }
         }
 
-        self.stats.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.stats
+            .errors
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Err(ApiKeyError::Internal(format!(
             "Redis operation failed after retries: {}",
             last_error.unwrap()
@@ -164,10 +179,7 @@ impl RedisApiKeyCache {
     }
 
     fn is_retryable(&self, error: &RedisError) -> bool {
-        matches!(
-            error.kind(),
-            ErrorKind::IoError
-        )
+        matches!(error.kind(), ErrorKind::IoError)
     }
 
     fn build_key(&self, key: &str) -> String {
@@ -179,43 +191,61 @@ impl RedisApiKeyCache {
 impl ApiKeyCache for RedisApiKeyCache {
     async fn get(&self, key: &str) -> Result<Option<ApiKeyConfig>, ApiKeyError> {
         let cache_key = self.build_key(key);
-        
-        let result = self.execute_with_retry(|conn| {
-            let cache_key = cache_key.clone();
-            Box::pin(async move {
-                let data: Option<Vec<u8>> = conn.get(&cache_key).await?;
-                Ok(data)
+
+        let result = self
+            .execute_with_retry(|conn| {
+                let cache_key = cache_key.clone();
+                Box::pin(async move {
+                    let data: Option<Vec<u8>> = conn.get(&cache_key).await?;
+                    Ok(data)
+                })
             })
-        }).await?;
+            .await?;
 
         match result {
             Some(data) => {
-                self.stats.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.stats
+                    .hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 match bincode::deserialize::<ApiKeyConfig>(&data) {
                     Ok(config) => {
                         debug!("Cache hit for API key: {}", redact_key(key));
                         Ok(Some(config))
                     }
                     Err(e) => {
-                        warn!("Failed to deserialize cached API key {}: {}", redact_key(key), e);
-                        self.stats.misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        warn!(
+                            "Failed to deserialize cached API key {}: {}",
+                            redact_key(key),
+                            e
+                        );
+                        self.stats
+                            .misses
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         Ok(None)
                     }
                 }
             }
             None => {
-                self.stats.misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.stats
+                    .misses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 debug!("Cache miss for API key: {}", redact_key(key));
                 Ok(None)
             }
         }
     }
 
-    async fn set(&self, key: &str, config: &ApiKeyConfig, ttl: Duration) -> Result<(), ApiKeyError> {
+    async fn set(
+        &self,
+        key: &str,
+        config: &ApiKeyConfig,
+        ttl: Duration,
+    ) -> Result<(), ApiKeyError> {
         let cache_key = self.build_key(key);
-        
-        let serialized = bincode::serialize(config)
-            .map_err(|e| ApiKeyError::Serialization(format!("Failed to serialize API key config: {}", e)))?;
+
+        let serialized = bincode::serialize(config).map_err(|e| {
+            ApiKeyError::Serialization(format!("Failed to serialize API key config: {}", e))
+        })?;
 
         self.execute_with_retry(|conn| {
             let cache_key = cache_key.clone();
@@ -223,31 +253,42 @@ impl ApiKeyCache for RedisApiKeyCache {
             let ttl_secs = ttl.as_secs() as u64;
             Box::pin(async move {
                 if ttl_secs > 0 {
-                    conn.set_ex::<_, _, ()>(&cache_key, serialized, ttl_secs).await?;
+                    conn.set_ex::<_, _, ()>(&cache_key, serialized, ttl_secs)
+                        .await?;
                 } else {
                     conn.set::<_, _, ()>(&cache_key, serialized).await?;
                 }
                 Ok(())
             })
-        }).await?;
+        })
+        .await?;
 
-        self.stats.sets.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        debug!("Cached API key: {} with TTL: {}s", redact_key(key), ttl.as_secs());
+        self.stats
+            .sets
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        debug!(
+            "Cached API key: {} with TTL: {}s",
+            redact_key(key),
+            ttl.as_secs()
+        );
         Ok(())
     }
 
     async fn delete(&self, key: &str) -> Result<(), ApiKeyError> {
         let cache_key = self.build_key(key);
-        
+
         self.execute_with_retry(|conn| {
             let cache_key = cache_key.clone();
             Box::pin(async move {
                 let _: i32 = conn.del(&cache_key).await?;
                 Ok(())
             })
-        }).await?;
+        })
+        .await?;
 
-        self.stats.deletes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.stats
+            .deletes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         debug!("Deleted cached API key: {}", redact_key(key));
         Ok(())
     }
@@ -258,7 +299,8 @@ impl ApiKeyCache for RedisApiKeyCache {
                 let _: String = redis::cmd("PING").query_async(conn).await?;
                 Ok(())
             })
-        }).await?;
+        })
+        .await?;
         Ok(())
     }
 
@@ -268,7 +310,10 @@ impl ApiKeyCache for RedisApiKeyCache {
             misses: self.stats.misses.load(std::sync::atomic::Ordering::Relaxed),
             errors: self.stats.errors.load(std::sync::atomic::Ordering::Relaxed),
             sets: self.stats.sets.load(std::sync::atomic::Ordering::Relaxed),
-            deletes: self.stats.deletes.load(std::sync::atomic::Ordering::Relaxed),
+            deletes: self
+                .stats
+                .deletes
+                .load(std::sync::atomic::Ordering::Relaxed),
             size: None,
         }
     }

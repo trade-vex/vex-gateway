@@ -1,6 +1,6 @@
+use rust_decimal::Decimal;
 use sea_orm::prelude::*;
 use serde::{Deserialize, Serialize};
-use rust_decimal::Decimal;
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}

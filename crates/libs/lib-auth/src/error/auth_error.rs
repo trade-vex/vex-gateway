@@ -138,11 +138,9 @@ impl ResponseError for AuthError {
                 "EMAIL_EXISTS",
                 "Email address is already registered".to_string(),
             ),
-            AuthError::UsernameAlreadyExists => (
-                409,
-                "USERNAME_TAKEN",
-                "Username already taken".to_string(),
-            ),
+            AuthError::UsernameAlreadyExists => {
+                (409, "USERNAME_TAKEN", "Username already taken".to_string())
+            }
             AuthError::InvalidPassword => (
                 400,
                 "INVALID_PASSWORD",

@@ -13,7 +13,6 @@
 /// - Data validation and constraints
 ///
 /// Note: ClickHousePortfolioRepository tests are in portfolio_repository_clickhouse.rs
-
 use async_trait::async_trait;
 use chrono::Utc;
 use lib_core::model::orders::Model as OrderModel;
@@ -140,7 +139,12 @@ impl TradingRepository for MockTradingRepository {
         Ok(orders)
     }
 
-    async fn get_open_orders_paginated(&self, user_id: u64, offset: u64, limit: u64) -> Result<Vec<OrderModel>> {
+    async fn get_open_orders_paginated(
+        &self,
+        user_id: u64,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<OrderModel>> {
         if self.should_error {
             return Err(TradingError::Database("Mock database error".to_string()));
         }
@@ -161,7 +165,11 @@ impl TradingRepository for MockTradingRepository {
         // Apply pagination
         let start = offset as usize;
         let end = (offset + limit) as usize;
-        Ok(orders.into_iter().skip(start).take((end - start).min(limit as usize)).collect())
+        Ok(orders
+            .into_iter()
+            .skip(start)
+            .take((end - start).min(limit as usize))
+            .collect())
     }
 
     async fn count_open_orders(&self, user_id: u64) -> Result<u64> {
@@ -189,7 +197,10 @@ impl TradingRepository for MockTradingRepository {
         Ok(self
             .orders
             .iter()
-            .find(|o| o.order_order_id == Decimal::from(order_id) && o.order_user_id == Decimal::from(user_id))
+            .find(|o| {
+                o.order_order_id == Decimal::from(order_id)
+                    && o.order_user_id == Decimal::from(user_id)
+            })
             .cloned())
     }
 
@@ -228,7 +239,12 @@ impl TradingRepository for MockTradingRepository {
             .collect())
     }
 
-    async fn get_order_history_paginated(&self, user_id: u64, offset: u64, limit: u64) -> Result<Vec<OrderModel>> {
+    async fn get_order_history_paginated(
+        &self,
+        user_id: u64,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<OrderModel>> {
         if self.should_error {
             return Err(TradingError::Database("Mock database error".to_string()));
         }
@@ -248,7 +264,11 @@ impl TradingRepository for MockTradingRepository {
         // Apply pagination
         let start = offset as usize;
         let end = (offset + limit) as usize;
-        Ok(orders.into_iter().skip(start).take((end - start).min(limit as usize)).collect())
+        Ok(orders
+            .into_iter()
+            .skip(start)
+            .take((end - start).min(limit as usize))
+            .collect())
     }
 
     async fn count_order_history(&self, user_id: u64) -> Result<u64> {
@@ -312,7 +332,12 @@ impl TradingRepository for MockTradingRepository {
 // Helper Functions
 // ============================================================================
 
-fn create_test_balance(user_id: i64, asset_id: i32, available: i64, locked: i64) -> UserBalanceModel {
+fn create_test_balance(
+    user_id: i64,
+    asset_id: i32,
+    available: i64,
+    locked: i64,
+) -> UserBalanceModel {
     UserBalanceModel {
         id: 1,
         user_id: Decimal::from(user_id),
@@ -531,11 +556,8 @@ async fn test_get_user_favorite_markets_success() {
     let fav2 = create_test_favorite_market(100, 2);
     let fav3 = create_test_favorite_market(200, 3);
 
-    let repo = MockTradingRepository::new().with_favorite_markets(vec![
-        fav1.clone(),
-        fav2.clone(),
-        fav3,
-    ]);
+    let repo =
+        MockTradingRepository::new().with_favorite_markets(vec![fav1.clone(), fav2.clone(), fav3]);
 
     let result = repo.get_user_favorite_markets(100).await.unwrap();
     assert_eq!(result.len(), 2);
@@ -612,7 +634,10 @@ async fn test_postgres_repository_integration() {
     let db = match Database::connect(&db_url).await {
         Ok(conn) => Arc::new(conn),
         Err(e) => {
-            eprintln!("Skipping PostgreSQL integration test: failed to connect: {}", e);
+            eprintln!(
+                "Skipping PostgreSQL integration test: failed to connect: {}",
+                e
+            );
             return;
         }
     };
@@ -640,7 +665,10 @@ async fn test_postgres_repository_integration() {
 
     // Test get_user_favorite_markets
     let favorites = repo.get_user_favorite_markets(test_user_id).await;
-    assert!(favorites.is_ok(), "get_user_favorite_markets should not error");
+    assert!(
+        favorites.is_ok(),
+        "get_user_favorite_markets should not error"
+    );
 
     // Test is_market_favorited
     let is_fav = repo.is_market_favorited(test_user_id, 1).await;
@@ -666,7 +694,7 @@ async fn test_trading_error_display() {
 async fn test_trading_error_from_db_err() {
     let db_err = DbErr::Custom("Test database error".to_string());
     let trading_err: TradingError = db_err.into();
-    
+
     match trading_err {
         TradingError::Database(msg) => {
             assert!(msg.contains("Test database error"));
@@ -687,7 +715,11 @@ async fn test_get_open_orders_case_insensitive_status() {
     let repo = MockTradingRepository::new().with_orders(vec![pending, processing]);
 
     let result = repo.get_open_orders(100).await.unwrap();
-    assert_eq!(result.len(), 2, "Status filtering should be case-insensitive");
+    assert_eq!(
+        result.len(),
+        2,
+        "Status filtering should be case-insensitive"
+    );
 }
 
 #[tokio::test]
@@ -707,7 +739,7 @@ async fn test_multiple_assets_per_user() {
 
     let result = repo.get_user_balances(100).await.unwrap();
     assert_eq!(result.len(), 3);
-    
+
     let asset_ids: Vec<i32> = result.iter().map(|b| b.asset_id).collect();
     assert!(asset_ids.contains(&0));
     assert!(asset_ids.contains(&1));
@@ -719,7 +751,8 @@ async fn test_order_side_preservation() {
     let buy_order = create_test_order(1, 100, 50000, 10000, "Buy", "Pending");
     let sell_order = create_test_order(2, 100, 50000, 10000, "Sell", "Pending");
 
-    let repo = MockTradingRepository::new().with_orders(vec![buy_order.clone(), sell_order.clone()]);
+    let repo =
+        MockTradingRepository::new().with_orders(vec![buy_order.clone(), sell_order.clone()]);
 
     let result = repo.get_open_orders(100).await.unwrap();
     assert_eq!(result.len(), 2);
@@ -751,7 +784,7 @@ async fn test_favorite_markets_multiple_users() {
     assert!(repo.is_market_favorited(100, 1).await.unwrap());
     assert!(repo.is_market_favorited(100, 2).await.unwrap());
     assert!(!repo.is_market_favorited(100, 3).await.unwrap());
-    
+
     assert!(repo.is_market_favorited(200, 1).await.unwrap());
     assert!(!repo.is_market_favorited(200, 2).await.unwrap());
     assert!(repo.is_market_favorited(200, 3).await.unwrap());

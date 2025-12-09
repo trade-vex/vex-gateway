@@ -6,10 +6,10 @@ use clickhouse::Client as ClickHouseClient;
 use lib_core::repository::repository::{ClickHousePortfolioRepository, PortfolioRepository};
 use lib_core::{PnlResolution, PortfolioMetrics};
 use rust_decimal::Decimal;
-use tokio::time::sleep;
-use uuid::Uuid;
-use tracing::info;
 use std::sync::Once;
+use tokio::time::sleep;
+use tracing::info;
+use uuid::Uuid;
 
 const DEFAULT_URL: &str = "http://localhost:8123";
 const DEFAULT_USER: &str = "default";
@@ -571,19 +571,11 @@ fn bucket_floor(resolution: PnlResolution, ts: i64) -> i64 {
         }
         PnlResolution::Month => {
             let floored = NaiveDate::from_ymd_opt(date.year(), date.month(), 1).unwrap_or(date);
-            floored
-                .and_hms_opt(0, 0, 0)
-                .unwrap()
-                .and_utc()
-                .timestamp()
+            floored.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp()
         }
         PnlResolution::Year => {
             let floored = NaiveDate::from_ymd_opt(date.year(), 1, 1).unwrap_or(date);
-            floored
-                .and_hms_opt(0, 0, 0)
-                .unwrap()
-                .and_utc()
-                .timestamp()
+            floored.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp()
         }
     }
 }
@@ -619,11 +611,7 @@ fn bucket_key(resolution: PnlResolution, ts: i64) -> i64 {
     }
 }
 
-fn expected_series(
-    resolution: PnlResolution,
-    now: i64,
-    ctx: &SeedContext,
-) -> Vec<(i64, Decimal)> {
+fn expected_series(resolution: PnlResolution, now: i64, ctx: &SeedContext) -> Vec<(i64, Decimal)> {
     use std::collections::{BTreeMap, BTreeSet};
 
     let start = window_start(now, resolution);
@@ -703,7 +691,10 @@ async fn clickhouse_portfolio_repository_integration() {
         .with_password(password.clone());
 
     if ensure_clickhouse_available(&base_client).await.is_none() {
-        eprintln!("Skipping ClickHouse integration test: unable to connect to {}", url);
+        eprintln!(
+            "Skipping ClickHouse integration test: unable to connect to {}",
+            url
+        );
         return;
     }
 
@@ -747,8 +738,7 @@ async fn clickhouse_portfolio_repository_integration() {
         .map(|point| (point.timestamp, point.pnl))
         .collect();
     assert_eq!(
-        actual_week_series,
-        expected_week_series,
+        actual_week_series, expected_week_series,
         "weekly pnl series must match expected accounting pnl"
     );
     let expected_month_pnl = Decimal::from_str("1450").unwrap();
@@ -759,7 +749,10 @@ async fn clickhouse_portfolio_repository_integration() {
         .await
         .expect("day portfolio query failed");
     let expected_day_series = expected_series(PnlResolution::Day, now_ts, &seed_ctx);
-    info!(points = metrics_day.pnl_series.len(), "daily pnl series points");
+    info!(
+        points = metrics_day.pnl_series.len(),
+        "daily pnl series points"
+    );
     assert!(
         metrics_day.pnl_series.len() >= 2,
         "expect at least two hourly pnl points for 1d resolution"
@@ -770,8 +763,7 @@ async fn clickhouse_portfolio_repository_integration() {
         .map(|point| (point.timestamp, point.pnl))
         .collect();
     assert_eq!(
-        actual_day_series,
-        expected_day_series,
+        actual_day_series, expected_day_series,
         "daily pnl series must match expected accounting pnl"
     );
     assert_eq!(
@@ -797,8 +789,7 @@ async fn clickhouse_portfolio_repository_integration() {
         .map(|point| (point.timestamp, point.pnl))
         .collect();
     assert_eq!(
-        actual_month_series,
-        expected_month_series,
+        actual_month_series, expected_month_series,
         "monthly pnl series must match expected accounting pnl"
     );
     assert_eq!(

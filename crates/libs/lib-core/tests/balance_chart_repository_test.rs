@@ -22,7 +22,6 @@
 /// Time T1: (1.0 BTC * $40k) + (10 ETH * $2k) + $10k = $70,000
 /// Time T2: (1.2 BTC * $45k) + (12 ETH * $2.5k) + $10k = $94,000
 /// Time T3: (1.5 BTC * $50k) + (15 ETH * $3k) + $10k = $130,000
-
 use clickhouse::Client as ClickHouseClient;
 use lib_core::repository::repository::{
     ClickHousePortfolioRepository, PnlResolution, PortfolioRepository,
@@ -32,7 +31,8 @@ use std::str::FromStr;
 
 /// Helper: Create ClickHouse client from environment
 fn create_test_client() -> ClickHouseClient {
-    let url = std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string());
+    let url =
+        std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string());
     ClickHouseClient::default().with_url(url)
 }
 
@@ -135,11 +135,11 @@ async fn test_balance_chart_single_day_resolution() {
     // Hour 18: BTC=$60k, ETH=$36k, USDT=$10k = $106k total
     // Hour 24: BTC=$75k, ETH=$45k, USDT=$10k = $130k total
     let equity_data = vec![
-        (base_ts, "70000.00"),                    // 00:00
-        (base_ts + 6 * 3600, "82000.00"),         // 06:00
-        (base_ts + 12 * 3600, "94000.00"),        // 12:00
-        (base_ts + 18 * 3600, "106000.00"),       // 18:00
-        (base_ts + 24 * 3600, "130000.00"),       // 24:00 (next day)
+        (base_ts, "70000.00"),              // 00:00
+        (base_ts + 6 * 3600, "82000.00"),   // 06:00
+        (base_ts + 12 * 3600, "94000.00"),  // 12:00
+        (base_ts + 18 * 3600, "106000.00"), // 18:00
+        (base_ts + 24 * 3600, "130000.00"), // 24:00 (next day)
     ];
 
     insert_test_equity_data(schema, user_id, equity_data)
@@ -219,13 +219,13 @@ async fn test_multi_asset_portfolio_price_changes() {
     // Day 5: New high - $135k
     // Day 6: Profit taking - $128k
     let equity_data = vec![
-        (base_ts, "100000.00"),                      // Day 0
-        (base_ts + 86400, "120000.00"),              // Day 1 (+20%)
-        (base_ts + 2 * 86400, "118000.00"),          // Day 2 (-2%)
-        (base_ts + 3 * 86400, "95000.00"),           // Day 3 (-20% correction)
-        (base_ts + 4 * 86400, "105000.00"),          // Day 4 (+10%)
-        (base_ts + 5 * 86400, "135000.00"),          // Day 5 (+28% ATH)
-        (base_ts + 6 * 86400, "128000.00"),          // Day 6 (-5%)
+        (base_ts, "100000.00"),             // Day 0
+        (base_ts + 86400, "120000.00"),     // Day 1 (+20%)
+        (base_ts + 2 * 86400, "118000.00"), // Day 2 (-2%)
+        (base_ts + 3 * 86400, "95000.00"),  // Day 3 (-20% correction)
+        (base_ts + 4 * 86400, "105000.00"), // Day 4 (+10%)
+        (base_ts + 5 * 86400, "135000.00"), // Day 5 (+28% ATH)
+        (base_ts + 6 * 86400, "128000.00"), // Day 6 (-5%)
     ];
 
     insert_test_equity_data(schema, user_id, equity_data)
@@ -242,11 +242,7 @@ async fn test_multi_asset_portfolio_price_changes() {
     assert!(!result.is_empty(), "Should return balance series");
 
     // Verify peak equity is captured
-    let max_balance = result
-        .iter()
-        .map(|p| p.balance)
-        .max()
-        .unwrap();
+    let max_balance = result.iter().map(|p| p.balance).max().unwrap();
     let expected_max = Decimal::from_str("135000.00").unwrap();
     assert!(
         (max_balance - expected_max).abs() < Decimal::from_str("1.00").unwrap(),
@@ -254,11 +250,7 @@ async fn test_multi_asset_portfolio_price_changes() {
     );
 
     // Verify trough equity is captured (after correction)
-    let min_balance = result
-        .iter()
-        .map(|p| p.balance)
-        .min()
-        .unwrap();
+    let min_balance = result.iter().map(|p| p.balance).min().unwrap();
     let expected_min = Decimal::from_str("95000.00").unwrap();
     assert!(
         (min_balance - expected_min).abs() < Decimal::from_str("1.00").unwrap(),
@@ -285,9 +277,9 @@ async fn test_forward_fill_missing_periods() {
 
     // Insert sparse data: Day 0, Day 3, Day 6 (gaps on days 1,2,4,5)
     let equity_data = vec![
-        (base_ts, "50000.00"),                       // Day 0
-        (base_ts + 3 * 86400, "52000.00"),           // Day 3 (gap: days 1-2)
-        (base_ts + 6 * 86400, "55000.00"),           // Day 6 (gap: days 4-5)
+        (base_ts, "50000.00"),             // Day 0
+        (base_ts + 3 * 86400, "52000.00"), // Day 3 (gap: days 1-2)
+        (base_ts + 6 * 86400, "55000.00"), // Day 6 (gap: days 4-5)
     ];
 
     insert_test_equity_data(schema, user_id, equity_data)
@@ -434,7 +426,7 @@ async fn test_high_precision_decimals() {
 
     // Insert high-precision equity values
     let equity_data = vec![
-        (base_ts, "1234567.123456789012"),          // 12 decimal places
+        (base_ts, "1234567.123456789012"), // 12 decimal places
         (base_ts + 3600, "1234890.987654321098"),
         (base_ts + 7200, "1235123.456789012345"),
     ];
@@ -457,7 +449,7 @@ async fn test_high_precision_decimals() {
         .iter()
         .find(|p| p.balance > Decimal::ZERO)
         .expect("Should have at least one non-zero balance point");
-    
+
     let expected_approx = Decimal::from_str("1234567.0").unwrap();
     let diff = (data_point.balance - expected_approx).abs();
     assert!(
@@ -501,4 +493,3 @@ mod integration_tests {
         }
     }
 }
-

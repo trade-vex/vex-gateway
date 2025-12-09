@@ -90,28 +90,26 @@ impl UserRepository for PostgresUserRepository {
             last_login: Set(user.last_login), // Accept caller-supplied last_login if appropriate
         };
 
-        let created_user = user_model
-            .insert(&*self.db)
-            .await
-            .map_err(|e| {
-                // Check the error message for unique constraint violations
-                let error_msg = e.to_string().to_lowercase();
-                
-                // Check for unique constraint violations (PostgreSQL error code 23505 or message patterns)
-                if error_msg.contains("unique constraint") 
-                    || error_msg.contains("duplicate key")
-                    || error_msg.contains("23505") {
-                    // Check if it's a username constraint violation
-                    if error_msg.contains("username") || error_msg.contains("ux_users_username") {
-                        return AuthError::UsernameAlreadyExists;
-                    }
-                    // Check if it's an email constraint violation
-                    if error_msg.contains("email") || error_msg.contains("ux_users_email") {
-                        return AuthError::EmailAlreadyExists;
-                    }
+        let created_user = user_model.insert(&*self.db).await.map_err(|e| {
+            // Check the error message for unique constraint violations
+            let error_msg = e.to_string().to_lowercase();
+
+            // Check for unique constraint violations (PostgreSQL error code 23505 or message patterns)
+            if error_msg.contains("unique constraint")
+                || error_msg.contains("duplicate key")
+                || error_msg.contains("23505")
+            {
+                // Check if it's a username constraint violation
+                if error_msg.contains("username") || error_msg.contains("ux_users_username") {
+                    return AuthError::UsernameAlreadyExists;
                 }
-                AuthError::Database(format!("Failed to create user: {}", e))
-            })?;
+                // Check if it's an email constraint violation
+                if error_msg.contains("email") || error_msg.contains("ux_users_email") {
+                    return AuthError::EmailAlreadyExists;
+                }
+            }
+            AuthError::Database(format!("Failed to create user: {}", e))
+        })?;
 
         Ok(created_user)
     }

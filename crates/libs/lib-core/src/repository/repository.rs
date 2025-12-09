@@ -13,9 +13,9 @@ use crate::model::user_favorite_markets::{
 use async_trait::async_trait;
 use clickhouse::Client as ClickHouseClient;
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
 use sea_orm::prelude::*;
 use sea_orm::*;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -56,17 +56,28 @@ pub trait TradingRepository: Send + Sync {
 
     // Order operations
     async fn get_open_orders(&self, user_id: u64) -> Result<Vec<OrderModel>>;
-    async fn get_open_orders_paginated(&self, user_id: u64, offset: u64, limit: u64) -> Result<Vec<OrderModel>>;
+    async fn get_open_orders_paginated(
+        &self,
+        user_id: u64,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<OrderModel>>;
     async fn count_open_orders(&self, user_id: u64) -> Result<u64>;
     async fn get_order_by_id(&self, order_id: u64, user_id: u64) -> Result<Option<OrderModel>>;
     async fn create_order(&self, order: OrderModel) -> Result<u64>;
     async fn count_user_orders(&self, user_id: u64) -> Result<u64>;
     async fn get_order_history(&self, user_id: u64) -> Result<Vec<OrderModel>>;
-    async fn get_order_history_paginated(&self, user_id: u64, offset: u64, limit: u64) -> Result<Vec<OrderModel>>;
+    async fn get_order_history_paginated(
+        &self,
+        user_id: u64,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<OrderModel>>;
     async fn count_order_history(&self, user_id: u64) -> Result<u64>;
-    
+
     // Favorite markets operations
-    async fn get_user_favorite_markets(&self, user_id: u64) -> Result<Vec<UserFavoriteMarketModel>>;
+    async fn get_user_favorite_markets(&self, user_id: u64)
+        -> Result<Vec<UserFavoriteMarketModel>>;
     async fn add_favorite_market(&self, user_id: u64, market_id: u32) -> Result<()>;
     async fn remove_favorite_market(&self, user_id: u64, market_id: u32) -> Result<()>;
     async fn is_market_favorited(&self, user_id: u64, market_id: u32) -> Result<bool>;
@@ -154,7 +165,7 @@ pub trait PortfolioRepository: Send + Sync {
         now_ts_secs: i64,
         resolution: PnlResolution,
     ) -> Result<PortfolioMetrics>;
-    
+
     async fn get_balance_chart(
         &self,
         user_id: u64,
@@ -244,8 +255,8 @@ impl TradingRepository for PostgresTradingRepository {
             .filter(|order| {
                 let status_lower = order.status.to_lowercase();
                 status_lower == "placed"
-                    || status_lower == "pending" 
-                    || status_lower == "partiallyfilled" 
+                    || status_lower == "pending"
+                    || status_lower == "partiallyfilled"
                     || status_lower == "processing"
             })
             .collect();
@@ -253,7 +264,12 @@ impl TradingRepository for PostgresTradingRepository {
         Ok(orders)
     }
 
-    async fn get_open_orders_paginated(&self, user_id: u64, offset: u64, limit: u64) -> Result<Vec<OrderModel>> {
+    async fn get_open_orders_paginated(
+        &self,
+        user_id: u64,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<OrderModel>> {
         let all_orders = OrderEntity::find()
             .filter(OrderColumn::OrderUserId.eq(Decimal::from(user_id)))
             .order_by_desc(OrderColumn::OrderTimestamp)
@@ -270,8 +286,8 @@ impl TradingRepository for PostgresTradingRepository {
             .filter(|order| {
                 let status_lower = order.status.to_lowercase();
                 status_lower == "placed"
-                    || status_lower == "pending" 
-                    || status_lower == "partiallyfilled" 
+                    || status_lower == "pending"
+                    || status_lower == "partiallyfilled"
                     || status_lower == "processing"
             })
             .collect();
@@ -292,8 +308,8 @@ impl TradingRepository for PostgresTradingRepository {
             .filter(|order| {
                 let status_lower = order.status.to_lowercase();
                 status_lower == "placed"
-                    || status_lower == "pending" 
-                    || status_lower == "partiallyfilled" 
+                    || status_lower == "pending"
+                    || status_lower == "partiallyfilled"
                     || status_lower == "processing"
             })
             .count();
@@ -328,7 +344,11 @@ impl TradingRepository for PostgresTradingRepository {
         };
 
         let result = active_model.insert(&*self.db).await?;
-        Ok(result.order_order_id.to_string().parse::<u64>().unwrap_or(0))
+        Ok(result
+            .order_order_id
+            .to_string()
+            .parse::<u64>()
+            .unwrap_or(0))
     }
 
     async fn count_user_orders(&self, user_id: u64) -> Result<u64> {
@@ -338,15 +358,16 @@ impl TradingRepository for PostgresTradingRepository {
             .await?;
         Ok(count as u64)
     }
-    
+
     async fn get_order_history(&self, user_id: u64) -> Result<Vec<OrderModel>> {
         // Only return Cancelled, PartiallyFilled, and Filled orders for history
         OrderEntity::find()
             .filter(OrderColumn::OrderUserId.eq(Decimal::from(user_id)))
             .filter(
-                OrderColumn::Status.eq("Cancelled")
+                OrderColumn::Status
+                    .eq("Cancelled")
                     .or(OrderColumn::Status.eq("PartiallyFilled"))
-                    .or(OrderColumn::Status.eq("Filled"))
+                    .or(OrderColumn::Status.eq("Filled")),
             )
             .order_by_desc(OrderColumn::OrderTimestamp)
             .all(&*self.db)
@@ -354,14 +375,20 @@ impl TradingRepository for PostgresTradingRepository {
             .map_err(Into::into)
     }
 
-    async fn get_order_history_paginated(&self, user_id: u64, offset: u64, limit: u64) -> Result<Vec<OrderModel>> {
+    async fn get_order_history_paginated(
+        &self,
+        user_id: u64,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<OrderModel>> {
         // Only return Cancelled, PartiallyFilled, and Filled orders for history
         OrderEntity::find()
             .filter(OrderColumn::OrderUserId.eq(Decimal::from(user_id)))
             .filter(
-                OrderColumn::Status.eq("Cancelled")
+                OrderColumn::Status
+                    .eq("Cancelled")
                     .or(OrderColumn::Status.eq("PartiallyFilled"))
-                    .or(OrderColumn::Status.eq("Filled"))
+                    .or(OrderColumn::Status.eq("Filled")),
             )
             .order_by_desc(OrderColumn::OrderTimestamp)
             .offset(offset)
@@ -376,16 +403,20 @@ impl TradingRepository for PostgresTradingRepository {
         let count = OrderEntity::find()
             .filter(OrderColumn::OrderUserId.eq(Decimal::from(user_id)))
             .filter(
-                OrderColumn::Status.eq("Cancelled")
+                OrderColumn::Status
+                    .eq("Cancelled")
                     .or(OrderColumn::Status.eq("PartiallyFilled"))
-                    .or(OrderColumn::Status.eq("Filled"))
+                    .or(OrderColumn::Status.eq("Filled")),
             )
             .count(&*self.db)
             .await?;
         Ok(count as u64)
     }
-    
-    async fn get_user_favorite_markets(&self, user_id: u64) -> Result<Vec<UserFavoriteMarketModel>> {
+
+    async fn get_user_favorite_markets(
+        &self,
+        user_id: u64,
+    ) -> Result<Vec<UserFavoriteMarketModel>> {
         UserFavoriteMarketEntity::find()
             .filter(UserFavoriteMarketColumn::UserId.eq(user_id as i64))
             .order_by_desc(UserFavoriteMarketColumn::FavoritedAt)
@@ -393,7 +424,7 @@ impl TradingRepository for PostgresTradingRepository {
             .await
             .map_err(Into::into)
     }
-    
+
     async fn add_favorite_market(&self, user_id: u64, market_id: u32) -> Result<()> {
         let market_id_i32 = market_id as i32;
 
@@ -423,7 +454,7 @@ impl TradingRepository for PostgresTradingRepository {
             Err(e) => Err(e.into()),
         }
     }
-    
+
     async fn remove_favorite_market(&self, user_id: u64, market_id: u32) -> Result<()> {
         let market_id_i32 = market_id as i32;
 
@@ -438,7 +469,7 @@ impl TradingRepository for PostgresTradingRepository {
 
         Ok(())
     }
-    
+
     async fn is_market_favorited(&self, user_id: u64, market_id: u32) -> Result<bool> {
         let market_id_i32 = market_id as i32;
 
@@ -517,10 +548,10 @@ impl ClickHousePortfolioRepository {
 
         // Determine step size in seconds for the buckets
         let step_seconds: i64 = match resolution {
-            PnlResolution::Day => 3600,      // 1 hour
-            PnlResolution::Week => 21600,    // 6 hours
-            PnlResolution::Month => 86400,   // 1 day
-            PnlResolution::Year => 604800,   // 1 week
+            PnlResolution::Day => 3600,    // 1 hour
+            PnlResolution::Week => 21600,  // 6 hours
+            PnlResolution::Month => 86400, // 1 day
+            PnlResolution::Year => 604800, // 1 week
         };
 
         // 1. Fetch ALL balance updates for this user up to end_ts
@@ -591,7 +622,7 @@ impl ClickHousePortfolioRepository {
                 // Get price at or before current_ts
                 let price = if *asset_id == quote_asset_id {
                     Decimal::ONE // Quote asset always worth 1.0
-                    } else {
+                } else {
                     prices
                         .get(asset_id)
                         .and_then(|h| h.range(..=current_ts).next_back())
@@ -600,12 +631,12 @@ impl ClickHousePortfolioRepository {
                 };
 
                 total_equity += balance * price;
-                }
+            }
 
-                series.push(BalancePoint {
+            series.push(BalancePoint {
                 timestamp: current_ts,
-                    balance: total_equity,
-                });
+                balance: total_equity,
+            });
 
             current_ts += step_seconds;
         }
@@ -613,7 +644,7 @@ impl ClickHousePortfolioRepository {
         Ok(series)
     }
 
-    /// Dynamic Cashflow Calculation 
+    /// Dynamic Cashflow Calculation
     ///
     /// Fetches raw Deposit/Withdrawal events and values them using:
     /// 1. The price AT THE TIME of the deposit/withdrawal (historical cost basis)

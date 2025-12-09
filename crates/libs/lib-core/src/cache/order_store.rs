@@ -145,9 +145,10 @@ impl OrderStore {
                                     // Only include Cancelled, PartiallyFilled, Filled
                                     if let Some(status) = hash.get("status") {
                                         let status_lower = status.to_lowercase();
-                                        if status_lower == "cancelled" 
-                                            || status_lower == "partiallyfilled" 
-                                            || status_lower == "filled" {
+                                        if status_lower == "cancelled"
+                                            || status_lower == "partiallyfilled"
+                                            || status_lower == "filled"
+                                        {
                                             if let Some(order) = Self::parse_order_hash(hash) {
                                                 orders.push(order);
                                             }
@@ -161,10 +162,17 @@ impl OrderStore {
                         orders.sort_by(|a, b| b.order_timestamp.cmp(&a.order_timestamp));
                         let start = offset as usize;
                         let end = (offset + limit) as usize;
-                        let paginated_orders: Vec<_> = orders.into_iter().skip(start).take((end - start).min(limit as usize)).collect();
+                        let paginated_orders: Vec<_> = orders
+                            .into_iter()
+                            .skip(start)
+                            .take((end - start).min(limit as usize))
+                            .collect();
 
                         if !paginated_orders.is_empty() {
-                            debug!("Redis cache hit: {} history orders (paginated)", paginated_orders.len());
+                            debug!(
+                                "Redis cache hit: {} history orders (paginated)",
+                                paginated_orders.len()
+                            );
                             return Ok(paginated_orders);
                         }
                     }
@@ -180,12 +188,17 @@ impl OrderStore {
 
         // Database fallback
         if let Some(repo) = &self.trading_repo {
-            let orders = repo.get_order_history_paginated(user_id, offset, limit).await?;
+            let orders = repo
+                .get_order_history_paginated(user_id, offset, limit)
+                .await?;
             debug!("Postgres: Got {} history orders (paginated)", orders.len());
             return Ok(orders);
         }
 
-        debug!("No repository available for user order history: {}", user_id);
+        debug!(
+            "No repository available for user order history: {}",
+            user_id
+        );
         Ok(vec![])
     }
 
@@ -211,9 +224,10 @@ impl OrderStore {
                                     // Only include Cancelled, PartiallyFilled, Filled
                                     if let Some(status) = hash.get("status") {
                                         let status_lower = status.to_lowercase();
-                                        if status_lower == "cancelled" 
-                                            || status_lower == "partiallyfilled" 
-                                            || status_lower == "filled" {
+                                        if status_lower == "cancelled"
+                                            || status_lower == "partiallyfilled"
+                                            || status_lower == "filled"
+                                        {
                                             if let Some(order) = Self::parse_order_hash(hash) {
                                                 orders.push(order);
                                             }
@@ -224,7 +238,10 @@ impl OrderStore {
                         }
 
                         if !orders.is_empty() {
-                            debug!("Redis cache hit: {} history orders (includes filled_size)", orders.len());
+                            debug!(
+                                "Redis cache hit: {} history orders (includes filled_size)",
+                                orders.len()
+                            );
                             return Ok(orders);
                         }
                     }
@@ -241,11 +258,17 @@ impl OrderStore {
         // Database fallback - Query orders_events table only (filled_size is already there)
         if let Some(repo) = &self.trading_repo {
             let orders = repo.get_order_history(user_id).await?;
-            debug!("Postgres: Got {} history orders (includes filled_size)", orders.len());
+            debug!(
+                "Postgres: Got {} history orders (includes filled_size)",
+                orders.len()
+            );
             return Ok(orders);
         }
 
-        debug!("No repository available for user order history: {}", user_id);
+        debug!(
+            "No repository available for user order history: {}",
+            user_id
+        );
         Ok(vec![])
     }
 
@@ -273,19 +296,21 @@ impl OrderStore {
                                     // Filter orders by status - only include "open" orders
                                     if let Some(status) = hash.get("status") {
                                         let status_lower = status.to_lowercase();
-                                        
+
                                         // Skip orders that are in terminal states (not open)
-                                        if status_lower == "cancelled" 
-                                            || status_lower == "filled" 
-                                            || status_lower == "rejected" {
+                                        if status_lower == "cancelled"
+                                            || status_lower == "filled"
+                                            || status_lower == "rejected"
+                                        {
                                             continue;
                                         }
-                                        
+
                                         // Only include: Placed, Pending, PartiallyFilled, Processing
                                         if status_lower != "placed"
-                                            && status_lower != "pending" 
-                                            && status_lower != "partiallyfilled" 
-                                            && status_lower != "processing" {
+                                            && status_lower != "pending"
+                                            && status_lower != "partiallyfilled"
+                                            && status_lower != "processing"
+                                        {
                                             continue;
                                         }
                                     }
@@ -302,7 +327,11 @@ impl OrderStore {
                         orders.sort_by(|a, b| b.order_timestamp.cmp(&a.order_timestamp));
                         let start = offset as usize;
                         let end = (offset + limit) as usize;
-                        let paginated_orders: Vec<_> = orders.into_iter().skip(start).take((end - start).min(limit as usize)).collect();
+                        let paginated_orders: Vec<_> = orders
+                            .into_iter()
+                            .skip(start)
+                            .take((end - start).min(limit as usize))
+                            .collect();
 
                         if !paginated_orders.is_empty() {
                             return Ok(paginated_orders);
@@ -368,21 +397,22 @@ impl OrderStore {
                                     // Open orders: Placed, Pending, PartiallyFilled, Processing
                                     // Exclude: Filled, Cancelled, Rejected
                                     if let Some(status) = hash.get("status") {
-                                        
                                         let status_lower = status.to_lowercase();
-                                        
+
                                         // Skip orders that are in terminal states (not open)
-                                        if status_lower == "cancelled" 
-                                            || status_lower == "filled" 
-                                            || status_lower == "rejected" {
+                                        if status_lower == "cancelled"
+                                            || status_lower == "filled"
+                                            || status_lower == "rejected"
+                                        {
                                             continue;
                                         }
-                                        
+
                                         // Only include: Placed, Pending, PartiallyFilled, Processing
                                         if status_lower != "placed"
-                                            && status_lower != "pending" 
-                                            && status_lower != "partiallyfilled" 
-                                            && status_lower != "processing" {
+                                            && status_lower != "pending"
+                                            && status_lower != "partiallyfilled"
+                                            && status_lower != "processing"
+                                        {
                                             continue;
                                         }
                                     }
@@ -508,7 +538,8 @@ impl OrderStore {
         let order_user_id = Decimal::from_str(hash.get("user_id")?).ok()?;
         let order_price = Decimal::from_str(hash.get("price")?).ok()?;
         let order_size = Decimal::from_str(hash.get("size")?).ok()?;
-        let filled_size = Decimal::from_str(hash.get("filled_size").unwrap_or(&"0".to_string())).unwrap_or(Decimal::ZERO);
+        let filled_size = Decimal::from_str(hash.get("filled_size").unwrap_or(&"0".to_string()))
+            .unwrap_or(Decimal::ZERO);
         let order_side = hash.get("side")?.clone();
         let order_timestamp = hash.get("timestamp")?.parse::<i64>().ok()?;
         let market_id = hash.get("market_id")?.parse::<i32>().ok()?;
@@ -531,4 +562,3 @@ impl OrderStore {
         })
     }
 }
-

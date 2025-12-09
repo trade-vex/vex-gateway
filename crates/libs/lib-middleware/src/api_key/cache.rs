@@ -1,12 +1,13 @@
-use crate::api_key::security::ApiKeyConfig;
 use crate::api_key::error::ApiKeyError;
-use std::time::Duration;
+use crate::api_key::security::ApiKeyConfig;
 use async_trait::async_trait;
+use std::time::Duration;
 
 #[async_trait]
 pub trait ApiKeyCache: Send + Sync + 'static {
     async fn get(&self, key: &str) -> Result<Option<ApiKeyConfig>, ApiKeyError>;
-    async fn set(&self, key: &str, config: &ApiKeyConfig, ttl: Duration) -> Result<(), ApiKeyError>;
+    async fn set(&self, key: &str, config: &ApiKeyConfig, ttl: Duration)
+        -> Result<(), ApiKeyError>;
     async fn delete(&self, key: &str) -> Result<(), ApiKeyError>;
     async fn ping(&self) -> Result<(), ApiKeyError>;
     fn stats(&self) -> CacheStats;
@@ -49,17 +50,25 @@ impl NoOpCache {
 #[async_trait]
 impl ApiKeyCache for NoOpCache {
     async fn get(&self, _key: &str) -> Result<Option<ApiKeyConfig>, ApiKeyError> {
-        self.stats.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.stats
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(None)
     }
 
-    async fn set(&self, _key: &str, _config: &ApiKeyConfig, _ttl: Duration) -> Result<(), ApiKeyError> {
-        self.stats.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    async fn set(
+        &self,
+        _key: &str,
+        _config: &ApiKeyConfig,
+        _ttl: Duration,
+    ) -> Result<(), ApiKeyError> {
+        self.stats
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
     async fn delete(&self, _key: &str) -> Result<(), ApiKeyError> {
-        self.stats.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.stats
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 

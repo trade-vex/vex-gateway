@@ -10,8 +10,9 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use lib_api::handlers::api_key::{
-    create_api_key, delete_api_key, get_api_key, list_api_keys, toggle_api_key, update_api_key,
-    ApiKeyListResponse, ApiKeyResponse, AuthenticatedUser, CreateApiKeyRequest, UpdateApiKeyRequest,
+    ApiKeyListResponse, ApiKeyResponse, AuthenticatedUser, CreateApiKeyRequest,
+    UpdateApiKeyRequest, create_api_key, delete_api_key, get_api_key, list_api_keys,
+    toggle_api_key, update_api_key,
 };
 use lib_middleware::repository::api_key_repository::ApiKeyRepository;
 
@@ -94,11 +95,9 @@ async fn setup_test_db_with_schema() -> Result<DatabaseConnection, sea_orm::DbEr
         WHERE enabled = true;
     "#;
 
-    db.execute_unprepared(create_table_sql)
-        .await
-        .map_err(|e| {
-            sea_orm::DbErr::Custom(format!("Failed to create test database schema: {}", e))
-        })?;
+    db.execute_unprepared(create_table_sql).await.map_err(|e| {
+        sea_orm::DbErr::Custom(format!("Failed to create test database schema: {}", e))
+    })?;
 
     Ok(db)
 }
@@ -360,8 +359,8 @@ mod tests {
         )
         .await;
 
-                let user_id = user.user_id().unwrap();
-                let api_key_id = match create_result {
+        let user_id = user.user_id().unwrap();
+        let api_key_id = match create_result {
             Ok(_) => {
                 let user_keys = repo.find_by_user_id(user_id).await.unwrap();
                 assert_eq!(user_keys.len(), 1);
@@ -519,8 +518,8 @@ mod tests {
         )
         .await;
 
-                let user_id = user.user_id().unwrap();
-                let api_key_id = match create_result {
+        let user_id = user.user_id().unwrap();
+        let api_key_id = match create_result {
             Ok(_) => {
                 let user_keys = repo.find_by_user_id(user_id).await.unwrap();
                 assert_eq!(user_keys.len(), 1);
@@ -607,8 +606,8 @@ mod tests {
         )
         .await;
 
-                let user_id = user.user_id().unwrap();
-                let api_key_id = match create_result {
+        let user_id = user.user_id().unwrap();
+        let api_key_id = match create_result {
             Ok(_) => {
                 let user_keys = repo.find_by_user_id(user_id).await.unwrap();
                 assert_eq!(user_keys.len(), 1);
@@ -664,8 +663,8 @@ mod tests {
         )
         .await;
 
-                let user_id = user.user_id().unwrap();
-                let api_key_id = match create_result {
+        let user_id = user.user_id().unwrap();
+        let api_key_id = match create_result {
             Ok(_) => {
                 let user_keys = repo.find_by_user_id(user_id).await.unwrap();
                 assert_eq!(user_keys.len(), 1);
@@ -726,8 +725,8 @@ mod tests {
         )
         .await;
 
-                let user_id = user.user_id().unwrap();
-                let api_key_id = match create_result {
+        let user_id = user.user_id().unwrap();
+        let api_key_id = match create_result {
             Ok(_) => {
                 let user_keys = repo.find_by_user_id(user_id).await.unwrap();
                 assert_eq!(user_keys.len(), 1);
@@ -800,8 +799,8 @@ mod tests {
         )
         .await;
 
-                let user_id = user.user_id().unwrap();
-                let api_key_id = match create_result {
+        let user_id = user.user_id().unwrap();
+        let api_key_id = match create_result {
             Ok(_) => {
                 let user_keys = repo.find_by_user_id(user_id).await.unwrap();
                 assert_eq!(user_keys.len(), 1);
@@ -852,4 +851,3 @@ mod tests {
         global_cleanup().await;
     }
 }
-

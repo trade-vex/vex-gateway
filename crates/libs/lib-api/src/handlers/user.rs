@@ -1,13 +1,13 @@
 //! User Account Data API Handlers
 
 use actix_web::{HttpResponse, Result, web};
-use lib_core::{PnlResolution, PortfolioRepository, TradingRepository};
 use lib_core::dto::trading::{BalanceChartResponse, PnlChartResponse, PortfolioMetricsResponse};
 use lib_core::{
-    BalancesListResponse, FavoriteMarketsListResponse,
-    OrderHistoryResponse, OrderResponse, OrderStore, OrdersHistoryListResponse,
-    OrdersListResponse, ToggleFavoriteMarketRequest, UserBalanceResponse, UserBalanceStore,
+    BalancesListResponse, FavoriteMarketsListResponse, OrderHistoryResponse, OrderResponse,
+    OrderStore, OrdersHistoryListResponse, OrdersListResponse, ToggleFavoriteMarketRequest,
+    UserBalanceResponse, UserBalanceStore,
 };
+use lib_core::{PnlResolution, PortfolioRepository, TradingRepository};
 use lib_utils::auth_extractors::AuthenticatedUserId;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -204,7 +204,10 @@ pub async fn get_open_orders(
         }
     };
 
-    match order_store.get_user_orders_paginated(user_id, offset, limit_u64).await {
+    match order_store
+        .get_user_orders_paginated(user_id, offset, limit_u64)
+        .await
+    {
         Ok(orders) => {
             let order_responses: Vec<OrderResponse> =
                 orders.into_iter().map(|order| order.into()).collect();
@@ -326,7 +329,11 @@ pub async fn get_order_history(
     let total_count = match trading_repo.count_order_history(user_id).await {
         Ok(count) => count as usize,
         Err(e) => {
-            tracing::error!("failed to count order history for user_id {}: {}", user_id, e);
+            tracing::error!(
+                "failed to count order history for user_id {}: {}",
+                user_id,
+                e
+            );
             return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "failed to retrieve order history",
                 "message": e.to_string()
@@ -334,7 +341,10 @@ pub async fn get_order_history(
         }
     };
 
-    match order_store.get_user_order_history_paginated(user_id, offset, limit_u64).await {
+    match order_store
+        .get_user_order_history_paginated(user_id, offset, limit_u64)
+        .await
+    {
         Ok(orders) => {
             let order_responses: Vec<OrderHistoryResponse> =
                 orders.into_iter().map(|order| order.into()).collect();
@@ -640,8 +650,10 @@ pub async fn get_favorite_markets(
 
     match trading_repo.get_user_favorite_markets(user_id).await {
         Ok(favorites) => {
-            let market_ids: Vec<u32> =
-                favorites.into_iter().map(|fav| fav.market_id as u32).collect();
+            let market_ids: Vec<u32> = favorites
+                .into_iter()
+                .map(|fav| fav.market_id as u32)
+                .collect();
 
             let response = FavoriteMarketsListResponse { market_ids };
 
@@ -727,7 +739,10 @@ pub async fn toggle_favorite_market(
         Ok(is_favorited) => {
             if is_favorited {
                 // Remove from favorites
-                match trading_repo.remove_favorite_market(user_id, market_id).await {
+                match trading_repo
+                    .remove_favorite_market(user_id, market_id)
+                    .await
+                {
                     Ok(_) => Ok(HttpResponse::Ok().json(serde_json::json!({
                         "success": true,
                         "action": "removed",

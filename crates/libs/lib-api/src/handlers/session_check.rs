@@ -13,4 +13,3 @@ pub async fn session_check() -> HttpResponse {
         "message": "Authentication successful"
     }))
 }
-

@@ -1,8 +1,8 @@
 use lib_middleware::api_key::{
-    middleware::{ApiKeyStore, CacheConfig, CacheMetrics, RouteSecurityConfig},
-    security::{SecurityType, ApiKeyConfig, KeyMaterial},
-    redis_cache::{RedisApiKeyCache, RedisCacheConfig},
     cache::ApiKeyCache,
+    middleware::{ApiKeyStore, CacheConfig, CacheMetrics, RouteSecurityConfig},
+    redis_cache::{RedisApiKeyCache, RedisCacheConfig},
+    security::{ApiKeyConfig, KeyMaterial, SecurityType},
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -77,9 +77,20 @@ fn test_cache_config_clone() {
 fn test_cache_metrics_new() {
     let metrics = CacheMetrics::new();
 
-    assert_eq!(metrics.l1_hits.load(std::sync::atomic::Ordering::Relaxed), 0);
-    assert_eq!(metrics.l1_misses.load(std::sync::atomic::Ordering::Relaxed), 0);
-    assert_eq!(metrics.db_queries.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(
+        metrics.l1_hits.load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        metrics.l1_misses.load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        metrics
+            .db_queries
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
 }
 
 #[test]
@@ -87,13 +98,30 @@ fn test_cache_metrics_operations() {
     let metrics = CacheMetrics::new();
 
     // Test increment operations
-    metrics.l1_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    metrics.l1_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    metrics.db_queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    metrics
+        .l1_hits
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    metrics
+        .l1_misses
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    metrics
+        .db_queries
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    assert_eq!(metrics.l1_hits.load(std::sync::atomic::Ordering::Relaxed), 1);
-    assert_eq!(metrics.l1_misses.load(std::sync::atomic::Ordering::Relaxed), 1);
-    assert_eq!(metrics.db_queries.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(
+        metrics.l1_hits.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        metrics.l1_misses.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        metrics
+            .db_queries
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
 }
 
 #[test]
@@ -102,10 +130,14 @@ fn test_cache_metrics_hit_ratios() {
 
     // Add some hits and misses
     for _ in 0..7 {
-        metrics.l1_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        metrics
+            .l1_hits
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     for _ in 0..3 {
-        metrics.l1_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        metrics
+            .l1_misses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     let l1_ratio = metrics.get_l1_hit_rate();
@@ -126,13 +158,30 @@ fn test_cache_metrics_basic_usage() {
     let metrics = CacheMetrics::new();
 
     // Add some sample data
-    metrics.l1_hits.fetch_add(2, std::sync::atomic::Ordering::Relaxed);
-    metrics.l1_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    metrics.db_queries.fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+    metrics
+        .l1_hits
+        .fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+    metrics
+        .l1_misses
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    metrics
+        .db_queries
+        .fetch_add(2, std::sync::atomic::Ordering::Relaxed);
 
-    assert_eq!(metrics.l1_hits.load(std::sync::atomic::Ordering::Relaxed), 2);
-    assert_eq!(metrics.l1_misses.load(std::sync::atomic::Ordering::Relaxed), 1);
-    assert_eq!(metrics.db_queries.load(std::sync::atomic::Ordering::Relaxed), 2);
+    assert_eq!(
+        metrics.l1_hits.load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
+    assert_eq!(
+        metrics.l1_misses.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        metrics
+            .db_queries
+            .load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
 
     let hit_rate = metrics.get_l1_hit_rate();
     assert!((hit_rate - 0.6666666666666666).abs() < 0.01); // 2/3
@@ -145,8 +194,7 @@ async fn test_api_key_store_with_api_keys() {
         .with_permissions(vec![SecurityType::Trade]);
 
     let config = CacheConfig::default();
-    let store = ApiKeyStore::new(config)
-        .with_api_keys(vec![api_key_config.clone()]);
+    let store = ApiKeyStore::new(config).with_api_keys(vec![api_key_config.clone()]);
 
     // Verify the API key was added to memory store
     let result = store.get_api_key("test-key").await;
@@ -200,8 +248,7 @@ async fn test_api_key_store_with_valid_api_key() {
         .with_description("Test API key".to_string());
 
     let config = CacheConfig::default();
-    let store = ApiKeyStore::new(config)
-        .with_api_keys(vec![api_key_config]);
+    let store = ApiKeyStore::new(config).with_api_keys(vec![api_key_config]);
 
     let result = store.get_api_key("valid-key").await;
     assert!(result.is_some());
@@ -217,15 +264,14 @@ async fn test_api_key_store_with_valid_api_key() {
 
 #[tokio::test]
 async fn test_api_key_store_cache_behavior() {
-    let api_key_config = ApiKeyConfig::new("cache-test".to_string())
-        .with_hmac_secret("cache-secret".to_string());
+    let api_key_config =
+        ApiKeyConfig::new("cache-test".to_string()).with_hmac_secret("cache-secret".to_string());
 
     let config = CacheConfig {
         l1_max_size: 10,
         l1_ttl: Duration::from_secs(1), // Short TTL for testing
     };
-    let store = ApiKeyStore::new(config)
-        .with_api_keys(vec![api_key_config]);
+    let store = ApiKeyStore::new(config).with_api_keys(vec![api_key_config]);
 
     // First access should cache the key
     let result1 = store.get_api_key("cache-test").await;
@@ -311,7 +357,9 @@ async fn test_l2_cache_basic_operations() {
     let key = "test_key_123";
 
     // Set a key
-    let result = redis_cache.set(key, &api_key, Duration::from_secs(60)).await;
+    let result = redis_cache
+        .set(key, &api_key, Duration::from_secs(60))
+        .await;
     assert!(result.is_ok(), "Failed to set API key in Redis cache");
 
     // Read it back
@@ -323,7 +371,10 @@ async fn test_l2_cache_basic_operations() {
 
     // Delete the key
     let delete_result = redis_cache.delete(key).await;
-    assert!(delete_result.is_ok(), "Failed to delete API key from Redis cache");
+    assert!(
+        delete_result.is_ok(),
+        "Failed to delete API key from Redis cache"
+    );
 
     // Make sure it's gone
     let after_delete = redis_cache.get(key).await;
@@ -351,8 +402,14 @@ async fn test_l2_cache_ttl_expiration() {
 
     // Should exist right away
     let retrieved = redis_cache.get(key).await;
-    assert!(retrieved.is_ok(), "Failed to get API key immediately after set");
-    assert!(retrieved.unwrap().is_some(), "API key should be available immediately");
+    assert!(
+        retrieved.is_ok(),
+        "Failed to get API key immediately after set"
+    );
+    assert!(
+        retrieved.unwrap().is_some(),
+        "API key should be available immediately"
+    );
 
     // Wait past TTL
     tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -385,7 +442,9 @@ async fn test_l2_cache_stats_tracking() {
     assert_eq!(initial_stats.deletes, 0);
 
     // Setting a key bumps `sets`
-    let _ = redis_cache.set(key, &api_key, Duration::from_secs(60)).await;
+    let _ = redis_cache
+        .set(key, &api_key, Duration::from_secs(60))
+        .await;
     let after_set_stats = redis_cache.stats();
     assert_eq!(after_set_stats.sets, 1);
 
@@ -448,15 +507,31 @@ async fn test_l2_cache_serialization_roundtrip() {
         let key = format!("serialization_test_{}", i);
 
         // Store the key
-        let set_result = redis_cache.set(&key, &api_key, Duration::from_secs(60)).await;
-        assert!(set_result.is_ok(), "Failed to set API key {}: {:?}", i, set_result);
+        let set_result = redis_cache
+            .set(&key, &api_key, Duration::from_secs(60))
+            .await;
+        assert!(
+            set_result.is_ok(),
+            "Failed to set API key {}: {:?}",
+            i,
+            set_result
+        );
 
         // Fetch it back
         let get_result = redis_cache.get(&key).await;
-        assert!(get_result.is_ok(), "Failed to get API key {}: {:?}", i, get_result);
+        assert!(
+            get_result.is_ok(),
+            "Failed to get API key {}: {:?}",
+            i,
+            get_result
+        );
 
         let retrieved = get_result.unwrap();
-        assert!(retrieved.is_some(), "API key {} not found after roundtrip", i);
+        assert!(
+            retrieved.is_some(),
+            "API key {} not found after roundtrip",
+            i
+        );
 
         let retrieved_key = retrieved.unwrap();
 
@@ -470,20 +545,21 @@ async fn test_l2_cache_serialization_roundtrip() {
 
         // Key material should also match
         match (&retrieved_key.key_material, &api_key.key_material) {
-            (Some(ret), Some(orig)) => {
-                match (ret, orig) {
-                    (KeyMaterial::HmacSecret(ret_val), KeyMaterial::HmacSecret(orig_val)) => {
-                        assert_eq!(ret_val, orig_val);
-                    }
-                    (KeyMaterial::RsaPublicKey(ret_val), KeyMaterial::RsaPublicKey(orig_val)) => {
-                        assert_eq!(ret_val, orig_val);
-                    }
-                    (KeyMaterial::Ed25519PublicKey(ret_val), KeyMaterial::Ed25519PublicKey(orig_val)) => {
-                        assert_eq!(ret_val, orig_val);
-                    }
-                    _ => panic!("Key material types don't match"),
+            (Some(ret), Some(orig)) => match (ret, orig) {
+                (KeyMaterial::HmacSecret(ret_val), KeyMaterial::HmacSecret(orig_val)) => {
+                    assert_eq!(ret_val, orig_val);
                 }
-            }
+                (KeyMaterial::RsaPublicKey(ret_val), KeyMaterial::RsaPublicKey(orig_val)) => {
+                    assert_eq!(ret_val, orig_val);
+                }
+                (
+                    KeyMaterial::Ed25519PublicKey(ret_val),
+                    KeyMaterial::Ed25519PublicKey(orig_val),
+                ) => {
+                    assert_eq!(ret_val, orig_val);
+                }
+                _ => panic!("Key material types don't match"),
+            },
             (None, None) => {} // both None
             _ => panic!("Key material presence doesn't match"),
         }
@@ -519,14 +595,19 @@ async fn test_l2_cache_error_handling() {
     let key = "error_test_key";
 
     // These should fail
-    let set_result = redis_cache.set(key, &api_key, Duration::from_secs(60)).await;
+    let set_result = redis_cache
+        .set(key, &api_key, Duration::from_secs(60))
+        .await;
     assert!(set_result.is_err(), "Set should fail with invalid config");
 
     let get_result = redis_cache.get(key).await;
     assert!(get_result.is_err(), "Get should fail with invalid config");
 
     let delete_result = redis_cache.delete(key).await;
-    assert!(delete_result.is_err(), "Delete should fail with invalid config");
+    assert!(
+        delete_result.is_err(),
+        "Delete should fail with invalid config"
+    );
 
     // Stats should still be available
     let stats = redis_cache.stats();
@@ -546,7 +627,10 @@ async fn test_l2_cache_ping_health_check() {
 
     // Ping should work with a live Redis
     let ping_result = redis_cache.ping().await;
-    assert!(ping_result.is_ok(), "Ping should succeed with valid Redis connection");
+    assert!(
+        ping_result.is_ok(),
+        "Ping should succeed with valid Redis connection"
+    );
 }
 
 #[tokio::test]
@@ -574,13 +658,18 @@ async fn test_l2_cache_key_prefixing() {
     let key = "prefix_test_key";
 
     // Store with prefix
-    let set_result = redis_cache.set(key, &api_key, Duration::from_secs(60)).await;
+    let set_result = redis_cache
+        .set(key, &api_key, Duration::from_secs(60))
+        .await;
     assert!(set_result.is_ok(), "Failed to set API key with prefix");
 
     // Fetch with prefix
     let get_result = redis_cache.get(key).await;
     assert!(get_result.is_ok(), "Failed to get API key with prefix");
-    assert!(get_result.unwrap().is_some(), "API key not found with prefix");
+    assert!(
+        get_result.unwrap().is_some(),
+        "API key not found with prefix"
+    );
 
     // Clean up
     let _ = redis_cache.delete(key).await;
@@ -601,13 +690,12 @@ async fn test_cache_invalidation_l1() {
         .with_hmac_secret("test_secret".to_string())
         .with_permissions(vec![SecurityType::Trade, SecurityType::UserData]);
     let key = "test_key_123";
-    
+
     let config = CacheConfig {
         l1_max_size: 10,
         l1_ttl: Duration::from_secs(60),
     };
-    let store = ApiKeyStore::new(config)
-        .with_api_keys(vec![api_key.clone()]);
+    let store = ApiKeyStore::new(config).with_api_keys(vec![api_key.clone()]);
 
     // First fetch populates L1 cache
     let result1 = store.get_api_key(key).await;

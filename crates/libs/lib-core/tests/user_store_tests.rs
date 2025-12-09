@@ -15,7 +15,6 @@
 /// - Multi-asset portfolios
 /// - Invalidation operations
 /// - Error handling and edge cases
-
 use async_trait::async_trait;
 use lib_core::cache::user_store::{UserBalanceCacheConfig, UserBalanceStore};
 use lib_core::model::orders::Model as OrderModel;
@@ -101,7 +100,12 @@ impl TradingRepository for MockTradingRepository {
         Ok(vec![])
     }
 
-    async fn get_open_orders_paginated(&self, _user_id: u64, _offset: u64, _limit: u64) -> Result<Vec<OrderModel>> {
+    async fn get_open_orders_paginated(
+        &self,
+        _user_id: u64,
+        _offset: u64,
+        _limit: u64,
+    ) -> Result<Vec<OrderModel>> {
         Ok(vec![])
     }
 
@@ -144,7 +148,12 @@ impl TradingRepository for MockTradingRepository {
         Ok(vec![])
     }
 
-    async fn get_order_history_paginated(&self, _user_id: u64, _offset: u64, _limit: u64) -> Result<Vec<OrderModel>> {
+    async fn get_order_history_paginated(
+        &self,
+        _user_id: u64,
+        _offset: u64,
+        _limit: u64,
+    ) -> Result<Vec<OrderModel>> {
         Ok(vec![])
     }
 
@@ -192,7 +201,7 @@ async fn test_user_balance_store_with_repository() {
     };
 
     let balances = vec![
-        create_test_balance(100, 1, 10000, 500, 10500), // BTC
+        create_test_balance(100, 1, 10000, 500, 10500),  // BTC
         create_test_balance(100, 2, 50000, 1000, 51000), // ETH
     ];
 
@@ -256,10 +265,10 @@ async fn test_get_user_balances_multiple_assets() {
     };
 
     let balances = vec![
-        create_test_balance(100, 1, 10000, 500, 10500),    // BTC
-        create_test_balance(100, 2, 50000, 1000, 51000),   // ETH
-        create_test_balance(100, 3, 100000, 0, 100000),    // USDT
-        create_test_balance(100, 4, 5000, 2500, 7500),     // SOL
+        create_test_balance(100, 1, 10000, 500, 10500),  // BTC
+        create_test_balance(100, 2, 50000, 1000, 51000), // ETH
+        create_test_balance(100, 3, 100000, 0, 100000),  // USDT
+        create_test_balance(100, 4, 5000, 2500, 7500),   // SOL
     ];
 
     let mock_repo = Arc::new(MockTradingRepository::new().with_balances(balances));
@@ -421,7 +430,10 @@ async fn test_large_balance_values() {
     assert!(result.is_ok());
     let fetched_balances = result.unwrap();
     assert_eq!(fetched_balances.len(), 1);
-    assert_eq!(fetched_balances[0].available, Decimal::from(large_available));
+    assert_eq!(
+        fetched_balances[0].available,
+        Decimal::from(large_available)
+    );
     assert_eq!(fetched_balances[0].locked, Decimal::from(large_locked));
     assert_eq!(fetched_balances[0].total, Decimal::from(large_total));
 }
@@ -557,9 +569,9 @@ async fn test_asset_id_variations() {
 
     // Test various asset IDs
     let balances = vec![
-        create_test_balance(100, 1, 1000, 0, 1000),      // Small asset ID
-        create_test_balance(100, 100, 2000, 0, 2000),    // Medium asset ID
-        create_test_balance(100, 9999, 3000, 0, 3000),   // Large asset ID
+        create_test_balance(100, 1, 1000, 0, 1000), // Small asset ID
+        create_test_balance(100, 100, 2000, 0, 2000), // Medium asset ID
+        create_test_balance(100, 9999, 3000, 0, 3000), // Large asset ID
     ];
 
     let mock_repo = Arc::new(MockTradingRepository::new().with_balances(balances));

@@ -15,7 +15,6 @@
 /// - Status filtering for open orders
 /// - Invalidation of single orders and user orders
 /// - Error handling and edge cases
-
 use async_trait::async_trait;
 use lib_core::cache::order_store::{OrderCacheConfig, OrderStore};
 use lib_core::model::orders::Model as OrderModel;
@@ -94,7 +93,12 @@ impl TradingRepository for MockTradingRepository {
             .collect())
     }
 
-    async fn get_open_orders_paginated(&self, user_id: u64, offset: u64, limit: u64) -> Result<Vec<OrderModel>> {
+    async fn get_open_orders_paginated(
+        &self,
+        user_id: u64,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<OrderModel>> {
         if self.should_error {
             return Err(TradingError::Database("Mock database error".to_string()));
         }
@@ -109,7 +113,11 @@ impl TradingRepository for MockTradingRepository {
         // Apply pagination
         let start = offset as usize;
         let end = (offset + limit) as usize;
-        Ok(orders.into_iter().skip(start).take((end - start).min(limit as usize)).collect())
+        Ok(orders
+            .into_iter()
+            .skip(start)
+            .take((end - start).min(limit as usize))
+            .collect())
     }
 
     async fn count_open_orders(&self, user_id: u64) -> Result<u64> {
@@ -131,7 +139,10 @@ impl TradingRepository for MockTradingRepository {
         Ok(self
             .orders
             .iter()
-            .find(|o| o.order_order_id == Decimal::from(order_id) && o.order_user_id == Decimal::from(user_id))
+            .find(|o| {
+                o.order_order_id == Decimal::from(order_id)
+                    && o.order_user_id == Decimal::from(user_id)
+            })
             .cloned())
     }
 
@@ -160,7 +171,12 @@ impl TradingRepository for MockTradingRepository {
             .collect())
     }
 
-    async fn get_order_history_paginated(&self, user_id: u64, offset: u64, limit: u64) -> Result<Vec<OrderModel>> {
+    async fn get_order_history_paginated(
+        &self,
+        user_id: u64,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<OrderModel>> {
         if self.should_error {
             return Err(TradingError::Database("Mock database error".to_string()));
         }
@@ -180,7 +196,11 @@ impl TradingRepository for MockTradingRepository {
         // Apply pagination
         let start = offset as usize;
         let end = (offset + limit) as usize;
-        Ok(orders.into_iter().skip(start).take((end - start).min(limit as usize)).collect())
+        Ok(orders
+            .into_iter()
+            .skip(start)
+            .take((end - start).min(limit as usize))
+            .collect())
     }
 
     async fn count_order_history(&self, user_id: u64) -> Result<u64> {

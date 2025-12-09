@@ -25,6 +25,8 @@ use actix_web::web;
 ///
 /// A configured route that can be registered with an Actix web application.
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    cfg.route("/session-check", web::get().to(session_check::session_check));
+    cfg.route(
+        "/session-check",
+        web::get().to(session_check::session_check),
+    );
 }
-

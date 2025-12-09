@@ -14,25 +14,21 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use async_trait::async_trait;
 use lib_api::handlers::user::{
-    get_balances, get_favorite_markets, get_open_orders, get_order_history,
-    toggle_favorite_market, OrdersQuery,
+    OrdersQuery, get_balances, get_favorite_markets, get_open_orders, get_order_history,
+    toggle_favorite_market,
 };
 use lib_core::{
-    cache::{
-        order_store::{OrderCacheConfig, OrderStore},
-        user_store::{UserBalanceCacheConfig, UserBalanceStore},
-    },
+    ToggleFavoriteMarketRequest,
+    cache::{order_store::OrderCacheConfig, user_store::UserBalanceCacheConfig},
     model::{
-        orders::Model as OrderModel,
-        user_balances::Model as UserBalanceModel,
+        orders::Model as OrderModel, user_balances::Model as UserBalanceModel,
         user_favorite_markets::Model as UserFavoriteMarketModel,
     },
     repository::repository::{PostgresTradingRepository, TradingError, TradingRepository},
-    ToggleFavoriteMarketRequest,
 };
 use lib_utils::auth_extractors::AuthenticatedUserId;
-use async_trait::async_trait;
 
 /// Helper to convert UUID to u64 using the same logic as handlers
 fn uuid_to_u64(uuid: Uuid) -> u64 {
@@ -63,7 +59,7 @@ async fn setup_test_db_with_schema() -> Result<DatabaseConnection, sea_orm::DbEr
 
     // Read and execute migrations
     let migrations_dir = PathBuf::from("/Users/nikhilsharma/code/testing-setup/migrations");
-    
+
     // Execute migrations in order
     let migration_files = vec![
         "001_create_users_table.sql",
@@ -77,15 +73,22 @@ async fn setup_test_db_with_schema() -> Result<DatabaseConnection, sea_orm::DbEr
     for migration_file in migration_files {
         let migration_path = migrations_dir.join(migration_file);
         if migration_path.exists() {
-            let mut sql = fs::read_to_string(&migration_path)
-                .map_err(|e| sea_orm::DbErr::Custom(format!("Failed to read migration {}: {}", migration_file, e)))?;
-            
+            let mut sql = fs::read_to_string(&migration_path).map_err(|e| {
+                sea_orm::DbErr::Custom(format!(
+                    "Failed to read migration {}: {}",
+                    migration_file, e
+                ))
+            })?;
+
             // Fix TIMESTAMP (without timezone) to TIMESTAMPTZ for created_at columns to match SeaORM expectations
             // This is needed because SeaORM expects TIMESTAMPTZ when using DateTime<Utc>
             // Only replace TIMESTAMP that's not already TIMESTAMPTZ or TIMESTAMP WITH TIME ZONE
-            sql = sql.replace("created_at TIMESTAMP DEFAULT", "created_at TIMESTAMPTZ DEFAULT");
+            sql = sql.replace(
+                "created_at TIMESTAMP DEFAULT",
+                "created_at TIMESTAMPTZ DEFAULT",
+            );
             sql = sql.replace("created_at TIMESTAMP,", "created_at TIMESTAMPTZ,");
-            
+
             // Execute the entire migration file as one statement
             // PostgreSQL can handle multiple statements separated by semicolons
             // This is necessary because INSERT statements with VALUES can span multiple lines
@@ -96,14 +99,15 @@ async fn setup_test_db_with_schema() -> Result<DatabaseConnection, sea_orm::DbEr
                     && !error_str.contains("duplicate")
                     && !error_str.contains("does not exist")
                     && !error_str.contains("syntax error") // Some migrations have function definitions that cause syntax errors when re-run
-                    && !error_str.contains("unterminated") {
+                    && !error_str.contains("unterminated")
+                {
                     // Only warn on non-idempotency errors
                     eprintln!("Warning: Migration {} failed: {}", migration_file, e);
                 }
             }
         }
     }
-    
+
     // Explicitly ensure reference data (assets and markets) is populated
     // This is critical because tests depend on this data existing
     // We run these INSERTs separately to ensure they execute even if migration had errors
@@ -123,11 +127,11 @@ async fn ensure_reference_data(db: &DatabaseConnection) {
         (3, 'ETH', 1000000000000000000, true)
         ON CONFLICT (asset_id) DO NOTHING;
     "#;
-    
+
     if let Err(e) = db.execute_unprepared(assets_insert).await {
         eprintln!("Warning: Failed to ensure assets data: {}", e);
     }
-    
+
     // Insert markets if they don't exist
     let markets_insert = r#"
         INSERT INTO markets (market_id, base_asset_name, quote_asset_name, base_asset, quote_asset, base_scale_k, quote_scale_k, taker_fee, maker_fee, slippage, active) VALUES
@@ -135,7 +139,7 @@ async fn ensure_reference_data(db: &DatabaseConnection) {
         ((1 << 16) | 3, 'ETH', 'USD', 3, 1, 1000000000000000, 100, 0, 0, 150, true)
         ON CONFLICT (market_id) DO NOTHING;
     "#;
-    
+
     if let Err(e) = db.execute_unprepared(markets_insert).await {
         eprintln!("Warning: Failed to ensure markets data: {}", e);
     }
@@ -158,11 +162,26 @@ async fn require_database() -> DatabaseConnection {
 async fn cleanup_test_data(db: &DatabaseConnection, user_id: u64) {
     // Clean up in reverse dependency order
     let cleanup_queries = vec![
-        format!("DELETE FROM user_favorite_markets WHERE user_id = {}", user_id),
-        format!("DELETE FROM trading.orders_events WHERE order_user_id = {}", user_id),
-        format!("DELETE FROM trading.balances_events WHERE user_id = {}", user_id),
-        format!("DELETE FROM trading.deposits_events WHERE user_id = {}", user_id),
-        format!("DELETE FROM trading.withdrawals_events WHERE user_id = {}", user_id),
+        format!(
+            "DELETE FROM user_favorite_markets WHERE user_id = {}",
+            user_id
+        ),
+        format!(
+            "DELETE FROM trading.orders_events WHERE order_user_id = {}",
+            user_id
+        ),
+        format!(
+            "DELETE FROM trading.balances_events WHERE user_id = {}",
+            user_id
+        ),
+        format!(
+            "DELETE FROM trading.deposits_events WHERE user_id = {}",
+            user_id
+        ),
+        format!(
+            "DELETE FROM trading.withdrawals_events WHERE user_id = {}",
+            user_id
+        ),
     ];
 
     for query in cleanup_queries {
@@ -180,10 +199,10 @@ async fn global_cleanup_test_data(db: &DatabaseConnection) {
     // Note: We clean up assets and markets as requested, but they will be re-populated
     // by migrations when the next test runs (via require_database())
     let cleanup_queries = vec![
-        "DELETE FROM user_favorite_markets",  // Test data - references markets (must be first)
-        "DELETE FROM markets",                 // Reference data - will be re-populated by migrations
-        "DELETE FROM assets",                  // Reference data - will be re-populated by migrations
-        "DELETE FROM trading.orders_events",   // Test data
+        "DELETE FROM user_favorite_markets", // Test data - references markets (must be first)
+        "DELETE FROM markets",               // Reference data - will be re-populated by migrations
+        "DELETE FROM assets",                // Reference data - will be re-populated by migrations
+        "DELETE FROM trading.orders_events", // Test data
         "DELETE FROM trading.balances_events", // Test data
         "DELETE FROM trading.deposits_events", // Test data
         "DELETE FROM trading.withdrawals_events", // Test data
@@ -270,9 +289,7 @@ struct ErrorMockTradingRepository {
 
 impl ErrorMockTradingRepository {
     fn new() -> Self {
-        Self {
-            error_method: None,
-        }
+        Self { error_method: None }
     }
 
     fn with_error_on(mut self, method: &'static str) -> Self {
@@ -287,121 +304,218 @@ impl ErrorMockTradingRepository {
 
 #[async_trait]
 impl TradingRepository for ErrorMockTradingRepository {
-    async fn get_user_balances(&self, _user_id: u64) -> lib_core::repository::repository::Result<Vec<UserBalanceModel>> {
+    async fn get_user_balances(
+        &self,
+        _user_id: u64,
+    ) -> lib_core::repository::repository::Result<Vec<UserBalanceModel>> {
         if self.should_error("get_user_balances") {
-            return Err(TradingError::Database("Database connection failed".to_string()));
+            return Err(TradingError::Database(
+                "Database connection failed".to_string(),
+            ));
         }
         Ok(vec![])
     }
 
-    async fn get_user_balance(&self, _user_id: u64) -> lib_core::repository::repository::Result<Option<UserBalanceModel>> {
+    async fn get_user_balance(
+        &self,
+        _user_id: u64,
+    ) -> lib_core::repository::repository::Result<Option<UserBalanceModel>> {
         if self.should_error("get_user_balance") {
-            return Err(TradingError::Database("Database connection failed".to_string()));
+            return Err(TradingError::Database(
+                "Database connection failed".to_string(),
+            ));
         }
         Ok(None)
     }
 
-    async fn update_user_balance(&self, _user_id: u64, _available: u64, _locked: u64) -> lib_core::repository::repository::Result<()> {
+    async fn update_user_balance(
+        &self,
+        _user_id: u64,
+        _available: u64,
+        _locked: u64,
+    ) -> lib_core::repository::repository::Result<()> {
         if self.should_error("update_user_balance") {
-            return Err(TradingError::Database("Database connection failed".to_string()));
+            return Err(TradingError::Database(
+                "Database connection failed".to_string(),
+            ));
         }
         Ok(())
     }
 
-    async fn create_user_balance(&self, _user_id: u64, _available: u64, _locked: u64) -> lib_core::repository::repository::Result<()> {
+    async fn create_user_balance(
+        &self,
+        _user_id: u64,
+        _available: u64,
+        _locked: u64,
+    ) -> lib_core::repository::repository::Result<()> {
         if self.should_error("create_user_balance") {
-            return Err(TradingError::Database("Database connection failed".to_string()));
+            return Err(TradingError::Database(
+                "Database connection failed".to_string(),
+            ));
         }
         Ok(())
     }
 
-    async fn get_open_orders(&self, _user_id: u64) -> lib_core::repository::repository::Result<Vec<OrderModel>> {
+    async fn get_open_orders(
+        &self,
+        _user_id: u64,
+    ) -> lib_core::repository::repository::Result<Vec<OrderModel>> {
         if self.should_error("get_open_orders") {
-            return Err(TradingError::Database("Database connection failed".to_string()));
+            return Err(TradingError::Database(
+                "Database connection failed".to_string(),
+            ));
         }
         Ok(vec![])
     }
 
-    async fn get_open_orders_paginated(&self, _user_id: u64, _offset: u64, _limit: u64) -> lib_core::repository::repository::Result<Vec<OrderModel>> {
+    async fn get_open_orders_paginated(
+        &self,
+        _user_id: u64,
+        _offset: u64,
+        _limit: u64,
+    ) -> lib_core::repository::repository::Result<Vec<OrderModel>> {
         if self.should_error("get_open_orders_paginated") {
-            return Err(TradingError::Database("Database connection failed".to_string()));
+            return Err(TradingError::Database(
+                "Database connection failed".to_string(),
+            ));
         }
         Ok(vec![])
     }
 
-    async fn count_open_orders(&self, _user_id: u64) -> lib_core::repository::repository::Result<u64> {
+    async fn count_open_orders(
+        &self,
+        _user_id: u64,
+    ) -> lib_core::repository::repository::Result<u64> {
         if self.should_error("count_open_orders") {
-            return Err(TradingError::Database("Database connection failed".to_string()));
+            return Err(TradingError::Database(
+                "Database connection failed".to_string(),
+            ));
         }
         Ok(0)
     }
 
-    async fn get_order_by_id(&self, _order_id: u64, _user_id: u64) -> lib_core::repository::repository::Result<Option<OrderModel>> {
+    async fn get_order_by_id(
+        &self,
+        _order_id: u64,
+        _user_id: u64,
+    ) -> lib_core::repository::repository::Result<Option<OrderModel>> {
         if self.should_error("get_order_by_id") {
-            return Err(TradingError::Database("Database connection failed".to_string()));
+            return Err(TradingError::Database(
+                "Database connection failed".to_string(),
+            ));
         }
         Ok(None)
     }
 
-    async fn create_order(&self, _order: OrderModel) -> lib_core::repository::repository::Result<u64> {
+    async fn create_order(
+        &self,
+        _order: OrderModel,
+    ) -> lib_core::repository::repository::Result<u64> {
         if self.should_error("create_order") {
-            return Err(TradingError::Database("Database connection failed".to_string()));
+            return Err(TradingError::Database(
+                "Database connection failed".to_string(),
+            ));
         }
         Ok(0)
     }
 
-    async fn count_user_orders(&self, _user_id: u64) -> lib_core::repository::repository::Result<u64> {
+    async fn count_user_orders(
+        &self,
+        _user_id: u64,
+    ) -> lib_core::repository::repository::Result<u64> {
         if self.should_error("count_user_orders") {
-            return Err(TradingError::Database("Database connection failed".to_string()));
+            return Err(TradingError::Database(
+                "Database connection failed".to_string(),
+            ));
         }
         Ok(0)
     }
 
-    async fn get_order_history(&self, _user_id: u64) -> lib_core::repository::repository::Result<Vec<OrderModel>> {
+    async fn get_order_history(
+        &self,
+        _user_id: u64,
+    ) -> lib_core::repository::repository::Result<Vec<OrderModel>> {
         if self.should_error("get_order_history") {
-            return Err(TradingError::Database("Database connection failed".to_string()));
+            return Err(TradingError::Database(
+                "Database connection failed".to_string(),
+            ));
         }
         Ok(vec![])
     }
 
-    async fn get_order_history_paginated(&self, _user_id: u64, _offset: u64, _limit: u64) -> lib_core::repository::repository::Result<Vec<OrderModel>> {
+    async fn get_order_history_paginated(
+        &self,
+        _user_id: u64,
+        _offset: u64,
+        _limit: u64,
+    ) -> lib_core::repository::repository::Result<Vec<OrderModel>> {
         if self.should_error("get_order_history_paginated") {
-            return Err(TradingError::Database("Database connection failed".to_string()));
+            return Err(TradingError::Database(
+                "Database connection failed".to_string(),
+            ));
         }
         Ok(vec![])
     }
 
-    async fn count_order_history(&self, _user_id: u64) -> lib_core::repository::repository::Result<u64> {
+    async fn count_order_history(
+        &self,
+        _user_id: u64,
+    ) -> lib_core::repository::repository::Result<u64> {
         if self.should_error("count_order_history") {
-            return Err(TradingError::Database("Database connection failed".to_string()));
+            return Err(TradingError::Database(
+                "Database connection failed".to_string(),
+            ));
         }
         Ok(0)
     }
 
-    async fn get_user_favorite_markets(&self, _user_id: u64) -> lib_core::repository::repository::Result<Vec<UserFavoriteMarketModel>> {
+    async fn get_user_favorite_markets(
+        &self,
+        _user_id: u64,
+    ) -> lib_core::repository::repository::Result<Vec<UserFavoriteMarketModel>> {
         if self.should_error("get_user_favorite_markets") {
-            return Err(TradingError::Database("Database connection failed".to_string()));
+            return Err(TradingError::Database(
+                "Database connection failed".to_string(),
+            ));
         }
         Ok(vec![])
     }
 
-    async fn add_favorite_market(&self, _user_id: u64, _market_id: u32) -> lib_core::repository::repository::Result<()> {
+    async fn add_favorite_market(
+        &self,
+        _user_id: u64,
+        _market_id: u32,
+    ) -> lib_core::repository::repository::Result<()> {
         if self.should_error("add_favorite_market") {
-            return Err(TradingError::Database("Database connection failed".to_string()));
+            return Err(TradingError::Database(
+                "Database connection failed".to_string(),
+            ));
         }
         Ok(())
     }
 
-    async fn remove_favorite_market(&self, _user_id: u64, _market_id: u32) -> lib_core::repository::repository::Result<()> {
+    async fn remove_favorite_market(
+        &self,
+        _user_id: u64,
+        _market_id: u32,
+    ) -> lib_core::repository::repository::Result<()> {
         if self.should_error("remove_favorite_market") {
-            return Err(TradingError::Database("Database connection failed".to_string()));
+            return Err(TradingError::Database(
+                "Database connection failed".to_string(),
+            ));
         }
         Ok(())
     }
 
-    async fn is_market_favorited(&self, _user_id: u64, _market_id: u32) -> lib_core::repository::repository::Result<bool> {
+    async fn is_market_favorited(
+        &self,
+        _user_id: u64,
+        _market_id: u32,
+    ) -> lib_core::repository::repository::Result<bool> {
         if self.should_error("is_market_favorited") {
-            return Err(TradingError::Database("Database connection failed".to_string()));
+            return Err(TradingError::Database(
+                "Database connection failed".to_string(),
+            ));
         }
         Ok(false)
     }
@@ -437,36 +551,39 @@ mod tests {
         cleanup_test_data(&db, user_id).await;
 
         // Insert test balances
-        insert_test_balance(&db, user_id, 1, 1000000, 50000).await.unwrap(); // USD
-        insert_test_balance(&db, user_id, 2, 5000000, 100000).await.unwrap(); // BTC
+        insert_test_balance(&db, user_id, 1, 1000000, 50000)
+            .await
+            .unwrap(); // USD
+        insert_test_balance(&db, user_id, 2, 5000000, 100000)
+            .await
+            .unwrap(); // BTC
 
         // Setup stores
         let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
-        let balance_store = Arc::new(
-            UserBalanceStore::with_repository(
-                UserBalanceCacheConfig::default(),
-                trading_repo.clone(),
-            ),
-        );
+        let balance_store = Arc::new(UserBalanceStore::with_repository(
+            UserBalanceCacheConfig::default(),
+            trading_repo.clone(),
+        ));
 
         let authenticated_user = create_authenticated_user_id(user);
 
         // Call handler
-        let result = get_balances(
-            authenticated_user,
-            web::Data::new(balance_store.clone()),
-        )
-        .await;
+        let result = get_balances(authenticated_user, web::Data::new(balance_store.clone())).await;
 
         match result {
             Ok(response) => {
                 let status = response.status();
                 let body = response.into_body();
                 let bytes = actix_web::body::to_bytes(body).await.unwrap();
-                
+
                 if status != 200 {
-                    let error_response: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
-                    panic!("Handler returned status {}: {}", status, serde_json::to_string_pretty(&error_response).unwrap_or_default());
+                    let error_response: serde_json::Value =
+                        serde_json::from_slice(&bytes).unwrap_or_default();
+                    panic!(
+                        "Handler returned status {}: {}",
+                        status,
+                        serde_json::to_string_pretty(&error_response).unwrap_or_default()
+                    );
                 }
 
                 // Parse response
@@ -494,20 +611,14 @@ mod tests {
         cleanup_test_data(&db, user_id).await;
 
         let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
-        let balance_store = Arc::new(
-            UserBalanceStore::with_repository(
-                UserBalanceCacheConfig::default(),
-                trading_repo.clone(),
-            ),
-        );
+        let balance_store = Arc::new(UserBalanceStore::with_repository(
+            UserBalanceCacheConfig::default(),
+            trading_repo.clone(),
+        ));
 
         let authenticated_user = create_authenticated_user_id(user);
 
-        let result = get_balances(
-            authenticated_user,
-            web::Data::new(balance_store.clone()),
-        )
-        .await;
+        let result = get_balances(authenticated_user, web::Data::new(balance_store.clone())).await;
 
         match result {
             Ok(response) => {
@@ -539,17 +650,21 @@ mod tests {
         cleanup_test_data(&db, user_id).await;
 
         // Insert test orders - mix of open and filled
-        insert_test_order(&db, 1001, user_id, 65538, 5000000, 100, "Bid", "Placed").await.unwrap();
-        insert_test_order(&db, 1002, user_id, 65538, 5100000, 200, "Ask", "Pending").await.unwrap();
-        insert_test_order(&db, 1003, user_id, 65539, 3000000, 150, "Bid", "Filled").await.unwrap(); // Should not appear
+        insert_test_order(&db, 1001, user_id, 65538, 5000000, 100, "Bid", "Placed")
+            .await
+            .unwrap();
+        insert_test_order(&db, 1002, user_id, 65538, 5100000, 200, "Ask", "Pending")
+            .await
+            .unwrap();
+        insert_test_order(&db, 1003, user_id, 65539, 3000000, 150, "Bid", "Filled")
+            .await
+            .unwrap(); // Should not appear
 
         let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
-        let order_store = Arc::new(
-            OrderStore::with_repository(
-                OrderCacheConfig::default(),
-                trading_repo.clone(),
-            ),
-        );
+        let order_store = Arc::new(OrderStore::with_repository(
+            OrderCacheConfig::default(),
+            trading_repo.clone(),
+        ));
 
         let authenticated_user = create_authenticated_user_id(user);
         let query = web::Query(OrdersQuery {
@@ -613,12 +728,10 @@ mod tests {
         }
 
         let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
-        let order_store = Arc::new(
-            OrderStore::with_repository(
-                OrderCacheConfig::default(),
-                trading_repo.clone(),
-            ),
-        );
+        let order_store = Arc::new(OrderStore::with_repository(
+            OrderCacheConfig::default(),
+            trading_repo.clone(),
+        ));
 
         let authenticated_user = create_authenticated_user_id(user);
         let query = web::Query(OrdersQuery {
@@ -666,22 +779,43 @@ mod tests {
         cleanup_test_data(&db, user_id).await;
 
         // Insert test orders with all open statuses and some terminal statuses
-        insert_test_order(&db, 4001, user_id, 65538, 5000000, 100, "Bid", "Placed").await.unwrap();
-        insert_test_order(&db, 4002, user_id, 65538, 5100000, 200, "Ask", "Pending").await.unwrap();
-        insert_test_order(&db, 4003, user_id, 65538, 5200000, 150, "Bid", "PartiallyFilled").await.unwrap();
-        insert_test_order(&db, 4004, user_id, 65539, 3000000, 200, "Ask", "Processing").await.unwrap();
+        insert_test_order(&db, 4001, user_id, 65538, 5000000, 100, "Bid", "Placed")
+            .await
+            .unwrap();
+        insert_test_order(&db, 4002, user_id, 65538, 5100000, 200, "Ask", "Pending")
+            .await
+            .unwrap();
+        insert_test_order(
+            &db,
+            4003,
+            user_id,
+            65538,
+            5200000,
+            150,
+            "Bid",
+            "PartiallyFilled",
+        )
+        .await
+        .unwrap();
+        insert_test_order(&db, 4004, user_id, 65539, 3000000, 200, "Ask", "Processing")
+            .await
+            .unwrap();
         // Terminal statuses - should not appear in open orders
-        insert_test_order(&db, 4005, user_id, 65538, 5300000, 250, "Bid", "Filled").await.unwrap();
-        insert_test_order(&db, 4006, user_id, 65538, 5400000, 300, "Ask", "Cancelled").await.unwrap();
-        insert_test_order(&db, 4007, user_id, 65539, 3500000, 100, "Bid", "Rejected").await.unwrap();
+        insert_test_order(&db, 4005, user_id, 65538, 5300000, 250, "Bid", "Filled")
+            .await
+            .unwrap();
+        insert_test_order(&db, 4006, user_id, 65538, 5400000, 300, "Ask", "Cancelled")
+            .await
+            .unwrap();
+        insert_test_order(&db, 4007, user_id, 65539, 3500000, 100, "Bid", "Rejected")
+            .await
+            .unwrap();
 
         let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
-        let order_store = Arc::new(
-            OrderStore::with_repository(
-                OrderCacheConfig::default(),
-                trading_repo.clone(),
-            ),
-        );
+        let order_store = Arc::new(OrderStore::with_repository(
+            OrderCacheConfig::default(),
+            trading_repo.clone(),
+        ));
 
         let authenticated_user = create_authenticated_user_id(user);
         let query = web::Query(OrdersQuery {
@@ -717,13 +851,21 @@ mod tests {
                     .iter()
                     .map(|o| o["status"].as_str().unwrap().to_string())
                     .collect();
-                
+
                 // Check that all open statuses are present
                 assert!(statuses.iter().any(|s| s.eq_ignore_ascii_case("Placed")));
                 assert!(statuses.iter().any(|s| s.eq_ignore_ascii_case("Pending")));
-                assert!(statuses.iter().any(|s| s.eq_ignore_ascii_case("PartiallyFilled")));
-                assert!(statuses.iter().any(|s| s.eq_ignore_ascii_case("Processing")));
-                
+                assert!(
+                    statuses
+                        .iter()
+                        .any(|s| s.eq_ignore_ascii_case("PartiallyFilled"))
+                );
+                assert!(
+                    statuses
+                        .iter()
+                        .any(|s| s.eq_ignore_ascii_case("Processing"))
+                );
+
                 // Verify terminal statuses are NOT present
                 assert!(!statuses.iter().any(|s| s.eq_ignore_ascii_case("Filled")));
                 assert!(!statuses.iter().any(|s| s.eq_ignore_ascii_case("Cancelled")));
@@ -746,18 +888,33 @@ mod tests {
         cleanup_test_data(&db, user_id).await;
 
         // Insert test orders - mix of history and open
-        insert_test_order(&db, 3001, user_id, 65538, 5000000, 100, "Bid", "Filled").await.unwrap();
-        insert_test_order(&db, 3002, user_id, 65538, 5100000, 200, "Ask", "Cancelled").await.unwrap();
-        insert_test_order(&db, 3003, user_id, 65539, 3000000, 150, "Bid", "PartiallyFilled").await.unwrap();
-        insert_test_order(&db, 3004, user_id, 65538, 5200000, 250, "Ask", "Placed").await.unwrap(); // Should not appear
+        insert_test_order(&db, 3001, user_id, 65538, 5000000, 100, "Bid", "Filled")
+            .await
+            .unwrap();
+        insert_test_order(&db, 3002, user_id, 65538, 5100000, 200, "Ask", "Cancelled")
+            .await
+            .unwrap();
+        insert_test_order(
+            &db,
+            3003,
+            user_id,
+            65539,
+            3000000,
+            150,
+            "Bid",
+            "PartiallyFilled",
+        )
+        .await
+        .unwrap();
+        insert_test_order(&db, 3004, user_id, 65538, 5200000, 250, "Ask", "Placed")
+            .await
+            .unwrap(); // Should not appear
 
         let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
-        let order_store = Arc::new(
-            OrderStore::with_repository(
-                OrderCacheConfig::default(),
-                trading_repo.clone(),
-            ),
-        );
+        let order_store = Arc::new(OrderStore::with_repository(
+            OrderCacheConfig::default(),
+            trading_repo.clone(),
+        ));
 
         let authenticated_user = create_authenticated_user_id(user);
         let query = web::Query(OrdersQuery {
@@ -806,20 +963,37 @@ mod tests {
         // Insert test orders - terminal statuses
         // Note: Repository currently only includes Filled, Cancelled, and PartiallyFilled
         // Rejected is a terminal state but is NOT currently included in history (may be a bug)
-        insert_test_order(&db, 5001, user_id, 65538, 5000000, 100, "Bid", "Filled").await.unwrap();
-        insert_test_order(&db, 5002, user_id, 65538, 5100000, 200, "Ask", "Cancelled").await.unwrap();
-        insert_test_order(&db, 5003, user_id, 65539, 3000000, 150, "Bid", "PartiallyFilled").await.unwrap();
-        insert_test_order(&db, 5004, user_id, 65538, 5200000, 250, "Ask", "Rejected").await.unwrap();
+        insert_test_order(&db, 5001, user_id, 65538, 5000000, 100, "Bid", "Filled")
+            .await
+            .unwrap();
+        insert_test_order(&db, 5002, user_id, 65538, 5100000, 200, "Ask", "Cancelled")
+            .await
+            .unwrap();
+        insert_test_order(
+            &db,
+            5003,
+            user_id,
+            65539,
+            3000000,
+            150,
+            "Bid",
+            "PartiallyFilled",
+        )
+        .await
+        .unwrap();
+        insert_test_order(&db, 5004, user_id, 65538, 5200000, 250, "Ask", "Rejected")
+            .await
+            .unwrap();
         // Open status - should not appear in history
-        insert_test_order(&db, 5005, user_id, 65538, 5300000, 300, "Bid", "Placed").await.unwrap();
+        insert_test_order(&db, 5005, user_id, 65538, 5300000, 300, "Bid", "Placed")
+            .await
+            .unwrap();
 
         let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
-        let order_store = Arc::new(
-            OrderStore::with_repository(
-                OrderCacheConfig::default(),
-                trading_repo.clone(),
-            ),
-        );
+        let order_store = Arc::new(OrderStore::with_repository(
+            OrderCacheConfig::default(),
+            trading_repo.clone(),
+        ));
 
         let authenticated_user = create_authenticated_user_id(user);
         let query = web::Query(OrdersQuery {
@@ -856,19 +1030,27 @@ mod tests {
                     .iter()
                     .map(|o| o["status"].as_str().unwrap().to_string())
                     .collect();
-                
+
                 // Check that included terminal statuses are present
                 assert!(statuses.iter().any(|s| s.eq_ignore_ascii_case("Filled")));
                 assert!(statuses.iter().any(|s| s.eq_ignore_ascii_case("Cancelled")));
-                assert!(statuses.iter().any(|s| s.eq_ignore_ascii_case("PartiallyFilled")));
-                
+                assert!(
+                    statuses
+                        .iter()
+                        .any(|s| s.eq_ignore_ascii_case("PartiallyFilled"))
+                );
+
                 // Verify Rejected is NOT present (current repository implementation excludes it)
                 assert!(!statuses.iter().any(|s| s.eq_ignore_ascii_case("Rejected")));
-                
+
                 // Verify open statuses are NOT present
                 assert!(!statuses.iter().any(|s| s.eq_ignore_ascii_case("Placed")));
                 assert!(!statuses.iter().any(|s| s.eq_ignore_ascii_case("Pending")));
-                assert!(!statuses.iter().any(|s| s.eq_ignore_ascii_case("Processing")));
+                assert!(
+                    !statuses
+                        .iter()
+                        .any(|s| s.eq_ignore_ascii_case("Processing"))
+                );
             }
             Err(e) => {
                 panic!("Handler returned error: {}", e);
@@ -1084,19 +1266,14 @@ mod tests {
         let authenticated_user = create_authenticated_user_id(user);
 
         // Create mock repository that returns error
-        let mock_repo = Arc::new(ErrorMockTradingRepository::new().with_error_on("get_user_balances"));
-        let balance_store = Arc::new(
-            UserBalanceStore::with_repository(
-                UserBalanceCacheConfig::default(),
-                mock_repo.clone(),
-            ),
-        );
+        let mock_repo =
+            Arc::new(ErrorMockTradingRepository::new().with_error_on("get_user_balances"));
+        let balance_store = Arc::new(UserBalanceStore::with_repository(
+            UserBalanceCacheConfig::default(),
+            mock_repo.clone(),
+        ));
 
-        let result = get_balances(
-            authenticated_user,
-            web::Data::new(balance_store.clone()),
-        )
-        .await;
+        let result = get_balances(authenticated_user, web::Data::new(balance_store.clone())).await;
 
         match result {
             Ok(response) => {
@@ -1108,10 +1285,18 @@ mod tests {
 
                 assert_eq!(error_response["error"], "failed to retrieve balances");
                 assert!(error_response["message"].is_string());
-                assert!(error_response["message"].as_str().unwrap().contains("Database connection failed"));
+                assert!(
+                    error_response["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Database connection failed")
+                );
             }
             Err(e) => {
-                panic!("Handler should return Ok(HttpResponse) even on error, got: {}", e);
+                panic!(
+                    "Handler should return Ok(HttpResponse) even on error, got: {}",
+                    e
+                );
             }
         }
     }
@@ -1122,13 +1307,12 @@ mod tests {
         let authenticated_user = create_authenticated_user_id(user);
 
         // Create mock repository that returns error on count_open_orders
-        let mock_repo = Arc::new(ErrorMockTradingRepository::new().with_error_on("count_open_orders"));
-        let order_store = Arc::new(
-            OrderStore::with_repository(
-                OrderCacheConfig::default(),
-                mock_repo.clone(),
-            ),
-        );
+        let mock_repo =
+            Arc::new(ErrorMockTradingRepository::new().with_error_on("count_open_orders"));
+        let order_store = Arc::new(OrderStore::with_repository(
+            OrderCacheConfig::default(),
+            mock_repo.clone(),
+        ));
 
         let query = web::Query(OrdersQuery {
             page: Some(1),
@@ -1153,10 +1337,18 @@ mod tests {
 
                 assert_eq!(error_response["error"], "failed to retrieve open orders");
                 assert!(error_response["message"].is_string());
-                assert!(error_response["message"].as_str().unwrap().contains("Database connection failed"));
+                assert!(
+                    error_response["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Database connection failed")
+                );
             }
             Err(e) => {
-                panic!("Handler should return Ok(HttpResponse) even on error, got: {}", e);
+                panic!(
+                    "Handler should return Ok(HttpResponse) even on error, got: {}",
+                    e
+                );
             }
         }
     }
@@ -1167,13 +1359,12 @@ mod tests {
         let authenticated_user = create_authenticated_user_id(user);
 
         // Create mock repository that returns error on get_open_orders_paginated
-        let mock_repo = Arc::new(ErrorMockTradingRepository::new().with_error_on("get_open_orders_paginated"));
-        let order_store = Arc::new(
-            OrderStore::with_repository(
-                OrderCacheConfig::default(),
-                mock_repo.clone(),
-            ),
-        );
+        let mock_repo =
+            Arc::new(ErrorMockTradingRepository::new().with_error_on("get_open_orders_paginated"));
+        let order_store = Arc::new(OrderStore::with_repository(
+            OrderCacheConfig::default(),
+            mock_repo.clone(),
+        ));
 
         let query = web::Query(OrdersQuery {
             page: Some(1),
@@ -1200,7 +1391,10 @@ mod tests {
                 assert!(error_response["message"].is_string());
             }
             Err(e) => {
-                panic!("Handler should return Ok(HttpResponse) even on error, got: {}", e);
+                panic!(
+                    "Handler should return Ok(HttpResponse) even on error, got: {}",
+                    e
+                );
             }
         }
     }
@@ -1211,13 +1405,12 @@ mod tests {
         let authenticated_user = create_authenticated_user_id(user);
 
         // Create mock repository that returns error on count_order_history
-        let mock_repo = Arc::new(ErrorMockTradingRepository::new().with_error_on("count_order_history"));
-        let order_store = Arc::new(
-            OrderStore::with_repository(
-                OrderCacheConfig::default(),
-                mock_repo.clone(),
-            ),
-        );
+        let mock_repo =
+            Arc::new(ErrorMockTradingRepository::new().with_error_on("count_order_history"));
+        let order_store = Arc::new(OrderStore::with_repository(
+            OrderCacheConfig::default(),
+            mock_repo.clone(),
+        ));
 
         let query = web::Query(OrdersQuery {
             page: Some(1),
@@ -1242,10 +1435,18 @@ mod tests {
 
                 assert_eq!(error_response["error"], "failed to retrieve order history");
                 assert!(error_response["message"].is_string());
-                assert!(error_response["message"].as_str().unwrap().contains("Database connection failed"));
+                assert!(
+                    error_response["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Database connection failed")
+                );
             }
             Err(e) => {
-                panic!("Handler should return Ok(HttpResponse) even on error, got: {}", e);
+                panic!(
+                    "Handler should return Ok(HttpResponse) even on error, got: {}",
+                    e
+                );
             }
         }
     }
@@ -1256,13 +1457,13 @@ mod tests {
         let authenticated_user = create_authenticated_user_id(user);
 
         // Create mock repository that returns error on get_order_history_paginated
-        let mock_repo = Arc::new(ErrorMockTradingRepository::new().with_error_on("get_order_history_paginated"));
-        let order_store = Arc::new(
-            OrderStore::with_repository(
-                OrderCacheConfig::default(),
-                mock_repo.clone(),
-            ),
+        let mock_repo = Arc::new(
+            ErrorMockTradingRepository::new().with_error_on("get_order_history_paginated"),
         );
+        let order_store = Arc::new(OrderStore::with_repository(
+            OrderCacheConfig::default(),
+            mock_repo.clone(),
+        ));
 
         let query = web::Query(OrdersQuery {
             page: Some(1),
@@ -1289,7 +1490,10 @@ mod tests {
                 assert!(error_response["message"].is_string());
             }
             Err(e) => {
-                panic!("Handler should return Ok(HttpResponse) even on error, got: {}", e);
+                panic!(
+                    "Handler should return Ok(HttpResponse) even on error, got: {}",
+                    e
+                );
             }
         }
     }
@@ -1300,7 +1504,8 @@ mod tests {
         let authenticated_user = create_authenticated_user_id(user);
 
         // Create mock repository that returns error
-        let mock_repo = Arc::new(ErrorMockTradingRepository::new().with_error_on("get_user_favorite_markets"));
+        let mock_repo =
+            Arc::new(ErrorMockTradingRepository::new().with_error_on("get_user_favorite_markets"));
 
         let result = get_favorite_markets(
             authenticated_user,
@@ -1316,12 +1521,23 @@ mod tests {
                 let bytes = actix_web::body::to_bytes(body).await.unwrap();
                 let error_response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
-                assert_eq!(error_response["error"], "failed to retrieve favorite markets");
+                assert_eq!(
+                    error_response["error"],
+                    "failed to retrieve favorite markets"
+                );
                 assert!(error_response["message"].is_string());
-                assert!(error_response["message"].as_str().unwrap().contains("Database connection failed"));
+                assert!(
+                    error_response["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Database connection failed")
+                );
             }
             Err(e) => {
-                panic!("Handler should return Ok(HttpResponse) even on error, got: {}", e);
+                panic!(
+                    "Handler should return Ok(HttpResponse) even on error, got: {}",
+                    e
+                );
             }
         }
     }
@@ -1332,7 +1548,8 @@ mod tests {
         let authenticated_user = create_authenticated_user_id(user);
 
         // Create mock repository that returns error on is_market_favorited
-        let mock_repo = Arc::new(ErrorMockTradingRepository::new().with_error_on("is_market_favorited"));
+        let mock_repo =
+            Arc::new(ErrorMockTradingRepository::new().with_error_on("is_market_favorited"));
 
         let request = web::Json(ToggleFavoriteMarketRequest { market_id: 65538 });
 
@@ -1353,10 +1570,18 @@ mod tests {
 
                 assert_eq!(error_response["error"], "failed to toggle favorite market");
                 assert!(error_response["message"].is_string());
-                assert!(error_response["message"].as_str().unwrap().contains("Database connection failed"));
+                assert!(
+                    error_response["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Database connection failed")
+                );
             }
             Err(e) => {
-                panic!("Handler should return Ok(HttpResponse) even on error, got: {}", e);
+                panic!(
+                    "Handler should return Ok(HttpResponse) even on error, got: {}",
+                    e
+                );
             }
         }
     }
@@ -1368,7 +1593,8 @@ mod tests {
 
         // Create mock repository that returns error on add_favorite_market
         // First check succeeds (returns false), then add fails
-        let mock_repo = Arc::new(ErrorMockTradingRepository::new().with_error_on("add_favorite_market"));
+        let mock_repo =
+            Arc::new(ErrorMockTradingRepository::new().with_error_on("add_favorite_market"));
 
         let request = web::Json(ToggleFavoriteMarketRequest { market_id: 65538 });
 
@@ -1389,10 +1615,18 @@ mod tests {
 
                 assert_eq!(error_response["error"], "failed to add favorite market");
                 assert!(error_response["message"].is_string());
-                assert!(error_response["message"].as_str().unwrap().contains("Database connection failed"));
+                assert!(
+                    error_response["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Database connection failed")
+                );
             }
             Err(e) => {
-                panic!("Handler should return Ok(HttpResponse) even on error, got: {}", e);
+                panic!(
+                    "Handler should return Ok(HttpResponse) even on error, got: {}",
+                    e
+                );
             }
         }
     }
@@ -1408,4 +1642,3 @@ mod tests {
         global_cleanup().await;
     }
 }
-

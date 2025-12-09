@@ -3,8 +3,8 @@
 use actix_web::{HttpResponse, web};
 use common::{OrderCommand, OrderCommandType, Side, Status, TimeInForce, UserBalance};
 use lib_core::{
-    CorrelationService, Publisher, ResponseError, TradingRepository, generate_client_order_id, wait_for_response,
-    model::orders::Model as OrderModel,
+    CorrelationService, Publisher, ResponseError, TradingRepository, generate_client_order_id,
+    model::orders::Model as OrderModel, wait_for_response,
 };
 use lib_utils::AuthenticatedUserId;
 use rust_decimal::Decimal;
@@ -298,10 +298,16 @@ pub async fn place_order(
             // This ensures FOK orders that are cancelled appear in order history
             if response.order_id != 0 && matches!(response.status, Status::Cancelled) {
                 // Check if order already exists (might have been stored via Kafka)
-                match trading_repo.get_order_by_id(response.order_id, user_id).await {
+                match trading_repo
+                    .get_order_by_id(response.order_id, user_id)
+                    .await
+                {
                     Ok(Some(_)) => {
                         // Order already exists, skip insertion
-                        debug!("Order {} already exists in database, skipping insertion", response.order_id);
+                        debug!(
+                            "Order {} already exists in database, skipping insertion",
+                            response.order_id
+                        );
                     }
                     Ok(None) => {
                         // Order doesn't exist, create it

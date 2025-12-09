@@ -150,7 +150,7 @@ pub struct ToggleFavoriteMarketRequest {
 
 // Conversion implementations
 impl From<OrderModel> for OrderResponse {
-    fn from(model: OrderModel) -> Self {       
+    fn from(model: OrderModel) -> Self {
         let remaining_size = model.order_size - model.filled_size;
         Self {
             order_id: model.order_order_id,
@@ -235,4 +235,3 @@ impl PortfolioMetricsResponse {
         }
     }
 }
-
