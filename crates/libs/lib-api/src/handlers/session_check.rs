@@ -1,6 +1,7 @@
 //! lib-api/src/handlers/session_check.rs
 
 use actix_web::HttpResponse;
+use serde_json;
 
 /// Returns a 200 OK response if authentication is successful.
 ///
