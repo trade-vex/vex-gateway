@@ -40,8 +40,8 @@ jobs:
       CI: true
       SERVER_HOST: ${{ secrets.SERVER_HOST || '127.0.0.1' }}
       SERVER_PORT: ${{ secrets.SERVER_PORT || '8000' }}
-      DATABASE_URL: postgres://myuser:mypassword@postgres:5432/mydb
-      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgres://myuser:mypassword@localhost:5432/mydb
+      REDIS_URL: redis://localhost:6379
       JWT_PRIVATE_KEY_PATH: crates/libs/lib-auth/src/keys/private_key.pem
       JWT_PUBLIC_KEY_PATH: crates/libs/lib-auth/src/keys/public_key.pem
     steps:
@@ -147,8 +147,8 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libbsd-dev libssl-dev pkg-config build-essential cmake
+          apt-get update
+          apt-get install -y libbsd-dev libssl-dev pkg-config build-essential cmake
 
       - name: Generate test keys
         run: |
