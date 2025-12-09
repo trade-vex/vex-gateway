@@ -339,11 +339,11 @@ impl TradingRepository for PostgresTradingRepository {
         };
 
         let result = active_model.insert(&*self.db).await?;
-        Ok(result
+        result
             .order_order_id
             .to_string()
             .parse::<u64>()
-            .unwrap_or(0))
+            .map_err(|e| TradingError::Database(format!("Failed to parse order_order_id: {}", e)))
     }
 
     async fn count_user_orders(&self, user_id: u64) -> Result<u64> {
