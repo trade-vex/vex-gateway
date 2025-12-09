@@ -849,10 +849,13 @@ impl OAuthService {
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false)
                     }) {
-                        if let Some(email_str) = primary_email.get("email").and_then(|v| v.as_str()) {
+                        if let Some(email_str) = primary_email.get("email").and_then(|v| v.as_str())
+                        {
                             user_info["email"] = serde_json::Value::String(email_str.to_string());
                         }
-                        if let Some(verified) = primary_email.get("verified").and_then(|v| v.as_bool()) {
+                        if let Some(verified) =
+                            primary_email.get("verified").and_then(|v| v.as_bool())
+                        {
                             user_info["email_verified"] = serde_json::Value::Bool(verified);
                         }
                     }
@@ -864,14 +867,14 @@ impl OAuthService {
                         .map(|id| id.to_string())
                         .or_else(|| user_info["login"].as_str().map(|s| s.to_string()))
                         .unwrap_or_else(|| "unknown".to_string());
-                    
+
                     tracing::error!(
                         provider = "github",
                         user_id = %user_id,
                         error = %e,
                         "Failed to fetch GitHub email addresses"
                     );
-                    
+
                     // Return the error with additional context
                     return Err(AuthError::UserInfoFetchFailed(format!(
                         "Failed to fetch GitHub email addresses for user {}: {}",
@@ -1049,13 +1052,11 @@ impl OAuthService {
         let user_data = &data["data"];
 
         // Extract and validate email
-        let email = user_data["email"]
-            .as_str()
-            .ok_or_else(|| {
-                AuthError::UserInfoFetchFailed(
-                    "Twitter email not provided; request email scope".to_string(),
-                )
-            })?;
+        let email = user_data["email"].as_str().ok_or_else(|| {
+            AuthError::UserInfoFetchFailed(
+                "Twitter email not provided; request email scope".to_string(),
+            )
+        })?;
 
         if email.is_empty() {
             return Err(AuthError::UserInfoFetchFailed(
