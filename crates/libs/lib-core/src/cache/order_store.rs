@@ -372,7 +372,7 @@ impl OrderStore {
             if let Some(cache) = &self.cache {
                 let set_key = format!("user:{}:orders", user_id);
 
-                println!("🔍 OrderStore: Querying Redis SET: {}", set_key);
+                debug!("OrderStore: Querying Redis SET: {}", set_key);
 
                 match cache.smembers_string(&set_key).await {
                     Ok(order_ids) if !order_ids.is_empty() => {
@@ -381,8 +381,8 @@ impl OrderStore {
                             user_id,
                             order_ids.len()
                         );
-                        println!(
-                            "   Found {} order IDs in SET: {:?}",
+                        debug!(
+                            "Found {} order IDs in SET: {:?}",
                             order_ids.len(),
                             order_ids
                         );
@@ -425,14 +425,14 @@ impl OrderStore {
                             }
                         }
 
-                        println!("   Returning {} orders after filtering", orders.len());
+                        debug!("Returning {} orders after filtering", orders.len());
 
                         if !orders.is_empty() {
                             return Ok(orders);
                         }
 
                         // If all orders were filtered out (all cancelled), return empty vec
-                        println!("   All orders were cancelled - returning empty list");
+                        debug!("All orders were cancelled - returning empty list");
                         return Ok(vec![]);
                     }
                     Ok(_) => {
