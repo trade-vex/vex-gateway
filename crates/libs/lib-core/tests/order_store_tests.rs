@@ -363,11 +363,12 @@ async fn test_get_user_order_history() {
     let mock_repo = Arc::new(MockTradingRepository::new().with_orders(orders));
     let store = OrderStore::with_repository(config, mock_repo);
 
-    // History should include all orders
+    // History should only include terminal orders: Filled, Cancelled, PartiallyFilled
+    // Pending orders are excluded from history (they're in open orders)
     let result = store.get_user_order_history(100).await;
     assert!(result.is_ok());
     let history = result.unwrap();
-    assert_eq!(history.len(), 3);
+    assert_eq!(history.len(), 2); // Only Filled and Cancelled, not Pending
 }
 
 #[tokio::test]

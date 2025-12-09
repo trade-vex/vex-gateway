@@ -370,6 +370,7 @@ fn spawn_test_server(
 // ==================== STRESS TEST ====================
 
 #[tokio::test]
+#[ignore] // Requires vex-core, database, and redis - skip in CI
 async fn test_high_frequency_stress_test() {
     println!("\n╔═══════════════════════════════════════════════════════════════╗");
     println!("║  HIGH-FREQUENCY STRESS TEST - 10 Users, 200+ Orders          ║");

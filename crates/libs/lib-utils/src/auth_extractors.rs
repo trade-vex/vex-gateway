@@ -151,21 +151,14 @@ pub fn extract_user_id_from_request(
 pub fn extract_user_id_from_query(req: &HttpRequest) -> Result<Uuid, ActixError> {
     let query =
         web::Query::<std::collections::HashMap<String, String>>::from_query(req.query_string())
-            .map_err(|_| {
-                actix_web::error::ErrorBadRequest(
-                    "Invalid query parameters",
-                )
-            })?;
+            .map_err(|_| actix_web::error::ErrorBadRequest("Invalid query parameters"))?;
 
-    let user_id_str = query.get("user_id").ok_or_else(|| {
-        actix_web::error::ErrorBadRequest(
-            "user_id query parameter required",
-        )
-    })?;
+    let user_id_str = query
+        .get("user_id")
+        .ok_or_else(|| actix_web::error::ErrorBadRequest("user_id query parameter required"))?;
 
-    let user_id = Uuid::parse_str(user_id_str).map_err(|_| {
-        actix_web::error::ErrorBadRequest("Invalid user_id format")
-    })?;
+    let user_id = Uuid::parse_str(user_id_str)
+        .map_err(|_| actix_web::error::ErrorBadRequest("Invalid user_id format"))?;
 
     Ok(user_id)
 }

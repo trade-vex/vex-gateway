@@ -16,7 +16,6 @@ use actix_web::web;
 /// let app = App::new()
 ///     .service(
 ///         web::scope("")
-///             .wrap(auth_middleware)
 ///             .configure(session_check_route::configure)
 ///     );
 /// ```

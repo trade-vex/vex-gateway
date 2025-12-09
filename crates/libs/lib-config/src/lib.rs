@@ -222,10 +222,10 @@ impl Config {
         info!("Loading development defaults (no config files required)");
         Self {
             environment: Environment::Development,
-            server: ServerConfig::from_env().unwrap_or_else(|_| ServerConfig {
+            server: ServerConfig {
                 host: "127.0.0.1".to_string(),
                 port: 8081,
-            }),
+            },
             logging: LoggingConfig {
                 level: "debug".to_string(),
                 structured: false,

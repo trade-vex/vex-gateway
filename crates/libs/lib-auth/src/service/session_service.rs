@@ -249,9 +249,10 @@ impl SessionService {
                 && let Ok(session_data) = serde_json::from_str::<SessionData>(&session_json)
                 && session_data.user_id == user_id
             {
-                let _: () = conn.del(key).await.map_err(|e| {
-                    AuthError::Redis(format!("Failed to delete session: {}", e))
-                })?;
+                let _: () = conn
+                    .del(key)
+                    .await
+                    .map_err(|e| AuthError::Redis(format!("Failed to delete session: {}", e)))?;
                 revoked_count += 1;
             }
         }

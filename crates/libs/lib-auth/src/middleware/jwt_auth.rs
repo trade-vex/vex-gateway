@@ -256,9 +256,7 @@ where
                                     if let Some(cookie) = req.cookie("session_id")
                                         && let Some(session_service) = &session_service_opt
                                     {
-                                        match session_service
-                                            .refresh_session(cookie.value())
-                                            .await
+                                        match session_service.refresh_session(cookie.value()).await
                                         {
                                             Ok(()) => {
                                                 tracing::debug!(
@@ -271,8 +269,7 @@ where
                                                 let now = chrono::Utc::now().timestamp();
                                                 if token_exp > now {
                                                     let ttl_secs = (token_exp - now) as u64;
-                                                    if let Some(token_service) =
-                                                        &token_service_opt
+                                                    if let Some(token_service) = &token_service_opt
                                                     {
                                                         if let Err(e) = token_service
                                                             .blacklist_jti(&jti, ttl_secs)
@@ -337,9 +334,7 @@ where
                             (self.token_service.clone(), self.session_service.clone())
                         && let Some(cookie) = req.cookie("session_id")
                     {
-                        tracing::debug!(
-                            "JWT middleware: Token expired, attempting auto-refresh"
-                        );
+                        tracing::debug!("JWT middleware: Token expired, attempting auto-refresh");
 
                         let svc = self.service.clone();
                         let decoding_key = self.decoding_key.clone();
@@ -352,87 +347,76 @@ where
                             let mut req = req;
                             let session_id = cookie.value();
 
-                                    // Get session data
-                                    match session_service.get_session(session_id).await {
-                                        Ok(session_data) => {
-                                            // Try to refresh tokens
-                                            match token_service
-                                                .refresh_tokens(&session_data.refresh_token)
+                            // Get session data
+                            match session_service.get_session(session_id).await {
+                                Ok(session_data) => {
+                                    // Try to refresh tokens
+                                    match token_service
+                                        .refresh_tokens(&session_data.refresh_token)
+                                        .await
+                                    {
+                                        Ok(new_tokens) => {
+                                            // Update session with new tokens
+                                            if let Err(e) = session_service
+                                                .update_session_tokens(
+                                                    session_id,
+                                                    new_tokens.access_token.clone(),
+                                                    new_tokens.refresh_token.clone(),
+                                                )
                                                 .await
                                             {
-                                                Ok(new_tokens) => {
-                                                    // Update session with new tokens
-                                                    if let Err(e) = session_service
-                                                        .update_session_tokens(
-                                                            session_id,
-                                                            new_tokens.access_token.clone(),
-                                                            new_tokens.refresh_token.clone(),
-                                                        )
-                                                        .await
+                                                tracing::error!(
+                                                    "Failed to update session tokens: {}",
+                                                    e
+                                                );
+                                                let (req, _) = req.into_parts();
+                                                let response = HttpResponse::InternalServerError()
+                                                    .json(serde_json::json!({
+                                                        "error": {
+                                                            "code": "refresh_failed",
+                                                            "message": "Failed to update session",
+                                                            "status": 500
+                                                        }
+                                                    }));
+                                                return Ok(ServiceResponse::new(req, response)
+                                                    .map_into_boxed_body());
+                                            }
+
+                                            // Validate the new access token
+                                            let mut validation = Validation::new(algorithm);
+                                            validation.set_issuer(&[issuer]);
+                                            validation.set_audience(&[audience]);
+
+                                            match decode::<JwtClaims>(
+                                                &new_tokens.access_token,
+                                                &decoding_key,
+                                                &validation,
+                                            ) {
+                                                Ok(token_data) => {
+                                                    if let Ok(user_id) =
+                                                        Uuid::parse_str(&token_data.claims.sub)
                                                     {
-                                                        tracing::error!(
-                                                            "Failed to update session tokens: {}",
-                                                            e
-                                                        );
-                                                        let (req, _) = req.into_parts();
-                                                        let response = HttpResponse::InternalServerError().json(
-                                                            serde_json::json!({
-                                                                "error": {
-                                                                    "code": "refresh_failed",
-                                                                    "message": "Failed to update session",
-                                                                    "status": 500
-                                                                }
-                                                            })
-                                                        );
-                                                        return Ok(ServiceResponse::new(
-                                                            req, response,
-                                                        )
-                                                        .map_into_boxed_body());
-                                                    }
+                                                        let jti = token_data.claims.jti.clone();
+                                                        let authenticated_user =
+                                                            AuthenticatedUser { user_id };
+                                                        req.extensions_mut()
+                                                            .insert(authenticated_user.clone());
 
-                                                    // Validate the new access token
-                                                    let mut validation = Validation::new(algorithm);
-                                                    validation.set_issuer(&[issuer]);
-                                                    validation.set_audience(&[audience]);
-
-                                                    match decode::<JwtClaims>(
-                                                        &new_tokens.access_token,
-                                                        &decoding_key,
-                                                        &validation,
-                                                    ) {
-                                                        Ok(token_data) => {
-                                                            if let Ok(user_id) = Uuid::parse_str(
-                                                                &token_data.claims.sub,
-                                                            ) {
-                                                                let jti =
-                                                                    token_data.claims.jti.clone();
-                                                                let authenticated_user =
-                                                                    AuthenticatedUser { user_id };
-                                                                req.extensions_mut().insert(
-                                                                    authenticated_user.clone(),
+                                                        // Check if new token is blacklisted (shouldn't be, but check anyway)
+                                                        if let Ok(mut conn) = redis_pool.get().await
+                                                        {
+                                                            let blacklist_key =
+                                                                format!("blacklist:{}", jti);
+                                                            if let Ok(exists) = conn
+                                                                .exists::<_, bool>(&blacklist_key)
+                                                                .await
+                                                                && exists
+                                                            {
+                                                                tracing::warn!(
+                                                                    "Refreshed token is blacklisted"
                                                                 );
-
-                                                                // Check if new token is blacklisted (shouldn't be, but check anyway)
-                                                                if let Ok(mut conn) =
-                                                                    redis_pool.get().await
-                                                                {
-                                                                    let blacklist_key = format!(
-                                                                        "blacklist:{}",
-                                                                        jti
-                                                                    );
-                                                                    if let Ok(exists) = conn
-                                                                        .exists::<_, bool>(
-                                                                            &blacklist_key,
-                                                                        )
-                                                                        .await
-                                                                        && exists
-                                                                    {
-                                                                        tracing::warn!(
-                                                                            "Refreshed token is blacklisted"
-                                                                        );
-                                                                        let (req, _) =
-                                                                            req.into_parts();
-                                                                        let response = HttpResponse::Unauthorized().json(
+                                                                let (req, _) = req.into_parts();
+                                                                let response = HttpResponse::Unauthorized().json(
                                                                 serde_json::json!({
                                                                     "error": {
                                                                         "code": "token_revoked",
@@ -441,63 +425,61 @@ where
                                                                     }
                                                                 })
                                                             );
-                                                                        return Ok(ServiceResponse::new(req, response).map_into_boxed_body());
-                                                                    }
-                                                                }
-
-                                                                let bearer = format!(
-                                                                    "Bearer {}",
-                                                                    new_tokens.access_token
-                                                                );
-                                                                if let Ok(hv) =
-                                                                    HeaderValue::from_str(&bearer)
-                                                                {
-                                                                    req.headers_mut()
-                                                                        .insert(AUTHORIZATION, hv);
-                                                                } else {
-                                                                    tracing::warn!(
-                                                                        "Failed to set refreshed Authorization header"
-                                                                    );
-                                                                }
-
-                                                                tracing::info!(
-                                                                    "JWT middleware: Token auto-refreshed successfully; forwarding with updated header"
-                                                                );
-                                                                let res = svc.call(req).await?;
-                                                                return Ok(
-                                                                    res.map_into_boxed_body()
-                                                                );
+                                                                return Ok(ServiceResponse::new(
+                                                                    req, response,
+                                                                )
+                                                                .map_into_boxed_body());
                                                             }
                                                         }
-                                                        Err(_) => {
-                                                            tracing::error!(
-                                                                "New access token validation failed after refresh"
+
+                                                        let bearer = format!(
+                                                            "Bearer {}",
+                                                            new_tokens.access_token
+                                                        );
+                                                        if let Ok(hv) =
+                                                            HeaderValue::from_str(&bearer)
+                                                        {
+                                                            req.headers_mut()
+                                                                .insert(AUTHORIZATION, hv);
+                                                        } else {
+                                                            tracing::warn!(
+                                                                "Failed to set refreshed Authorization header"
                                                             );
                                                         }
+
+                                                        tracing::info!(
+                                                            "JWT middleware: Token auto-refreshed successfully; forwarding with updated header"
+                                                        );
+                                                        let res = svc.call(req).await?;
+                                                        return Ok(res.map_into_boxed_body());
                                                     }
                                                 }
-                                                Err(refresh_err) => {
-                                                    tracing::warn!(
-                                                        "Token refresh failed: {}",
-                                                        refresh_err
+                                                Err(_) => {
+                                                    tracing::error!(
+                                                        "New access token validation failed after refresh"
                                                     );
                                                 }
                                             }
                                         }
-                                        Err(_) => {
-                                            tracing::warn!("Session not found for auto-refresh");
+                                        Err(refresh_err) => {
+                                            tracing::warn!("Token refresh failed: {}", refresh_err);
                                         }
                                     }
+                                }
+                                Err(_) => {
+                                    tracing::warn!("Session not found for auto-refresh");
+                                }
+                            }
 
-                                    // If we get here, auto-refresh failed - return expired token error
-                                    let (req, _) = req.into_parts();
-                                    let response = HttpResponse::Unauthorized().json(serde_json::json!({
-                                        "error": {
-                                            "code": "token_expired",
-                                            "message": "Token has expired and could not be refreshed",
-                                            "status": 401
-                                        }
-                                    }));
+                            // If we get here, auto-refresh failed - return expired token error
+                            let (req, _) = req.into_parts();
+                            let response = HttpResponse::Unauthorized().json(serde_json::json!({
+                                "error": {
+                                    "code": "token_expired",
+                                    "message": "Token has expired and could not be refreshed",
+                                    "status": 401
+                                }
+                            }));
                             Ok(ServiceResponse::new(req, response).map_into_boxed_body())
                         });
                     }

@@ -535,6 +535,7 @@ async fn check_orders(
 // ==================== MAIN TEST ====================
 
 #[tokio::test]
+#[ignore] // Requires vex-core, database, and redis - skip in CI
 async fn test_multi_user_trading_scenario() {
     println!("\n╔═══════════════════════════════════════════════════════════════╗");
     println!("║  Multi-User Trading Scenario Integration Test                ║");
