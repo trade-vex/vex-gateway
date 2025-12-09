@@ -1022,14 +1022,33 @@ impl OAuthService {
     ///     "id": "1234567890",
     ///     "username": "johndoe",
     ///     "name": "John Doe",
-    ///     "profile_image_url": "https://..."
+    ///     "profile_image_url": "https://...",
+    ///     "email": "user@example.com"  // May be missing if email scope not granted
     ///   }
     /// }
     /// ```
     ///
-    /// Note: Twitter doesn't always provide email addresses
+    /// # Email Requirement
+    ///
+    /// This method requires a non-empty email address. If the email is missing or empty,
+    /// it returns an error indicating that the email scope must be requested.
     fn parse_twitter_user_info(&self, data: Value) -> Result<OAuthUserInfo, AuthError> {
         let user_data = &data["data"];
+
+        // Extract and validate email
+        let email = user_data["email"]
+            .as_str()
+            .ok_or_else(|| {
+                AuthError::UserInfoFetchFailed(
+                    "Twitter email not provided; request email scope".to_string(),
+                )
+            })?;
+
+        if email.is_empty() {
+            return Err(AuthError::UserInfoFetchFailed(
+                "Twitter email not provided; request email scope".to_string(),
+            ));
+        }
 
         Ok(OAuthUserInfo {
             provider_id: user_data["id"]
@@ -1038,7 +1057,7 @@ impl OAuthService {
                     AuthError::UserInfoFetchFailed("Missing Twitter user ID".to_string())
                 })?
                 .to_string(),
-            email: user_data["email"].as_str().unwrap_or("").to_string(),
+            email: email.to_string(),
             name: user_data["name"]
                 .as_str()
                 .unwrap_or("Unknown User")
