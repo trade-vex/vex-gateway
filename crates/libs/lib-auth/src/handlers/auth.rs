@@ -18,6 +18,18 @@ use crate::repository::UserRepository;
 use crate::service::{EmailService, SessionService, TokenService};
 use std::sync::Arc;
 
+/// Helper function to get cookie security configuration based on FRONTEND_URL
+/// Returns (is_secure, cookie_ttl) where:
+/// - is_secure: true if FRONTEND_URL starts with "https://", false otherwise
+/// - cookie_ttl: cookie time-to-live in seconds (24 hours)
+fn get_cookie_config() -> (bool, i64) {
+    let is_secure = std::env::var("FRONTEND_URL")
+        .unwrap_or_else(|_| "http://localhost:8081".to_string())
+        .starts_with("https://");
+    let cookie_ttl = 24 * 3600;
+    (is_secure, cookie_ttl)
+}
+
 // Signup handler
 pub async fn signup(
     req: web::Json<SignupRequest>,
@@ -148,11 +160,7 @@ pub async fn login(
     let user_info = UserInfo::from(user.clone());
 
     // Create session cookie
-    let is_secure = std::env::var("FRONTEND_URL")
-        .unwrap_or_else(|_| "http://localhost:8081".to_string())
-        .starts_with("https://");
-
-    let cookie_ttl = 24 * 3600;
+    let (is_secure, cookie_ttl) = get_cookie_config();
 
     let session_cookie = actix_web::cookie::Cookie::build("session_id", session_id)
         .path("/")
@@ -206,9 +214,7 @@ pub async fn logout(
     }
 
     // Create cookies to delete the session and user_info cookies
-    let is_secure = std::env::var("FRONTEND_URL")
-        .unwrap_or_else(|_| "http://localhost:8081".to_string())
-        .starts_with("https://");
+    let (is_secure, _cookie_ttl) = get_cookie_config();
 
     let delete_session_cookie = actix_web::cookie::Cookie::build("session_id", "")
         .path("/")
@@ -343,11 +349,7 @@ pub async fn verify_email_with_otp(
     let user_info = UserInfo::from(updated_user);
 
     // Create session cookie
-    let is_secure = std::env::var("FRONTEND_URL")
-        .unwrap_or_else(|_| "http://localhost:8081".to_string())
-        .starts_with("https://");
-
-    let cookie_ttl = 24 * 3600;
+    let (is_secure, cookie_ttl) = get_cookie_config();
 
     let session_cookie = actix_web::cookie::Cookie::build("session_id", session_id)
         .path("/")
