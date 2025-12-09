@@ -482,8 +482,8 @@ pub async fn cancel_order(
     // Build cancel command
     let command = OrderCommand {
         command: OrderCommandType::CancelOrder,
-        order_id, // The order to cancel
-        client_order_id,                // NEW correlation ID for this cancel request
+        order_id,        // The order to cancel
+        client_order_id, // NEW correlation ID for this cancel request
         market_id: cancel_data.market_id,
         user_id,
         price: 0,
