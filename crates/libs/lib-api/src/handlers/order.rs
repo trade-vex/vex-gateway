@@ -468,7 +468,7 @@ pub async fn cancel_order(
                 order_id: 0,
                 client_order_id: 0,
                 status: "error".to_string(),
-                message: format!("Invalid order_id: must be a valid u64 integer string",),
+                message: "Invalid order_id: must be a valid u64 integer string".to_string(),
             });
         }
     };

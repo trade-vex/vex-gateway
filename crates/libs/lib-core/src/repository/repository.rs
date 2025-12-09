@@ -340,7 +340,7 @@ impl TradingRepository for PostgresTradingRepository {
             .filter(OrderColumn::OrderUserId.eq(Decimal::from(user_id)))
             .count(&*self.db)
             .await?;
-        Ok(count as u64)
+        Ok(count)
     }
 
     async fn get_order_history(&self, user_id: u64) -> Result<Vec<OrderModel>> {
@@ -394,7 +394,7 @@ impl TradingRepository for PostgresTradingRepository {
             )
             .count(&*self.db)
             .await?;
-        Ok(count as u64)
+        Ok(count)
     }
 
     async fn get_user_favorite_markets(
