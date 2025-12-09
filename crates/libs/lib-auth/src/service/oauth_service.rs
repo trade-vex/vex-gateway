@@ -133,19 +133,19 @@ impl OAuthService {
             trimmed
         };
         // Ensure starts with alphanumeric
-        if trimmed
+        if trimmed.is_empty() {
+            "user".to_string()
+        } else if trimmed
             .chars()
             .next()
-            .map(|c| c.is_ascii_alphanumeric())
-            .unwrap_or(false)
+            .map(|c| !c.is_ascii_alphanumeric())
+            .unwrap_or(true)
         {
-            if trimmed.is_empty() {
-                "user".to_string()
-            } else {
-                trimmed
-            }
-        } else {
+            // First char is NOT alphanumeric, prepend "user-"
             trimmed.insert_str(0, "user-");
+            trimmed
+        } else {
+            // First char IS alphanumeric, return trimmed
             trimmed
         }
     }
