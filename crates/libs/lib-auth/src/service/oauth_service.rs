@@ -670,20 +670,15 @@ impl OAuthService {
 
         let verifier_key = format!("oauth_verifier:{}:{}", provider, state);
 
+        // Atomically get and delete verifier
         let verifier: Option<String> = redis_conn
-            .get(&verifier_key)
+            .get_del(&verifier_key)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to retrieve verifier: {}", e)))?;
 
         let verifier = verifier.ok_or_else(|| {
             AuthError::CodeExchangeFailed("PKCE verifier not found or expired".to_string())
         })?;
-
-        // Delete verifier after retrieval (one-time use)
-        let _: () = redis_conn
-            .del(&verifier_key)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to delete verifier: {}", e)))?;
 
         Ok(verifier)
     }
@@ -704,20 +699,15 @@ impl OAuthService {
 
         let nonce_key = format!("oauth_nonce:{}:{}", provider, state);
 
+        // Atomically get and delete nonce
         let nonce: Option<String> = redis_conn
-            .get(&nonce_key)
+            .get_del(&nonce_key)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to retrieve nonce: {}", e)))?;
 
         let nonce = nonce.ok_or_else(|| {
             AuthError::CodeExchangeFailed("OIDC nonce not found or expired".to_string())
         })?;
-
-        // Delete nonce after retrieval (one-time use)
-        let _: () = redis_conn
-            .del(&nonce_key)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to delete nonce: {}", e)))?;
 
         Ok(nonce)
     }
