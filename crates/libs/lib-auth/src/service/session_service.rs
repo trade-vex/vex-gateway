@@ -23,7 +23,10 @@ pub struct SessionService {
 impl SessionService {
     pub fn new(redis_pool: Arc<RedisPool>, session_ttl_seconds: i64) -> Self {
         if session_ttl_seconds <= 0 {
-            panic!("session_ttl_seconds must be greater than 0, got: {}", session_ttl_seconds);
+            panic!(
+                "session_ttl_seconds must be greater than 0, got: {}",
+                session_ttl_seconds
+            );
         }
         Self {
             redis_pool,

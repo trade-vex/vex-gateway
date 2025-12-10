@@ -94,9 +94,9 @@ async fn setup_test_db_with_schema() -> Result<DatabaseConnection, sea_orm::DbEr
     Ok(db)
 }
 
-async fn cleanup_test_data(db: &DatabaseConnection) {
-    let cleanup_sql = "DELETE FROM api_keys WHERE user_id IS NOT NULL";
-    db.execute_unprepared(cleanup_sql)
+async fn cleanup_test_data(db: &DatabaseConnection, user_id: Uuid) {
+    let cleanup_sql = format!("DELETE FROM api_keys WHERE user_id = '{}'", user_id);
+    db.execute_unprepared(&cleanup_sql)
         .await
         .expect("Failed to cleanup test data");
 }
@@ -129,15 +129,16 @@ mod tests {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
+        let user = create_test_user();
+        let user_id = user.user_id().unwrap();
         // Clean up before test to ensure isolation
-        cleanup_test_data(&db).await;
+        cleanup_test_data(&db, user_id).await;
 
         let repo = Arc::new(
             lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(
                 Arc::new(db.clone()),
             ),
         );
-        let user = create_test_user();
         let request = create_test_request();
 
         let result = create_api_key(
@@ -151,7 +152,6 @@ mod tests {
             Ok(response) => {
                 assert_eq!(response.status(), 201);
 
-                let user_id = user.user_id().unwrap();
                 let user_keys = repo.find_by_user_id(user_id).await.unwrap();
                 assert_eq!(user_keys.len(), 1);
 
@@ -166,7 +166,7 @@ mod tests {
             }
         }
 
-        cleanup_test_data(&db).await;
+        cleanup_test_data(&db, user_id).await;
     }
 
     #[tokio::test]
@@ -174,13 +174,14 @@ mod tests {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
-        cleanup_test_data(&db).await;
+        let user = create_test_user();
+        let user_id = user.user_id().unwrap();
+        cleanup_test_data(&db, user_id).await;
         let repo = Arc::new(
             lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(
                 Arc::new(db.clone()),
             ),
         );
-        let user = create_test_user();
 
         let mut request = create_test_request();
         request.permissions = vec!["invalid_permission".to_string()];
@@ -201,7 +202,7 @@ mod tests {
             }
         }
 
-        cleanup_test_data(&db).await;
+        cleanup_test_data(&db, user_id).await;
     }
 
     #[tokio::test]
@@ -209,13 +210,14 @@ mod tests {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
-        cleanup_test_data(&db).await;
+        let user = create_test_user();
+        let user_id = user.user_id().unwrap();
+        cleanup_test_data(&db, user_id).await;
         let repo = Arc::new(
             lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(
                 Arc::new(db.clone()),
             ),
         );
-        let user = create_test_user();
 
         let mut request = create_test_request();
         request.key_material_type = Some("invalid_type".to_string());
@@ -236,7 +238,7 @@ mod tests {
             }
         }
 
-        cleanup_test_data(&db).await;
+        cleanup_test_data(&db, user_id).await;
     }
 
     #[tokio::test]
@@ -244,14 +246,15 @@ mod tests {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
-        cleanup_test_data(&db).await;
+        let user = create_test_user();
+        let user_id = user.user_id().unwrap();
+        cleanup_test_data(&db, user_id).await;
 
         let repo = Arc::new(
             lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(
                 Arc::new(db.clone()),
             ),
         );
-        let user = create_test_user();
 
         let request1 = create_test_request();
         let request2 = CreateApiKeyRequest {
@@ -298,7 +301,6 @@ mod tests {
                 assert_eq!(list_response.total, 2);
                 assert_eq!(list_response.api_keys.len(), 2);
 
-                let user_id = user.user_id().unwrap();
                 for api_key_response in &list_response.api_keys {
                     assert_eq!(api_key_response.user_id, Some(user_id));
                     assert!(api_key_response.api_key.starts_with("vex_"));
@@ -321,7 +323,7 @@ mod tests {
             }
         }
 
-        cleanup_test_data(&db).await;
+        cleanup_test_data(&db, user_id).await;
     }
 
     #[tokio::test]
@@ -329,14 +331,15 @@ mod tests {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
-        cleanup_test_data(&db).await;
+        let user = create_test_user();
+        let user_id = user.user_id().unwrap();
+        cleanup_test_data(&db, user_id).await;
 
         let repo = Arc::new(
             lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(
                 Arc::new(db.clone()),
             ),
         );
-        let user = create_test_user();
         let request = create_test_request();
 
         let create_result = create_api_key(
@@ -346,7 +349,6 @@ mod tests {
         )
         .await;
 
-        let user_id = user.user_id().unwrap();
         let api_key_id = match create_result {
             Ok(_) => {
                 let user_keys = repo.find_by_user_id(user_id).await.unwrap();
@@ -374,7 +376,6 @@ mod tests {
                 let bytes = actix_web::body::to_bytes(body).await.unwrap();
                 let api_key_response: ApiKeyResponse = serde_json::from_slice(&bytes).unwrap();
 
-                let user_id = user.user_id().unwrap();
                 assert_eq!(api_key_response.id, api_key_id);
                 assert_eq!(api_key_response.user_id, Some(user_id));
                 assert_eq!(api_key_response.description, request.description);
@@ -389,7 +390,7 @@ mod tests {
             }
         }
 
-        cleanup_test_data(&db).await;
+        cleanup_test_data(&db, user_id).await;
     }
 
     #[tokio::test]
@@ -397,13 +398,14 @@ mod tests {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
-        cleanup_test_data(&db).await;
+        let user = create_test_user();
+        let user_id = user.user_id().unwrap();
+        cleanup_test_data(&db, user_id).await;
         let repo = Arc::new(
             lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(
                 Arc::new(db.clone()),
             ),
         );
-        let user = create_test_user();
         let non_existent_id = Uuid::new_v4();
 
         let result = get_api_key(
@@ -425,7 +427,7 @@ mod tests {
             }
         }
 
-        cleanup_test_data(&db).await;
+        cleanup_test_data(&db, user_id).await;
     }
 
     #[tokio::test]
@@ -433,14 +435,17 @@ mod tests {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
-        cleanup_test_data(&db).await;
+        let user1 = create_test_user();
+        let user2 = create_test_user();
+        let user1_id = user1.user_id().unwrap();
+        let user2_id = user2.user_id().unwrap();
+        cleanup_test_data(&db, user1_id).await;
+        cleanup_test_data(&db, user2_id).await;
         let repo = Arc::new(
             lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(
                 Arc::new(db.clone()),
             ),
         );
-        let user1 = create_test_user();
-        let user2 = create_test_user();
         let request = create_test_request();
 
         let create_result = create_api_key(
@@ -450,7 +455,6 @@ mod tests {
         )
         .await;
 
-        let user1_id = user1.user_id().unwrap();
         let api_key_id = match create_result {
             Ok(_) => {
                 let user_keys = repo.find_by_user_id(user1_id).await.unwrap();
@@ -475,8 +479,6 @@ mod tests {
                 assert_eq!(response.status(), 403);
 
                 // Verifying the API key belongs to user1, not user2
-                let user1_id = user1.user_id().unwrap();
-                let user2_id = user2.user_id().unwrap();
                 let api_key = repo.find_by_id(api_key_id).await.unwrap().unwrap();
                 assert_eq!(api_key.user_id, Some(user1_id));
                 assert_ne!(api_key.user_id, Some(user2_id));
@@ -486,7 +488,8 @@ mod tests {
             }
         }
 
-        cleanup_test_data(&db).await;
+        cleanup_test_data(&db, user1_id).await;
+        cleanup_test_data(&db, user2_id).await;
     }
 
     #[tokio::test]
@@ -494,14 +497,15 @@ mod tests {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
-        cleanup_test_data(&db).await;
+        let user = create_test_user();
+        let user_id = user.user_id().unwrap();
+        cleanup_test_data(&db, user_id).await;
 
         let repo = Arc::new(
             lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(
                 Arc::new(db.clone()),
             ),
         );
-        let user = create_test_user();
         let request = create_test_request();
 
         let create_result = create_api_key(
@@ -511,7 +515,6 @@ mod tests {
         )
         .await;
 
-        let user_id = user.user_id().unwrap();
         let api_key_id = match create_result {
             Ok(_) => {
                 let user_keys = repo.find_by_user_id(user_id).await.unwrap();
@@ -545,7 +548,6 @@ mod tests {
                 let bytes = actix_web::body::to_bytes(body).await.unwrap();
                 let api_key_response: ApiKeyResponse = serde_json::from_slice(&bytes).unwrap();
 
-                let user_id = user.user_id().unwrap();
                 assert_eq!(api_key_response.id, api_key_id);
                 assert_eq!(api_key_response.user_id, Some(user_id));
                 assert!(api_key_response.api_key.starts_with("vex_"));
@@ -558,7 +560,6 @@ mod tests {
                 assert_eq!(api_key_response.permissions, vec!["USER_STREAM"]);
 
                 // Verifying the update in the database by fetching the API key
-                let user_id = user.user_id().unwrap();
                 let updated_key = repo.find_by_id(api_key_id).await.unwrap().unwrap();
                 assert_eq!(updated_key.id, api_key_id);
                 assert_eq!(updated_key.user_id, Some(user_id));
@@ -577,7 +578,7 @@ mod tests {
             }
         }
 
-        cleanup_test_data(&db).await;
+        cleanup_test_data(&db, user_id).await;
     }
 
     #[tokio::test]
@@ -585,13 +586,14 @@ mod tests {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
-        cleanup_test_data(&db).await;
+        let user = create_test_user();
+        let user_id = user.user_id().unwrap();
+        cleanup_test_data(&db, user_id).await;
         let repo = Arc::new(
             lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(
                 Arc::new(db.clone()),
             ),
         );
-        let user = create_test_user();
         let request = create_test_request();
 
         let create_result = create_api_key(
@@ -601,7 +603,6 @@ mod tests {
         )
         .await;
 
-        let user_id = user.user_id().unwrap();
         let api_key_id = match create_result {
             Ok(_) => {
                 let user_keys = repo.find_by_user_id(user_id).await.unwrap();
@@ -635,7 +636,7 @@ mod tests {
             }
         }
 
-        cleanup_test_data(&db).await;
+        cleanup_test_data(&db, user_id).await;
     }
 
     #[tokio::test]
@@ -643,14 +644,15 @@ mod tests {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
-        cleanup_test_data(&db).await;
+        let user = create_test_user();
+        let user_id = user.user_id().unwrap();
+        cleanup_test_data(&db, user_id).await;
 
         let repo = Arc::new(
             lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(
                 Arc::new(db.clone()),
             ),
         );
-        let user = create_test_user();
         let request = create_test_request();
 
         let create_result = create_api_key(
@@ -660,7 +662,6 @@ mod tests {
         )
         .await;
 
-        let user_id = user.user_id().unwrap();
         let api_key_id = match create_result {
             Ok(_) => {
                 let user_keys = repo.find_by_user_id(user_id).await.unwrap();
@@ -699,7 +700,7 @@ mod tests {
             }
         }
 
-        cleanup_test_data(&db).await;
+        cleanup_test_data(&db, user_id).await;
     }
 
     #[tokio::test]
@@ -707,14 +708,15 @@ mod tests {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
-        cleanup_test_data(&db).await;
+        let user = create_test_user();
+        let user_id = user.user_id().unwrap();
+        cleanup_test_data(&db, user_id).await;
 
         let repo = Arc::new(
             lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(
                 Arc::new(db.clone()),
             ),
         );
-        let user = create_test_user();
         let request = create_test_request();
 
         let create_result = create_api_key(
@@ -724,7 +726,6 @@ mod tests {
         )
         .await;
 
-        let user_id = user.user_id().unwrap();
         let api_key_id = match create_result {
             Ok(_) => {
                 let user_keys = repo.find_by_user_id(user_id).await.unwrap();
@@ -775,7 +776,7 @@ mod tests {
             }
         }
 
-        cleanup_test_data(&db).await;
+        cleanup_test_data(&db, user_id).await;
     }
 
     #[tokio::test]
@@ -783,14 +784,15 @@ mod tests {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
-        cleanup_test_data(&db).await;
+        let user = create_test_user();
+        let user_id = user.user_id().unwrap();
+        cleanup_test_data(&db, user_id).await;
 
         let repo = Arc::new(
             lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(
                 Arc::new(db.clone()),
             ),
         );
-        let user = create_test_user();
         let request = create_test_request();
 
         let create_result = create_api_key(
@@ -800,7 +802,6 @@ mod tests {
         )
         .await;
 
-        let user_id = user.user_id().unwrap();
         let api_key_id = match create_result {
             Ok(_) => {
                 let user_keys = repo.find_by_user_id(user_id).await.unwrap();
@@ -841,6 +842,6 @@ mod tests {
             }
         }
 
-        cleanup_test_data(&db).await;
+        cleanup_test_data(&db, user_id).await;
     }
 }

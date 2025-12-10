@@ -516,13 +516,9 @@ async fn test_user_balance_and_order_retrieval() {
         .await
         .expect("Failed to create OrderStore")
     } else {
-        OrderStore::with_redis_cache(
-            OrderCacheConfig { enabled: true },
-            redis_url.clone(),
-            None,
-        )
-        .await
-        .expect("Failed to create OrderStore")
+        OrderStore::with_redis_cache(OrderCacheConfig { enabled: true }, redis_url.clone(), None)
+            .await
+            .expect("Failed to create OrderStore")
     };
 
     println!(

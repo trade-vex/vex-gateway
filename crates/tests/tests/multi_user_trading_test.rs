@@ -593,13 +593,9 @@ async fn test_multi_user_trading_scenario() {
         .await
         .expect("Failed to create OrderStore")
     } else {
-        OrderStore::with_redis_cache(
-            OrderCacheConfig { enabled: true },
-            redis_url.clone(),
-            None,
-        )
-        .await
-        .expect("Failed to create OrderStore")
+        OrderStore::with_redis_cache(OrderCacheConfig { enabled: true }, redis_url.clone(), None)
+            .await
+            .expect("Failed to create OrderStore")
     };
 
     let server_address =

@@ -406,13 +406,10 @@ async fn test_high_frequency_stress_test() {
     .await
     .expect("Failed to create UserBalanceStore");
 
-    let order_store = OrderStore::with_redis_cache(
-        OrderCacheConfig { enabled: true },
-        redis_url.clone(),
-        None,
-    )
-    .await
-    .expect("Failed to create OrderStore");
+    let order_store =
+        OrderStore::with_redis_cache(OrderCacheConfig { enabled: true }, redis_url.clone(), None)
+            .await
+            .expect("Failed to create OrderStore");
 
     let server_address =
         spawn_test_server(publisher, correlation_service, balance_store, order_store);
