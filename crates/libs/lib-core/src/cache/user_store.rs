@@ -6,7 +6,6 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
 use tracing::{debug, warn};
 
 #[derive(Clone)]
@@ -16,19 +15,9 @@ pub struct UserBalanceStore {
     config: UserBalanceCacheConfig,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct UserBalanceCacheConfig {
-    pub ttl: Duration,
     pub enabled: bool,
-}
-
-impl Default for UserBalanceCacheConfig {
-    fn default() -> Self {
-        Self {
-            ttl: Duration::from_secs(1800),
-            enabled: false,
-        }
-    }
 }
 
 impl UserBalanceStore {

@@ -567,10 +567,7 @@ async fn test_multi_user_trading_scenario() {
     let balance_store = if let Some(ref db_conn) = db {
         let trading_repo = Arc::new(PostgresTradingRepository::new(db_conn.clone()));
         UserBalanceStore::with_redis_cache(
-            UserBalanceCacheConfig {
-                ttl: Duration::from_secs(300),
-                enabled: true,
-            },
+            UserBalanceCacheConfig { enabled: true },
             redis_url.clone(),
             Some(trading_repo),
         )
@@ -578,10 +575,7 @@ async fn test_multi_user_trading_scenario() {
         .expect("Failed to create UserBalanceStore")
     } else {
         UserBalanceStore::with_redis_cache(
-            UserBalanceCacheConfig {
-                ttl: Duration::from_secs(300),
-                enabled: true,
-            },
+            UserBalanceCacheConfig { enabled: true },
             redis_url.clone(),
             None,
         )
@@ -592,10 +586,7 @@ async fn test_multi_user_trading_scenario() {
     let order_store = if let Some(ref db_conn) = db {
         let trading_repo = Arc::new(PostgresTradingRepository::new(db_conn.clone()));
         OrderStore::with_redis_cache(
-            OrderCacheConfig {
-                ttl: Duration::from_secs(300),
-                enabled: true,
-            },
+            OrderCacheConfig { enabled: true },
             redis_url.clone(),
             Some(trading_repo),
         )
@@ -603,10 +594,7 @@ async fn test_multi_user_trading_scenario() {
         .expect("Failed to create OrderStore")
     } else {
         OrderStore::with_redis_cache(
-            OrderCacheConfig {
-                ttl: Duration::from_secs(300),
-                enabled: true,
-            },
+            OrderCacheConfig { enabled: true },
             redis_url.clone(),
             None,
         )

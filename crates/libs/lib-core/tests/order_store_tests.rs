@@ -23,7 +23,6 @@ use lib_core::model::user_favorite_markets::Model as UserFavoriteMarketModel;
 use lib_core::repository::repository::{TradingError, TradingRepository};
 use rust_decimal::Decimal;
 use std::sync::Arc;
-use std::time::Duration;
 
 type Result<T> = std::result::Result<T, TradingError>;
 
@@ -278,10 +277,7 @@ async fn test_order_store_new() {
 
 #[tokio::test]
 async fn test_order_store_with_repository() {
-    let config = OrderCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false, // Cache disabled
-    };
+    let config = OrderCacheConfig { enabled: false };
 
     let orders = vec![
         create_test_order(1, 100, 50000, 1000, "buy", "Pending"),
@@ -302,10 +298,7 @@ async fn test_order_store_with_repository() {
 
 #[tokio::test]
 async fn test_get_order_by_id() {
-    let config = OrderCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false,
-    };
+    let config = OrderCacheConfig { enabled: false };
 
     let orders = vec![create_test_order(1, 100, 50000, 1000, "buy", "Pending")];
 
@@ -334,10 +327,7 @@ async fn test_get_order_by_id() {
 
 #[tokio::test]
 async fn test_get_user_orders_empty() {
-    let config = OrderCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false,
-    };
+    let config = OrderCacheConfig { enabled: false };
 
     let mock_repo = Arc::new(MockTradingRepository::new());
     let store = OrderStore::with_repository(config, mock_repo);
@@ -349,10 +339,7 @@ async fn test_get_user_orders_empty() {
 
 #[tokio::test]
 async fn test_get_user_order_history() {
-    let config = OrderCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false,
-    };
+    let config = OrderCacheConfig { enabled: false };
 
     let orders = vec![
         create_test_order(1, 100, 50000, 1000, "buy", "Pending"),
@@ -373,10 +360,7 @@ async fn test_get_user_order_history() {
 
 #[tokio::test]
 async fn test_database_error_handling() {
-    let config = OrderCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false,
-    };
+    let config = OrderCacheConfig { enabled: false };
 
     let mock_repo = Arc::new(MockTradingRepository::new().with_error());
     let store = OrderStore::with_repository(config, mock_repo);
@@ -394,10 +378,7 @@ async fn test_database_error_handling() {
 
 #[tokio::test]
 async fn test_invalidate_operations() {
-    let config = OrderCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false, // Cache disabled, so invalidation is no-op
-    };
+    let config = OrderCacheConfig { enabled: false }; // Cache disabled, so invalidation is no-op
 
     let store = OrderStore::new(config);
 
@@ -408,10 +389,7 @@ async fn test_invalidate_operations() {
 
 #[tokio::test]
 async fn test_multiple_users() {
-    let config = OrderCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false,
-    };
+    let config = OrderCacheConfig { enabled: false };
 
     let orders = vec![
         create_test_order(1, 100, 50000, 1000, "buy", "Pending"),
@@ -438,10 +416,7 @@ async fn test_multiple_users() {
 
 #[tokio::test]
 async fn test_order_status_variations() {
-    let config = OrderCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false,
-    };
+    let config = OrderCacheConfig { enabled: false };
 
     let statuses = vec![
         "Pending",
@@ -465,10 +440,7 @@ async fn test_order_status_variations() {
 
 #[tokio::test]
 async fn test_order_side_variations() {
-    let config = OrderCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false,
-    };
+    let config = OrderCacheConfig { enabled: false };
 
     let orders = vec![
         create_test_order(1, 100, 50000, 1000, "buy", "Pending"),
@@ -488,10 +460,7 @@ async fn test_order_side_variations() {
 
 #[tokio::test]
 async fn test_large_order_values() {
-    let config = OrderCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false,
-    };
+    let config = OrderCacheConfig { enabled: false };
 
     // Test with large price and size values (12 decimal places precision)
     let large_price = 50_000_000_000_000_000i64; // 50,000 * 10^12
@@ -519,26 +488,18 @@ async fn test_large_order_values() {
 #[tokio::test]
 async fn test_config_default_values() {
     let config = OrderCacheConfig::default();
-    assert_eq!(config.ttl, Duration::from_secs(1800));
     assert!(!config.enabled);
 }
 
 #[tokio::test]
 async fn test_config_custom_values() {
-    let config = OrderCacheConfig {
-        ttl: Duration::from_secs(600),
-        enabled: true,
-    };
-    assert_eq!(config.ttl, Duration::from_secs(600));
+    let config = OrderCacheConfig { enabled: true };
     assert!(config.enabled);
 }
 
 #[tokio::test]
 async fn test_concurrent_access() {
-    let config = OrderCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false,
-    };
+    let config = OrderCacheConfig { enabled: false };
 
     let orders = vec![
         create_test_order(1, 100, 50000, 1000, "buy", "Pending"),

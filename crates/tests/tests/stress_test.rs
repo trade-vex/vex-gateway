@@ -399,10 +399,7 @@ async fn test_high_frequency_stress_test() {
         .expect("Failed to start VexGateway");
 
     let balance_store = UserBalanceStore::with_redis_cache(
-        UserBalanceCacheConfig {
-            ttl: Duration::from_secs(300),
-            enabled: true,
-        },
+        UserBalanceCacheConfig { enabled: true },
         redis_url.clone(),
         None,
     )
@@ -410,10 +407,7 @@ async fn test_high_frequency_stress_test() {
     .expect("Failed to create UserBalanceStore");
 
     let order_store = OrderStore::with_redis_cache(
-        OrderCacheConfig {
-            ttl: Duration::from_secs(300),
-            enabled: true,
-        },
+        OrderCacheConfig { enabled: true },
         redis_url.clone(),
         None,
     )

@@ -54,7 +54,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libbsd-dev libssl-dev pkg-config build-essential cmake
+          sudo apt-get install -y libbsd-dev libssl-dev pkg-config build-essential cmake clang libclang-dev
 
       - name: Generate test keys
         run: |
@@ -148,7 +148,7 @@ jobs:
       - name: Install system dependencies
         run: |
           apt-get update
-          apt-get install -y libbsd-dev libssl-dev pkg-config build-essential cmake
+          apt-get install -y libbsd-dev libssl-dev pkg-config build-essential cmake clang libclang-dev
 
       - name: Generate test keys
         run: |

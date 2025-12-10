@@ -6,7 +6,6 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
 use tracing::{debug, warn};
 
 #[derive(Clone)]
@@ -16,19 +15,9 @@ pub struct OrderStore {
     config: OrderCacheConfig,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct OrderCacheConfig {
-    pub ttl: Duration,
     pub enabled: bool,
-}
-
-impl Default for OrderCacheConfig {
-    fn default() -> Self {
-        Self {
-            ttl: Duration::from_secs(1800),
-            enabled: false,
-        }
-    }
 }
 
 impl OrderStore {

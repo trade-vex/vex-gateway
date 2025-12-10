@@ -143,10 +143,7 @@ impl AppState {
 
         // Initialize balance store with Redis cache and trading repository
         let balance_store = UserBalanceStore::with_redis_cache(
-            UserBalanceCacheConfig {
-                ttl: std::time::Duration::from_secs(1800),
-                enabled: true,
-            },
+            UserBalanceCacheConfig { enabled: true },
             config.redis.url.clone(),
             Some(trading_repo.clone()),
         )
@@ -154,10 +151,7 @@ impl AppState {
 
         // Initialize order store with Redis cache and trading repository
         let order_store = OrderStore::with_redis_cache(
-            OrderCacheConfig {
-                ttl: std::time::Duration::from_secs(1800),
-                enabled: true,
-            },
+            OrderCacheConfig { enabled: true },
             config.redis.url.clone(),
             Some(trading_repo.clone()),
         )

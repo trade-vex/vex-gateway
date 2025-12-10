@@ -23,7 +23,6 @@ use lib_core::model::user_favorite_markets::Model as UserFavoriteMarketModel;
 use lib_core::repository::repository::{TradingError, TradingRepository};
 use rust_decimal::Decimal;
 use std::sync::Arc;
-use std::time::Duration;
 
 type Result<T> = std::result::Result<T, TradingError>;
 
@@ -195,10 +194,7 @@ async fn test_user_balance_store_new() {
 
 #[tokio::test]
 async fn test_user_balance_store_with_repository() {
-    let config = UserBalanceCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false, // Cache disabled
-    };
+    let config = UserBalanceCacheConfig { enabled: false };
 
     let balances = vec![
         create_test_balance(100, 1, 10000, 500, 10500),  // BTC
@@ -221,10 +217,7 @@ async fn test_user_balance_store_with_repository() {
 
 #[tokio::test]
 async fn test_get_user_balances_empty() {
-    let config = UserBalanceCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false,
-    };
+    let config = UserBalanceCacheConfig { enabled: false };
 
     let mock_repo = Arc::new(MockTradingRepository::new());
     let store = UserBalanceStore::with_repository(config, mock_repo);
@@ -236,10 +229,7 @@ async fn test_get_user_balances_empty() {
 
 #[tokio::test]
 async fn test_get_user_balances_single_asset() {
-    let config = UserBalanceCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false,
-    };
+    let config = UserBalanceCacheConfig { enabled: false };
 
     let balances = vec![create_test_balance(100, 1, 10000, 500, 10500)];
 
@@ -259,10 +249,7 @@ async fn test_get_user_balances_single_asset() {
 
 #[tokio::test]
 async fn test_get_user_balances_multiple_assets() {
-    let config = UserBalanceCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false,
-    };
+    let config = UserBalanceCacheConfig { enabled: false };
 
     let balances = vec![
         create_test_balance(100, 1, 10000, 500, 10500),  // BTC
@@ -303,10 +290,7 @@ async fn test_get_user_balances_multiple_assets() {
 
 #[tokio::test]
 async fn test_database_error_handling() {
-    let config = UserBalanceCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false,
-    };
+    let config = UserBalanceCacheConfig { enabled: false };
 
     let mock_repo = Arc::new(MockTradingRepository::new().with_error());
     let store = UserBalanceStore::with_repository(config, mock_repo);
@@ -324,10 +308,7 @@ async fn test_database_error_handling() {
 
 #[tokio::test]
 async fn test_invalidate_operations() {
-    let config = UserBalanceCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false, // Cache disabled, so invalidation is no-op
-    };
+    let config = UserBalanceCacheConfig { enabled: false }; // Cache disabled, so invalidation is no-op
 
     let store = UserBalanceStore::new(config);
 
@@ -337,10 +318,7 @@ async fn test_invalidate_operations() {
 
 #[tokio::test]
 async fn test_multiple_users() {
-    let config = UserBalanceCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false,
-    };
+    let config = UserBalanceCacheConfig { enabled: false };
 
     let balances = vec![
         create_test_balance(100, 1, 10000, 500, 10500),
@@ -384,10 +362,7 @@ async fn test_multiple_users() {
 
 #[tokio::test]
 async fn test_zero_balances() {
-    let config = UserBalanceCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false,
-    };
+    let config = UserBalanceCacheConfig { enabled: false };
 
     let balances = vec![create_test_balance(100, 1, 0, 0, 0)];
 
@@ -405,10 +380,7 @@ async fn test_zero_balances() {
 
 #[tokio::test]
 async fn test_large_balance_values() {
-    let config = UserBalanceCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false,
-    };
+    let config = UserBalanceCacheConfig { enabled: false };
 
     // Test with large balance values (12 decimal places precision)
     let large_available = 1_000_000_000_000_000i64; // 1,000 * 10^12
@@ -440,10 +412,7 @@ async fn test_large_balance_values() {
 
 #[tokio::test]
 async fn test_balance_consistency() {
-    let config = UserBalanceCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false,
-    };
+    let config = UserBalanceCacheConfig { enabled: false };
 
     // Test that total = available + locked
     let balances = vec![
@@ -470,26 +439,18 @@ async fn test_balance_consistency() {
 #[tokio::test]
 async fn test_config_default_values() {
     let config = UserBalanceCacheConfig::default();
-    assert_eq!(config.ttl, Duration::from_secs(1800));
     assert!(!config.enabled);
 }
 
 #[tokio::test]
 async fn test_config_custom_values() {
-    let config = UserBalanceCacheConfig {
-        ttl: Duration::from_secs(600),
-        enabled: true,
-    };
-    assert_eq!(config.ttl, Duration::from_secs(600));
+    let config = UserBalanceCacheConfig { enabled: true };
     assert!(config.enabled);
 }
 
 #[tokio::test]
 async fn test_concurrent_access() {
-    let config = UserBalanceCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false,
-    };
+    let config = UserBalanceCacheConfig { enabled: false };
 
     let balances = vec![
         create_test_balance(100, 1, 10000, 500, 10500),
@@ -520,10 +481,7 @@ async fn test_concurrent_access() {
 
 #[tokio::test]
 async fn test_balance_with_only_available() {
-    let config = UserBalanceCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false,
-    };
+    let config = UserBalanceCacheConfig { enabled: false };
 
     let balances = vec![create_test_balance(100, 1, 10000, 0, 10000)];
 
@@ -541,10 +499,7 @@ async fn test_balance_with_only_available() {
 
 #[tokio::test]
 async fn test_balance_with_only_locked() {
-    let config = UserBalanceCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false,
-    };
+    let config = UserBalanceCacheConfig { enabled: false };
 
     let balances = vec![create_test_balance(100, 1, 0, 5000, 5000)];
 
@@ -562,10 +517,7 @@ async fn test_balance_with_only_locked() {
 
 #[tokio::test]
 async fn test_asset_id_variations() {
-    let config = UserBalanceCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false,
-    };
+    let config = UserBalanceCacheConfig { enabled: false };
 
     // Test various asset IDs
     let balances = vec![
@@ -588,10 +540,7 @@ async fn test_asset_id_variations() {
 
 #[tokio::test]
 async fn test_timestamp_preservation() {
-    let config = UserBalanceCacheConfig {
-        ttl: Duration::from_secs(300),
-        enabled: false,
-    };
+    let config = UserBalanceCacheConfig { enabled: false };
 
     let balances = vec![create_test_balance(100, 1, 10000, 500, 10500)];
 
