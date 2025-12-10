@@ -17,14 +17,17 @@ pub struct SessionData {
 #[derive(Clone)]
 pub struct SessionService {
     redis_pool: Arc<RedisPool>,
-    session_ttl_seconds: i64,
+    session_ttl_seconds: u64,
 }
 
 impl SessionService {
     pub fn new(redis_pool: Arc<RedisPool>, session_ttl_seconds: i64) -> Self {
+        if session_ttl_seconds <= 0 {
+            panic!("session_ttl_seconds must be greater than 0, got: {}", session_ttl_seconds);
+        }
         Self {
             redis_pool,
-            session_ttl_seconds,
+            session_ttl_seconds: session_ttl_seconds as u64,
         }
     }
 
@@ -53,9 +56,8 @@ impl SessionService {
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
 
-        let ttl = self.session_ttl_seconds as u64;
         let _: () = conn
-            .set_ex(&session_key, session_json, ttl)
+            .set_ex(&session_key, session_json, self.session_ttl_seconds)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to store session: {}", e)))?;
 
@@ -125,7 +127,7 @@ impl SessionService {
 
         // Extend the TTL
         let _: () = conn
-            .expire(&session_key, self.session_ttl_seconds)
+            .expire(&session_key, self.session_ttl_seconds as i64)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to refresh session: {}", e)))?;
 
@@ -160,15 +162,15 @@ impl SessionService {
         let session_json = serde_json::to_string(&updated_session)
             .map_err(|e| AuthError::Redis(format!("Failed to serialize session: {}", e)))?;
 
-        // Update the session with new tokens, preserving existing TTL
+        // Update the session with new tokens
         let _: () = conn
             .set(&session_key, session_json)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to update session: {}", e)))?;
 
-        // Extend TTL to the configured session TTL
+        // Reset TTL to the configured session TTL value
         let _: () = conn
-            .expire(&session_key, self.session_ttl_seconds)
+            .expire(&session_key, self.session_ttl_seconds as i64)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to extend session TTL: {}", e)))?;
 
