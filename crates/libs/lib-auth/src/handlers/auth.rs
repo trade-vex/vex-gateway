@@ -484,10 +484,28 @@ pub async fn change_password(
         // No session cookie found - this shouldn't happen in normal flow,
         // but handle gracefully by revoking all sessions
         tracing::warn!("Change password called without session cookie - revoking all sessions");
-        let _ = session_service.revoke_all_user_sessions(user.user_id).await;
+        if let Err(e) = session_service.revoke_all_user_sessions(user.user_id).await {
+            tracing::error!(
+                "Failed to revoke sessions after password change for user {}: {}",
+                user.user_id,
+                e
+            );
+            return Err(AuthError::Redis(
+                "Failed to revoke sessions; please retry".to_string(),
+            ));
+        }
 
         // Also revoke refresh tokens (legacy cleanup)
-        let _ = token_service.revoke_user_sessions(user.user_id).await;
+        if let Err(e) = token_service.revoke_user_sessions(user.user_id).await {
+            tracing::error!(
+                "Failed to revoke refresh tokens after password change for user {}: {}",
+                user.user_id,
+                e
+            );
+            return Err(AuthError::Redis(
+                "Failed to revoke sessions; please retry".to_string(),
+            ));
+        }
     }
 
     Ok(HttpResponse::Ok().json(json!({
@@ -721,10 +739,28 @@ pub async fn reset_password(
         .await?;
 
     // Revoke all user sessions
-    let _ = session_service.revoke_all_user_sessions(user_id).await;
+    if let Err(e) = session_service.revoke_all_user_sessions(user_id).await {
+        tracing::error!(
+            "Failed to revoke sessions after password reset for user {}: {}",
+            user_id,
+            e
+        );
+        return Err(AuthError::Redis(
+            "Failed to revoke sessions; please retry".to_string(),
+        ));
+    }
 
     // Also revoke refresh tokens (legacy cleanup)
-    let _ = token_service.revoke_user_sessions(user_id).await;
+    if let Err(e) = token_service.revoke_user_sessions(user_id).await {
+        tracing::error!(
+            "Failed to revoke refresh tokens after password reset for user {}: {}",
+            user_id,
+            e
+        );
+        return Err(AuthError::Redis(
+            "Failed to revoke sessions; please retry".to_string(),
+        ));
+    }
 
     tracing::info!("Password reset successful for user_id: {}", user_id);
 
