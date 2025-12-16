@@ -72,6 +72,7 @@ async fn test_place_order(
         events: None,
         balance: [UserBalance::default(); 2],
         l2_data: None,
+        route_gateway_id: 0,
     };
 
     // Send to VEX Core
@@ -161,6 +162,7 @@ async fn test_cancel_order(
         events: None,
         balance: [UserBalance::default(); 2],
         l2_data: None,
+        route_gateway_id: 0,
     };
 
     // Send cancel command

@@ -254,6 +254,7 @@ pub async fn place_order(
         events: None,
         balance: [UserBalance::default(); 2],
         l2_data: None,
+        route_gateway_id: 0,
     };
 
     // Send to VEX Core
@@ -496,6 +497,7 @@ pub async fn cancel_order(
         events: None,
         balance: [UserBalance::default(); 2],
         l2_data: None,
+        route_gateway_id: 0,
     };
 
     // Send cancel command

@@ -95,6 +95,7 @@ async fn test_deposit_funds(
         events: None,
         balance: [UserBalance::default(); 2],
         l2_data: None,
+        route_gateway_id: 0,
     };
 
     // Set the balance amount for deposit
@@ -196,6 +197,7 @@ async fn test_place_order(
         events: None,
         balance: [UserBalance::default(); 2],
         l2_data: None,
+        route_gateway_id: 0,
     };
 
     // Send to VEX Core
