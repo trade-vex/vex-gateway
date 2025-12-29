@@ -136,6 +136,11 @@ impl AuthConfig {
             config.email.from_email = from_email;
         }
 
+        // Override frontend_url from FRONTEND_URL environment variable if set
+        if let Ok(frontend_url) = env::var("FRONTEND_URL") {
+            config.server.frontend_url = frontend_url;
+        }
+
         Ok(config)
     }
 
