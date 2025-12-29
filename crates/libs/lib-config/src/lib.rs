@@ -157,6 +157,11 @@ impl Config {
         let mut config: Config = config.try_deserialize().map_err(ConfigError::LoadError)?;
         config.environment = environment;
 
+        // Override frontend_url from FRONTEND_URL environment variable if set
+        if let Ok(frontend_url) = std::env::var("FRONTEND_URL") {
+            config.auth.server.frontend_url = frontend_url;
+        }
+
         // Log what we loaded before validation
         debug!("Loaded configuration before validation:");
         debug!("  Environment: {:?}", config.environment);
