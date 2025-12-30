@@ -88,12 +88,10 @@ pub async fn handle_oauth_callback(
                 .max_age(Duration::seconds(response.expires_in as i64))
                 .finish();
 
-            // Redirect to the portfolio page with session and user_info cookies
-            let redirect_url = format!("{}/portfolio", oauth_service.get_frontend_url());
             Ok(HttpResponse::Found()
                 .cookie(session_cookie)
                 .cookie(user_info_cookie)
-                .append_header(("Location", redirect_url))
+                .append_header(("Location", oauth_service.get_frontend_url()))
                 .finish())
         }
         Err(e) => {
