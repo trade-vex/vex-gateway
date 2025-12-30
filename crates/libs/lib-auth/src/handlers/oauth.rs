@@ -10,14 +10,17 @@ use actix_web::{
 use serde_json;
 use std::sync::Arc;
 use tracing::error;
+use url::Url;
 
 /// Initiate OAuth flow
-/// GET /oauth/{provider}
+/// GET /oauth/{provider}?platform=app|web
 pub async fn initiate_oauth(
     provider: web::Path<String>,
+    query: web::Query<std::collections::HashMap<String, String>>,
     oauth_service: web::Data<Arc<OAuthService>>,
 ) -> Result<HttpResponse, AuthError> {
-    match oauth_service.get_auth_url(&provider).await {
+    let platform = query.get("platform").map(|s| s.as_str());
+    match oauth_service.get_auth_url_with_platform(&provider, platform).await {
         Ok(url) => Ok(HttpResponse::Found()
             .append_header(("Location", url))
             .finish()),
@@ -47,9 +50,7 @@ pub async fn handle_oauth_callback(
         .handle_callback(&provider, code, &query.state)
         .await
     {
-        Ok(response) => {
-            let is_secure = oauth_service.get_frontend_url().starts_with("https://");
-
+        Ok((response, platform)) => {
             // Get user_id and user_info from the response
             let user_id = response.user.user_id;
             let user_info = response.user.clone();
@@ -66,33 +67,77 @@ pub async fn handle_oauth_callback(
                     AuthError::CodeExchangeFailed(format!("Failed to create session: {}", e))
                 })?;
 
-            // Create session cookie
-            let session_cookie = Cookie::build("session_id", session_id)
-                .path("/")
-                .http_only(true)
-                .secure(is_secure)
-                .same_site(SameSite::Strict)
-                .max_age(Duration::seconds(response.expires_in as i64))
-                .finish();
+            // Get the frontend URL (same for both platforms)
+            let frontend_url = oauth_service.get_frontend_url().to_string();
+            let is_secure = frontend_url.starts_with("https://");
 
-            // Create user_info cookie (JSON format)
+            // Serialize user_info to JSON (needed for both platforms)
             let user_info_json = serde_json::to_string(&user_info).map_err(|e| {
                 AuthError::Validation(format!("Failed to serialize user info: {}", e))
             })?;
 
-            let user_info_cookie = Cookie::build("user_info", user_info_json)
-                .path("/")
-                .http_only(false) // Allow client-side JavaScript access
-                .secure(is_secure)
-                .same_site(SameSite::Strict)
-                .max_age(Duration::seconds(response.expires_in as i64))
-                .finish();
+            // Determine redirect URL and cookies based on platform
+            match platform.as_deref() {
+                Some("app") => {
+                    // For app: redirect with query parameters (no cookies)
+                    // Use encodeURIComponent-style encoding (form_urlencoded)
+                    use url::form_urlencoded;
+                    
+                    // Encode values similar to JavaScript's encodeURIComponent
+                    // form_urlencoded::byte_serialize provides encodeURIComponent-style encoding
+                    let encoded_session: String = form_urlencoded::byte_serialize(session_id.as_bytes()).collect();
+                    let encoded_user_info: String = form_urlencoded::byte_serialize(user_info_json.as_bytes()).collect();
+                    
+                    // Build URL with query parameters (works for both standard URLs and custom schemes like vex://)
+                    let redirect_url = if frontend_url.contains("://") && !frontend_url.starts_with("http://") && !frontend_url.starts_with("https://") {
+                        // Custom scheme (e.g., vex://) - manually append query params
+                        format!("{}?session_id={}&user_info={}", frontend_url, encoded_session, encoded_user_info)
+                    } else {
+                        // Standard URL - use URL parsing for proper encoding
+                        match Url::parse(&frontend_url) {
+                            Ok(mut url) => {
+                                url.query_pairs_mut()
+                                    .append_pair("session_id", &session_id)
+                                    .append_pair("user_info", &user_info_json);
+                                url.to_string()
+                            }
+                            Err(_) => {
+                                // Fallback: manually append if parsing fails
+                                format!("{}?session_id={}&user_info={}", frontend_url, encoded_session, encoded_user_info)
+                            }
+                        }
+                    };
 
-            Ok(HttpResponse::Found()
-                .cookie(session_cookie)
-                .cookie(user_info_cookie)
-                .append_header(("Location", oauth_service.get_frontend_url()))
-                .finish())
+                    Ok(HttpResponse::Found()
+                        .append_header(("Location", redirect_url))
+                        .finish())
+                }
+                Some("web") | _ => {
+                    // For web: redirect to frontend_url with cookies (no query parameters)
+                    // Create session cookie
+                    let session_cookie = Cookie::build("session_id", session_id.clone())
+                        .path("/")
+                        .http_only(true)
+                        .secure(is_secure)
+                        .same_site(SameSite::Strict)
+                        .max_age(Duration::seconds(response.expires_in as i64))
+                        .finish();
+
+                    let user_info_cookie = Cookie::build("user_info", user_info_json)
+                        .path("/")
+                        .http_only(false) // Allow client-side JavaScript access
+                        .secure(is_secure)
+                        .same_site(SameSite::Strict)
+                        .max_age(Duration::seconds(response.expires_in as i64))
+                        .finish();
+
+                    Ok(HttpResponse::Found()
+                        .cookie(session_cookie)
+                        .cookie(user_info_cookie)
+                        .append_header(("Location", frontend_url))
+                        .finish())
+                }
+            }
         }
         Err(e) => {
             error!("OAuth callback error: {}", e);

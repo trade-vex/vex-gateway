@@ -471,6 +471,107 @@ impl OAuthService {
         Ok(final_auth_url.to_string())
     }
 
+    /// Generates an authorization URL for initiating OAuth flow with platform support
+    ///
+    /// This method is similar to `get_auth_url` but also stores the platform
+    /// information in Redis so it can be retrieved during the callback.
+    ///
+    /// # Arguments
+    ///
+    /// * `provider` - The OAuth provider name ("google", "github", "twitter")
+    /// * `platform` - Optional platform identifier ("app" or "web")
+    ///
+    /// # Returns
+    ///
+    /// The authorization URL to redirect the user to, or an error if:
+    /// - Provider is not configured
+    /// - Redis connection fails
+    pub async fn get_auth_url_with_platform(
+        &self,
+        provider: &str,
+        platform: Option<&str>,
+    ) -> Result<String, AuthError> {
+        if provider.is_empty() {
+            return Err(AuthError::InvalidProvider(
+                "Provider name is empty".to_string(),
+            ));
+        }
+
+        let client = self.oauth_clients.get(provider).ok_or_else(|| {
+            AuthError::InvalidProvider(format!("Provider '{}' not configured", provider))
+        })?;
+
+        // Generate PKCE challenge for security (prevents authorization code interception)
+        let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
+
+        // Build authorization URL using OpenID Connect flow
+        // Note: Nonce is required by API but only used for OIDC ID token validation
+        let mut auth_request = client
+            .authorize_url(
+                CoreAuthenticationFlow::AuthorizationCode,
+                CsrfToken::new_random,
+                Nonce::new_random,
+            )
+            .set_pkce_challenge(pkce_challenge);
+
+        // Add provider-specific scopes
+        if provider == "google" {
+            auth_request = auth_request
+                .add_scope(Scope::new("openid".to_string()))
+                .add_scope(Scope::new("email".to_string()))
+                .add_scope(Scope::new("profile".to_string()));
+        } else if provider == "github" {
+            auth_request = auth_request.add_scope(Scope::new("user:email".to_string()));
+        } else if provider == "twitter" {
+            auth_request = auth_request
+                .add_scope(Scope::new("tweet.read".to_string()))
+                .add_scope(Scope::new("users.read".to_string()));
+        }
+
+        let (final_auth_url, csrf_state, nonce) = auth_request.url();
+
+        // Store state and PKCE verifier in Redis with 10-minute expiry
+        let mut redis_conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Redis connection failed: {}", e)))?;
+
+        let state_key = format!("oauth_state:{}:{}", provider, csrf_state.secret());
+        let verifier_key = format!("oauth_verifier:{}:{}", provider, csrf_state.secret());
+        let platform_key = format!("oauth_platform:{}:{}", provider, csrf_state.secret());
+
+        let _: () = redis_conn
+            .set_ex(&state_key, "valid", 600)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to store state: {}", e)))?;
+
+        let _: () = redis_conn
+            .set_ex(&verifier_key, pkce_verifier.secret(), 600)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to store verifier: {}", e)))?;
+
+        // Store platform if provided
+        if let Some(platform) = platform {
+            let _: () = redis_conn
+                .set_ex(&platform_key, platform, 600)
+                .await
+                .map_err(|e| AuthError::Redis(format!("Failed to store platform: {}", e)))?;
+        }
+
+        // Store nonce for OIDC providers (used for ID token validation)
+        // nonce is validated in handle_callback to prevent replay attacks
+        if provider == "google" {
+            let nonce_key = format!("oauth_nonce:{}:{}", provider, csrf_state.secret());
+            let _: () = redis_conn
+                .set_ex(&nonce_key, nonce.secret(), 600)
+                .await
+                .map_err(|e| AuthError::Redis(format!("Failed to store nonce: {}", e)))?;
+        }
+
+        Ok(final_auth_url.to_string())
+    }
+
     /// Handles the OAuth callback after user authentication
     ///
     /// This is the core method that completes the OAuth flow:
@@ -523,7 +624,10 @@ impl OAuthService {
         provider: &str,
         code: &str,
         state: &str,
-    ) -> Result<OAuthLoginResponse, AuthError> {
+    ) -> Result<(OAuthLoginResponse, Option<String>), AuthError> {
+        // Retrieve platform before consuming state (we need state to look it up)
+        let platform = self.get_stored_platform(provider, state).await?;
+        
         // Verify and consume state for CSRF protection
         self.verify_and_consume_state(provider, state).await?;
 
@@ -607,12 +711,15 @@ impl OAuthService {
             .await
             .map_err(|e| AuthError::CodeExchangeFailed(format!("Token minting failed: {}", e)))?;
 
-        Ok(OAuthLoginResponse {
-            access_token: tokens.access_token,
-            refresh_token: tokens.refresh_token,
-            expires_in: tokens.expires_in,
-            user: user.into(),
-        })
+        Ok((
+            OAuthLoginResponse {
+                access_token: tokens.access_token,
+                refresh_token: tokens.refresh_token,
+                expires_in: tokens.expires_in,
+                user: user.into(),
+            },
+            platform,
+        ))
     }
 
     /// Verifies and atomically consumes the OAuth state parameter
@@ -710,6 +817,40 @@ impl OAuthService {
         })?;
 
         Ok(nonce)
+    }
+
+    /// Retrieves and consumes the stored platform from Redis
+    ///
+    /// The platform is stored during OAuth initiation to determine the correct
+    /// redirect URL during callback (app vs web).
+    ///
+    /// # One-time Use
+    ///
+    /// The platform is deleted after retrieval to prevent reuse.
+    async fn get_stored_platform(&self, provider: &str, state: &str) -> Result<Option<String>, AuthError> {
+        let mut redis_conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Redis connection failed: {}", e)))?;
+
+        let platform_key = format!("oauth_platform:{}:{}", provider, state);
+
+        // Get platform (optional - may not exist if platform wasn't specified)
+        let platform: Option<String> = redis_conn
+            .get(&platform_key)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to retrieve platform: {}", e)))?;
+
+        // Delete platform after retrieval (one-time use) if it exists
+        if platform.is_some() {
+            let _: () = redis_conn
+                .del(&platform_key)
+                .await
+                .map_err(|e| AuthError::Redis(format!("Failed to delete platform: {}", e)))?;
+        }
+
+        Ok(platform)
     }
 
     /// Validates the OIDC ID token for Google authentication
