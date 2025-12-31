@@ -67,8 +67,19 @@ pub async fn handle_oauth_callback(
                     AuthError::CodeExchangeFailed(format!("Failed to create session: {}", e))
                 })?;
 
-            // Get the frontend URL (same for both platforms)
-            let frontend_url = oauth_service.get_frontend_url().to_string();
+            // Get the frontend URL based on platform
+            let frontend_url = match platform.as_deref() {
+                Some("app") => {
+                    std::env::var("FRONTEND_URL_APP")
+                        .or_else(|_| std::env::var("OAUTH_FRONTEND_URL_APP"))
+                        .unwrap_or_else(|_| oauth_service.get_frontend_url().to_string())
+                }
+                Some("web") | _ => {
+                    std::env::var("FRONTEND_URL_WEB")
+                        .or_else(|_| std::env::var("OAUTH_FRONTEND_URL_WEB"))
+                        .unwrap_or_else(|_| oauth_service.get_frontend_url().to_string())
+                }
+            };
             let is_secure = frontend_url.starts_with("https://");
 
             // Serialize user_info to JSON (needed for both platforms)
