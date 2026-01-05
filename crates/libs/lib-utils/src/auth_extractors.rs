@@ -16,20 +16,6 @@ use lib_middleware::api_key::security::ApiKeyConfig;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthenticatedUserId(pub Uuid);
 
-impl AuthenticatedUserId {
-    /// Converts the UUID to a u64 using bit manipulation.
-    ///
-    /// This performs an XOR operation between the upper and lower 64 bits of the UUID
-    /// to derive a u64 user ID
-    ///
-    /// # Returns
-    /// A u64 representation of the UUID.
-    pub fn as_u64(&self) -> u64 {
-        let raw = self.0.as_u128();
-        ((raw >> 64) as u64) ^ (raw as u64)
-    }
-}
-
 impl From<AuthenticatedUser> for AuthenticatedUserId {
     fn from(user: AuthenticatedUser) -> Self {
         Self(user.user_id)
