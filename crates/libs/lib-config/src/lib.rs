@@ -147,7 +147,6 @@ impl Config {
                 config::Environment::default()
                     .prefix("APP")
                     .separator("_")
-                    .list_separator(",")
                     .try_parsing(true),
             )
             .build()
