@@ -111,6 +111,7 @@ pub async fn get_balances(
 /// # Query Parameters
 /// - `page` (optional): Page number (1-indexed). Defaults to 1.
 /// - `limit` (optional): Number of orders per page. Defaults to 20, max 100.
+/// - `market_id` (optional): Filter orders by market ID. If not provided, returns orders from all markets.
 ///
 /// # Authentication
 /// Requires valid JWT token in Authorization header: `Bearer <token>`
@@ -120,7 +121,7 @@ pub async fn get_balances(
 ///
 /// # Example Request
 /// ```bash
-/// curl -X GET "http://localhost:8080/api/user/orders/open?page=1&limit=20" \
+/// curl -X GET "http://localhost:8080/api/user/orders/open?page=1&limit=20&market_id=1" \
 ///   -H "Authorization: Bearer <jwt_token>"
 /// ```
 ///
@@ -175,6 +176,7 @@ pub async fn get_balances(
 pub struct OrdersQuery {
     pub page: Option<usize>,
     pub limit: Option<usize>,
+    pub market_id: Option<u32>,
 }
 
 pub async fn get_open_orders(
@@ -193,7 +195,7 @@ pub async fn get_open_orders(
     let limit_u64 = limit as u64;
 
     // Get total count for pagination metadata
-    let total_count = match trading_repo.count_open_orders(user_id).await {
+    let total_count = match trading_repo.count_open_orders(user_id, query.market_id).await {
         Ok(count) => count as usize,
         Err(e) => {
             tracing::error!("failed to count open orders for user_id {}: {}", user_id, e);
@@ -205,7 +207,7 @@ pub async fn get_open_orders(
     };
 
     match order_store
-        .get_user_orders_paginated(user_id, offset, limit_u64)
+        .get_user_orders_paginated(user_id, offset, limit_u64, query.market_id)
         .await
     {
         Ok(orders) => {
@@ -250,6 +252,7 @@ pub async fn get_open_orders(
 /// # Query Parameters
 /// - `page` (optional): Page number (1-indexed). Defaults to 1.
 /// - `limit` (optional): Number of orders per page. Defaults to 20, max 100.
+/// - `market_id` (optional): Filter orders by market ID. If not provided, returns orders from all markets.
 ///
 /// # Authentication
 /// Requires valid JWT token in Authorization header: `Bearer <token>`
@@ -259,7 +262,7 @@ pub async fn get_open_orders(
 ///
 /// # Example Request
 /// ```bash
-/// curl -X GET "http://localhost:8080/api/user/orders/history?page=1&limit=20" \
+/// curl -X GET "http://localhost:8080/api/user/orders/history?page=1&limit=20&market_id=1" \
 ///   -H "Authorization: Bearer <jwt_token>"
 /// ```
 ///
@@ -326,7 +329,7 @@ pub async fn get_order_history(
     let limit_u64 = limit as u64;
 
     // Get total count for pagination metadata
-    let total_count = match trading_repo.count_order_history(user_id).await {
+    let total_count = match trading_repo.count_order_history(user_id, query.market_id).await {
         Ok(count) => count as usize,
         Err(e) => {
             tracing::error!(
@@ -342,7 +345,7 @@ pub async fn get_order_history(
     };
 
     match order_store
-        .get_user_order_history_paginated(user_id, offset, limit_u64)
+        .get_user_order_history_paginated(user_id, offset, limit_u64, query.market_id)
         .await
     {
         Ok(orders) => {
