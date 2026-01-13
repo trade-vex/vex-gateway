@@ -1,3 +1,4 @@
+use crate::cache::ScalingCache;
 use crate::model::orders::Model as OrderModel;
 use crate::repository::repository::{TradingError, TradingRepository};
 use lib_db::backends::kv::redis::RedisDb;
@@ -13,6 +14,7 @@ pub struct OrderStore {
     cache: Option<RedisDb>,
     trading_repo: Option<Arc<dyn TradingRepository>>,
     config: OrderCacheConfig,
+    scaling_cache: Option<Arc<ScalingCache>>,
 }
 
 #[derive(Clone, Default)]
@@ -26,6 +28,7 @@ impl OrderStore {
             cache: None,
             trading_repo: None,
             config,
+            scaling_cache: None,
         }
     }
 
@@ -37,6 +40,7 @@ impl OrderStore {
             cache: None,
             trading_repo: Some(trading_repo),
             config,
+            scaling_cache: None,
         }
     }
 
@@ -58,7 +62,41 @@ impl OrderStore {
             cache,
             trading_repo,
             config,
+            scaling_cache: None,
         })
+    }
+
+    pub fn with_scaling_cache(mut self, scaling_cache: Arc<ScalingCache>) -> Self {
+        self.scaling_cache = Some(scaling_cache);
+        self
+    }
+
+    /// Descale an order model using the scaling cache
+    fn descale_order(&self, mut order: OrderModel) -> OrderModel {
+        if let Some(scaling_cache) = &self.scaling_cache {
+            order.order_price = scaling_cache.scale_price(order.market_id as u32, order.order_price);
+            order.order_size = scaling_cache.scale_volume(order.market_id as u32, order.order_size);
+            order.filled_size = scaling_cache.scale_volume(order.market_id as u32, order.filled_size);
+        }
+        order
+    }
+
+    /// Descale a vector of orders
+    fn descale_orders(&self, orders: Vec<OrderModel>) -> Vec<OrderModel> {
+        if let Some(scaling_cache) = &self.scaling_cache {
+            orders
+                .into_iter()
+                .map(|order| {
+                    let mut descaled = order.clone();
+                    descaled.order_price = scaling_cache.scale_price(descaled.market_id as u32, descaled.order_price);
+                    descaled.order_size = scaling_cache.scale_volume(descaled.market_id as u32, descaled.order_size);
+                    descaled.filled_size = scaling_cache.scale_volume(descaled.market_id as u32, descaled.filled_size);
+                    descaled
+                })
+                .collect()
+        } else {
+            orders
+        }
     }
 
     pub async fn get_order_by_id(
@@ -76,7 +114,7 @@ impl OrderStore {
                         // Parse hash to OrderModel
                         if let Some(order) = Self::parse_order_hash(hash) {
                             debug!("Order cache hit for order ID: {}", order_id);
-                            return Ok(Some(order));
+                            return Ok(Some(self.descale_order(order)));
                         }
                     }
                     Ok(_) => {
@@ -94,7 +132,7 @@ impl OrderStore {
             match repo.get_order_by_id(order_id, user_id).await {
                 Ok(Some(order)) => {
                     debug!("Database hit for order ID: {}", order_id);
-                    return Ok(Some(order));
+                    return Ok(Some(self.descale_order(order)));
                 }
                 Ok(None) => {
                     debug!("Order not found in database: {}", order_id);
@@ -169,7 +207,7 @@ impl OrderStore {
                                 "Redis cache hit: {} history orders (paginated)",
                                 paginated_orders.len()
                             );
-                            return Ok(paginated_orders);
+                            return Ok(self.descale_orders(paginated_orders));
                         }
                     }
                     Ok(_) => {
@@ -188,7 +226,7 @@ impl OrderStore {
                 .get_order_history_paginated(user_id, offset, limit, market_id)
                 .await?;
             debug!("Postgres: Got {} history orders (paginated)", orders.len());
-            return Ok(orders);
+            return Ok(self.descale_orders(orders));
         }
 
         debug!(
@@ -238,7 +276,7 @@ impl OrderStore {
                                 "Redis cache hit: {} history orders (includes filled_size)",
                                 orders.len()
                             );
-                            return Ok(orders);
+                            return Ok(self.descale_orders(orders));
                         }
                     }
                     Ok(_) => {
@@ -258,7 +296,7 @@ impl OrderStore {
                 "Postgres: Got {} history orders (includes filled_size)",
                 orders.len()
             );
-            return Ok(orders);
+            return Ok(self.descale_orders(orders));
         }
 
         debug!(
@@ -337,7 +375,7 @@ impl OrderStore {
                             .collect();
 
                         if !paginated_orders.is_empty() {
-                            return Ok(paginated_orders);
+                            return Ok(self.descale_orders(paginated_orders));
                         }
                     }
                     Ok(_) => {
@@ -355,7 +393,7 @@ impl OrderStore {
             match repo.get_open_orders_paginated(user_id, offset, limit, market_id).await {
                 Ok(orders) => {
                     debug!("Database hit for user orders (paginated): {}", user_id);
-                    return Ok(orders);
+                    return Ok(self.descale_orders(orders));
                 }
                 Err(e) => {
                     return Err(e);
@@ -431,7 +469,7 @@ impl OrderStore {
                         debug!("Returning {} orders after filtering", orders.len());
 
                         if !orders.is_empty() {
-                            return Ok(orders);
+                            return Ok(self.descale_orders(orders));
                         }
 
                         // If all orders were filtered out (all cancelled), return empty vec
@@ -453,7 +491,7 @@ impl OrderStore {
             match repo.get_open_orders(user_id).await {
                 Ok(orders) => {
                     debug!("Database hit for user orders: {}", user_id);
-                    return Ok(orders);
+                    return Ok(self.descale_orders(orders));
                 }
                 Err(e) => {
                     return Err(e);

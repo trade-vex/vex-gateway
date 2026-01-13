@@ -1,3 +1,4 @@
+use crate::cache::ScalingCache;
 use crate::model::user_balances::Model as UserBalanceModel;
 use crate::repository::repository::{TradingError, TradingRepository};
 use lib_db::backends::kv::redis::RedisDb;
@@ -13,6 +14,7 @@ pub struct UserBalanceStore {
     cache: Option<RedisDb>,
     trading_repo: Option<Arc<dyn TradingRepository>>,
     config: UserBalanceCacheConfig,
+    scaling_cache: Option<Arc<ScalingCache>>,
 }
 
 #[derive(Clone, Default)]
@@ -27,6 +29,7 @@ impl UserBalanceStore {
             cache: None,
             trading_repo: None,
             config,
+            scaling_cache: None,
         }
     }
 
@@ -38,6 +41,7 @@ impl UserBalanceStore {
             cache: None,
             trading_repo: Some(trading_repo),
             config,
+            scaling_cache: None,
         }
     }
 
@@ -59,7 +63,43 @@ impl UserBalanceStore {
             cache,
             trading_repo,
             config,
+            scaling_cache: None,
         })
+    }
+
+    pub fn with_scaling_cache(mut self, scaling_cache: Arc<ScalingCache>) -> Self {
+        self.scaling_cache = Some(scaling_cache);
+        self
+    }
+
+    /// Descale a balance model using the scaling cache
+    fn descale_balance(&self, mut balance: UserBalanceModel) -> UserBalanceModel {
+        if let Some(scaling_cache) = &self.scaling_cache {
+            let asset_id = balance.asset_id as u16;
+            balance.available = scaling_cache.scale_balance(asset_id, balance.available);
+            balance.locked = scaling_cache.scale_balance(asset_id, balance.locked);
+            balance.total = scaling_cache.scale_balance(asset_id, balance.total);
+        }
+        balance
+    }
+
+    /// Descale a vector of balances
+    fn descale_balances(&self, balances: Vec<UserBalanceModel>) -> Vec<UserBalanceModel> {
+        if let Some(scaling_cache) = &self.scaling_cache {
+            balances
+                .into_iter()
+                .map(|balance| {
+                    let mut descaled = balance.clone();
+                    let asset_id = descaled.asset_id as u16;
+                    descaled.available = scaling_cache.scale_balance(asset_id, descaled.available);
+                    descaled.locked = scaling_cache.scale_balance(asset_id, descaled.locked);
+                    descaled.total = scaling_cache.scale_balance(asset_id, descaled.total);
+                    descaled
+                })
+                .collect()
+        } else {
+            balances
+        }
     }
 
     /// Get user balances from cache: user:{user_id}:asset:{asset_id}:balance hashes
@@ -95,7 +135,7 @@ impl UserBalanceStore {
                         }
 
                         if !balances.is_empty() {
-                            return Ok(balances);
+                            return Ok(self.descale_balances(balances));
                         }
                     }
                     Ok(_) => {
@@ -113,7 +153,7 @@ impl UserBalanceStore {
             match repo.get_user_balances(user_id).await {
                 Ok(balances) => {
                     debug!("Database hit for user balances: {}", user_id);
-                    return Ok(balances);
+                    return Ok(self.descale_balances(balances));
                 }
                 Err(e) => {
                     return Err(e);
