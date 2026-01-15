@@ -1,4 +1,4 @@
-use crate::cache::ScalingCache;
+use crate::cache::scaling_cache::ScalingCache;
 use crate::model::orders::Model as OrderModel;
 use crate::repository::repository::{TradingError, TradingRepository};
 use lib_db::backends::kv::redis::RedisDb;

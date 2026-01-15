@@ -11,7 +11,7 @@ use lib_core::CorrelationService;
 use lib_core::Publisher;
 use lib_core::repository::repository::{ClickHousePortfolioRepository, PortfolioRepository};
 use lib_core::{
-    OrderCacheConfig, OrderStore, PostgresTradingRepository, cache::ScalingCache, TradingRepository,
+    OrderCacheConfig, OrderStore, PostgresTradingRepository, cache::scaling_cache::ScalingCache, TradingRepository,
     UserBalanceCacheConfig, UserBalanceStore,
 };
 use lib_middleware::api_key::middleware::CacheConfig;

@@ -144,7 +144,7 @@ impl TradingRepository for MockTradingRepository {
         user_id: u64,
         offset: u64,
         limit: u64,
-        _market_id: Option<u32>,
+        market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>> {
         if self.should_error {
             return Err(TradingError::Database("Mock database error".to_string()));
@@ -158,6 +158,7 @@ impl TradingRepository for MockTradingRepository {
                         || o.status.to_lowercase() == "pending"
                         || o.status.to_lowercase() == "partiallyfilled"
                         || o.status.to_lowercase() == "processing")
+                    && market_id.map_or(true, |mid| o.market_id == mid as i32)
             })
             .cloned()
             .collect();
@@ -173,7 +174,7 @@ impl TradingRepository for MockTradingRepository {
             .collect())
     }
 
-    async fn count_open_orders(&self, user_id: u64, _market_id: Option<u32>) -> Result<u64> {
+    async fn count_open_orders(&self, user_id: u64, market_id: Option<u32>) -> Result<u64> {
         if self.should_error {
             return Err(TradingError::Database("Mock database error".to_string()));
         }
@@ -186,6 +187,7 @@ impl TradingRepository for MockTradingRepository {
                         || o.status.to_lowercase() == "pending"
                         || o.status.to_lowercase() == "partiallyfilled"
                         || o.status.to_lowercase() == "processing")
+                    && market_id.map_or(true, |mid| o.market_id == mid as i32)
             })
             .count();
         Ok(count as u64)
@@ -245,7 +247,7 @@ impl TradingRepository for MockTradingRepository {
         user_id: u64,
         offset: u64,
         limit: u64,
-        _market_id: Option<u32>,
+        market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>> {
         if self.should_error {
             return Err(TradingError::Database("Mock database error".to_string()));
@@ -258,6 +260,7 @@ impl TradingRepository for MockTradingRepository {
                     && (o.status.to_lowercase() == "cancelled"
                         || o.status.to_lowercase() == "partiallyfilled"
                         || o.status.to_lowercase() == "filled")
+                    && market_id.map_or(true, |mid| o.market_id == mid as i32)
             })
             .cloned()
             .collect();
@@ -273,7 +276,7 @@ impl TradingRepository for MockTradingRepository {
             .collect())
     }
 
-    async fn count_order_history(&self, user_id: u64, _market_id: Option<u32>) -> Result<u64> {
+    async fn count_order_history(&self, user_id: u64, market_id: Option<u32>) -> Result<u64> {
         if self.should_error {
             return Err(TradingError::Database("Mock database error".to_string()));
         }
@@ -285,6 +288,7 @@ impl TradingRepository for MockTradingRepository {
                     && (o.status.to_lowercase() == "cancelled"
                         || o.status.to_lowercase() == "partiallyfilled"
                         || o.status.to_lowercase() == "filled")
+                    && market_id.map_or(true, |mid| o.market_id == mid as i32)
             })
             .count();
         Ok(count as u64)
