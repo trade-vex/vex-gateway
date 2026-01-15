@@ -1,4 +1,4 @@
-use crate::cache::ScalingCache;
+use crate::cache::scaling_cache::ScalingCache;
 use crate::model::user_balances::Model as UserBalanceModel;
 use crate::repository::repository::{TradingError, TradingRepository};
 use lib_db::backends::kv::redis::RedisDb;

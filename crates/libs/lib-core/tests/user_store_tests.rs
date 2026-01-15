@@ -104,11 +104,12 @@ impl TradingRepository for MockTradingRepository {
         _user_id: u64,
         _offset: u64,
         _limit: u64,
+        _market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>> {
         Ok(vec![])
     }
 
-    async fn count_open_orders(&self, _user_id: u64) -> Result<u64> {
+    async fn count_open_orders(&self, _user_id: u64, _market_id: Option<u32>) -> Result<u64> {
         Ok(0)
     }
 
@@ -152,11 +153,12 @@ impl TradingRepository for MockTradingRepository {
         _user_id: u64,
         _offset: u64,
         _limit: u64,
+        _market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>> {
         Ok(vec![])
     }
 
-    async fn count_order_history(&self, _user_id: u64) -> Result<u64> {
+    async fn count_order_history(&self, _user_id: u64, _market_id: Option<u32>) -> Result<u64> {
         Ok(0)
     }
 }
