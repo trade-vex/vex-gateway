@@ -490,6 +490,7 @@ impl OAuthService {
         &self,
         provider: &str,
         platform: Option<&str>,
+        code_challenge: Option<&str>, // NEW: Accept code_challenge from frontend
     ) -> Result<String, AuthError> {
         if provider.is_empty() {
             return Err(AuthError::InvalidProvider(
@@ -540,6 +541,7 @@ impl OAuthService {
         let state_key = format!("oauth_state:{}:{}", provider, csrf_state.secret());
         let verifier_key = format!("oauth_verifier:{}:{}", provider, csrf_state.secret());
         let platform_key = format!("oauth_platform:{}:{}", provider, csrf_state.secret());
+        let code_challenge_key = format!("oauth_code_challenge:{}:{}", provider, csrf_state.secret());
 
         let _: () = redis_conn
             .set_ex(&state_key, "valid", 600)
@@ -557,6 +559,15 @@ impl OAuthService {
                 .set_ex(&platform_key, platform, 600)
                 .await
                 .map_err(|e| AuthError::Redis(format!("Failed to store platform: {}", e)))?;
+        }
+
+        // Store frontend-provided code_challenge for verification code flow (if provided)
+        // This is separate from OAuth provider PKCE - used for our verification code security
+        if let Some(code_challenge) = code_challenge {
+            let _: () = redis_conn
+                .set_ex(&code_challenge_key, code_challenge, 600)
+                .await
+                .map_err(|e| AuthError::Redis(format!("Failed to store code_challenge: {}", e)))?;
         }
 
         // Store nonce for OIDC providers (used for ID token validation)
@@ -851,6 +862,32 @@ impl OAuthService {
         }
 
         Ok(platform)
+    }
+
+    /// Retrieves and consumes the stored code_challenge from Redis
+    /// 
+    /// The code_challenge is used for PKCE verification of the verification code.
+    /// This is separate from the OAuth provider's PKCE flow.
+    /// 
+    /// # One-time Use
+    /// 
+    /// The code_challenge is deleted after retrieval to prevent reuse.
+    pub async fn get_stored_code_challenge(&self, provider: &str, state: &str) -> Result<Option<String>, AuthError> {
+        let mut redis_conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Redis connection failed: {}", e)))?;
+
+        let code_challenge_key = format!("oauth_code_challenge:{}:{}", provider, state);
+
+        // Atomically get and delete code_challenge
+        let code_challenge: Option<String> = redis_conn
+            .get_del(&code_challenge_key)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to retrieve code_challenge: {}", e)))?;
+
+        Ok(code_challenge)
     }
 
     /// Validates the OIDC ID token for Google authentication

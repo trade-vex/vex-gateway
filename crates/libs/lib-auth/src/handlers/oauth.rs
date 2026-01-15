@@ -1,4 +1,4 @@
-use crate::dto::auth_request_dto::OAuthCallbackQuery;
+use crate::dto::auth_request_dto::{OAuthCallbackQuery, OAuthVerifyRequest};
 use crate::error::auth_error::AuthError;
 use crate::service::{oauth_service::OAuthService, session_service::SessionService};
 
@@ -9,18 +9,30 @@ use actix_web::{
 };
 use serde_json;
 use std::sync::Arc;
-use tracing::error;
+use tracing::{error, warn};
 use url::Url;
 
 /// Initiate OAuth flow
-/// GET /oauth/{provider}?platform=app|web
+/// GET /oauth/{provider}?platform=app|web&code_challenge=<SHA256_HASH>
+/// 
+/// # Parameters
+/// 
+/// - `platform`: "app" or "web" (optional)
+/// - `code_challenge`: SHA256 hash of code_verifier (optional, but required for app platform security)
 pub async fn initiate_oauth(
     provider: web::Path<String>,
     query: web::Query<std::collections::HashMap<String, String>>,
     oauth_service: web::Data<Arc<OAuthService>>,
 ) -> Result<HttpResponse, AuthError> {
     let platform = query.get("platform").map(|s| s.as_str());
-    match oauth_service.get_auth_url_with_platform(&provider, platform).await {
+    let code_challenge = query.get("code_challenge").map(|s| s.as_str());
+    
+    // For app platform, code_challenge is recommended for security
+    if platform == Some("app") && code_challenge.is_none() {
+        warn!("OAuth initiation for app platform without code_challenge - verification code will not be PKCE-protected");
+    }
+    
+    match oauth_service.get_auth_url_with_platform(&provider, platform, code_challenge).await {
         Ok(url) => Ok(HttpResponse::Found()
             .append_header(("Location", url))
             .finish()),
@@ -90,31 +102,47 @@ pub async fn handle_oauth_callback(
             // Determine redirect URL and cookies based on platform
             match platform.as_deref() {
                 Some("app") => {
-                    // For app: redirect with query parameters (no cookies)
-                    // Use encodeURIComponent-style encoding (form_urlencoded)
-                    use url::form_urlencoded;
+                    // SECURITY: For app platform, use PKCE-protected verification code
+                    // Retrieve code_challenge that was stored during OAuth initiation
+                    let code_challenge = oauth_service
+                        .get_stored_code_challenge(&provider, &query.state)
+                        .await?
+                        .unwrap_or_default(); // Fallback to empty if not provided
                     
-                    // Encode values similar to JavaScript's encodeURIComponent
-                    // form_urlencoded::byte_serialize provides encodeURIComponent-style encoding
-                    let encoded_session: String = form_urlencoded::byte_serialize(session_id.as_bytes()).collect();
-                    let encoded_user_info: String = form_urlencoded::byte_serialize(user_info_json.as_bytes()).collect();
-                    
-                    // Build URL with query parameters (works for both standard URLs and custom schemes like vex://)
-                    let redirect_url = if frontend_url.contains("://") && !frontend_url.starts_with("http://") && !frontend_url.starts_with("https://") {
-                        // Custom scheme (e.g., vex://) - manually append query params
-                        format!("{}?session_id={}&user_info={}", frontend_url, encoded_session, encoded_user_info)
+                    // Store verification code WITH code_challenge (PKCE protection)
+                    let verification_code = session_service
+                        .store_oauth_verification_code(
+                            session_id,
+                            user_info_json,
+                            code_challenge, // PKCE challenge for verification
+                        )
+                        .await
+                        .map_err(|e| {
+                            AuthError::CodeExchangeFailed(format!(
+                                "Failed to store verification code: {}",
+                                e
+                            ))
+                        })?;
+
+                    // Build URL with ONLY verification code (not session_id or user_info)
+                    let redirect_url = if frontend_url.contains("://")
+                        && !frontend_url.starts_with("http://")
+                        && !frontend_url.starts_with("https://")
+                    {
+                        // Custom scheme (e.g., vex://) - manually append query param
+                        format!("{}?code={}", frontend_url, verification_code)
                     } else {
                         // Standard URL - use URL parsing for proper encoding
                         match Url::parse(&frontend_url) {
                             Ok(mut url) => {
                                 url.query_pairs_mut()
-                                    .append_pair("session_id", &session_id)
-                                    .append_pair("user_info", &user_info_json);
+                                    .clear()
+                                    .append_pair("code", &verification_code);
                                 url.to_string()
                             }
                             Err(_) => {
                                 // Fallback: manually append if parsing fails
-                                format!("{}?session_id={}&user_info={}", frontend_url, encoded_session, encoded_user_info)
+                                format!("{}?code={}", frontend_url, verification_code)
                             }
                         }
                     };
@@ -125,7 +153,7 @@ pub async fn handle_oauth_callback(
                 }
                 Some("web") | _ => {
                     // For web: redirect to frontend_url with cookies (no query parameters)
-                    // Create session cookie
+                    // Cookies are more secure than URL parameters for web
                     let session_cookie = Cookie::build("session_id", session_id.clone())
                         .path("/")
                         .http_only(true)
@@ -155,6 +183,71 @@ pub async fn handle_oauth_callback(
             Err(e)
         }
     }
+}
+
+/// Verify OAuth callback code and return session securely
+/// POST /api/oauth/verify
+/// 
+/// # Request Body
+/// 
+/// ```json
+/// {
+///   "code": "verification_code_from_callback",
+///   "code_verifier": "frontend_generated_verifier"
+/// }
+/// ```
+/// 
+/// # Security
+/// 
+/// - Verifies PKCE code_challenge matches SHA256(code_verifier)
+/// - Single-use verification code (deleted after use)
+/// - 5-minute TTL on verification codes
+/// - Prevents interception attacks
+pub async fn verify_oauth_callback(
+    req: web::Json<OAuthVerifyRequest>,
+    session_service: web::Data<Arc<SessionService>>,
+) -> Result<HttpResponse, AuthError> {
+    use sha2::{Sha256, Digest};
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+
+    // Consume the verification code (single-use)
+    let verification_data = session_service
+        .consume_oauth_verification_code(&req.code)
+        .await?;
+
+    // PKCE VERIFICATION: Compute challenge from verifier and compare
+    let mut hasher = Sha256::new();
+    hasher.update(req.code_verifier.as_bytes());
+    let computed_challenge = URL_SAFE_NO_PAD.encode(hasher.finalize());
+
+    // CRITICAL SECURITY CHECK: Challenge must match stored challenge
+    if computed_challenge != verification_data.code_challenge {
+        warn!(
+            "PKCE verification failed: stored_challenge={}, computed_challenge={}",
+            verification_data.code_challenge,
+            computed_challenge
+        );
+        return Err(AuthError::InvalidVerificationCode);
+    }
+
+    // Parse user info from stored JSON
+    let user_info: crate::dto::auth_response_dto::UserInfo =
+        serde_json::from_str(&verification_data.user_info)
+            .map_err(|e| AuthError::Validation(format!("Failed to parse user info: {}", e)))?;
+
+    // Verify the session exists and is valid
+    let session_data = session_service
+        .get_session(&verification_data.session_id)
+        .await?;
+
+    // Return session_id and user_info securely via JSON response
+    // Frontend should store these securely (not from URL parameters)
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "session_id": verification_data.session_id,
+        "user": user_info,
+        "access_token": session_data.access_token,
+        "refresh_token": session_data.refresh_token,
+    })))
 }
 
 /// Get list of available OAuth providers

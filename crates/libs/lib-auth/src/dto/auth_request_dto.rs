@@ -74,3 +74,24 @@ pub struct ResetPasswordRequest {
     #[validate(length(min = 8))]
     pub new_password: String,
 }
+
+/// Request to verify OAuth callback code with PKCE verifier
+/// POST /api/oauth/verify
+/// 
+/// # Security
+/// 
+/// Uses PKCE (Proof Key for Code Exchange) to prevent interception attacks.
+/// Frontend generates code_verifier and computes code_challenge = SHA256(verifier).
+/// Only the legitimate client has the verifier to complete verification.
+#[derive(Deserialize, Validate)]
+pub struct OAuthVerifyRequest {
+    /// Verification code from OAuth callback URL
+    #[validate(length(min = 1))]
+    pub code: String,
+    
+    /// PKCE code verifier (43-128 characters, URL-safe)
+    /// Frontend generates this and computes code_challenge = SHA256(verifier)
+    /// Only the legitimate client has the verifier
+    #[validate(length(min = 43, max = 128))]
+    pub code_verifier: String,
+}

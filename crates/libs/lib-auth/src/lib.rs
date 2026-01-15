@@ -32,6 +32,10 @@ pub fn configure_public_auth_services(cfg: &mut web::ServiceConfig) {
                 .route(
                     "/{provider}/callback",
                     web::get().to(handlers::oauth::handle_oauth_callback),
+                )
+                .route(
+                    "/verify",
+                    web::post().to(handlers::oauth::verify_oauth_callback),
                 ),
         )
         // Public auth routes

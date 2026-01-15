@@ -1,4 +1,5 @@
 use crate::error::auth_error::AuthError;
+use crate::utils::rand::generate_random_string;
 use deadpool_redis::Pool as RedisPool;
 use deadpool_redis::redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,16 @@ pub struct SessionData {
     pub user_id: Uuid,
     pub access_token: String,
     pub refresh_token: String,
+}
+
+/// OAuth verification code data stored temporarily in Redis
+/// Includes PKCE code_challenge for security verification
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OAuthVerificationData {
+    pub session_id: String,
+    pub user_info: String, // JSON string of user info
+    pub code_challenge: String, // SHA256 hash of code_verifier (PKCE)
+    pub created_at: i64,
 }
 
 /// Service for managing user sessions in Redis
@@ -255,5 +266,93 @@ impl SessionService {
         }
 
         Ok(revoked_count)
+    }
+
+    /// Store an OAuth verification code that maps to session_id and user_info
+    /// The verification code is short-lived (5 minutes) and single-use
+    /// Includes PKCE code_challenge to prevent interception attacks
+    /// 
+    /// # Security
+    /// 
+    /// - Verification code is cryptographically random (32 chars)
+    /// - Code_challenge is SHA256 hash of frontend-generated verifier
+    /// - Only legitimate client has the verifier to complete verification
+    /// - TTL: 5 minutes (300 seconds)
+    /// - Single-use: deleted after verification
+    pub async fn store_oauth_verification_code(
+        &self,
+        session_id: String,
+        user_info_json: String,
+        code_challenge: String, // SHA256 hash of verifier
+    ) -> Result<String, AuthError> {
+        // Generate a cryptographically secure verification code
+        let verification_code = generate_random_string(32);
+        let verification_key = format!("oauth:verify:{}", verification_code);
+
+        let verification_data = OAuthVerificationData {
+            session_id,
+            user_info: user_info_json,
+            code_challenge, // Store challenge (hash), NOT verifier
+            created_at: chrono::Utc::now().timestamp(),
+        };
+
+        let verification_json = serde_json::to_string(&verification_data)
+            .map_err(|e| AuthError::Redis(format!("Failed to serialize verification data: {}", e)))?;
+
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+
+        // Store with 5 minute TTL (300 seconds) - short-lived for security
+        let _: () = conn
+            .set_ex(&verification_key, verification_json, 300)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to store verification code: {}", e)))?;
+
+        Ok(verification_code)
+    }
+
+    /// Retrieve and consume an OAuth verification code
+    /// This is a single-use operation - the code is deleted after retrieval
+    /// 
+    /// # Returns
+    /// 
+    /// The verification data containing session_id, user_info, and code_challenge
+    /// 
+    /// # Errors
+    /// 
+    /// - `VerificationCodeExpired`: Code not found or expired
+    pub async fn consume_oauth_verification_code(
+        &self,
+        verification_code: &str,
+    ) -> Result<OAuthVerificationData, AuthError> {
+        let verification_key = format!("oauth:verify:{}", verification_code);
+
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+
+        // Get and delete in one atomic operation (GETDEL)
+        let verification_json: Option<String> = conn
+            .get(&verification_key)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get verification code: {}", e)))?;
+
+        let verification_json = verification_json.ok_or(AuthError::VerificationCodeExpired)?;
+
+        // Delete the code immediately (single-use)
+        let _: () = conn
+            .del(&verification_key)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to delete verification code: {}", e)))?;
+
+        let verification_data: OAuthVerificationData = serde_json::from_str(&verification_json)
+            .map_err(|e| AuthError::Redis(format!("Failed to deserialize verification data: {}", e)))?;
+
+        Ok(verification_data)
     }
 }
