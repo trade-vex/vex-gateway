@@ -72,17 +72,6 @@ impl UserBalanceStore {
         self
     }
 
-    /// Descale a balance model using the scaling cache
-    fn descale_balance(&self, mut balance: UserBalanceModel) -> UserBalanceModel {
-        if let Some(scaling_cache) = &self.scaling_cache {
-            let asset_id = balance.asset_id as u16;
-            balance.available = scaling_cache.scale_balance(asset_id, balance.available);
-            balance.locked = scaling_cache.scale_balance(asset_id, balance.locked);
-            balance.total = scaling_cache.scale_balance(asset_id, balance.total);
-        }
-        balance
-    }
-
     /// Descale a vector of balances
     fn descale_balances(&self, balances: Vec<UserBalanceModel>) -> Vec<UserBalanceModel> {
         if let Some(scaling_cache) = &self.scaling_cache {

@@ -7,10 +7,8 @@ use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone)]
 struct MarketScaling {
-    base_scale_k: u64,
     quote_scale_k: u64,
     base_asset_id: u16,
-    quote_asset_id: u16,
 }
 
 /// Scaling cache that loads market and asset scaling factors from the database
@@ -67,26 +65,18 @@ impl ScalingCache {
             let market_id: i32 = row
                 .try_get::<i32>("", "market_id")
                 .map_err(|e| format!("Failed to parse market_id: {}", e))?;
-            let base_scale_k: i64 = row
-                .try_get::<i64>("", "base_scale_k")
-                .map_err(|e| format!("Failed to parse base_scale_k: {}", e))?;
             let quote_scale_k: i64 = row
                 .try_get::<i64>("", "quote_scale_k")
                 .map_err(|e| format!("Failed to parse quote_scale_k: {}", e))?;
             let base_asset: i16 = row
                 .try_get::<i16>("", "base_asset")
                 .map_err(|e| format!("Failed to parse base_asset: {}", e))?;
-            let quote_asset: i16 = row
-                .try_get::<i16>("", "quote_asset")
-                .map_err(|e| format!("Failed to parse quote_asset: {}", e))?;
 
             new_markets.insert(
                 market_id as u32,
                 MarketScaling {
-                    base_scale_k: base_scale_k as u64,
                     quote_scale_k: quote_scale_k as u64,
                     base_asset_id: base_asset as u16,
-                    quote_asset_id: quote_asset as u16,
                 },
             );
         }
