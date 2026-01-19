@@ -81,6 +81,13 @@ pub struct OAuthUserInfo {
     pub email_verified: bool,
 }
 
+/// Response for mobile OAuth login code exchange
+#[derive(Debug, Clone, Serialize)]
+pub struct OAuthExchangeResponse {
+    pub session_id: String,
+    pub user_info: serde_json::Value,
+}
+
 // Conversion from User model to UserInfo DTO
 impl From<crate::models::user::Model> for UserInfo {
     fn from(user: crate::models::user::Model) -> Self {
