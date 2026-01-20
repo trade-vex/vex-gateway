@@ -63,7 +63,7 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::util::find_config_dir;
 
@@ -236,8 +236,10 @@ impl Config {
                 colored: true,
                 file_path: None,
             },
-            auth: AuthConfig::from_env_with_oauth()
-                .unwrap_or_else(|_| AuthConfig::development_defaults()),
+            auth: AuthConfig::from_env_with_oauth().unwrap_or_else(|err| {
+                warn!("AuthConfig env loading failed; using development defaults: {err}");
+                AuthConfig::development_defaults()
+            }),
         }
     }
 
