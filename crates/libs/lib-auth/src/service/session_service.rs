@@ -46,6 +46,11 @@ impl SessionService {
         }
     }
 
+    /// Get the session TTL in seconds (for cookie max_age alignment)
+    pub fn ttl_seconds(&self) -> u64 {
+        self.session_ttl_seconds
+    }
+
     /// Create a new session for a user
     pub async fn create_session(
         &self,

@@ -184,12 +184,13 @@ pub async fn handle_oauth_callback(
                 _ => {
                     // For web: session cookie only; frontend can call /profile to fetch user info
                     // Removed user_info cookie - it was XSS-sensitive (not HttpOnly)
+                    // Use SessionService TTL for cookie max_age to align client/server state
                     let session_cookie = Cookie::build("session_id", session_id.clone())
                         .path("/")
                         .http_only(true)
                         .secure(is_secure)
                         .same_site(SameSite::Strict)
-                        .max_age(Duration::seconds(response.expires_in as i64))
+                        .max_age(Duration::seconds(session_service.ttl_seconds() as i64))
                         .finish();
 
                     // Clear the oauth_state cookie on success

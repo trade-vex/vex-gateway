@@ -24,13 +24,22 @@ use vex_networking::client::VexGateway;
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     // Load configuration
-    let config = Config::load_auto().unwrap_or_else(|e| {
-        eprintln!(
-            "Failed to load configuration: {}. Falling back to defaults.",
-            e
-        );
-        Config::load_development_defaults()
-    });
+    let config = match Config::load_auto() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("Failed to load configuration: {}", e);
+            // In production, fail fast instead of silently using dev defaults
+            let env = std::env::var("APP_ENV").unwrap_or_else(|_| "development".to_string());
+            if env.eq_ignore_ascii_case("production") {
+                return Err(std::io::Error::other(format!(
+                    "Configuration load failed in production: {}",
+                    e
+                )));
+            }
+            eprintln!("Falling back to development defaults.");
+            Config::load_development_defaults()
+        }
+    };
 
     // Validate configuration before using any config values
     if let Err(e) = config.validate() {

@@ -320,7 +320,7 @@ pub async fn get_open_orders(
 pub async fn get_order_history(
     user: AuthenticatedUserId,
     query: web::Query<OrdersQuery>,
-    order_store: web::Data<Arc<OrderStore>>,
+    _order_store: web::Data<Arc<OrderStore>>,
     trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
     let raw = user.0.as_u128();
@@ -351,8 +351,9 @@ pub async fn get_order_history(
         }
     };
 
-    match order_store
-        .get_user_order_history_paginated(user_id, offset, limit_u64, query.market_id)
+    // Use trading_repo (not order_store cache) for consistency with count_order_history
+    match trading_repo
+        .get_order_history_paginated(user_id, offset, limit_u64, query.market_id)
         .await
     {
         Ok(orders) => {

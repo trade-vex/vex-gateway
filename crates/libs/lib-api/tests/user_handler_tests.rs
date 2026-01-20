@@ -1462,11 +1462,10 @@ mod tests {
 
                 assert_eq!(error_response["error"], "failed to retrieve balances");
                 assert!(error_response["message"].is_string());
-                assert!(
-                    error_response["message"]
-                        .as_str()
-                        .unwrap()
-                        .contains("Database connection failed")
+                // Handlers return sanitized generic error message, not internal DB errors
+                assert_eq!(
+                    error_response["message"],
+                    "An internal error occurred. Please try again later."
                 );
             }
             Err(e) => {
@@ -1516,11 +1515,10 @@ mod tests {
 
                 assert_eq!(error_response["error"], "failed to retrieve open orders");
                 assert!(error_response["message"].is_string());
-                assert!(
-                    error_response["message"]
-                        .as_str()
-                        .unwrap()
-                        .contains("Database connection failed")
+                // Handlers return sanitized generic error message, not internal DB errors
+                assert_eq!(
+                    error_response["message"],
+                    "An internal error occurred. Please try again later."
                 );
             }
             Err(e) => {
@@ -1618,11 +1616,10 @@ mod tests {
 
                 assert_eq!(error_response["error"], "failed to retrieve order history");
                 assert!(error_response["message"].is_string());
-                assert!(
-                    error_response["message"]
-                        .as_str()
-                        .unwrap()
-                        .contains("Database connection failed")
+                // Handlers return sanitized generic error message, not internal DB errors
+                assert_eq!(
+                    error_response["message"],
+                    "An internal error occurred. Please try again later."
                 );
             }
             Err(e) => {
@@ -1712,11 +1709,10 @@ mod tests {
                     "failed to retrieve favorite markets"
                 );
                 assert!(error_response["message"].is_string());
-                assert!(
-                    error_response["message"]
-                        .as_str()
-                        .unwrap()
-                        .contains("Database connection failed")
+                // Handlers return sanitized generic error message, not internal DB errors
+                assert_eq!(
+                    error_response["message"],
+                    "An internal error occurred. Please try again later."
                 );
             }
             Err(e) => {
@@ -1757,11 +1753,10 @@ mod tests {
 
                 assert_eq!(error_response["error"], "failed to toggle favorite market");
                 assert!(error_response["message"].is_string());
-                assert!(
-                    error_response["message"]
-                        .as_str()
-                        .unwrap()
-                        .contains("Database connection failed")
+                // Handlers return sanitized generic error message, not internal DB errors
+                assert_eq!(
+                    error_response["message"],
+                    "An internal error occurred. Please try again later."
                 );
             }
             Err(e) => {
@@ -1803,11 +1798,10 @@ mod tests {
 
                 assert_eq!(error_response["error"], "failed to add favorite market");
                 assert!(error_response["message"].is_string());
-                assert!(
-                    error_response["message"]
-                        .as_str()
-                        .unwrap()
-                        .contains("Database connection failed")
+                // Handlers return sanitized generic error message, not internal DB errors
+                assert_eq!(
+                    error_response["message"],
+                    "An internal error occurred. Please try again later."
                 );
             }
             Err(e) => {
