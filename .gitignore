@@ -11,3 +11,19 @@
 
 # Config
 config/production.toml
+config/development.toml
+config/testing.toml
+
+**/target
+.DS_Store
+.sqlx/**
+
+# Security - JWT keys
+crates/libs/lib-auth/src/keys/
+*.pem
+
+/aeron-test-client
+
+*.sql
+
+docs/

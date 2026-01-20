@@ -31,10 +31,11 @@ impl LoggingConfig {
     /// with a descriptive message if validation fails.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let valid_levels = ["trace", "debug", "info", "warn", "error"];
-        if !valid_levels.contains(&self.level.to_lowercase().as_str()) {
+        let level = self.level.trim().to_lowercase();
+        if !valid_levels.contains(&level.as_str()) {
             return Err(ConfigError::ValidationError(format!(
                 "Invalid log level: {}. Must be one of: {:?}",
-                self.level, valid_levels
+                level, valid_levels
             )));
         }
         Ok(())

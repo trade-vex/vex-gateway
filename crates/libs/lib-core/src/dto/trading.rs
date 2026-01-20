@@ -1,0 +1,268 @@
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+
+// Re-export models from separate modules
+pub use crate::model::orders::Model as OrderModel;
+pub use crate::model::user_balances::Model as UserBalanceModel;
+pub use crate::model::user_favorite_markets::Model as UserFavoriteMarketModel;
+use crate::{BalancePoint, PnlPoint, PnlResolution};
+
+// Simple types as specified
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Side {
+    Bid,
+    Ask,
+}
+
+impl std::fmt::Display for Side {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Side::Bid => write!(f, "Bid"),
+            Side::Ask => write!(f, "Ask"),
+        }
+    }
+}
+
+impl std::str::FromStr for Side {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Case-insensitive matching with common aliases
+        match s.to_lowercase().as_str() {
+            "bid" | "buy" => Ok(Side::Bid),
+            "ask" | "sell" => Ok(Side::Ask),
+            _ => Err(format!(
+                "Invalid side: '{}'. Expected: Bid, Ask, Buy, or Sell",
+                s
+            )),
+        }
+    }
+}
+
+// API Response DTOs
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OrderResponse {
+    pub order_id: Decimal,
+    pub user_id: Decimal,
+    pub market_id: u32,
+    pub price: Decimal,
+    pub size: Decimal,
+    pub side: Side,
+    pub timestamp: u64,
+    pub time_in_force: String,
+    pub status: String,
+}
+
+/// Enhanced order response for order history with status and fill information
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OrderHistoryResponse {
+    pub order_id: Decimal,
+    pub user_id: Decimal,
+    pub market_id: u32,
+    pub price: Decimal,
+    pub size: Decimal,
+    pub side: Side,
+    pub timestamp: u64,
+    pub time_in_force: String,
+    pub status: String,
+    pub filled_size: Decimal,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UserBalanceResponse {
+    pub user_id: Decimal,
+    pub asset_id: u32,
+    pub available: Decimal,
+    pub locked: Decimal,
+    pub total: Decimal,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BalancesListResponse {
+    pub balances: Vec<UserBalanceResponse>,
+    pub total_assets: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OrdersListResponse {
+    pub orders: Vec<OrderResponse>,
+    pub total: usize,
+    pub page: usize,
+    pub limit: usize,
+    pub total_pages: usize,
+    pub has_next: bool,
+    pub has_prev: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OrdersHistoryListResponse {
+    pub orders: Vec<OrderHistoryResponse>,
+    pub total: usize,
+    pub page: usize,
+    pub limit: usize,
+    pub total_pages: usize,
+    pub has_next: bool,
+    pub has_prev: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PortfolioOverviewResponse {
+    pub balance: Decimal,
+    pub balance_24h_ago: Decimal,
+    pub volume_24h: Decimal,
+    pub pnl_7d: Decimal,
+    pub max_drawdown_1m: Decimal,
+    pub pnl_series: Vec<PnlPoint>,
+    pub pnl_resolution: String,
+}
+
+/// Portfolio metrics response (without PnL series)
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PortfolioMetricsResponse {
+    pub balance: Decimal,
+    pub balance_24h_ago: Decimal,
+    pub volume_24h: Decimal,
+    pub pnl_7d: Decimal,
+    pub max_drawdown_1m: Decimal,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BalanceChartResponse {
+    pub balance_series: Vec<BalancePoint>,
+    pub resolution: String,
+}
+
+/// PnL chart response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PnlChartResponse {
+    pub pnl_series: Vec<PnlPoint>,
+    pub resolution: String,
+}
+
+/// List of favorite markets response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FavoriteMarketsListResponse {
+    pub market_ids: Vec<u32>,
+}
+
+/// Request to add/toggle a favorite market
+#[derive(Debug, Deserialize)]
+pub struct ToggleFavoriteMarketRequest {
+    pub market_id: u32,
+}
+
+// Conversion implementations
+impl From<OrderModel> for OrderResponse {
+    fn from(model: OrderModel) -> Self {
+        // Defensive arithmetic: ensure remaining_size is never negative
+        let remaining_size = if model.order_size >= model.filled_size {
+            model.order_size - model.filled_size
+        } else {
+            tracing::warn!(
+                order_id = %model.order_order_id,
+                order_size = %model.order_size,
+                filled_size = %model.filled_size,
+                "filled_size exceeds order_size, returning zero remaining"
+            );
+            Decimal::ZERO
+        };
+        let side = model.order_side.parse().unwrap_or_else(|_| {
+            tracing::warn!(
+                order_id = %model.order_order_id,
+                order_side = %model.order_side,
+                "Invalid order_side value, defaulting to Bid"
+            );
+            Side::Bid
+        });
+        Self {
+            order_id: model.order_order_id,
+            user_id: model.order_user_id,
+            market_id: model.market_id as u32,
+            price: model.order_price,
+            size: remaining_size,
+            side,
+            timestamp: model.order_timestamp as u64,
+            time_in_force: model.time_in_force,
+            status: model.status,
+        }
+    }
+}
+
+impl From<UserBalanceModel> for UserBalanceResponse {
+    fn from(model: UserBalanceModel) -> Self {
+        Self {
+            user_id: model.user_id,
+            asset_id: model.asset_id as u32,
+            available: model.available,
+            locked: model.locked,
+            total: model.total,
+            timestamp: model.timestamp as u64,
+        }
+    }
+}
+
+impl From<OrderModel> for OrderHistoryResponse {
+    fn from(model: OrderModel) -> Self {
+        let side = model.order_side.parse().unwrap_or_else(|_| {
+            tracing::warn!(
+                order_id = %model.order_order_id,
+                order_side = %model.order_side,
+                "Invalid order_side value, defaulting to Bid"
+            );
+            Side::Bid
+        });
+        Self {
+            order_id: model.order_order_id,
+            user_id: model.order_user_id,
+            market_id: model.market_id as u32,
+            price: model.order_price,
+            size: model.order_size,
+            side,
+            timestamp: model.order_timestamp as u64,
+            time_in_force: model.time_in_force,
+            status: model.status,
+            filled_size: model.filled_size,
+        }
+    }
+}
+
+impl PortfolioOverviewResponse {
+    pub fn with_metrics(
+        balance: Decimal,
+        balance_24h_ago: Decimal,
+        volume_24h: Decimal,
+        pnl_7d: Decimal,
+        max_drawdown_1m: Decimal,
+        pnl_series: Vec<PnlPoint>,
+        resolution: PnlResolution,
+    ) -> Self {
+        Self {
+            balance,
+            balance_24h_ago,
+            volume_24h,
+            pnl_7d,
+            max_drawdown_1m,
+            pnl_series,
+            pnl_resolution: resolution.as_str().to_string(),
+        }
+    }
+}
+
+impl PortfolioMetricsResponse {
+    pub fn new(
+        balance: Decimal,
+        balance_24h_ago: Decimal,
+        volume_24h: Decimal,
+        pnl_7d: Decimal,
+        max_drawdown_1m: Decimal,
+    ) -> Self {
+        Self {
+            balance,
+            balance_24h_ago,
+            volume_24h,
+            pnl_7d,
+            max_drawdown_1m,
+        }
+    }
+}

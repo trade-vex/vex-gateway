@@ -5,3 +5,26 @@ edition = "2024"
 
 [dependencies]
 actix-web = {workspace = true}
+serde = { workspace = true }
+uuid = {workspace = true}
+futures-util = {workspace = true}
+serde_json = "1.0"
+tokio = { workspace = true }
+chrono = { workspace = true }
+sea-orm = { workspace = true }
+tracing = { workspace = true }
+rand = "0.8"
+base64 = "0.21"
+lib-middleware = { path = "../lib-middleware" }
+lib-auth = { path = "../lib-auth" }
+lib-utils = { path = "../lib-utils" }
+lib-core = { path = "../lib-core" }
+vex-networking ={ workspace = true }
+vex-config = { workspace = true}
+common = { workspace = true}
+rust_decimal = "1.40"
+
+[dev-dependencies]
+tokio-test = "0.4"
+async-trait = "0.1"
+rust_decimal = "1.40"

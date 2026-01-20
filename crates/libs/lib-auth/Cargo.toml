@@ -1,0 +1,48 @@
+[package]
+name = "lib-auth"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+actix-web = { workspace = true }
+jsonwebtoken = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+url = "2.5.7"
+
+# Data & Config
+serde = { workspace = true }
+serde_json = { workspace = true }
+config = { workspace = true}
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+futures-util = "0.3"
+thiserror = { workspace = true }
+
+# Database & Cache
+deadpool-redis = { workspace = true }
+redis = { workspace = true }
+async-trait = { workspace = true }
+sea-orm = { workspace = true }
+tracing = { workspace = true }
+
+# OAuth & OpenID Connect
+openidconnect = "3.5"
+
+# Crypto
+rand = "0.8"
+base64 = "0.22.1"
+sha2 = "0.10.9"
+bcrypt = "0.17.1"
+validator = { version = "0.20", features = ["derive"] }
+secrecy = { version = "0.8", features = ["serde"] }
+
+# Email
+lettre = { version = "0.11", features = ["tokio1", "tokio1-native-tls", "smtp-transport", "builder"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
+dotenvy = { workspace = true }
+tokio-test = "0.4.4"

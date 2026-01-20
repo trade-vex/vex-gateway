@@ -2,6 +2,7 @@
 
 use crate::ConfigError;
 use serde::{Deserialize, Serialize};
+use std::env;
 use std::net::{SocketAddr, ToSocketAddrs};
 
 /// Server configuration settings for the VEX Gateway Service.
@@ -14,15 +15,22 @@ pub struct ServerConfig {
     pub host: String,
     /// The port number to bind the server to (0 for ephemeral port in testing)
     pub port: u16,
-    /// Maximum number of concurrent connections the server will accept
-    pub max_connections: usize,
-    /// Connection timeout in seconds (how long to wait for new connections)
-    pub connection_timeout: u64,
-    /// Keep-alive timeout in seconds (how long to keep idle connections open)
-    pub keep_alive_timeout: u64,
 }
 
 impl ServerConfig {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Ok(Self {
+            // Default to 127.0.0.1 for development safety; production should explicitly set APP_SERVER_HOST
+            host: env::var("APP_SERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
+            port: env::var("APP_SERVER_PORT")
+                .unwrap_or_else(|_| "8081".to_string())
+                .parse()
+                .map_err(|_| {
+                    ConfigError::ValidationError("Invalid APP_SERVER_PORT value".to_string())
+                })?,
+        })
+    }
+
     /// Validate server configuration values.
     ///
     /// Performs basic validation to ensure the server configuration
@@ -39,19 +47,6 @@ impl ServerConfig {
                 "Server host cannot be empty".to_string(),
             ));
         }
-
-        if self.max_connections == 0 {
-            return Err(ConfigError::ValidationError(
-                "Max connections cannot be 0".to_string(),
-            ));
-        }
-
-        if self.connection_timeout == 0 {
-            return Err(ConfigError::ValidationError(
-                "Connection timeout cannot be 0".to_string(),
-            ));
-        }
-
         Ok(())
     }
 

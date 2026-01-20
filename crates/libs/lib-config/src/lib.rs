@@ -59,19 +59,27 @@ pub use error::ConfigError;
 pub use logging::LoggingConfig;
 pub use server::ServerConfig;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::util::find_config_dir;
+
+/// Re-export AuthConfig from lib-auth for convenience
+pub use lib_auth::config::AuthConfig;
 
 /// Main configuration structure for the VEX Gateway Service.
 ///
 /// Contains all configuration settings organized by category.
 /// This is the primary configuration type that applications should use.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+///
+/// # Security Note
+/// This struct intentionally does not derive `Serialize` to prevent accidental
+/// serialization of sensitive configuration values (database credentials, JWT keys, etc.)
+/// into logs, responses, or debug output.
+#[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     /// Current runtime environment (determines validation rules)
     pub environment: Environment,
@@ -79,6 +87,8 @@ pub struct Config {
     pub server: ServerConfig,
     /// Logging configuration (level, format, output)
     pub logging: LoggingConfig,
+    /// Authentication configuration
+    pub auth: AuthConfig,
 }
 
 impl Config {
@@ -128,28 +138,20 @@ impl Config {
         debug!("Config directory: {:?}", config_dir);
         debug!(
             "Looking for config file: {:?}",
-            config_dir
-                .join("config")
-                .join(environment.config_file_name())
+            config_dir.join(environment.config_file_name())
         );
 
         // Build configuration with proper precedence
         let config = config::Config::builder()
             // 1. Load environment-specific configuration file
             .add_source(
-                config::File::from(
-                    config_dir
-                        .join("config")
-                        .join(environment.config_file_name()),
-                )
-                .required(false),
+                config::File::from(config_dir.join(environment.config_file_name())).required(false),
             )
             // 2. Load from environment variables with APP_ prefix
             .add_source(
                 config::Environment::default()
                     .prefix("APP")
                     .separator("_")
-                    .list_separator(",")
                     .try_parsing(true),
             )
             .build()
@@ -158,6 +160,13 @@ impl Config {
         // Deserialize and validate
         let mut config: Config = config.try_deserialize().map_err(ConfigError::LoadError)?;
         config.environment = environment;
+
+        // Override frontend_url from FRONTEND_URL environment variable if set and non-empty
+        if let Ok(frontend_url) = std::env::var("FRONTEND_URL") {
+            if !frontend_url.trim().is_empty() {
+                config.auth.server.frontend_url = frontend_url;
+            }
+        }
 
         // Log what we loaded before validation
         debug!("Loaded configuration before validation:");
@@ -224,19 +233,20 @@ impl Config {
         info!("Loading development defaults (no config files required)");
         Self {
             environment: Environment::Development,
-            server: ServerConfig {
+            server: ServerConfig::from_env().unwrap_or_else(|_| ServerConfig {
                 host: "127.0.0.1".to_string(),
-                port: 8000,
-                max_connections: 1000,
-                connection_timeout: 30,
-                keep_alive_timeout: 60,
-            },
+                port: 8081,
+            }),
             logging: LoggingConfig {
                 level: "debug".to_string(),
                 structured: false,
                 colored: true,
                 file_path: None,
             },
+            auth: AuthConfig::from_env_with_oauth().unwrap_or_else(|err| {
+                warn!("AuthConfig env loading failed; using development defaults: {err}");
+                AuthConfig::development_defaults()
+            }),
         }
     }
 
@@ -311,13 +321,6 @@ impl Config {
             }
             Environment::Development => {
                 debug!("Applying development-specific validation rules");
-
-                // Development-specific validations
-                if self.server.max_connections > 10000 {
-                    return Err(ConfigError::ValidationError(
-                        "Development environment max_connections should be reasonable".to_string(),
-                    ));
-                }
             }
             Environment::Testing => {
                 debug!("Applying testing-specific validation rules");
@@ -432,19 +435,13 @@ mod tests {
     fn test_server_config_validation() {
         let valid_config = ServerConfig {
             host: "127.0.0.1".to_string(),
-            port: 8000,
-            max_connections: 1000,
-            connection_timeout: 30,
-            keep_alive_timeout: 60,
+            port: 8081,
         };
         assert!(valid_config.validate().is_ok());
 
         let invalid_config = ServerConfig {
             host: "".to_string(),
-            port: 8000,
-            max_connections: 1000,
-            connection_timeout: 30,
-            keep_alive_timeout: 60,
+            port: 8081,
         };
         assert!(invalid_config.validate().is_err());
     }
@@ -469,7 +466,7 @@ mod tests {
         let config = Config::load_development_defaults();
         assert_eq!(config.environment, Environment::Development);
         assert_eq!(config.server.host, "127.0.0.1");
-        assert_eq!(config.server.port, 8000);
+        assert_eq!(config.server.port, 8081);
         assert_eq!(config.logging.level, "debug");
         assert!(config.logging.colored);
         assert!(!config.logging.structured);
@@ -480,7 +477,7 @@ mod tests {
         let config = Config::load_development_defaults();
         let addr = config.server_address().unwrap();
         assert_eq!(addr.ip().to_string(), "127.0.0.1");
-        assert_eq!(addr.port(), 8000);
+        assert_eq!(addr.port(), 8081);
     }
 
     #[test]
