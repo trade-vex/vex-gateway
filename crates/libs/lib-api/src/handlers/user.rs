@@ -73,7 +73,8 @@ pub async fn get_balances(
     user: AuthenticatedUserId,
     balance_store: web::Data<Arc<UserBalanceStore>>,
 ) -> Result<HttpResponse> {
-    let user_id = user.as_u64();
+    let raw = user.0.as_u128();
+    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
 
     match balance_store.get_user_balances(user_id).await {
         Ok(balances) => {
@@ -110,6 +111,7 @@ pub async fn get_balances(
 /// # Query Parameters
 /// - `page` (optional): Page number (1-indexed). Defaults to 1.
 /// - `limit` (optional): Number of orders per page. Defaults to 20, max 100.
+/// - `market_id` (optional): Filter orders by market ID. If not provided, returns orders from all markets.
 ///
 /// # Authentication
 /// Requires valid JWT token in Authorization header: `Bearer <token>`
@@ -119,7 +121,7 @@ pub async fn get_balances(
 ///
 /// # Example Request
 /// ```bash
-/// curl -X GET "http://localhost:8080/api/user/orders/open?page=1&limit=20" \
+/// curl -X GET "http://localhost:8080/api/user/orders/open?page=1&limit=20&market_id=1" \
 ///   -H "Authorization: Bearer <jwt_token>"
 /// ```
 ///
@@ -174,6 +176,7 @@ pub async fn get_balances(
 pub struct OrdersQuery {
     pub page: Option<usize>,
     pub limit: Option<usize>,
+    pub market_id: Option<u32>,
 }
 
 pub async fn get_open_orders(
@@ -182,7 +185,8 @@ pub async fn get_open_orders(
     order_store: web::Data<Arc<OrderStore>>,
     trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
-    let user_id = user.as_u64();
+    let raw = user.0.as_u128();
+    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
 
     // Parse pagination parameters
     let page = query.page.unwrap_or(1).max(1);
@@ -191,7 +195,10 @@ pub async fn get_open_orders(
     let limit_u64 = limit as u64;
 
     // Get total count for pagination metadata
-    let total_count = match trading_repo.count_open_orders(user_id).await {
+    let total_count = match trading_repo
+        .count_open_orders(user_id, query.market_id)
+        .await
+    {
         Ok(count) => count as usize,
         Err(e) => {
             tracing::error!("failed to count open orders for user_id {}: {}", user_id, e);
@@ -203,7 +210,7 @@ pub async fn get_open_orders(
     };
 
     match order_store
-        .get_user_orders_paginated(user_id, offset, limit_u64)
+        .get_user_orders_paginated(user_id, offset, limit_u64, query.market_id)
         .await
     {
         Ok(orders) => {
@@ -248,6 +255,7 @@ pub async fn get_open_orders(
 /// # Query Parameters
 /// - `page` (optional): Page number (1-indexed). Defaults to 1.
 /// - `limit` (optional): Number of orders per page. Defaults to 20, max 100.
+/// - `market_id` (optional): Filter orders by market ID. If not provided, returns orders from all markets.
 ///
 /// # Authentication
 /// Requires valid JWT token in Authorization header: `Bearer <token>`
@@ -257,7 +265,7 @@ pub async fn get_open_orders(
 ///
 /// # Example Request
 /// ```bash
-/// curl -X GET "http://localhost:8080/api/user/orders/history?page=1&limit=20" \
+/// curl -X GET "http://localhost:8080/api/user/orders/history?page=1&limit=20&market_id=1" \
 ///   -H "Authorization: Bearer <jwt_token>"
 /// ```
 ///
@@ -314,7 +322,8 @@ pub async fn get_order_history(
     order_store: web::Data<Arc<OrderStore>>,
     trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
-    let user_id = user.as_u64();
+    let raw = user.0.as_u128();
+    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
 
     // Parse pagination parameters
     let page = query.page.unwrap_or(1).max(1);
@@ -323,7 +332,10 @@ pub async fn get_order_history(
     let limit_u64 = limit as u64;
 
     // Get total count for pagination metadata
-    let total_count = match trading_repo.count_order_history(user_id).await {
+    let total_count = match trading_repo
+        .count_order_history(user_id, query.market_id)
+        .await
+    {
         Ok(count) => count as usize,
         Err(e) => {
             tracing::error!(
@@ -339,7 +351,7 @@ pub async fn get_order_history(
     };
 
     match order_store
-        .get_user_order_history_paginated(user_id, offset, limit_u64)
+        .get_user_order_history_paginated(user_id, offset, limit_u64, query.market_id)
         .await
     {
         Ok(orders) => {
@@ -419,7 +431,8 @@ pub async fn get_portfolio_overview(
     user: AuthenticatedUserId,
     portfolio_repo: web::Data<Arc<dyn PortfolioRepository>>,
 ) -> Result<HttpResponse> {
-    let user_id = user.as_u64();
+    let raw = user.0.as_u128();
+    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
     let now_secs = chrono::Utc::now().timestamp();
 
     // Use default resolution (Day) for metrics - resolution only affects pnl_series which we don't need here
@@ -494,7 +507,8 @@ pub async fn get_balance_chart(
     query: web::Query<BalanceChartQuery>,
     portfolio_repo: web::Data<Arc<dyn PortfolioRepository>>,
 ) -> Result<HttpResponse> {
-    let user_id = user.as_u64();
+    let raw = user.0.as_u128();
+    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
     let now_secs = chrono::Utc::now().timestamp();
 
     let resolution = query
@@ -575,7 +589,8 @@ pub async fn get_pnl_chart(
     query: web::Query<PnlChartQuery>,
     portfolio_repo: web::Data<Arc<dyn PortfolioRepository>>,
 ) -> Result<HttpResponse> {
-    let user_id = user.as_u64();
+    let raw = user.0.as_u128();
+    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
     let now_secs = chrono::Utc::now().timestamp();
 
     let resolution = query
@@ -639,7 +654,8 @@ pub async fn get_favorite_markets(
     user: AuthenticatedUserId,
     trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
-    let user_id = user.as_u64();
+    let raw = user.0.as_u128();
+    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
 
     match trading_repo.get_user_favorite_markets(user_id).await {
         Ok(favorites) => {
@@ -731,7 +747,8 @@ pub async fn toggle_favorite_market(
     request: web::Json<ToggleFavoriteMarketRequest>,
     trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
-    let user_id = user.as_u64();
+    let raw = user.0.as_u128();
+    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
     let market_id = request.market_id;
 
     // Check if market is already favorited

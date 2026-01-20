@@ -206,7 +206,8 @@ pub async fn place_order(
     let start = Instant::now();
 
     // Extract user ID from JWT
-    let user_id = auth_user.as_u64();
+    let raw = auth_user.0.as_u128();
+    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
     let order_data = order_data.into_inner();
 
     let OrderRequest {
@@ -453,7 +454,8 @@ pub async fn cancel_order(
 ) -> HttpResponse {
     let start = Instant::now();
 
-    let user_id = auth_user.as_u64();
+    let raw = auth_user.0.as_u128();
+    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
     let cancel_data = cancel_data.into_inner();
 
     // Parse order_id from string to u64

@@ -74,3 +74,21 @@ pub struct ResetPasswordRequest {
     #[validate(length(min = 8))]
     pub new_password: String,
 }
+
+/// Query parameters for OAuth initiation
+#[derive(Debug, Clone, Deserialize)]
+pub struct OAuthInitQuery {
+    /// Platform identifier: "web" or "app"
+    pub platform: Option<String>,
+    /// Required when platform="app" - SHA256 hash of the app's verifier (PKCE-like)
+    pub app_challenge: Option<String>,
+}
+
+/// Request body for mobile OAuth login code exchange
+#[derive(Debug, Clone, Deserialize)]
+pub struct OAuthExchangeRequest {
+    /// One-time login code received via deep link
+    pub login_code: String,
+    /// The original verifier that was hashed to create app_challenge
+    pub verifier: String,
+}
