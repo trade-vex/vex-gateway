@@ -21,7 +21,7 @@ ed25519-dalek = { version = "2.0", features = ["pkcs8"] }
 pkcs8 = { version = "0.10", features = ["pem"] } 
 subtle = "2.5"
 tokio = { workspace = true }
-lru = "0.12"
+lru = "0.16"
 
 # Database dependencies
 sea-orm = { workspace = true }
