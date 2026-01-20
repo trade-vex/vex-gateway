@@ -28,7 +28,7 @@ use crate::error::auth_error::AuthError;
 pub fn s256_challenge(verifier: &str) -> Result<String, AuthError> {
     // RFC 7636 specifies verifier must be 43-128 characters
     let n = verifier.len();
-    if n < 43 || n > 128 {
+    if !(43..=128).contains(&n) {
         return Err(AuthError::InvalidRequest);
     }
 

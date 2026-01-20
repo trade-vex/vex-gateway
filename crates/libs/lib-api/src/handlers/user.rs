@@ -195,7 +195,10 @@ pub async fn get_open_orders(
     let limit_u64 = limit as u64;
 
     // Get total count for pagination metadata
-    let total_count = match trading_repo.count_open_orders(user_id, query.market_id).await {
+    let total_count = match trading_repo
+        .count_open_orders(user_id, query.market_id)
+        .await
+    {
         Ok(count) => count as usize,
         Err(e) => {
             tracing::error!("failed to count open orders for user_id {}: {}", user_id, e);
@@ -329,7 +332,10 @@ pub async fn get_order_history(
     let limit_u64 = limit as u64;
 
     // Get total count for pagination metadata
-    let total_count = match trading_repo.count_order_history(user_id, query.market_id).await {
+    let total_count = match trading_repo
+        .count_order_history(user_id, query.market_id)
+        .await
+    {
         Ok(count) => count as usize,
         Err(e) => {
             tracing::error!(

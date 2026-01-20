@@ -92,10 +92,10 @@ pub async fn handle_oauth_callback(
 
     // For web flow: enforce state cookie binding (prevents login CSRF / session swapping)
     // Mobile apps don't have cookies, they use app_challenge verification instead
-    if let Some(ref state_from_cookie) = cookie_state {
-        if state_from_cookie != &query.state {
-            return Err(AuthError::StateMismatch);
-        }
+    if let Some(ref state_from_cookie) = cookie_state
+        && state_from_cookie != &query.state
+    {
+        return Err(AuthError::StateMismatch);
     }
 
     match oauth_service
@@ -121,16 +121,12 @@ pub async fn handle_oauth_callback(
 
             // Get the frontend URL based on platform
             let frontend_url = match meta.platform.as_deref() {
-                Some("app") => {
-                    std::env::var("FRONTEND_URL_APP")
-                        .or_else(|_| std::env::var("OAUTH_FRONTEND_URL_APP"))
-                        .unwrap_or_else(|_| oauth_service.get_frontend_url().to_string())
-                }
-                Some("web") | _ => {
-                    std::env::var("FRONTEND_URL_WEB")
-                        .or_else(|_| std::env::var("OAUTH_FRONTEND_URL_WEB"))
-                        .unwrap_or_else(|_| oauth_service.get_frontend_url().to_string())
-                }
+                Some("app") => std::env::var("FRONTEND_URL_APP")
+                    .or_else(|_| std::env::var("OAUTH_FRONTEND_URL_APP"))
+                    .unwrap_or_else(|_| oauth_service.get_frontend_url().to_string()),
+                _ => std::env::var("FRONTEND_URL_WEB")
+                    .or_else(|_| std::env::var("OAUTH_FRONTEND_URL_WEB"))
+                    .unwrap_or_else(|_| oauth_service.get_frontend_url().to_string()),
             };
             let is_secure = req.connection_info().scheme() == "https";
 
@@ -178,7 +174,7 @@ pub async fn handle_oauth_callback(
                         .append_header(("Location", redirect_url))
                         .finish())
                 }
-                Some("web") | _ => {
+                _ => {
                     // For web: session cookie only; frontend can call /profile to fetch user info
                     // Removed user_info cookie - it was XSS-sensitive (not HttpOnly)
                     let session_cookie = Cookie::build("session_id", session_id.clone())

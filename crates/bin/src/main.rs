@@ -56,12 +56,12 @@ async fn main() -> std::io::Result<()> {
 
     // Load gateway networking configuration from environment variables
     let mut gateway_config = GatewayNetworkingConfig::test_defaults();
-    gateway_config.context_dir = std::env::var("CONTEXT_DIR")
-        .unwrap_or_else(|_| "/dev/shm/aeron".to_string());
-    gateway_config.core_address = std::env::var("CORE_ADDRESS")
-        .unwrap_or_else(|_| "aeron-media-driver-core".to_string());
-    gateway_config.local_address = std::env::var("LOCAL_ADDRESS")
-        .unwrap_or_else(|_| "0.0.0.0".to_string());
+    gateway_config.context_dir =
+        std::env::var("CONTEXT_DIR").unwrap_or_else(|_| "/dev/shm/aeron".to_string());
+    gateway_config.core_address =
+        std::env::var("CORE_ADDRESS").unwrap_or_else(|_| "aeron-media-driver-core".to_string());
+    gateway_config.local_address =
+        std::env::var("LOCAL_ADDRESS").unwrap_or_else(|_| "0.0.0.0".to_string());
     gateway_config.core_port = std::env::var("CORE_PORT")
         .unwrap_or_else(|_| "40123".to_string())
         .parse::<u16>()

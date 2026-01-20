@@ -1061,9 +1061,18 @@ mod tests {
         insert_test_order(&db, 6003, user_id, 65539, 3000000, 150, "Bid", "Placed")
             .await
             .unwrap(); // Market 65539 - should be filtered out
-        insert_test_order(&db, 6004, user_id, 65538, 5200000, 250, "Ask", "PartiallyFilled")
-            .await
-            .unwrap(); // Market 65538
+        insert_test_order(
+            &db,
+            6004,
+            user_id,
+            65538,
+            5200000,
+            250,
+            "Ask",
+            "PartiallyFilled",
+        )
+        .await
+        .unwrap(); // Market 65538
 
         let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
         let order_store = Arc::new(OrderStore::with_repository(

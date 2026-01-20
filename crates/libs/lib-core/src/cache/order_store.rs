@@ -352,7 +352,10 @@ impl OrderStore {
 
         // Database fallback
         if let Some(repo) = &self.trading_repo {
-            match repo.get_open_orders_paginated(user_id, offset, limit, market_id).await {
+            match repo
+                .get_open_orders_paginated(user_id, offset, limit, market_id)
+                .await
+            {
                 Ok(orders) => {
                     debug!("Database hit for user orders (paginated): {}", user_id);
                     return Ok(orders);
