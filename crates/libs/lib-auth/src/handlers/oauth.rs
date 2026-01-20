@@ -93,10 +93,10 @@ pub async fn handle_oauth_callback(
 
     // For web flow: enforce state cookie binding (prevents login CSRF / session swapping)
     // If cookie exists, it must match the query state
-    if let Some(ref state_from_cookie) = cookie_state {
-        if state_from_cookie != &query.state {
-            return Err(AuthError::StateMismatch);
-        }
+    if let Some(ref state_from_cookie) = cookie_state
+        && state_from_cookie != &query.state
+    {
+        return Err(AuthError::StateMismatch);
     }
 
     match oauth_service

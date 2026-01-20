@@ -31,7 +31,10 @@ impl std::str::FromStr for Side {
         match s.to_lowercase().as_str() {
             "bid" | "buy" => Ok(Side::Bid),
             "ask" | "sell" => Ok(Side::Ask),
-            _ => Err(format!("Invalid side: '{}'. Expected: Bid, Ask, Buy, or Sell", s)),
+            _ => Err(format!(
+                "Invalid side: '{}'. Expected: Bid, Ask, Buy, or Sell",
+                s
+            )),
         }
     }
 }

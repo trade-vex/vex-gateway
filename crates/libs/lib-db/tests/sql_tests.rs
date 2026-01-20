@@ -1,4 +1,8 @@
-use lib_db::{error::Result, postgres::PostgresDb, traits::SqlDb};
+use lib_db::{
+    error::Result,
+    postgres::{DbConfig, PostgresDb},
+    traits::SqlDb,
+};
 use uuid::Uuid;
 
 /// Test helper function for basic SQL operations
@@ -276,8 +280,19 @@ async fn test_sql_trait_compatibility() -> Result<()> {
 
 #[tokio::test]
 async fn test_postgres_connection_handling() -> Result<()> {
-    // Test connection with invalid URL
-    let result = PostgresDb::connect("postgres://invalid:invalid@localhost:5432/invalid").await;
+    // Test connection with invalid URL using short timeout to avoid slow tests
+    let short_timeout_config = DbConfig {
+        max_connections: 5,
+        min_connections: 1,
+        acquire_timeout_ms: 500, // Short timeout for invalid connection test
+        idle_timeout_secs: 60,
+        max_lifetime_secs: 300,
+    };
+    let result = PostgresDb::with_config(
+        "postgres://invalid:invalid@localhost:5432/invalid",
+        short_timeout_config,
+    )
+    .await;
     assert!(result.is_err());
 
     // Test connection with valid URL (if available)

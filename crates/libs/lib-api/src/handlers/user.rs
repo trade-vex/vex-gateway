@@ -753,7 +753,10 @@ pub async fn toggle_favorite_market(
     let market_id = request.market_id;
 
     // Use atomic toggle operation to prevent race conditions
-    match trading_repo.toggle_favorite_market(user_id, market_id).await {
+    match trading_repo
+        .toggle_favorite_market(user_id, market_id)
+        .await
+    {
         Ok(was_added) => {
             let action = if was_added { "added" } else { "removed" };
             Ok(HttpResponse::Ok().json(serde_json::json!({

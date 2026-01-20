@@ -97,7 +97,10 @@ async fn setup_test_db_with_schema() -> Result<DatabaseConnection, sea_orm::DbEr
                 let error_str = e.to_string();
                 if error_str.contains("syntax error") || error_str.contains("unterminated") {
                     // Syntax and parse errors should be escalated - they indicate real problems
-                    eprintln!("ERROR: Migration {} has syntax/parse error: {}", migration_file, e);
+                    eprintln!(
+                        "ERROR: Migration {} has syntax/parse error: {}",
+                        migration_file, e
+                    );
                 } else if !error_str.contains("already exists")
                     && !error_str.contains("duplicate")
                     && !error_str.contains("does not exist")
@@ -489,6 +492,19 @@ impl TradingRepository for ErrorMockTradingRepository {
             ));
         }
         Ok(false)
+    }
+
+    async fn toggle_favorite_market(
+        &self,
+        _user_id: u64,
+        _market_id: u32,
+    ) -> lib_core::repository::repository::Result<bool> {
+        if self.should_error("toggle_favorite_market") {
+            return Err(TradingError::Database(
+                "Database connection failed".to_string(),
+            ));
+        }
+        Ok(true)
     }
 }
 
