@@ -58,9 +58,9 @@ impl RedisApiKeyCache {
         let client = Client::open(config.url.clone())
             .map_err(|e| ApiKeyError::Internal(format!("Failed to create Redis client: {}", e)))?;
 
-        let conn = ConnectionManager::new(client)
-            .await
-            .map_err(|e| ApiKeyError::Internal(format!("Failed to create Redis connection: {}", e)))?;
+        let conn = ConnectionManager::new(client).await.map_err(|e| {
+            ApiKeyError::Internal(format!("Failed to create Redis connection: {}", e))
+        })?;
 
         Ok(Self {
             conn,
@@ -94,8 +94,7 @@ impl RedisApiKeyCache {
                             attempt + 1,
                             last_error.as_ref().unwrap()
                         );
-                        tokio::time::sleep(Duration::from_millis(100 * (attempt + 1) as u64))
-                            .await;
+                        tokio::time::sleep(Duration::from_millis(100 * (attempt + 1) as u64)).await;
                     }
                 }
             }

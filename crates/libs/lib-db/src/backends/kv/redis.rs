@@ -24,9 +24,7 @@ pub struct RedisConfig {
 
 impl Default for RedisConfig {
     fn default() -> Self {
-        Self {
-            retry_count: 3,
-        }
+        Self { retry_count: 3 }
     }
 }
 
@@ -83,10 +81,12 @@ impl BasicKvStore for RedisDb {
             source: Some(Box::new(e)),
         })?;
 
-        let conn = ConnectionManager::new(client).await.map_err(|e| DbError::Connection {
-            message: format!("Failed to create connection manager: {}", e),
-            source: Some(Box::new(e)),
-        })?;
+        let conn = ConnectionManager::new(client)
+            .await
+            .map_err(|e| DbError::Connection {
+                message: format!("Failed to create connection manager: {}", e),
+                source: Some(Box::new(e)),
+            })?;
 
         Ok(Self {
             conn,

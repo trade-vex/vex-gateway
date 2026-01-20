@@ -4,7 +4,6 @@
 
 use clickhouse::Client as ClickHouseClient;
 use jsonwebtoken::{DecodingKey, EncodingKey};
-use redis::aio::ConnectionManager;
 use lib_auth::config::{AuthConfig, JwtConfig, OAuthProviderConfig, RedisConfig};
 use lib_auth::repository::{PostgresUserRepository, UserRepository};
 use lib_auth::service::{EmailService, OAuthService, SessionService, TokenService};
@@ -20,6 +19,7 @@ use lib_middleware::{
     ApiKeyMiddleware, SecurityType,
     repository::api_key_repository::{ApiKeyRepository, PostgresApiKeyRepository},
 };
+use redis::aio::ConnectionManager;
 use reqwest::Client;
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;

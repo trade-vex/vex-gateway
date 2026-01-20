@@ -1,6 +1,6 @@
 use crate::error::auth_error::AuthError;
-use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
+use redis::aio::ConnectionManager;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

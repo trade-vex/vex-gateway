@@ -1,10 +1,10 @@
-use redis::aio::ConnectionManager;
-use redis::AsyncCommands;
 use lettre::{
     AsyncSmtpTransport, AsyncTransport, Tokio1Executor, message::header::ContentType,
     transport::smtp::authentication::Credentials,
 };
 use rand::Rng;
+use redis::AsyncCommands;
+use redis::aio::ConnectionManager;
 use uuid::Uuid;
 
 use crate::config::EmailConfig;

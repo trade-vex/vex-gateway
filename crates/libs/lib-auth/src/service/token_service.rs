@@ -2,10 +2,10 @@ use crate::config::JwtConfig;
 use crate::dto::jwt_response_dto::{AppClaims, JwtTokenResponse};
 use crate::error::auth_error::AuthError;
 use chrono::{Duration, Utc};
-use redis::aio::ConnectionManager;
-use redis::AsyncCommands;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use jsonwebtoken::{DecodingKey, Validation, decode};
+use redis::AsyncCommands;
+use redis::aio::ConnectionManager;
 use std::sync::Arc;
 use uuid::Uuid;
 #[derive(Clone)]

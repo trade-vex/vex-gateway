@@ -42,8 +42,8 @@ use crate::config::OAuthProviderConfig;
 use crate::dto::auth_response_dto::{OAuthLoginResponse, OAuthUserInfo};
 use crate::error::auth_error::AuthError;
 use crate::service::token_service::TokenService;
-use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
+use redis::aio::ConnectionManager;
 use serde::{Deserialize, Serialize};
 
 /// Unified OAuth transaction data stored in Redis
