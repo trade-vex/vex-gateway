@@ -74,6 +74,11 @@ pub use lib_auth::config::AuthConfig;
 ///
 /// Contains all configuration settings organized by category.
 /// This is the primary configuration type that applications should use.
+///
+/// # Security Note
+/// This struct intentionally does not derive `Serialize` to prevent accidental
+/// serialization of sensitive configuration values (database credentials, JWT keys, etc.)
+/// into logs, responses, or debug output.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     /// Current runtime environment (determines validation rules)

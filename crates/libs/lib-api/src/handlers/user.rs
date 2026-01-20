@@ -645,7 +645,15 @@ pub async fn get_favorite_markets(
         Ok(favorites) => {
             let market_ids: Vec<u32> = favorites
                 .into_iter()
-                .map(|fav| fav.market_id as u32)
+                .filter_map(|fav| {
+                    u32::try_from(fav.market_id).ok().or_else(|| {
+                        tracing::warn!(
+                            market_id = fav.market_id,
+                            "Invalid market_id (negative value), skipping"
+                        );
+                        None
+                    })
+                })
                 .collect();
 
             let response = FavoriteMarketsListResponse { market_ids };
