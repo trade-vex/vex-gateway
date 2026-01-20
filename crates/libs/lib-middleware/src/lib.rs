@@ -1,6 +1,9 @@
 pub mod api_key;
 pub mod models;
+pub mod rate_limit;
 pub mod repository;
+pub mod request_id;
+pub mod security_headers;
 
 pub use api_key::{
     error::ApiKeyError,
@@ -12,6 +15,15 @@ pub use api_key::{
 pub use models::api_key::{KeyMaterialType, Model as ApiKeyModel, NewApiKey};
 
 pub use repository::api_key_repository::{ApiKeyRepository, PostgresApiKeyRepository};
+
+pub use request_id::{RequestId, RequestIdMiddleware, REQUEST_ID_HEADER};
+
+pub use security_headers::{SecurityHeadersConfig, SecurityHeadersMiddleware};
+
+pub use rate_limit::{
+    create_auth_rate_limiter, create_custom_rate_limiter, create_rate_limiter,
+    create_trading_rate_limiter, IpKeyExtractor, RateLimitConfig,
+};
 
 #[cfg(test)]
 mod tests {

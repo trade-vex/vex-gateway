@@ -21,6 +21,11 @@ thiserror = {workspace = true}
 num_cpus = "1.16"
 async-trait = "0.1"
 clickhouse = "0.12"
+actix-governor = { workspace = true }
+governor = { workspace = true }
+actix-cors = { workspace = true }
+actix-web-prom = { workspace = true }
+prometheus = { workspace = true }
 
 #  Internal crate dependencies
 lib-api = {path = "../lib-api"}
