@@ -250,8 +250,8 @@ pub async fn exchange_oauth_login_code(
         return Err(AuthError::InvalidRequest);
     }
 
-    // Retrieve the login_code data
-    let data = session_service.get_login_code(login_code).await?;
+    // Atomically retrieve and delete login_code data
+    let data = session_service.get_and_delete_login_code(login_code).await?;
 
     // Verify PKCE-like S256 challenge: SHA256(verifier) must equal app_challenge
     let computed = crate::utils::pkce::s256_challenge(verifier)?;
@@ -259,9 +259,6 @@ pub async fn exchange_oauth_login_code(
         // Don't reveal whether the code was valid or challenge failed
         return Err(AuthError::InvalidRequest);
     }
-
-    // One-time use: delete the login_code after successful verification
-    session_service.delete_login_code(login_code).await?;
 
     // Parse user_info JSON
     let user_info_val: serde_json::Value =
