@@ -61,9 +61,8 @@ pub trait TradingRepository: Send + Sync {
         user_id: u64,
         offset: u64,
         limit: u64,
-        market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>>;
-    async fn count_open_orders(&self, user_id: u64, market_id: Option<u32>) -> Result<u64>;
+    async fn count_open_orders(&self, user_id: u64) -> Result<u64>;
     async fn get_order_by_id(&self, order_id: u64, user_id: u64) -> Result<Option<OrderModel>>;
     async fn create_order(&self, order: OrderModel) -> Result<u64>;
     async fn count_user_orders(&self, user_id: u64) -> Result<u64>;
@@ -73,9 +72,8 @@ pub trait TradingRepository: Send + Sync {
         user_id: u64,
         offset: u64,
         limit: u64,
-        market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>>;
-    async fn count_order_history(&self, user_id: u64, market_id: Option<u32>) -> Result<u64>;
+    async fn count_order_history(&self, user_id: u64) -> Result<u64>;
 
     // Favorite markets operations
     async fn get_user_favorite_markets(&self, user_id: u64)
@@ -262,7 +260,6 @@ impl TradingRepository for PostgresTradingRepository {
         user_id: u64,
         offset: u64,
         limit: u64,
-        market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>> {
         // Filter for "open" orders: Placed, Pending, PartiallyFilled, Processing
         // Exclude: Filled, Cancelled, Rejected
@@ -272,15 +269,9 @@ impl TradingRepository for PostgresTradingRepository {
             .add(OrderColumn::Status.eq("PartiallyFilled"))
             .add(OrderColumn::Status.eq("Processing"));
 
-        let mut query = OrderEntity::find()
+        let orders = OrderEntity::find()
             .filter(OrderColumn::OrderUserId.eq(Decimal::from(user_id)))
-            .filter(open_status_condition);
-
-        if let Some(market_id) = market_id {
-            query = query.filter(OrderColumn::MarketId.eq(market_id as i32));
-        }
-
-        let orders = query
+            .filter(open_status_condition)
             .order_by_desc(OrderColumn::OrderTimestamp)
             .offset(offset)
             .limit(limit)
@@ -291,7 +282,7 @@ impl TradingRepository for PostgresTradingRepository {
         Ok(orders)
     }
 
-    async fn count_open_orders(&self, user_id: u64, market_id: Option<u32>) -> Result<u64> {
+    async fn count_open_orders(&self, user_id: u64) -> Result<u64> {
         // Count only "open" orders: Placed, Pending, PartiallyFilled, Processing
         // Exclude: Filled, Cancelled, Rejected
         let open_status_condition = Condition::any()
@@ -300,15 +291,12 @@ impl TradingRepository for PostgresTradingRepository {
             .add(OrderColumn::Status.eq("PartiallyFilled"))
             .add(OrderColumn::Status.eq("Processing"));
 
-        let mut query = OrderEntity::find()
+        let count = OrderEntity::find()
             .filter(OrderColumn::OrderUserId.eq(Decimal::from(user_id)))
-            .filter(open_status_condition);
-
-        if let Some(market_id) = market_id {
-            query = query.filter(OrderColumn::MarketId.eq(market_id as i32));
-        }
-
-        let count = query.count(&*self.db).await.map_err(TradingError::from)?;
+            .filter(open_status_condition)
+            .count(&*self.db)
+            .await
+            .map_err(TradingError::from)?;
 
         Ok(count)
     }
@@ -376,49 +364,36 @@ impl TradingRepository for PostgresTradingRepository {
         user_id: u64,
         offset: u64,
         limit: u64,
-        market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>> {
         // Only return Cancelled, PartiallyFilled, and Filled orders for history
-        let mut query = OrderEntity::find()
+        OrderEntity::find()
             .filter(OrderColumn::OrderUserId.eq(Decimal::from(user_id)))
             .filter(
                 OrderColumn::Status
                     .eq("Cancelled")
                     .or(OrderColumn::Status.eq("PartiallyFilled"))
                     .or(OrderColumn::Status.eq("Filled")),
-            );
-
-        if let Some(market_id) = market_id {
-            query = query.filter(OrderColumn::MarketId.eq(market_id as i32));
-        }
-
-        let orders = query
+            )
             .order_by_desc(OrderColumn::OrderTimestamp)
             .offset(offset)
             .limit(limit)
             .all(&*self.db)
             .await
-            .map_err(TradingError::from)?;
-
-        Ok(orders)
+            .map_err(Into::into)
     }
 
-    async fn count_order_history(&self, user_id: u64, market_id: Option<u32>) -> Result<u64> {
+    async fn count_order_history(&self, user_id: u64) -> Result<u64> {
         // Count only Cancelled, PartiallyFilled, and Filled orders for history
-        let mut query = OrderEntity::find()
+        let count = OrderEntity::find()
             .filter(OrderColumn::OrderUserId.eq(Decimal::from(user_id)))
             .filter(
                 OrderColumn::Status
                     .eq("Cancelled")
                     .or(OrderColumn::Status.eq("PartiallyFilled"))
                     .or(OrderColumn::Status.eq("Filled")),
-            );
-
-        if let Some(market_id) = market_id {
-            query = query.filter(OrderColumn::MarketId.eq(market_id as i32));
-        }
-
-        let count = query.count(&*self.db).await?;
+            )
+            .count(&*self.db)
+            .await?;
         Ok(count)
     }
 

@@ -54,22 +54,13 @@ async fn main() -> std::io::Result<()> {
     // Initialize VexGateway client
     info!("Initializing VexGateway client");
 
-    // Load gateway networking configuration from environment variables
+    // Change this for prod , test defaults should not be used and remove all hardcoded network config
     let mut gateway_config = GatewayNetworkingConfig::test_defaults();
-    gateway_config.context_dir =
-        std::env::var("CONTEXT_DIR").unwrap_or_else(|_| "/dev/shm/aeron".to_string());
-    gateway_config.core_address =
-        std::env::var("CORE_ADDRESS").unwrap_or_else(|_| "aeron-media-driver-core".to_string());
-    gateway_config.local_address =
-        std::env::var("LOCAL_ADDRESS").unwrap_or_else(|_| "0.0.0.0".to_string());
-    gateway_config.core_port = std::env::var("CORE_PORT")
-        .unwrap_or_else(|_| "40123".to_string())
-        .parse::<u16>()
-        .unwrap_or(40123);
-    gateway_config.core_control_port = std::env::var("CORE_CONTROL_PORT")
-        .unwrap_or_else(|_| "40123".to_string())
-        .parse::<u16>()
-        .unwrap_or(40123);
+    gateway_config.context_dir = "/dev/shm/aeron".to_string();
+    gateway_config.core_address = "aeron-media-driver-core".to_string();
+    gateway_config.local_address = "0.0.0.0".to_string();
+    gateway_config.core_port = 40001;
+    gateway_config.core_control_port = 40002;
     info!("GATEWAY CONFIG 00005: {:?}", gateway_config);
     let mut gateway_client = VexGateway::new(gateway_config)
         .map_err(|e| std::io::Error::other(format!("Failed to initialize VexGateway: {}", e)))?;

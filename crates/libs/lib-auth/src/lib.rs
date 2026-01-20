@@ -32,11 +32,6 @@ pub fn configure_public_auth_services(cfg: &mut web::ServiceConfig) {
                 .route(
                     "/{provider}/callback",
                     web::get().to(handlers::oauth::handle_oauth_callback),
-                )
-                // Mobile-only: exchange login_code + verifier for session_id
-                .route(
-                    "/exchange",
-                    web::post().to(handlers::oauth::exchange_oauth_login_code),
                 ),
         )
         // Public auth routes

@@ -117,7 +117,6 @@ impl OrderStore {
         user_id: u64,
         offset: u64,
         limit: u64,
-        market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>, TradingError> {
         // Try Redis first if cache enabled
         if self.config.enabled {
@@ -140,12 +139,6 @@ impl OrderStore {
                                             || status_lower == "filled"
                                         {
                                             if let Some(order) = Self::parse_order_hash(hash) {
-                                                // Filter by market_id if provided
-                                                if let Some(filter_market_id) = market_id {
-                                                    if order.market_id as u32 != filter_market_id {
-                                                        continue;
-                                                    }
-                                                }
                                                 orders.push(order);
                                             }
                                         }
@@ -185,7 +178,7 @@ impl OrderStore {
         // Database fallback
         if let Some(repo) = &self.trading_repo {
             let orders = repo
-                .get_order_history_paginated(user_id, offset, limit, market_id)
+                .get_order_history_paginated(user_id, offset, limit)
                 .await?;
             debug!("Postgres: Got {} history orders (paginated)", orders.len());
             return Ok(orders);
@@ -275,7 +268,6 @@ impl OrderStore {
         user_id: u64,
         offset: u64,
         limit: u64,
-        market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>, TradingError> {
         // Cache: Query user:{user_id}:orders SET, then fetch each order hash
         if self.config.enabled {
@@ -313,12 +305,6 @@ impl OrderStore {
                                     }
 
                                     if let Some(order) = Self::parse_order_hash(hash) {
-                                        // Filter by market_id if provided
-                                        if let Some(filter_market_id) = market_id {
-                                            if order.market_id as u32 != filter_market_id {
-                                                continue;
-                                            }
-                                        }
                                         orders.push(order);
                                     }
                                 }
@@ -352,10 +338,7 @@ impl OrderStore {
 
         // Database fallback
         if let Some(repo) = &self.trading_repo {
-            match repo
-                .get_open_orders_paginated(user_id, offset, limit, market_id)
-                .await
-            {
+            match repo.get_open_orders_paginated(user_id, offset, limit).await {
                 Ok(orders) => {
                     debug!("Database hit for user orders (paginated): {}", user_id);
                     return Ok(orders);

@@ -44,30 +44,6 @@ use crate::error::auth_error::AuthError;
 use crate::service::token_service::TokenService;
 use deadpool_redis::Pool as RedisPool;
 use deadpool_redis::redis::AsyncCommands;
-use serde::{Deserialize, Serialize};
-
-/// Unified OAuth transaction data stored in Redis
-/// Replaces separate oauth_state, oauth_verifier, oauth_nonce, oauth_platform keys
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OAuthTxn {
-    /// PKCE verifier for the OAuth provider
-    pkce_verifier: String,
-    /// OIDC nonce for ID token validation (Google only)
-    nonce: Option<String>,
-    /// Platform identifier: "web" or "app"
-    platform: Option<String>,
-    /// App challenge for mobile PKCE-like second hop (app only)
-    app_challenge: Option<String>,
-}
-
-/// Metadata returned from OAuth callback for handler use
-#[derive(Debug, Clone)]
-pub struct OAuthCallbackMeta {
-    /// Platform identifier: "web" or "app"
-    pub platform: Option<String>,
-    /// App challenge for mobile verification (app only)
-    pub app_challenge: Option<String>,
-}
 #[allow(unused_imports)]
 use openidconnect::TokenResponse;
 use openidconnect::{
@@ -495,127 +471,6 @@ impl OAuthService {
         Ok(final_auth_url.to_string())
     }
 
-    /// Generates an authorization URL for initiating OAuth flow with platform support
-    ///
-    /// This method stores all OAuth transaction data in a single Redis key and
-    /// returns both the authorization URL and the state value for cookie binding.
-    ///
-    /// # Arguments
-    ///
-    /// * `provider` - The OAuth provider name ("google", "github", "twitter")
-    /// * `platform` - Optional platform identifier ("app" or "web")
-    /// * `app_challenge` - Required when platform="app", SHA256 hash of app's verifier
-    ///
-    /// # Returns
-    ///
-    /// A tuple of (authorization_url, state) where state should be bound to the
-    /// user-agent session via cookie (for web) to prevent login CSRF.
-    ///
-    /// # Errors
-    ///
-    /// - Provider is not configured
-    /// - Redis connection fails
-    /// - app_challenge missing when platform="app"
-    pub async fn get_auth_url_with_platform(
-        &self,
-        provider: &str,
-        platform: Option<&str>,
-        app_challenge: Option<&str>,
-    ) -> Result<(String, String), AuthError> {
-        if provider.is_empty() {
-            return Err(AuthError::InvalidProvider(
-                "Provider name is empty".to_string(),
-            ));
-        }
-
-        let client = self.oauth_clients.get(provider).ok_or_else(|| {
-            AuthError::InvalidProvider(format!("Provider '{}' not configured", provider))
-        })?;
-
-        // Generate PKCE challenge for security (prevents authorization code interception)
-        let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-
-        // Build authorization URL using OpenID Connect flow
-        // Note: Nonce is required by API but only used for OIDC ID token validation
-        let mut auth_request = client
-            .authorize_url(
-                CoreAuthenticationFlow::AuthorizationCode,
-                CsrfToken::new_random,
-                Nonce::new_random,
-            )
-            .set_pkce_challenge(pkce_challenge);
-
-        // Add provider-specific scopes
-        if provider == "google" {
-            auth_request = auth_request
-                .add_scope(Scope::new("openid".to_string()))
-                .add_scope(Scope::new("email".to_string()))
-                .add_scope(Scope::new("profile".to_string()));
-        } else if provider == "github" {
-            auth_request = auth_request.add_scope(Scope::new("user:email".to_string()));
-        } else if provider == "twitter" {
-            auth_request = auth_request
-                .add_scope(Scope::new("tweet.read".to_string()))
-                .add_scope(Scope::new("users.read".to_string()));
-        }
-
-        let (final_auth_url, csrf_state, nonce) = auth_request.url();
-
-        // Store unified OAuth transaction in Redis with 10-minute expiry
-        let mut redis_conn = self
-            .redis_pool
-            .get()
-            .await
-            .map_err(|e| AuthError::Redis(format!("Redis connection failed: {}", e)))?;
-
-        let txn = OAuthTxn {
-            pkce_verifier: pkce_verifier.secret().to_string(),
-            nonce: if provider == "google" {
-                Some(nonce.secret().to_string())
-            } else {
-                None
-            },
-            platform: platform.map(|s| s.to_string()),
-            app_challenge: app_challenge.map(|s| s.to_string()),
-        };
-
-        let key = format!("oauth_txn:{}:{}", provider, csrf_state.secret());
-        let value = serde_json::to_string(&txn)
-            .map_err(|e| AuthError::Redis(format!("Failed to serialize oauth txn: {}", e)))?;
-
-        let _: () = redis_conn
-            .set_ex(&key, value, 600)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to store oauth txn: {}", e)))?;
-
-        Ok((final_auth_url.to_string(), csrf_state.secret().to_string()))
-    }
-
-    /// Atomically consumes the OAuth transaction from Redis
-    ///
-    /// Uses GETDEL to ensure one-time use semantics and prevent replay attacks.
-    async fn consume_txn(&self, provider: &str, state: &str) -> Result<OAuthTxn, AuthError> {
-        let mut redis_conn = self
-            .redis_pool
-            .get()
-            .await
-            .map_err(|e| AuthError::Redis(format!("Redis connection failed: {}", e)))?;
-
-        let key = format!("oauth_txn:{}:{}", provider, state);
-
-        let raw: Option<String> = redis::cmd("GETDEL")
-            .arg(&key)
-            .query_async(&mut redis_conn)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to GETDEL oauth txn: {}", e)))?;
-
-        let raw = raw.ok_or(AuthError::StateMismatch)?;
-        let txn: OAuthTxn = serde_json::from_str(&raw)
-            .map_err(|e| AuthError::Redis(format!("Failed to deserialize oauth txn: {}", e)))?;
-
-        Ok(txn)
-    }
-
     /// Handles the OAuth callback after user authentication
     ///
     /// This is the core method that completes the OAuth flow:
@@ -668,30 +523,30 @@ impl OAuthService {
         provider: &str,
         code: &str,
         state: &str,
-    ) -> Result<(OAuthLoginResponse, OAuthCallbackMeta), AuthError> {
-        // Atomically consume the OAuth transaction (provides CSRF protection via one-time use)
-        let txn = self.consume_txn(provider, state).await?;
+    ) -> Result<OAuthLoginResponse, AuthError> {
+        // Verify and consume state for CSRF protection
+        self.verify_and_consume_state(provider, state).await?;
 
         // Get OAuth client
         let client = self.oauth_clients.get(provider).ok_or_else(|| {
             AuthError::InvalidProvider(format!("Provider '{}' not configured", provider))
         })?;
 
-        // Exchange authorization code for access token using stored PKCE verifier
+        // Retrieve PKCE verifier from Redis
+        let pkce_verifier = self.get_stored_verifier(provider, state).await?;
+
+        // Exchange authorization code for access token
         let token_response = client
             .exchange_code(AuthorizationCode::new(code.to_string()))
-            .set_pkce_verifier(PkceCodeVerifier::new(txn.pkce_verifier))
+            .set_pkce_verifier(PkceCodeVerifier::new(pkce_verifier))
             .request_async(async_http_client)
             .await
             .map_err(|e| AuthError::CodeExchangeFailed(format!("Token exchange failed: {}", e)))?;
 
-        // Validate ID token for OIDC providers (Google)
-        // This validates signature, issuer, audience, expiration, and nonce
+        // validate ID token for OIDC providers
+        // this validates signature, issuer, audience, expiration, and nonce
         if provider == "google" {
-            let nonce = txn.nonce.as_deref().ok_or_else(|| {
-                AuthError::CodeExchangeFailed("OIDC nonce missing from transaction".to_string())
-            })?;
-            self.validate_id_token(client, &token_response, nonce)
+            self.validate_id_token(client, &token_response, state)
                 .await?;
         }
 
@@ -752,18 +607,109 @@ impl OAuthService {
             .await
             .map_err(|e| AuthError::CodeExchangeFailed(format!("Token minting failed: {}", e)))?;
 
-        Ok((
-            OAuthLoginResponse {
-                access_token: tokens.access_token,
-                refresh_token: tokens.refresh_token,
-                expires_in: tokens.expires_in,
-                user: user.into(),
-            },
-            OAuthCallbackMeta {
-                platform: txn.platform,
-                app_challenge: txn.app_challenge,
-            },
-        ))
+        Ok(OAuthLoginResponse {
+            access_token: tokens.access_token,
+            refresh_token: tokens.refresh_token,
+            expires_in: tokens.expires_in,
+            user: user.into(),
+        })
+    }
+
+    /// Verifies and atomically consumes the OAuth state parameter
+    ///
+    /// This method provides CSRF protection by ensuring the state parameter
+    /// matches what was stored in Redis during authorization URL generation.
+    ///
+    /// # Atomicity
+    ///
+    /// Uses Redis `GETDEL` command to atomically retrieve and delete the state,
+    /// preventing replay attacks even in concurrent scenarios.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StateMismatch` if:
+    /// - State is not found in Redis (never existed or already consumed)
+    /// - State has expired (> 10 minutes)
+    async fn verify_and_consume_state(&self, provider: &str, state: &str) -> Result<(), AuthError> {
+        let mut redis_conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Redis connection failed: {}", e)))?;
+
+        let state_key = format!("oauth_state:{}:{}", provider, state);
+
+        // Atomically get and delete state - prevents replay attacks
+        let state_value: Option<String> = redis::cmd("GETDEL")
+            .arg(&state_key)
+            .query_async(&mut redis_conn)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get and delete state: {}", e)))?;
+
+        if state_value.is_none() {
+            return Err(AuthError::StateMismatch);
+        }
+
+        Ok(())
+    }
+
+    /// Retrieves and consumes the PKCE verifier from Redis
+    ///
+    /// The PKCE verifier is needed to complete the token exchange and must match
+    /// the code challenge sent in the authorization request.
+    ///
+    /// # One-time Use
+    ///
+    /// The verifier is deleted after retrieval to prevent reuse.
+    async fn get_stored_verifier(&self, provider: &str, state: &str) -> Result<String, AuthError> {
+        let mut redis_conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Redis connection failed: {}", e)))?;
+
+        let verifier_key = format!("oauth_verifier:{}:{}", provider, state);
+
+        // Atomically get and delete verifier
+        let verifier: Option<String> = redis_conn
+            .get_del(&verifier_key)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to retrieve verifier: {}", e)))?;
+
+        let verifier = verifier.ok_or_else(|| {
+            AuthError::CodeExchangeFailed("PKCE verifier not found or expired".to_string())
+        })?;
+
+        Ok(verifier)
+    }
+
+    /// Retrieves and consumes the stored nonce from Redis
+    ///
+    /// The nonce is used for ID token validation in OIDC flows to prevent replay attacks.
+    ///
+    /// # One-time Use
+    ///
+    /// The nonce is deleted after retrieval to prevent reuse.
+    async fn get_stored_nonce(&self, provider: &str, state: &str) -> Result<String, AuthError> {
+        let mut redis_conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Redis connection failed: {}", e)))?;
+
+        let nonce_key = format!("oauth_nonce:{}:{}", provider, state);
+
+        // Atomically get and delete nonce
+        let nonce: Option<String> = redis_conn
+            .get_del(&nonce_key)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to retrieve nonce: {}", e)))?;
+
+        let nonce = nonce.ok_or_else(|| {
+            AuthError::CodeExchangeFailed("OIDC nonce not found or expired".to_string())
+        })?;
+
+        Ok(nonce)
     }
 
     /// Validates the OIDC ID token for Google authentication
@@ -779,25 +725,28 @@ impl OAuthService {
     ///
     /// * `client` - The OAuth client configured for the provider
     /// * `token_response` - The token response from the provider
-    /// * `stored_nonce_secret` - The nonce stored during OAuth initiation
+    /// * `state` - The OAuth state parameter used to retrieve the stored nonce
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - ID token is missing from the response
+    /// - Nonce cannot be retrieved from Redis
     /// - Any validation step fails (signature, issuer, audience, expiration, nonce)
     async fn validate_id_token(
         &self,
         client: &CoreClient,
         token_response: &openidconnect::core::CoreTokenResponse,
-        stored_nonce_secret: &str,
+        state: &str,
     ) -> Result<(), AuthError> {
         // Extract ID token from response
         let id_token = token_response.id_token().ok_or_else(|| {
             AuthError::CodeExchangeFailed("ID token missing from OIDC response".to_string())
         })?;
 
-        let stored_nonce = Nonce::new(stored_nonce_secret.to_string());
+        // Retrieve stored nonce from Redis
+        let stored_nonce_secret = self.get_stored_nonce("google", state).await?;
+        let stored_nonce = Nonce::new(stored_nonce_secret);
 
         // Verify ID token using the client's verifier
         // This validates:

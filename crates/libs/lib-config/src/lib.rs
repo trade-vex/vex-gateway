@@ -152,6 +152,7 @@ impl Config {
                 config::Environment::default()
                     .prefix("APP")
                     .separator("_")
+                    .list_separator(",")
                     .try_parsing(true),
             )
             .build()
@@ -160,11 +161,6 @@ impl Config {
         // Deserialize and validate
         let mut config: Config = config.try_deserialize().map_err(ConfigError::LoadError)?;
         config.environment = environment;
-
-        // Override frontend_url from FRONTEND_URL environment variable if set
-        if let Ok(frontend_url) = std::env::var("FRONTEND_URL") {
-            config.auth.server.frontend_url = frontend_url;
-        }
 
         // Log what we loaded before validation
         debug!("Loaded configuration before validation:");
@@ -231,10 +227,10 @@ impl Config {
         info!("Loading development defaults (no config files required)");
         Self {
             environment: Environment::Development,
-            server: ServerConfig::from_env().unwrap_or_else(|_| ServerConfig {
-                host: "0.0.0.0".to_string(),
+            server: ServerConfig {
+                host: "127.0.0.1".to_string(),
                 port: 8081,
-            }),
+            },
             logging: LoggingConfig {
                 level: "debug".to_string(),
                 structured: false,

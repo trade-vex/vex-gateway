@@ -339,7 +339,6 @@ impl TradingRepository for ErrorMockTradingRepository {
         _user_id: u64,
         _offset: u64,
         _limit: u64,
-        _market_id: Option<u32>,
     ) -> lib_core::repository::repository::Result<Vec<OrderModel>> {
         if self.should_error("get_open_orders_paginated") {
             return Err(TradingError::Database(
@@ -352,7 +351,6 @@ impl TradingRepository for ErrorMockTradingRepository {
     async fn count_open_orders(
         &self,
         _user_id: u64,
-        _market_id: Option<u32>,
     ) -> lib_core::repository::repository::Result<u64> {
         if self.should_error("count_open_orders") {
             return Err(TradingError::Database(
@@ -416,7 +414,6 @@ impl TradingRepository for ErrorMockTradingRepository {
         _user_id: u64,
         _offset: u64,
         _limit: u64,
-        _market_id: Option<u32>,
     ) -> lib_core::repository::repository::Result<Vec<OrderModel>> {
         if self.should_error("get_order_history_paginated") {
             return Err(TradingError::Database(
@@ -429,7 +426,6 @@ impl TradingRepository for ErrorMockTradingRepository {
     async fn count_order_history(
         &self,
         _user_id: u64,
-        _market_id: Option<u32>,
     ) -> lib_core::repository::repository::Result<u64> {
         if self.should_error("count_order_history") {
             return Err(TradingError::Database(
@@ -633,7 +629,6 @@ mod tests {
         let query = web::Query(OrdersQuery {
             page: Some(1),
             limit: Some(20),
-            market_id: None,
         });
 
         let result = get_open_orders(
@@ -704,7 +699,6 @@ mod tests {
         let query = web::Query(OrdersQuery {
             page: Some(1),
             limit: Some(2), // Only 2 per page
-            market_id: None,
         });
 
         let result = get_open_orders(
@@ -792,7 +786,6 @@ mod tests {
         let query = web::Query(OrdersQuery {
             page: Some(1),
             limit: Some(20),
-            market_id: None,
         });
 
         let result = get_open_orders(
@@ -895,7 +888,6 @@ mod tests {
         let query = web::Query(OrdersQuery {
             page: Some(1),
             limit: Some(20),
-            market_id: None,
         });
 
         let result = get_order_history(
@@ -978,7 +970,6 @@ mod tests {
         let query = web::Query(OrdersQuery {
             page: Some(1),
             limit: Some(20),
-            market_id: None,
         });
 
         let result = get_order_history(
@@ -1031,172 +1022,6 @@ mod tests {
                         .iter()
                         .any(|s| s.eq_ignore_ascii_case("Processing"))
                 );
-            }
-            Err(e) => {
-                panic!("Handler returned error: {}", e);
-            }
-        }
-
-        cleanup_test_data(&db, user_id).await;
-    }
-
-    #[tokio::test]
-    #[ignore] // Requires database - skip in CI
-    async fn test_get_open_orders_with_market_id_filter() {
-        let Some(db) = require_database().await else {
-            return; // Skip test if database is unavailable
-        };
-        let user = create_test_user();
-        let user_id = uuid_to_u64(user);
-
-        cleanup_test_data(&db, user_id).await;
-
-        // Insert test orders across different markets
-        insert_test_order(&db, 6001, user_id, 65538, 5000000, 100, "Bid", "Placed")
-            .await
-            .unwrap(); // Market 65538
-        insert_test_order(&db, 6002, user_id, 65538, 5100000, 200, "Ask", "Pending")
-            .await
-            .unwrap(); // Market 65538
-        insert_test_order(&db, 6003, user_id, 65539, 3000000, 150, "Bid", "Placed")
-            .await
-            .unwrap(); // Market 65539 - should be filtered out
-        insert_test_order(
-            &db,
-            6004,
-            user_id,
-            65538,
-            5200000,
-            250,
-            "Ask",
-            "PartiallyFilled",
-        )
-        .await
-        .unwrap(); // Market 65538
-
-        let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
-        let order_store = Arc::new(OrderStore::with_repository(
-            OrderCacheConfig::default(),
-            trading_repo.clone(),
-        ));
-
-        let authenticated_user = create_authenticated_user_id(user);
-        let query = web::Query(OrdersQuery {
-            page: Some(1),
-            limit: Some(20),
-            market_id: Some(65538), // Filter by market_id
-        });
-
-        let result = get_open_orders(
-            authenticated_user,
-            query,
-            web::Data::new(order_store.clone()),
-            web::Data::new(trading_repo.clone() as Arc<dyn TradingRepository>),
-        )
-        .await;
-
-        match result {
-            Ok(response) => {
-                assert_eq!(response.status(), 200);
-
-                let body = response.into_body();
-                let bytes = actix_web::body::to_bytes(body).await.unwrap();
-                let orders_response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-
-                assert!(orders_response["orders"].is_array());
-                let orders = orders_response["orders"].as_array().unwrap();
-                // Should have 3 orders from market 65538 (Placed, Pending, PartiallyFilled)
-                // Should NOT include order from market 65539
-                assert_eq!(orders.len(), 3);
-                assert_eq!(orders_response["total"], 3);
-
-                // Verify all returned orders are from the correct market
-                for order in orders {
-                    assert_eq!(order["market_id"], 65538);
-                }
-            }
-            Err(e) => {
-                panic!("Handler returned error: {}", e);
-            }
-        }
-
-        cleanup_test_data(&db, user_id).await;
-    }
-
-    #[tokio::test]
-    #[ignore] // Requires database - skip in CI
-    async fn test_get_order_history_with_market_id_filter() {
-        let Some(db) = require_database().await else {
-            return; // Skip test if database is unavailable
-        };
-        let user = create_test_user();
-        let user_id = uuid_to_u64(user);
-
-        cleanup_test_data(&db, user_id).await;
-
-        // Insert test orders across different markets
-        insert_test_order(&db, 7001, user_id, 65538, 5000000, 100, "Bid", "Filled")
-            .await
-            .unwrap(); // Market 65538
-        insert_test_order(&db, 7002, user_id, 65538, 5100000, 200, "Ask", "Cancelled")
-            .await
-            .unwrap(); // Market 65538
-        insert_test_order(
-            &db,
-            7003,
-            user_id,
-            65539,
-            3000000,
-            150,
-            "Bid",
-            "PartiallyFilled",
-        )
-        .await
-        .unwrap(); // Market 65539 - should be filtered out
-        insert_test_order(&db, 7004, user_id, 65538, 5200000, 250, "Ask", "Filled")
-            .await
-            .unwrap(); // Market 65538
-
-        let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
-        let order_store = Arc::new(OrderStore::with_repository(
-            OrderCacheConfig::default(),
-            trading_repo.clone(),
-        ));
-
-        let authenticated_user = create_authenticated_user_id(user);
-        let query = web::Query(OrdersQuery {
-            page: Some(1),
-            limit: Some(20),
-            market_id: Some(65538), // Filter by market_id
-        });
-
-        let result = get_order_history(
-            authenticated_user,
-            query,
-            web::Data::new(order_store.clone()),
-            web::Data::new(trading_repo.clone() as Arc<dyn TradingRepository>),
-        )
-        .await;
-
-        match result {
-            Ok(response) => {
-                assert_eq!(response.status(), 200);
-
-                let body = response.into_body();
-                let bytes = actix_web::body::to_bytes(body).await.unwrap();
-                let history_response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-
-                assert!(history_response["orders"].is_array());
-                let orders = history_response["orders"].as_array().unwrap();
-                // Should have 3 orders from market 65538 (Filled, Cancelled, Filled)
-                // Should NOT include order from market 65539
-                assert_eq!(orders.len(), 3);
-                assert_eq!(history_response["total"], 3);
-
-                // Verify all returned orders are from the correct market
-                for order in orders {
-                    assert_eq!(order["market_id"], 65538);
-                }
             }
             Err(e) => {
                 panic!("Handler returned error: {}", e);
@@ -1477,7 +1302,6 @@ mod tests {
         let query = web::Query(OrdersQuery {
             page: Some(1),
             limit: Some(20),
-            market_id: None,
         });
 
         let result = get_open_orders(
@@ -1531,7 +1355,6 @@ mod tests {
         let query = web::Query(OrdersQuery {
             page: Some(1),
             limit: Some(20),
-            market_id: None,
         });
 
         let result = get_open_orders(
@@ -1579,7 +1402,6 @@ mod tests {
         let query = web::Query(OrdersQuery {
             page: Some(1),
             limit: Some(20),
-            market_id: None,
         });
 
         let result = get_order_history(
@@ -1634,7 +1456,6 @@ mod tests {
         let query = web::Query(OrdersQuery {
             page: Some(1),
             limit: Some(20),
-            market_id: None,
         });
 
         let result = get_order_history(
