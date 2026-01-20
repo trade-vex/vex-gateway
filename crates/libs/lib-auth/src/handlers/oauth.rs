@@ -89,13 +89,14 @@ pub async fn handle_oauth_callback(
     // Check for state cookie (present for web, absent for mobile)
     let cookie_name = format!("oauth_state_{}", provider.as_str());
     let cookie_state = req.cookie(&cookie_name).map(|c| c.value().to_string());
+    let has_state_cookie = cookie_state.is_some();
 
     // For web flow: enforce state cookie binding (prevents login CSRF / session swapping)
-    // Mobile apps don't have cookies, they use app_challenge verification instead
-    if let Some(ref state_from_cookie) = cookie_state
-        && state_from_cookie != &query.state
-    {
-        return Err(AuthError::StateMismatch);
+    // If cookie exists, it must match the query state
+    if let Some(ref state_from_cookie) = cookie_state {
+        if state_from_cookie != &query.state {
+            return Err(AuthError::StateMismatch);
+        }
     }
 
     match oauth_service
@@ -103,6 +104,12 @@ pub async fn handle_oauth_callback(
         .await
     {
         Ok((response, meta)) => {
+            // For web flows (non-app), require the state cookie to prevent CSRF
+            // Mobile apps don't have cookies, they use app_challenge verification instead
+            if meta.app_challenge.is_none() && !has_state_cookie {
+                return Err(AuthError::StateMismatch);
+            }
+
             // Get user_id and user_info from the response
             let user_id = response.user.user_id;
             let user_info = response.user.clone();

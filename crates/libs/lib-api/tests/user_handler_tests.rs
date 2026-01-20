@@ -95,11 +95,12 @@ async fn setup_test_db_with_schema() -> Result<DatabaseConnection, sea_orm::DbEr
             if let Err(e) = db.execute_unprepared(&sql).await {
                 // Ignore "already exists" errors for idempotency (tables, indexes, etc.)
                 let error_str = e.to_string();
-                if !error_str.contains("already exists") 
+                if error_str.contains("syntax error") || error_str.contains("unterminated") {
+                    // Syntax and parse errors should be escalated - they indicate real problems
+                    eprintln!("ERROR: Migration {} has syntax/parse error: {}", migration_file, e);
+                } else if !error_str.contains("already exists")
                     && !error_str.contains("duplicate")
                     && !error_str.contains("does not exist")
-                    && !error_str.contains("syntax error") // Some migrations have function definitions that cause syntax errors when re-run
-                    && !error_str.contains("unterminated")
                 {
                     // Only warn on non-idempotency errors
                     eprintln!("Warning: Migration {} failed: {}", migration_file, e);
@@ -1219,8 +1220,8 @@ mod tests {
 
         // Insert favorite markets
         // Note: PostgreSQL BIGINT is signed (i64), so we need to cast u64 to i64
-        // For testing, we'll use the lower 63 bits to avoid overflow
-        let user_id_i64 = user_id as i64;
+        // Mask to lower 63 bits to avoid producing negative values from high-bit u64s
+        let user_id_i64 = (user_id & 0x7FFF_FFFF_FFFF_FFFF) as i64;
         let market_ids = vec![65538, 65539]; // BTC/USD and ETH/USD
         for market_id in &market_ids {
             let sql = format!(
@@ -1367,7 +1368,8 @@ mod tests {
 
         // First add a favorite
         // Note: PostgreSQL BIGINT is signed (i64), so we need to cast u64 to i64
-        let user_id_i64 = user_id as i64;
+        // Mask to lower 63 bits to avoid producing negative values from high-bit u64s
+        let user_id_i64 = (user_id & 0x7FFF_FFFF_FFFF_FFFF) as i64;
         let sql = format!(
             "INSERT INTO user_favorite_markets (user_id, market_id) VALUES ({}, {})",
             user_id_i64, 65538

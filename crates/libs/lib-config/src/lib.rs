@@ -232,7 +232,7 @@ impl Config {
         Self {
             environment: Environment::Development,
             server: ServerConfig::from_env().unwrap_or_else(|_| ServerConfig {
-                host: "0.0.0.0".to_string(),
+                host: "127.0.0.1".to_string(),
                 port: 8081,
             }),
             logging: LoggingConfig {

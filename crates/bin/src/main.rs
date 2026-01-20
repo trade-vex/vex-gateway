@@ -55,7 +55,7 @@ async fn main() -> std::io::Result<()> {
     info!("Initializing VexGateway client");
 
     // Load gateway networking configuration from environment variables
-    let mut gateway_config = GatewayNetworkingConfig::test_defaults();
+    let mut gateway_config = GatewayNetworkingConfig::development_defaults();
     gateway_config.context_dir =
         std::env::var("CONTEXT_DIR").unwrap_or_else(|_| "/dev/shm/aeron".to_string());
     gateway_config.core_address =
@@ -65,11 +65,17 @@ async fn main() -> std::io::Result<()> {
     gateway_config.core_port = std::env::var("CORE_PORT")
         .unwrap_or_else(|_| "40123".to_string())
         .parse::<u16>()
-        .unwrap_or(40123);
+        .unwrap_or_else(|e| {
+            tracing::warn!("Invalid CORE_PORT, defaulting to 40123: {}", e);
+            40123
+        });
     gateway_config.core_control_port = std::env::var("CORE_CONTROL_PORT")
         .unwrap_or_else(|_| "40123".to_string())
         .parse::<u16>()
-        .unwrap_or(40123);
+        .unwrap_or_else(|e| {
+            tracing::warn!("Invalid CORE_CONTROL_PORT, defaulting to 40123: {}", e);
+            40123
+        });
     info!("GATEWAY CONFIG 00005: {:?}", gateway_config);
     let mut gateway_client = VexGateway::new(gateway_config)
         .map_err(|e| std::io::Error::other(format!("Failed to initialize VexGateway: {}", e)))?;

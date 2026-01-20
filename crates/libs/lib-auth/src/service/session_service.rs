@@ -150,6 +150,7 @@ impl SessionService {
     }
 
     /// Update tokens in an existing session
+    /// Uses a single Redis connection for read-modify-write to minimize race conditions
     pub async fn update_session_tokens(
         &self,
         session_id: &str,
@@ -164,8 +165,16 @@ impl SessionService {
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
 
-        // Get existing session to preserve user_id
-        let session_data = self.get_session(session_id).await?;
+        // Get existing session to preserve user_id (using same connection)
+        let session_json: Option<String> = conn
+            .get(&session_key)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get session: {}", e)))?;
+
+        let session_json = session_json.ok_or(AuthError::InvalidRequest)?;
+
+        let session_data: SessionData = serde_json::from_str(&session_json)
+            .map_err(|e| AuthError::Redis(format!("Failed to deserialize session: {}", e)))?;
 
         // Create updated session data with new tokens
         let updated_session = SessionData {
@@ -174,20 +183,14 @@ impl SessionService {
             refresh_token,
         };
 
-        let session_json = serde_json::to_string(&updated_session)
+        let updated_json = serde_json::to_string(&updated_session)
             .map_err(|e| AuthError::Redis(format!("Failed to serialize session: {}", e)))?;
 
-        // Update the session with new tokens
+        // Update the session with new tokens and reset TTL atomically using SETEX
         let _: () = conn
-            .set(&session_key, session_json)
+            .set_ex(&session_key, updated_json, self.session_ttl_seconds)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to update session: {}", e)))?;
-
-        // Reset TTL to the configured session TTL value
-        let _: () = conn
-            .expire(&session_key, self.session_ttl_seconds as i64)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to extend session TTL: {}", e)))?;
 
         Ok(())
     }
