@@ -13,6 +13,18 @@ pub struct SessionData {
     pub refresh_token: String,
 }
 
+/// One-time login code data for mobile OAuth exchange (short TTL)
+/// Used for PKCE-like "second hop" verification in mobile deep-link flow
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoginCodeData {
+    /// The session_id to return after successful verification
+    pub session_id: String,
+    /// Serialized user info JSON
+    pub user_info_json: String,
+    /// App challenge (SHA256 hash) that must match S256(verifier)
+    pub app_challenge: String,
+}
+
 /// Service for managing user sessions in Redis
 #[derive(Clone)]
 pub struct SessionService {
@@ -255,5 +267,107 @@ impl SessionService {
         }
 
         Ok(revoked_count)
+    }
+
+    // ============== Mobile OAuth Login Code Methods ==============
+
+    /// Create a short-lived, one-time login_code for mobile deep-link return
+    ///
+    /// This implements the "second hop" PKCE-like flow for mobile OAuth:
+    /// - Instead of putting session_id in the deep link (interceptable),
+    /// - We return a login_code that requires the app's verifier to redeem
+    ///
+    /// # Arguments
+    ///
+    /// * `session_id` - The session ID to return after verification
+    /// * `user_info_json` - Serialized user info to return
+    /// * `app_challenge` - SHA256 hash of the app's verifier
+    ///
+    /// # Returns
+    ///
+    /// A one-time login_code (UUID) that expires in 120 seconds
+    pub async fn create_login_code(
+        &self,
+        session_id: String,
+        user_info_json: String,
+        app_challenge: String,
+    ) -> Result<String, AuthError> {
+        let login_code = Uuid::new_v4().to_string();
+        let key = format!("oauth_login_code:{}", login_code);
+
+        let data = LoginCodeData {
+            session_id,
+            user_info_json,
+            app_challenge,
+        };
+
+        let json = serde_json::to_string(&data)
+            .map_err(|e| AuthError::Redis(format!("Failed to serialize login_code data: {}", e)))?;
+
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+
+        // Very short TTL (120 seconds) - just enough for the app to exchange
+        let _: () = conn
+            .set_ex(&key, json, 120)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to store login_code: {}", e)))?;
+
+        Ok(login_code)
+    }
+
+    /// Retrieve login_code data (does NOT delete - use delete_login_code after verification)
+    ///
+    /// # Arguments
+    ///
+    /// * `login_code` - The one-time code from the deep link
+    ///
+    /// # Returns
+    ///
+    /// The LoginCodeData if found, or InvalidRequest if expired/not found
+    pub async fn get_login_code(&self, login_code: &str) -> Result<LoginCodeData, AuthError> {
+        let key = format!("oauth_login_code:{}", login_code);
+
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+
+        let json: Option<String> = conn
+            .get(&key)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get login_code: {}", e)))?;
+
+        let json = json.ok_or(AuthError::InvalidRequest)?;
+        let data: LoginCodeData = serde_json::from_str(&json)
+            .map_err(|e| AuthError::Redis(format!("Failed to deserialize login_code: {}", e)))?;
+
+        Ok(data)
+    }
+
+    /// Delete a login_code after successful verification (one-time use)
+    ///
+    /// # Arguments
+    ///
+    /// * `login_code` - The code to delete
+    pub async fn delete_login_code(&self, login_code: &str) -> Result<(), AuthError> {
+        let key = format!("oauth_login_code:{}", login_code);
+
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+
+        let _: () = conn
+            .del(&key)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to delete login_code: {}", e)))?;
+
+        Ok(())
     }
 }

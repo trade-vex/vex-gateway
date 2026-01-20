@@ -195,8 +195,10 @@ pub async fn get_open_orders(
     let limit_u64 = limit as u64;
 
     // Get total count for pagination metadata
-    // Note: Using trading_repo for both count and data to ensure consistency
-    let total_count = match trading_repo.count_open_orders(user_id, query.market_id).await {
+    let total_count = match trading_repo
+        .count_open_orders(user_id, query.market_id)
+        .await
+    {
         Ok(count) => count as usize,
         Err(e) => {
             tracing::error!("failed to count open orders for user_id {}: {}", user_id, e);
@@ -331,7 +333,10 @@ pub async fn get_order_history(
     let limit_u64 = limit as u64;
 
     // Get total count for pagination metadata
-    let total_count = match trading_repo.count_order_history(user_id, query.market_id).await {
+    let total_count = match trading_repo
+        .count_order_history(user_id, query.market_id)
+        .await
+    {
         Ok(count) => count as usize,
         Err(e) => {
             tracing::error!(
@@ -657,7 +662,15 @@ pub async fn get_favorite_markets(
         Ok(favorites) => {
             let market_ids: Vec<u32> = favorites
                 .into_iter()
-                .map(|fav| fav.market_id as u32)
+                .filter_map(|fav| {
+                    u32::try_from(fav.market_id).ok().or_else(|| {
+                        tracing::warn!(
+                            market_id = fav.market_id,
+                            "Invalid market_id (negative value), skipping"
+                        );
+                        None
+                    })
+                })
                 .collect();
 
             let response = FavoriteMarketsListResponse { market_ids };
