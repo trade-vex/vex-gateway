@@ -210,8 +210,8 @@ impl From<sea_orm::DbErr> for AuthError {
     }
 }
 
-impl From<deadpool_redis::redis::RedisError> for AuthError {
-    fn from(error: deadpool_redis::redis::RedisError) -> Self {
+impl From<redis::RedisError> for AuthError {
+    fn from(error: redis::RedisError) -> Self {
         AuthError::Redis(error.to_string())
     }
 }

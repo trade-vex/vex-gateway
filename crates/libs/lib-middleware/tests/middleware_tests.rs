@@ -332,11 +332,6 @@ fn create_test_redis_config() -> RedisCacheConfig {
     RedisCacheConfig {
         url: "redis://localhost:6379".to_string(),
         key_prefix: "test_api_key:".to_string(),
-        max_connections: 5,
-        min_connections: 1,
-        connection_timeout_ms: 1000,
-        max_lifetime_secs: 300,
-        idle_timeout_secs: 60,
         retry_count: 3,
     }
 }
@@ -575,11 +570,6 @@ async fn test_l2_cache_error_handling() {
     let invalid_config = RedisCacheConfig {
         url: "redis://invalid-host:9999".to_string(),
         key_prefix: "test:".to_string(),
-        max_connections: 1,
-        min_connections: 1,
-        connection_timeout_ms: 100, // tiny timeout
-        max_lifetime_secs: 60,
-        idle_timeout_secs: 30,
         retry_count: 1,
     };
 
@@ -638,11 +628,6 @@ async fn test_l2_cache_key_prefixing() {
     let redis_config = RedisCacheConfig {
         url: "redis://localhost:6379".to_string(),
         key_prefix: "my_app:api_keys:".to_string(),
-        max_connections: 5,
-        min_connections: 1,
-        connection_timeout_ms: 1000,
-        max_lifetime_secs: 300,
-        idle_timeout_secs: 60,
         retry_count: 3,
     };
 

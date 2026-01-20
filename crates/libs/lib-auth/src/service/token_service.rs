@@ -2,8 +2,8 @@ use crate::config::JwtConfig;
 use crate::dto::jwt_response_dto::{AppClaims, JwtTokenResponse};
 use crate::error::auth_error::AuthError;
 use chrono::{Duration, Utc};
-use deadpool_redis::Pool;
-use deadpool_redis::redis::AsyncCommands;
+use redis::aio::ConnectionManager;
+use redis::AsyncCommands;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use jsonwebtoken::{DecodingKey, Validation, decode};
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct TokenService {
     jwt_config: Arc<JwtConfig>,
-    redis_pool: Arc<Pool>,
+    conn: ConnectionManager,
     encoding_key: Arc<EncodingKey>,
     decoding_key: Arc<DecodingKey>,
 }
@@ -19,13 +19,13 @@ pub struct TokenService {
 impl TokenService {
     pub fn new(
         jwt_config: Arc<JwtConfig>,
-        redis_pool: Arc<Pool>,
+        conn: ConnectionManager,
         encoding_key: Arc<EncodingKey>,
         decoding_key: Arc<DecodingKey>,
     ) -> Self {
         Self {
             jwt_config,
-            redis_pool,
+            conn,
             encoding_key,
             decoding_key,
         }
@@ -33,11 +33,7 @@ impl TokenService {
 
     pub async fn mint_tokens(&self, user_id: Uuid) -> Result<JwtTokenResponse, AuthError> {
         // Fix the Redis connection error handling
-        let mut conn = self
-            .redis_pool
-            .get()
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+        let mut conn = self.conn.clone();
 
         let jti = Uuid::new_v4().to_string();
         let now = Utc::now();
@@ -93,11 +89,7 @@ impl TokenService {
         &self,
         old_refresh_token: &str,
     ) -> Result<JwtTokenResponse, AuthError> {
-        let mut conn = self
-            .redis_pool
-            .get()
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+        let mut conn = self.conn.clone();
 
         let redis_key = format!("refresh:{}", old_refresh_token);
 
@@ -147,11 +139,7 @@ impl TokenService {
 
     // Check if a token is blacklisted
     pub async fn is_token_blacklisted(&self, jti: &str) -> Result<bool, AuthError> {
-        let mut conn = self
-            .redis_pool
-            .get()
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+        let mut conn = self.conn.clone();
 
         let blacklist_key = format!("blacklist:{}", jti);
         let exists: bool = conn
@@ -167,11 +155,7 @@ impl TokenService {
         // First validate the token to get the JTI and expiration
         let claims = self.validate_jwt(token)?;
 
-        let mut conn = self
-            .redis_pool
-            .get()
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+        let mut conn = self.conn.clone();
 
         // Calculate TTL until token expires
         let current_time = Utc::now().timestamp();
@@ -195,11 +179,7 @@ impl TokenService {
 
     // Blacklist a JTI with specific TTL
     pub async fn blacklist_jti(&self, jti: &str, ttl_secs: u64) -> Result<(), AuthError> {
-        let mut conn = self
-            .redis_pool
-            .get()
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+        let mut conn = self.conn.clone();
 
         let blacklist_key = format!("blacklist:{}", jti);
         let _: () = conn
@@ -216,11 +196,7 @@ impl TokenService {
         user_id: Uuid,
         password_timestamp: i64,
     ) -> Result<JwtTokenResponse, AuthError> {
-        let mut conn = self
-            .redis_pool
-            .get()
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+        let mut conn = self.conn.clone();
 
         let jti = Uuid::new_v4().to_string();
         let now = Utc::now();
@@ -273,11 +249,7 @@ impl TokenService {
 
     // Revoke all sessions for a user by blacklisting all refresh tokens
     pub async fn revoke_user_sessions(&self, user_id: Uuid) -> Result<(), AuthError> {
-        let mut conn = self
-            .redis_pool
-            .get()
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+        let mut conn = self.conn.clone();
 
         // Find all refresh tokens for this user
         let pattern = "refresh:*".to_string();

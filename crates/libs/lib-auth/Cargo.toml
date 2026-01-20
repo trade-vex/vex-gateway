@@ -21,7 +21,6 @@ futures-util = "0.3"
 thiserror = { workspace = true }
 
 # Database & Cache
-deadpool-redis = { workspace = true }
 redis = { workspace = true }
 async-trait = { workspace = true }
 sea-orm = { workspace = true }

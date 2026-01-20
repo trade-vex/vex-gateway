@@ -42,8 +42,8 @@ use crate::config::OAuthProviderConfig;
 use crate::dto::auth_response_dto::{OAuthLoginResponse, OAuthUserInfo};
 use crate::error::auth_error::AuthError;
 use crate::service::token_service::TokenService;
-use deadpool_redis::Pool as RedisPool;
-use deadpool_redis::redis::AsyncCommands;
+use redis::aio::ConnectionManager;
+use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 
 /// Unified OAuth transaction data stored in Redis
@@ -102,8 +102,8 @@ use crate::repository::UserRepository;
 /// - `oauth_nonce:{provider}:{state}` - OIDC nonce for ID token validation (600s TTL)
 #[derive(Clone)]
 pub struct OAuthService {
-    /// Redis connection pool for state management
-    redis_pool: Arc<RedisPool>,
+    /// Redis connection for state management
+    conn: ConnectionManager,
 
     /// HTTP client for API requests to providers
     http_client: reqwest::Client,
@@ -275,7 +275,7 @@ impl OAuthService {
     /// ).await?;
     /// ```
     pub async fn new(
-        redis_pool: Arc<RedisPool>,
+        conn: ConnectionManager,
         http_client: reqwest::Client,
         oauth_providers: HashMap<String, OAuthProviderConfig>,
         token_service: Arc<TokenService>,
@@ -292,7 +292,7 @@ impl OAuthService {
         }
 
         Ok(Self {
-            redis_pool,
+            conn,
             http_client,
             oauth_clients,
             token_service,
@@ -463,11 +463,7 @@ impl OAuthService {
         let (final_auth_url, csrf_state, nonce) = auth_request.url();
 
         // Store state and PKCE verifier in Redis with 10-minute expiry
-        let mut redis_conn = self
-            .redis_pool
-            .get()
-            .await
-            .map_err(|e| AuthError::Redis(format!("Redis connection failed: {}", e)))?;
+        let mut redis_conn = self.conn.clone();
 
         let state_key = format!("oauth_state:{}:{}", provider, csrf_state.secret());
         let verifier_key = format!("oauth_verifier:{}:{}", provider, csrf_state.secret());
@@ -562,11 +558,7 @@ impl OAuthService {
         let (final_auth_url, csrf_state, nonce) = auth_request.url();
 
         // Store unified OAuth transaction in Redis with 10-minute expiry
-        let mut redis_conn = self
-            .redis_pool
-            .get()
-            .await
-            .map_err(|e| AuthError::Redis(format!("Redis connection failed: {}", e)))?;
+        let mut redis_conn = self.conn.clone();
 
         let txn = OAuthTxn {
             pkce_verifier: pkce_verifier.secret().to_string(),
@@ -595,11 +587,7 @@ impl OAuthService {
     ///
     /// Uses GETDEL to ensure one-time use semantics and prevent replay attacks.
     async fn consume_txn(&self, provider: &str, state: &str) -> Result<OAuthTxn, AuthError> {
-        let mut redis_conn = self
-            .redis_pool
-            .get()
-            .await
-            .map_err(|e| AuthError::Redis(format!("Redis connection failed: {}", e)))?;
+        let mut redis_conn = self.conn.clone();
 
         let key = format!("oauth_txn:{}:{}", provider, state);
 

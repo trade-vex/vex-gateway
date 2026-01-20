@@ -10,7 +10,7 @@ chrono = {workspace = true}
 serde_json = {workspace = true}
 tracing = {workspace = true}
 sea-orm = {workspace = true}
-deadpool-redis = {workspace = true}
+redis = {workspace = true}
 jsonwebtoken = {workspace = true}
 reqwest = {workspace = true}
 url = {workspace = true}

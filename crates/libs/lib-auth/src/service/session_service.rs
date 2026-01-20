@@ -1,8 +1,7 @@
 use crate::error::auth_error::AuthError;
-use deadpool_redis::Pool as RedisPool;
-use deadpool_redis::redis::AsyncCommands;
+use redis::aio::ConnectionManager;
+use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use uuid::Uuid;
 
 /// Session data stored in Redis - only tokens and user_id
@@ -28,12 +27,12 @@ pub struct LoginCodeData {
 /// Service for managing user sessions in Redis
 #[derive(Clone)]
 pub struct SessionService {
-    redis_pool: Arc<RedisPool>,
+    conn: ConnectionManager,
     session_ttl_seconds: u64,
 }
 
 impl SessionService {
-    pub fn new(redis_pool: Arc<RedisPool>, session_ttl_seconds: i64) -> Self {
+    pub fn new(conn: ConnectionManager, session_ttl_seconds: i64) -> Self {
         if session_ttl_seconds <= 0 {
             panic!(
                 "session_ttl_seconds must be greater than 0, got: {}",
@@ -41,7 +40,7 @@ impl SessionService {
             );
         }
         Self {
-            redis_pool,
+            conn,
             session_ttl_seconds: session_ttl_seconds as u64,
         }
     }
@@ -65,11 +64,7 @@ impl SessionService {
         let session_json = serde_json::to_string(&session_data)
             .map_err(|e| AuthError::Redis(format!("Failed to serialize session: {}", e)))?;
 
-        let mut conn = self
-            .redis_pool
-            .get()
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+        let mut conn = self.conn.clone();
 
         let _: () = conn
             .set_ex(&session_key, session_json, self.session_ttl_seconds)
@@ -83,11 +78,7 @@ impl SessionService {
     pub async fn get_session(&self, session_id: &str) -> Result<SessionData, AuthError> {
         let session_key = format!("session:{}", session_id);
 
-        let mut conn = self
-            .redis_pool
-            .get()
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+        let mut conn = self.conn.clone();
 
         let session_json: Option<String> = conn
             .get(&session_key)
@@ -106,11 +97,7 @@ impl SessionService {
     pub async fn delete_session(&self, session_id: &str) -> Result<(), AuthError> {
         let session_key = format!("session:{}", session_id);
 
-        let mut conn = self
-            .redis_pool
-            .get()
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+        let mut conn = self.conn.clone();
 
         let _: () = conn
             .del(&session_key)
@@ -124,11 +111,7 @@ impl SessionService {
     pub async fn refresh_session(&self, session_id: &str) -> Result<(), AuthError> {
         let session_key = format!("session:{}", session_id);
 
-        let mut conn = self
-            .redis_pool
-            .get()
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+        let mut conn = self.conn.clone();
 
         // Check if session exists
         let exists: bool = conn
@@ -158,12 +141,6 @@ impl SessionService {
     ) -> Result<(), AuthError> {
         let session_key = format!("session:{}", session_id);
 
-        let mut conn = self
-            .redis_pool
-            .get()
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
-
         // Get existing session to preserve user_id
         let session_data = self.get_session(session_id).await?;
 
@@ -176,6 +153,8 @@ impl SessionService {
 
         let session_json = serde_json::to_string(&updated_session)
             .map_err(|e| AuthError::Redis(format!("Failed to serialize session: {}", e)))?;
+
+        let mut conn = self.conn.clone();
 
         // Update the session with new tokens
         let _: () = conn
@@ -198,11 +177,7 @@ impl SessionService {
         user_id: Uuid,
         keep_session_id: &str,
     ) -> Result<usize, AuthError> {
-        let mut conn = self
-            .redis_pool
-            .get()
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+        let mut conn = self.conn.clone();
 
         // Find all sessions
         let pattern = "session:*".to_string();
@@ -237,11 +212,7 @@ impl SessionService {
 
     /// Revoke all sessions for a user
     pub async fn revoke_all_user_sessions(&self, user_id: Uuid) -> Result<usize, AuthError> {
-        let mut conn = self
-            .redis_pool
-            .get()
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+        let mut conn = self.conn.clone();
 
         // Find all sessions
         let pattern = "session:*".to_string();
@@ -304,11 +275,7 @@ impl SessionService {
         let json = serde_json::to_string(&data)
             .map_err(|e| AuthError::Redis(format!("Failed to serialize login_code data: {}", e)))?;
 
-        let mut conn = self
-            .redis_pool
-            .get()
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+        let mut conn = self.conn.clone();
 
         // Very short TTL (120 seconds) - just enough for the app to exchange
         let _: () = conn
@@ -331,11 +298,7 @@ impl SessionService {
     pub async fn get_login_code(&self, login_code: &str) -> Result<LoginCodeData, AuthError> {
         let key = format!("oauth_login_code:{}", login_code);
 
-        let mut conn = self
-            .redis_pool
-            .get()
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+        let mut conn = self.conn.clone();
 
         let json: Option<String> = conn
             .get(&key)
@@ -357,11 +320,7 @@ impl SessionService {
     pub async fn delete_login_code(&self, login_code: &str) -> Result<(), AuthError> {
         let key = format!("oauth_login_code:{}", login_code);
 
-        let mut conn = self
-            .redis_pool
-            .get()
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get Redis connection: {}", e)))?;
+        let mut conn = self.conn.clone();
 
         let _: () = conn
             .del(&key)

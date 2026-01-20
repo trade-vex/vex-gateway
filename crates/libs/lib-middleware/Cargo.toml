@@ -29,6 +29,5 @@ uuid = { version = "1", features = ["v4", "serde"] }
 async-trait = "0.1.88"
 
 # Redis dependencies (for L2 cache support)
-bb8 = "0.8"
-redis = { version = "0.24", features = ["tokio-comp", "connection-manager"] }
+redis = { workspace = true }
 bincode = "1.3"
