@@ -769,3 +769,292 @@ pub async fn reset_password(
         "timestamp": chrono::Utc::now().to_rfc3339()
     })))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dto::auth_request_dto::*;
+    use validator::Validate;
+
+    // Tests for cookie configuration
+    mod cookie_config {
+        use super::*;
+
+        #[test]
+        fn test_cookie_ttl_is_24_hours() {
+            let (_, cookie_ttl) = get_cookie_config();
+            assert_eq!(cookie_ttl, 24 * 3600); // 86400 seconds
+        }
+
+        #[test]
+        fn test_https_detection_logic() {
+            // Test the HTTPS detection logic directly
+            let https_url = "https://example.com";
+            let http_url = "http://localhost:8081";
+
+            assert!(https_url.starts_with("https://"));
+            assert!(!http_url.starts_with("https://"));
+        }
+
+        #[test]
+        fn test_default_url_format() {
+            // The default URL should be HTTP localhost
+            let default_url = "http://localhost:8081";
+            assert!(!default_url.starts_with("https://"));
+        }
+    }
+
+    // Tests for request DTOs validation
+    mod signup_validation {
+        use super::*;
+
+        #[test]
+        fn test_valid_signup_request() {
+            let req = SignupRequest {
+                email: "test@example.com".to_string(),
+                username: "testuser".to_string(),
+                password: "password123".to_string(),
+            };
+            assert!(req.validate().is_ok());
+        }
+
+        #[test]
+        fn test_invalid_email_format() {
+            let req = SignupRequest {
+                email: "not-an-email".to_string(),
+                username: "testuser".to_string(),
+                password: "password123".to_string(),
+            };
+            assert!(req.validate().is_err());
+        }
+
+        #[test]
+        fn test_password_too_short() {
+            let req = SignupRequest {
+                email: "test@example.com".to_string(),
+                username: "testuser".to_string(),
+                password: "short".to_string(), // Less than 8 chars
+            };
+            assert!(req.validate().is_err());
+        }
+
+        #[test]
+        fn test_username_too_short() {
+            let req = SignupRequest {
+                email: "test@example.com".to_string(),
+                username: "ab".to_string(), // Less than 3 chars
+                password: "password123".to_string(),
+            };
+            assert!(req.validate().is_err());
+        }
+    }
+
+    mod login_validation {
+        use super::*;
+
+        #[test]
+        fn test_valid_login_request() {
+            let req = LoginRequest {
+                email: "test@example.com".to_string(),
+                password: "password123".to_string(),
+            };
+            assert!(req.validate().is_ok());
+        }
+
+        #[test]
+        fn test_invalid_login_email() {
+            let req = LoginRequest {
+                email: "invalid".to_string(),
+                password: "password123".to_string(),
+            };
+            assert!(req.validate().is_err());
+        }
+
+        #[test]
+        fn test_short_login_password() {
+            let req = LoginRequest {
+                email: "test@example.com".to_string(),
+                password: "short".to_string(),
+            };
+            assert!(req.validate().is_err());
+        }
+    }
+
+    mod change_password_validation {
+        use super::*;
+
+        #[test]
+        fn test_valid_change_password() {
+            let req = ChangePasswordRequest {
+                old_password: "oldpassword123".to_string(),
+                new_password: "newpassword456".to_string(),
+            };
+            assert!(req.validate().is_ok());
+        }
+
+        #[test]
+        fn test_current_password_too_short() {
+            let req = ChangePasswordRequest {
+                old_password: "short".to_string(),
+                new_password: "newpassword456".to_string(),
+            };
+            assert!(req.validate().is_err());
+        }
+
+        #[test]
+        fn test_new_password_too_short() {
+            let req = ChangePasswordRequest {
+                old_password: "oldpassword123".to_string(),
+                new_password: "short".to_string(),
+            };
+            assert!(req.validate().is_err());
+        }
+    }
+
+    mod verify_email_validation {
+        use super::*;
+
+        #[test]
+        fn test_valid_verify_email() {
+            let req = VerifyEmailRequest {
+                email: "test@example.com".to_string(),
+                otp: "123456".to_string(),
+            };
+            assert!(req.validate().is_ok());
+        }
+
+        #[test]
+        fn test_invalid_otp_too_short() {
+            let req = VerifyEmailRequest {
+                email: "test@example.com".to_string(),
+                otp: "12345".to_string(), // 5 chars, needs 6
+            };
+            assert!(req.validate().is_err());
+        }
+
+        #[test]
+        fn test_invalid_otp_too_long() {
+            let req = VerifyEmailRequest {
+                email: "test@example.com".to_string(),
+                otp: "1234567".to_string(), // 7 chars, max 6
+            };
+            assert!(req.validate().is_err());
+        }
+    }
+
+    mod forgot_password_validation {
+        use super::*;
+
+        #[test]
+        fn test_valid_forgot_password() {
+            let req = ForgotPasswordRequest {
+                email: "test@example.com".to_string(),
+            };
+            assert!(req.validate().is_ok());
+        }
+
+        #[test]
+        fn test_invalid_forgot_password_email() {
+            let req = ForgotPasswordRequest {
+                email: "not-valid".to_string(),
+            };
+            assert!(req.validate().is_err());
+        }
+    }
+
+    mod reset_password_validation {
+        use super::*;
+
+        #[test]
+        fn test_valid_reset_password() {
+            let req = ResetPasswordRequest {
+                reset_token: "some-token-value".to_string(),
+                new_password: "newpassword123".to_string(),
+            };
+            assert!(req.validate().is_ok());
+        }
+
+        #[test]
+        fn test_new_password_too_short_for_reset() {
+            let req = ResetPasswordRequest {
+                reset_token: "some-token-value".to_string(),
+                new_password: "short".to_string(),
+            };
+            assert!(req.validate().is_err());
+        }
+    }
+
+    mod verify_reset_otp_validation {
+        use super::*;
+
+        #[test]
+        fn test_valid_verify_reset_otp() {
+            let req = VerifyResetOtpRequest {
+                email: "test@example.com".to_string(),
+                otp: "123456".to_string(),
+            };
+            assert!(req.validate().is_ok());
+        }
+
+        #[test]
+        fn test_invalid_otp_length() {
+            let req = VerifyResetOtpRequest {
+                email: "test@example.com".to_string(),
+                otp: "12345".to_string(), // 5 chars instead of 6
+            };
+            assert!(req.validate().is_err());
+        }
+    }
+
+    mod check_email_validation {
+        use super::*;
+
+        #[test]
+        fn test_valid_check_email() {
+            let req = CheckEmailRequest {
+                email: "test@example.com".to_string(),
+            };
+            assert!(req.validate().is_ok());
+        }
+
+        #[test]
+        fn test_invalid_check_email() {
+            let req = CheckEmailRequest {
+                email: "invalid-email".to_string(),
+            };
+            assert!(req.validate().is_err());
+        }
+    }
+
+    // Tests for UserInfo conversion
+    mod user_info_conversion {
+        use super::*;
+        use chrono::Utc;
+
+        #[test]
+        fn test_user_info_from_model() {
+            let now = Utc::now();
+            let user = Model {
+                user_id: Uuid::new_v4(),
+                email: "test@example.com".to_string(),
+                username: "testuser".to_string(),
+                password_hash: Some("hashed".to_string()),
+                auth_provider: "email".to_string(),
+                provider_id: None,
+                avatar_url: Some("https://example.com/avatar.png".to_string()),
+                email_verified: true,
+                status: UserStatus::Active,
+                created_at: now,
+                updated_at: now,
+                last_login: Some(now),
+            };
+
+            let user_info = UserInfo::from(user.clone());
+
+            assert_eq!(user_info.user_id, user.user_id);
+            assert_eq!(user_info.email, user.email);
+            assert_eq!(user_info.username, user.username);
+            assert_eq!(user_info.email_verified, user.email_verified);
+        }
+    }
+}

@@ -6,23 +6,35 @@ use uuid::Uuid;
 
 use crate::api_key::security::{KeyMaterial, SecurityType};
 
+/// API key model with database column definitions.
+///
+/// # Required Database Indexes
+///
+/// For optimal query performance, ensure these indexes exist:
+/// - `ux_api_keys_api_key` - UNIQUE index on `api_key` (for key lookup)
+/// - `ix_api_keys_user_id` - Index on `user_id` (for listing user's keys)
+/// - `ix_api_keys_expires_at` - Index on `expires_at` (for expiring keys query)
+/// - `ix_api_keys_enabled_expires` - Composite on `(enabled, expires_at)` (for active keys)
 #[derive(Debug, Clone, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "api_keys")]
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: Uuid,
+    #[sea_orm(unique)]
     pub api_key: String,
     pub key_material_type: Option<KeyMaterialType>,
     pub key_material_value: Option<String>,
-    // ✅ change from Json → Vec<SecurityType>
     pub permissions: Vec<SecurityType>,
     pub recv_window: i64,
+    #[sea_orm(indexed)]
     pub enabled: bool,
     pub description: Option<String>,
     pub ip_blacklist: Vec<String>,
+    #[sea_orm(indexed)]
     pub user_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[sea_orm(indexed)]
     pub expires_at: Option<DateTime<Utc>>,
     pub last_used_at: Option<DateTime<Utc>>,
 }

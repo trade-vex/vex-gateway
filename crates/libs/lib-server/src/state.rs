@@ -9,6 +9,7 @@ use lib_auth::repository::{PostgresUserRepository, UserRepository};
 use lib_auth::service::{EmailService, OAuthService, SessionService, TokenService};
 use lib_core::CorrelationService;
 use lib_core::Publisher;
+use lib_core::PublisherHandle;
 use lib_core::repository::repository::{ClickHousePortfolioRepository, PortfolioRepository};
 use lib_core::{
     OrderCacheConfig, OrderStore, PostgresTradingRepository, TradingRepository,
@@ -24,7 +25,6 @@ use reqwest::Client;
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex as TokioMutex;
 use tracing::{debug, info};
 use url::Url;
 
@@ -56,11 +56,13 @@ pub struct AppState {
     pub email_service: EmailService,
     pub session_service: SessionService,
 
-    // Gateway publisher for order processing
-    pub gateway_publisher: Arc<TokioMutex<Publisher>>,
+    // Gateway publisher handle for lock-free order processing
+    // Uses a channel-based approach to eliminate mutex contention
+    pub gateway_publisher: PublisherHandle,
 
-    // API key middleware for dynamic updates
-    pub api_key_middleware: Arc<TokioMutex<ApiKeyMiddleware>>,
+    // API key middleware for authentication
+    // Clone is cheap (Arc-based internals with RwLock for cache)
+    pub api_key_middleware: ApiKeyMiddleware,
 
     // Correlation service for matching responses to requests
     pub correlation_service: Arc<CorrelationService>,
@@ -176,8 +178,8 @@ impl AppState {
             oauth_service,
             email_service,
             session_service,
-            gateway_publisher: Arc::new(TokioMutex::new(gateway_publisher)),
-            api_key_middleware: Arc::new(TokioMutex::new(api_key_middleware)),
+            gateway_publisher: PublisherHandle::new(gateway_publisher),
+            api_key_middleware,
             api_key_repository,
             portfolio_repository,
             trading_repository: trading_repo,
@@ -286,6 +288,8 @@ impl AppState {
         let cache_config = CacheConfig {
             l1_max_size: 100000,
             l1_ttl: std::time::Duration::from_secs(300),
+            l2_ttl: std::time::Duration::from_secs(900), // 15 minutes for L2 Redis cache
+            redis_key_prefix: "vex:apikey:".to_string(),
         };
 
         // Create middleware with database repository for dynamic loading

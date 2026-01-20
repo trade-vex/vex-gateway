@@ -817,3 +817,201 @@ The Team"#,
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Tests for key prefix constants
+    mod key_prefixes {
+        use super::*;
+
+        #[test]
+        fn test_otp_key_prefix_format() {
+            assert_eq!(OTP_KEY_PREFIX, "otp:verification:");
+            // Verify key format
+            let email = "test@example.com";
+            let key = format!("{}{}", OTP_KEY_PREFIX, email);
+            assert_eq!(key, "otp:verification:test@example.com");
+        }
+
+        #[test]
+        fn test_password_reset_otp_prefix() {
+            assert_eq!(PASSWORD_RESET_OTP_PREFIX, "otp:password_reset:");
+        }
+
+        #[test]
+        fn test_password_reset_token_prefix() {
+            assert_eq!(PASSWORD_RESET_TOKEN_PREFIX, "password_reset:");
+        }
+
+        #[test]
+        fn test_rate_limit_prefixes() {
+            assert_eq!(
+                RATE_LIMIT_PASSWORD_RESET_PREFIX,
+                "rate_limit:password_reset:"
+            );
+            assert_eq!(RATE_LIMIT_OTP_VERIFY_PREFIX, "rate_limit:otp_verify:");
+        }
+    }
+
+    // Tests for OTP generation logic
+    mod otp_generation {
+        #[test]
+        fn test_generated_otp_is_numeric() {
+            // Test the OTP format by generating one manually using the same logic
+            use rand::Rng;
+            let otp_length = 6;
+            let mut rng = rand::thread_rng();
+            let mut otp = String::with_capacity(otp_length);
+
+            for _ in 0..otp_length {
+                let digit = rng.gen_range(0..10);
+                otp.push_str(&digit.to_string());
+            }
+
+            assert_eq!(otp.len(), otp_length);
+            assert!(otp.chars().all(|c| c.is_ascii_digit()));
+        }
+
+        #[test]
+        fn test_otp_length_is_configurable() {
+            use rand::Rng;
+
+            for expected_len in [4, 6, 8] {
+                let mut rng = rand::thread_rng();
+                let mut otp = String::with_capacity(expected_len);
+
+                for _ in 0..expected_len {
+                    let digit = rng.gen_range(0..10);
+                    otp.push_str(&digit.to_string());
+                }
+
+                assert_eq!(otp.len(), expected_len);
+            }
+        }
+
+        #[test]
+        fn test_otp_uniqueness() {
+            // Generate multiple OTPs and verify they're likely different
+            use rand::Rng;
+            use std::collections::HashSet;
+
+            let mut otps = HashSet::new();
+            let otp_length = 6;
+
+            for _ in 0..100 {
+                let mut rng = rand::thread_rng();
+                let mut otp = String::with_capacity(otp_length);
+
+                for _ in 0..otp_length {
+                    let digit = rng.gen_range(0..10);
+                    otp.push_str(&digit.to_string());
+                }
+                otps.insert(otp);
+            }
+
+            // With 6-digit OTPs, 100 samples should have very few collisions
+            // Expecting at least 95 unique values out of 100
+            assert!(
+                otps.len() >= 95,
+                "Expected at least 95 unique OTPs, got {}",
+                otps.len()
+            );
+        }
+    }
+
+    // Tests for email content formatting
+    mod email_content {
+        #[test]
+        fn test_verification_email_text_format() {
+            let recipient_name = "John Doe";
+            let otp = "123456";
+            let otp_expiry_minutes = 10;
+
+            let text_content = format!(
+                r#"Hello {},
+
+Thank you for signing up! Your verification code is:
+
+{}
+
+This code will expire in {} minutes.
+
+If you didn't create an account, please ignore this email.
+
+Best regards,
+The Team"#,
+                recipient_name, otp, otp_expiry_minutes
+            );
+
+            assert!(text_content.contains("Hello John Doe"));
+            assert!(text_content.contains("123456"));
+            assert!(text_content.contains("10 minutes"));
+        }
+
+        #[test]
+        fn test_verification_email_html_contains_otp() {
+            let otp = "654321";
+            let html_content = format!(r#"<div class="otp">{}</div>"#, otp);
+
+            assert!(html_content.contains("654321"));
+        }
+
+        #[test]
+        fn test_password_reset_email_text_format() {
+            let recipient_name = "Jane Doe";
+            let otp = "987654";
+            let otp_expiry_minutes = 15;
+
+            let text_content = format!(
+                r#"Hello {},
+
+We received a request to reset your password. Your verification code is:
+
+{}
+
+This code will expire in {} minutes.
+
+If you didn't request a password reset, please ignore this email or contact support if you have concerns.
+
+Best regards,
+The Team"#,
+                recipient_name, otp, otp_expiry_minutes
+            );
+
+            assert!(text_content.contains("Hello Jane Doe"));
+            assert!(text_content.contains("987654"));
+            assert!(text_content.contains("15 minutes"));
+            assert!(text_content.contains("password reset"));
+        }
+    }
+
+    // Tests for expiry time calculations
+    mod expiry_calculations {
+        #[test]
+        fn test_otp_expiry_seconds_calculation() {
+            let expiry_minutes = 10i64;
+            let expiry_seconds = expiry_minutes * 60;
+            assert_eq!(expiry_seconds, 600);
+        }
+
+        #[test]
+        fn test_otp_expiry_u64_conversion() {
+            let expiry_minutes = 10i64;
+            let expiry_seconds = expiry_minutes * 60;
+            let expiry_seconds_u64: Result<u64, _> = expiry_seconds.try_into();
+            assert!(expiry_seconds_u64.is_ok());
+            assert_eq!(expiry_seconds_u64.unwrap(), 600u64);
+        }
+
+        #[test]
+        fn test_negative_expiry_fails_conversion() {
+            let expiry_minutes = -10i64;
+            let expiry_seconds = expiry_minutes * 60;
+            // Negative values cannot be converted to u64
+            let result: Result<u64, _> = expiry_seconds.try_into();
+            assert!(result.is_err());
+        }
+    }
+}

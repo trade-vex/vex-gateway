@@ -7,20 +7,24 @@ use lib_auth::middleware::jwt_auth::JwtAuthentication;
 use lib_auth::service::session_service::SessionService;
 use lib_middleware::api_key::middleware::ApiKeyMiddleware;
 use std::{rc::Rc, sync::Arc};
-use tokio::sync::Mutex as TokioMutex;
 use tracing::error;
 
+/// Combined authentication middleware supporting JWT, API Key, and Session auth.
+///
+/// This middleware detects the authentication type from request headers/cookies
+/// and delegates to the appropriate handler. The `ApiKeyMiddleware` is cheaply
+/// cloneable (internal state uses Arc) so no mutex is needed.
 #[derive(Clone)]
 pub struct CombinedAuthMiddleware {
     jwt_middleware: JwtAuthentication,
-    api_key_middleware: Arc<TokioMutex<ApiKeyMiddleware>>,
+    api_key_middleware: ApiKeyMiddleware,
     session_service: Arc<SessionService>,
 }
 
 impl CombinedAuthMiddleware {
     pub fn new(
         jwt_middleware: JwtAuthentication,
-        api_key_middleware: Arc<TokioMutex<ApiKeyMiddleware>>,
+        api_key_middleware: ApiKeyMiddleware,
         session_service: Arc<SessionService>,
     ) -> Self {
         Self {
@@ -75,7 +79,7 @@ where
         ready(Ok(CombinedAuthMiddlewareService {
             service: Rc::new(service),
             jwt_middleware: self.jwt_middleware.clone(),
-            api_key_middleware: Arc::clone(&self.api_key_middleware),
+            api_key_middleware: self.api_key_middleware.clone(),
             session_service: Arc::clone(&self.session_service),
         }))
     }
@@ -84,7 +88,7 @@ where
 pub struct CombinedAuthMiddlewareService<S> {
     service: Rc<S>,
     jwt_middleware: JwtAuthentication,
-    api_key_middleware: Arc<TokioMutex<ApiKeyMiddleware>>,
+    api_key_middleware: ApiKeyMiddleware,
     session_service: Arc<SessionService>,
 }
 
@@ -102,7 +106,7 @@ where
 
     fn call(&self, mut req: ServiceRequest) -> Self::Future {
         let jwt_middleware = self.jwt_middleware.clone();
-        let api_key_middleware = Arc::clone(&self.api_key_middleware);
+        let api_key_middleware = self.api_key_middleware.clone();
         let session_service = Arc::clone(&self.session_service);
         let service = Rc::clone(&self.service);
 
@@ -117,7 +121,8 @@ where
                 }
 
                 AuthType::ApiKey => {
-                    let api_key_middleware = api_key_middleware.lock().await;
+                    // ApiKeyMiddleware is Clone with internal RwLock synchronization
+                    // No external mutex needed - clone is cheap (Arc-based internals)
                     let api_key_service = api_key_middleware
                         .new_transform(service.clone())
                         .await

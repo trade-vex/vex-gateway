@@ -81,16 +81,16 @@ impl UserBalanceStore {
                             keys.len()
                         );
 
+                        // Convert to &str slice for batch fetch (solves N+1 query problem)
+                        let key_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+
+                        // Batch fetch all balance hashes in single pipelined request
                         let mut balances = Vec::new();
-                        // Fetch each balance hash
-                        for key in keys {
-                            match cache.hgetall_string(&key).await {
-                                Ok(hash) if !hash.is_empty() => {
-                                    if let Some(balance) = Self::parse_balance_hash(hash) {
-                                        balances.push(balance);
-                                    }
+                        if let Ok(hashes) = cache.hgetall_batch(&key_refs).await {
+                            for hash in hashes.into_iter().flatten() {
+                                if let Some(balance) = Self::parse_balance_hash(hash) {
+                                    balances.push(balance);
                                 }
-                                _ => continue,
                             }
                         }
 

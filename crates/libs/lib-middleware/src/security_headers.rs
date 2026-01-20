@@ -237,7 +237,10 @@ mod tests {
         assert_eq!(config.content_type_options, Some("nosniff"));
         assert_eq!(config.frame_options, Some("DENY"));
         assert_eq!(config.xss_protection, Some("1; mode=block"));
-        assert_eq!(config.referrer_policy, Some("strict-origin-when-cross-origin"));
+        assert_eq!(
+            config.referrer_policy,
+            Some("strict-origin-when-cross-origin")
+        );
         assert_eq!(config.cache_control, Some("no-store"));
         assert!(config.permissions_policy.is_some());
         assert!(config.content_security_policy.is_none());
@@ -257,9 +260,11 @@ mod tests {
 
     #[test]
     fn test_config_with_csp() {
-        let config = SecurityHeadersConfig::default()
-            .with_csp("default-src 'self'");
-        assert_eq!(config.content_security_policy, Some("default-src 'self'".to_string()));
+        let config = SecurityHeadersConfig::default().with_csp("default-src 'self'");
+        assert_eq!(
+            config.content_security_policy,
+            Some("default-src 'self'".to_string())
+        );
     }
 
     #[test]

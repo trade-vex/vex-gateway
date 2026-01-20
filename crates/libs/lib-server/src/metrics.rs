@@ -59,11 +59,10 @@ impl MetricsConfig {
             .map(|s| s.to_lowercase() != "false")
             .unwrap_or(true);
 
-        let path = std::env::var("METRICS_PATH")
-            .unwrap_or_else(|_| "/metrics".to_string());
+        let path = std::env::var("METRICS_PATH").unwrap_or_else(|_| "/metrics".to_string());
 
-        let namespace = std::env::var("METRICS_NAMESPACE")
-            .unwrap_or_else(|_| "vex_gateway".to_string());
+        let namespace =
+            std::env::var("METRICS_NAMESPACE").unwrap_or_else(|_| "vex_gateway".to_string());
 
         Self {
             enabled,
@@ -98,50 +97,42 @@ impl BusinessMetrics {
     /// Create new BusinessMetrics and register with the given registry
     pub fn new(registry: &Registry, namespace: &str) -> Result<Self, prometheus::Error> {
         let orders_submitted = Counter::with_opts(
-            opts!("orders_submitted_total", "Total orders submitted")
-                .namespace(namespace),
+            opts!("orders_submitted_total", "Total orders submitted").namespace(namespace),
         )?;
         registry.register(Box::new(orders_submitted.clone()))?;
 
         let orders_cancelled = Counter::with_opts(
-            opts!("orders_cancelled_total", "Total orders cancelled")
-                .namespace(namespace),
+            opts!("orders_cancelled_total", "Total orders cancelled").namespace(namespace),
         )?;
         registry.register(Box::new(orders_cancelled.clone()))?;
 
         let orders_rejected = Counter::with_opts(
-            opts!("orders_rejected_total", "Total orders rejected")
-                .namespace(namespace),
+            opts!("orders_rejected_total", "Total orders rejected").namespace(namespace),
         )?;
         registry.register(Box::new(orders_rejected.clone()))?;
 
         let active_sessions = Gauge::with_opts(
-            opts!("active_sessions", "Current number of active sessions")
-                .namespace(namespace),
+            opts!("active_sessions", "Current number of active sessions").namespace(namespace),
         )?;
         registry.register(Box::new(active_sessions.clone()))?;
 
         let cache_hits = Counter::with_opts(
-            opts!("api_key_cache_hits_total", "API key cache hits")
-                .namespace(namespace),
+            opts!("api_key_cache_hits_total", "API key cache hits").namespace(namespace),
         )?;
         registry.register(Box::new(cache_hits.clone()))?;
 
         let cache_misses = Counter::with_opts(
-            opts!("api_key_cache_misses_total", "API key cache misses")
-                .namespace(namespace),
+            opts!("api_key_cache_misses_total", "API key cache misses").namespace(namespace),
         )?;
         registry.register(Box::new(cache_misses.clone()))?;
 
         let auth_failures = Counter::with_opts(
-            opts!("auth_failures_total", "Authentication failures")
-                .namespace(namespace),
+            opts!("auth_failures_total", "Authentication failures").namespace(namespace),
         )?;
         registry.register(Box::new(auth_failures.clone()))?;
 
         let rate_limit_hits = Counter::with_opts(
-            opts!("rate_limit_hits_total", "Rate limit exceeded events")
-                .namespace(namespace),
+            opts!("rate_limit_hits_total", "Rate limit exceeded events").namespace(namespace),
         )?;
         registry.register(Box::new(rate_limit_hits.clone()))?;
 

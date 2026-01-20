@@ -127,27 +127,31 @@ impl OrderStore {
 
                 match cache.smembers_string(&set_key).await {
                     Ok(order_ids) if !order_ids.is_empty() => {
+                        // Build keys for batch fetch (solves N+1 query problem)
+                        let order_keys: Vec<String> =
+                            order_ids.iter().map(|id| format!("order:{}", id)).collect();
+                        let order_key_refs: Vec<&str> =
+                            order_keys.iter().map(|s| s.as_str()).collect();
+
+                        // Batch fetch all order hashes in single pipelined request
                         let mut orders = Vec::new();
-                        for order_id_str in &order_ids {
-                            let order_key = format!("order:{}", order_id_str);
-                            if let Ok(hash) = cache.hgetall_string(&order_key).await {
-                                if !hash.is_empty() {
-                                    // Only include Cancelled, PartiallyFilled, Filled
-                                    if let Some(status) = hash.get("status") {
-                                        let status_lower = status.to_lowercase();
-                                        if status_lower == "cancelled"
-                                            || status_lower == "partiallyfilled"
-                                            || status_lower == "filled"
-                                        {
-                                            if let Some(order) = Self::parse_order_hash(hash) {
-                                                // Filter by market_id if provided
-                                                if let Some(filter_market_id) = market_id {
-                                                    if order.market_id as u32 != filter_market_id {
-                                                        continue;
-                                                    }
+                        if let Ok(hashes) = cache.hgetall_batch(&order_key_refs).await {
+                            for hash in hashes.into_iter().flatten() {
+                                // Only include Cancelled, PartiallyFilled, Filled
+                                if let Some(status) = hash.get("status") {
+                                    let status_lower = status.to_lowercase();
+                                    if status_lower == "cancelled"
+                                        || status_lower == "partiallyfilled"
+                                        || status_lower == "filled"
+                                    {
+                                        if let Some(order) = Self::parse_order_hash(hash) {
+                                            // Filter by market_id if provided
+                                            if let Some(filter_market_id) = market_id {
+                                                if order.market_id as u32 != filter_market_id {
+                                                    continue;
                                                 }
-                                                orders.push(order);
                                             }
+                                            orders.push(order);
                                         }
                                     }
                                 }
@@ -212,21 +216,25 @@ impl OrderStore {
 
                 match cache.smembers_string(&set_key).await {
                     Ok(order_ids) if !order_ids.is_empty() => {
+                        // Build keys for batch fetch (solves N+1 query problem)
+                        let order_keys: Vec<String> =
+                            order_ids.iter().map(|id| format!("order:{}", id)).collect();
+                        let order_key_refs: Vec<&str> =
+                            order_keys.iter().map(|s| s.as_str()).collect();
+
+                        // Batch fetch all order hashes in single pipelined request
                         let mut orders = Vec::new();
-                        for order_id_str in &order_ids {
-                            let order_key = format!("order:{}", order_id_str);
-                            if let Ok(hash) = cache.hgetall_string(&order_key).await {
-                                if !hash.is_empty() {
-                                    // Only include Cancelled, PartiallyFilled, Filled
-                                    if let Some(status) = hash.get("status") {
-                                        let status_lower = status.to_lowercase();
-                                        if status_lower == "cancelled"
-                                            || status_lower == "partiallyfilled"
-                                            || status_lower == "filled"
-                                        {
-                                            if let Some(order) = Self::parse_order_hash(hash) {
-                                                orders.push(order);
-                                            }
+                        if let Ok(hashes) = cache.hgetall_batch(&order_key_refs).await {
+                            for hash in hashes.into_iter().flatten() {
+                                // Only include Cancelled, PartiallyFilled, Filled
+                                if let Some(status) = hash.get("status") {
+                                    let status_lower = status.to_lowercase();
+                                    if status_lower == "cancelled"
+                                        || status_lower == "partiallyfilled"
+                                        || status_lower == "filled"
+                                    {
+                                        if let Some(order) = Self::parse_order_hash(hash) {
+                                            orders.push(order);
                                         }
                                     }
                                 }
@@ -284,45 +292,47 @@ impl OrderStore {
 
                 match cache.smembers_string(&set_key).await {
                     Ok(order_ids) if !order_ids.is_empty() => {
+                        // Build keys for batch fetch (solves N+1 query problem)
+                        let order_keys: Vec<String> =
+                            order_ids.iter().map(|id| format!("order:{}", id)).collect();
+                        let order_key_refs: Vec<&str> =
+                            order_keys.iter().map(|s| s.as_str()).collect();
+
+                        // Batch fetch all order hashes in single pipelined request
                         let mut orders = Vec::new();
-                        // Fetch each order hash
-                        for order_id_str in order_ids {
-                            let order_key = format!("order:{}", order_id_str);
-                            match cache.hgetall_string(&order_key).await {
-                                Ok(hash) if !hash.is_empty() => {
-                                    // Filter orders by status - only include "open" orders
-                                    if let Some(status) = hash.get("status") {
-                                        let status_lower = status.to_lowercase();
+                        if let Ok(hashes) = cache.hgetall_batch(&order_key_refs).await {
+                            for hash in hashes.into_iter().flatten() {
+                                // Filter orders by status - only include "open" orders
+                                if let Some(status) = hash.get("status") {
+                                    let status_lower = status.to_lowercase();
 
-                                        // Skip orders that are in terminal states (not open)
-                                        if status_lower == "cancelled"
-                                            || status_lower == "filled"
-                                            || status_lower == "rejected"
-                                        {
-                                            continue;
-                                        }
-
-                                        // Only include: Placed, Pending, PartiallyFilled, Processing
-                                        if status_lower != "placed"
-                                            && status_lower != "pending"
-                                            && status_lower != "partiallyfilled"
-                                            && status_lower != "processing"
-                                        {
-                                            continue;
-                                        }
+                                    // Skip orders that are in terminal states (not open)
+                                    if status_lower == "cancelled"
+                                        || status_lower == "filled"
+                                        || status_lower == "rejected"
+                                    {
+                                        continue;
                                     }
 
-                                    if let Some(order) = Self::parse_order_hash(hash) {
-                                        // Filter by market_id if provided
-                                        if let Some(filter_market_id) = market_id {
-                                            if order.market_id as u32 != filter_market_id {
-                                                continue;
-                                            }
-                                        }
-                                        orders.push(order);
+                                    // Only include: Placed, Pending, PartiallyFilled, Processing
+                                    if status_lower != "placed"
+                                        && status_lower != "pending"
+                                        && status_lower != "partiallyfilled"
+                                        && status_lower != "processing"
+                                    {
+                                        continue;
                                     }
                                 }
-                                _ => continue,
+
+                                if let Some(order) = Self::parse_order_hash(hash) {
+                                    // Filter by market_id if provided
+                                    if let Some(filter_market_id) = market_id {
+                                        if order.market_id as u32 != filter_market_id {
+                                            continue;
+                                        }
+                                    }
+                                    orders.push(order);
+                                }
                             }
                         }
 
@@ -393,41 +403,43 @@ impl OrderStore {
                             order_ids
                         );
 
+                        // Build keys for batch fetch (solves N+1 query problem)
+                        let order_keys: Vec<String> =
+                            order_ids.iter().map(|id| format!("order:{}", id)).collect();
+                        let order_key_refs: Vec<&str> =
+                            order_keys.iter().map(|s| s.as_str()).collect();
+
+                        // Batch fetch all order hashes in single pipelined request
                         let mut orders = Vec::new();
-                        // Fetch each order hash
-                        for order_id_str in order_ids {
-                            let order_key = format!("order:{}", order_id_str);
-                            match cache.hgetall_string(&order_key).await {
-                                Ok(hash) if !hash.is_empty() => {
-                                    // Filter orders by status - only include "open" orders
-                                    // Open orders: Placed, Pending, PartiallyFilled, Processing
-                                    // Exclude: Filled, Cancelled, Rejected
-                                    if let Some(status) = hash.get("status") {
-                                        let status_lower = status.to_lowercase();
+                        if let Ok(hashes) = cache.hgetall_batch(&order_key_refs).await {
+                            for hash in hashes.into_iter().flatten() {
+                                // Filter orders by status - only include "open" orders
+                                // Open orders: Placed, Pending, PartiallyFilled, Processing
+                                // Exclude: Filled, Cancelled, Rejected
+                                if let Some(status) = hash.get("status") {
+                                    let status_lower = status.to_lowercase();
 
-                                        // Skip orders that are in terminal states (not open)
-                                        if status_lower == "cancelled"
-                                            || status_lower == "filled"
-                                            || status_lower == "rejected"
-                                        {
-                                            continue;
-                                        }
-
-                                        // Only include: Placed, Pending, PartiallyFilled, Processing
-                                        if status_lower != "placed"
-                                            && status_lower != "pending"
-                                            && status_lower != "partiallyfilled"
-                                            && status_lower != "processing"
-                                        {
-                                            continue;
-                                        }
+                                    // Skip orders that are in terminal states (not open)
+                                    if status_lower == "cancelled"
+                                        || status_lower == "filled"
+                                        || status_lower == "rejected"
+                                    {
+                                        continue;
                                     }
 
-                                    if let Some(order) = Self::parse_order_hash(hash) {
-                                        orders.push(order);
+                                    // Only include: Placed, Pending, PartiallyFilled, Processing
+                                    if status_lower != "placed"
+                                        && status_lower != "pending"
+                                        && status_lower != "partiallyfilled"
+                                        && status_lower != "processing"
+                                    {
+                                        continue;
                                     }
                                 }
-                                _ => continue,
+
+                                if let Some(order) = Self::parse_order_hash(hash) {
+                                    orders.push(order);
+                                }
                             }
                         }
 

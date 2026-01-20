@@ -1,3 +1,20 @@
+//! Middleware components for the VEX Gateway.
+//!
+//! This crate provides Actix-web middleware for:
+//!
+//! - **API Key Authentication**: Three-tier caching (L1 LRU → L2 Redis → L3 PostgreSQL)
+//! - **Rate Limiting**: Token bucket algorithm with IP-based and user-based limits
+//! - **Request ID Tracking**: Unique request IDs for distributed tracing
+//! - **Security Headers**: OWASP-recommended security headers (CSP, HSTS, etc.)
+//!
+//! # API Key Security
+//!
+//! API keys support multiple security types:
+//! - `None`: Public read-only access
+//! - `Trade`: Order placement and cancellation
+//! - `UserData`: Access to user balances and orders
+//! - `UserStream`: WebSocket streaming of user data
+
 pub mod api_key;
 pub mod models;
 pub mod rate_limit;

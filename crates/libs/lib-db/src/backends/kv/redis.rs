@@ -486,4 +486,51 @@ impl RedisDb {
 
         Ok(keys)
     }
+
+    /// Batch fetch multiple hashes using pipelining (solves N+1 query problem)
+    ///
+    /// Instead of N separate HGETALL calls, this performs a single pipelined request
+    /// which is significantly more efficient for fetching multiple hashes.
+    ///
+    /// # Arguments
+    /// * `keys` - Slice of keys to fetch
+    ///
+    /// # Returns
+    /// * `Vec<Option<HashMap<String, String>>>` - Results in same order as input keys.
+    ///   `Some(HashMap)` for existing hashes, `None` for missing keys.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let keys = vec!["order:1", "order:2", "order:3"];
+    /// let results = cache.hgetall_batch(&keys).await?;
+    /// // results[0] = Some({...}) if order:1 exists, None otherwise
+    /// ```
+    pub async fn hgetall_batch(
+        &self,
+        keys: &[&str],
+    ) -> Result<Vec<Option<std::collections::HashMap<String, String>>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut conn = self.conn.clone();
+
+        // Build pipeline with all HGETALL commands
+        let mut pipe = redis::pipe();
+        for key in keys {
+            pipe.hgetall(*key);
+        }
+
+        // Execute pipeline - returns Vec of HashMaps
+        let results: Vec<std::collections::HashMap<String, String>> =
+            pipe.query_async(&mut conn).await?;
+
+        // Convert to Option<HashMap> - empty hashmaps indicate missing keys
+        let results_with_options = results
+            .into_iter()
+            .map(|hash| if hash.is_empty() { None } else { Some(hash) })
+            .collect();
+
+        Ok(results_with_options)
+    }
 }

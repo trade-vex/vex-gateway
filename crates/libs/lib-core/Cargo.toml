@@ -28,3 +28,8 @@ actix-web = "4.4"
 serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }
 tracing-subscriber = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "correlation"
+harness = false

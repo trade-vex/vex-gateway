@@ -1,3 +1,20 @@
+//! Authentication and authorization services for the VEX Gateway.
+//!
+//! This crate provides comprehensive authentication functionality including:
+//!
+//! - **JWT Authentication**: RS256-signed tokens with refresh token rotation
+//! - **OAuth 2.0**: Support for Google, GitHub, and Apple providers with PKCE
+//! - **Session Management**: Redis-backed sessions with ownership verification
+//! - **Email Verification**: OTP-based email verification and password reset
+//! - **API Key Authentication**: For programmatic access to trading APIs
+//!
+//! # Security Features
+//!
+//! - One-time refresh tokens (atomic GETDEL prevents reuse)
+//! - Session ownership verification for all mutations
+//! - Token blacklisting with configurable TTL
+//! - Rate limiting on authentication endpoints
+
 pub mod config;
 pub mod dto;
 pub mod error;

@@ -90,6 +90,9 @@ pub enum AuthError {
 
     #[error("OTP expired")]
     OtpExpired,
+
+    #[error("Unauthorized - session does not belong to user")]
+    Unauthorized,
 }
 
 impl ResponseError for AuthError {
@@ -186,6 +189,11 @@ impl ResponseError for AuthError {
                 400,
                 "OTP_EXPIRED",
                 "Verification code has expired".to_string(),
+            ),
+            AuthError::Unauthorized => (
+                403,
+                "UNAUTHORIZED",
+                "You are not authorized to perform this action".to_string(),
             ),
             AuthError::Config(_) | AuthError::InternalError(_) => {
                 (500, "INTERNAL_ERROR", "Internal server error".to_string())

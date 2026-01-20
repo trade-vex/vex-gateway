@@ -55,10 +55,14 @@ fn test_cache_config_custom() {
     let config = CacheConfig {
         l1_max_size: 2000,
         l1_ttl: Duration::from_secs(600),
+        l2_ttl: Duration::from_secs(1200),
+        redis_key_prefix: "test:apikey:".to_string(),
     };
 
     assert_eq!(config.l1_max_size, 2000);
     assert_eq!(config.l1_ttl, Duration::from_secs(600));
+    assert_eq!(config.l2_ttl, Duration::from_secs(1200));
+    assert_eq!(config.redis_key_prefix, "test:apikey:");
 }
 
 #[test]
@@ -66,11 +70,15 @@ fn test_cache_config_clone() {
     let config = CacheConfig {
         l1_max_size: 500,
         l1_ttl: Duration::from_secs(120),
+        l2_ttl: Duration::from_secs(240),
+        redis_key_prefix: "clone:test:".to_string(),
     };
 
     let cloned = config.clone();
     assert_eq!(config.l1_max_size, cloned.l1_max_size);
     assert_eq!(config.l1_ttl, cloned.l1_ttl);
+    assert_eq!(config.l2_ttl, cloned.l2_ttl);
+    assert_eq!(config.redis_key_prefix, cloned.redis_key_prefix);
 }
 
 #[test]
@@ -270,6 +278,8 @@ async fn test_api_key_store_cache_behavior() {
     let config = CacheConfig {
         l1_max_size: 10,
         l1_ttl: Duration::from_secs(1), // Short TTL for testing
+        l2_ttl: Duration::from_secs(2),
+        redis_key_prefix: "test:apikey:".to_string(),
     };
     let store = ApiKeyStore::new(config).with_api_keys(vec![api_key_config]);
 
@@ -679,6 +689,8 @@ async fn test_cache_invalidation_l1() {
     let config = CacheConfig {
         l1_max_size: 10,
         l1_ttl: Duration::from_secs(60),
+        l2_ttl: Duration::from_secs(120),
+        redis_key_prefix: "test:apikey:".to_string(),
     };
     let store = ApiKeyStore::new(config).with_api_keys(vec![api_key.clone()]);
 

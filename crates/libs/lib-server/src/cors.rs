@@ -16,7 +16,7 @@
 //! - Credentials are enabled by default for cookie-based authentication
 
 use actix_cors::Cors;
-use actix_web::http::{header, Method};
+use actix_web::http::{Method, header};
 use tracing::info;
 
 /// CORS configuration settings
@@ -89,8 +89,8 @@ impl CorsConfig {
 /// If no allowed origins are specified, uses FRONTEND_URL environment variable.
 /// Falls back to localhost:8081 for development.
 pub fn build_cors(config: &CorsConfig) -> Cors {
-    let frontend_url = std::env::var("FRONTEND_URL")
-        .unwrap_or_else(|_| "http://localhost:8081".to_string());
+    let frontend_url =
+        std::env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
 
     // Determine allowed origins
     let origins: Vec<String> = if config.allowed_origins.is_empty() {

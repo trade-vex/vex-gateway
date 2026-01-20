@@ -5,6 +5,8 @@ use actix_web::{
 };
 use futures_util::future::{ready, LocalBoxFuture, Ready};
 use futures_util::stream;
+use redis::aio::ConnectionManager;
+use redis::AsyncCommands;
 use std::{
     collections::HashMap,
     pin::Pin,
@@ -33,13 +35,15 @@ pub struct RouteSecurityConfig {
 /// API Key Store with multi-level caching
 ///
 /// Cache Hierarchy:
-/// 1. L1 (In-Memory LRU)
-/// 2. L2 (Redis) - TODO
-/// 3. L3 (Database)
+/// 1. L1 (In-Memory LRU) - fastest, per-instance cache
+/// 2. L2 (Redis) - shared distributed cache
+/// 3. L3 (Database) - source of truth
 #[derive(Clone)]
 pub struct ApiKeyStore {
     /// L1 Cache: In-memory LRU for hot keys
     l1_cache: Arc<RwLock<lru::LruCache<String, CachedApiKey>>>,
+    /// L2 Cache: Redis connection for distributed cache
+    redis_conn: Option<ConnectionManager>,
     /// Database repository for persistent storage
     api_key_repo: Option<Arc<dyn ApiKeyRepository>>,
     /// Fallback: In-memory HashMap for development
@@ -73,15 +77,23 @@ impl CachedApiKey {
 /// Cache configuration
 #[derive(Clone)]
 pub struct CacheConfig {
+    /// Maximum number of entries in L1 cache
     pub l1_max_size: usize,
+    /// Time-to-live for L1 cache entries
     pub l1_ttl: Duration,
+    /// Time-to-live for L2 Redis cache entries
+    pub l2_ttl: Duration,
+    /// Redis key prefix for namespacing
+    pub redis_key_prefix: String,
 }
 
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             l1_max_size: 100_000,             // 100K hot keys in memory
-            l1_ttl: Duration::from_secs(300), // 5 minute TTL
+            l1_ttl: Duration::from_secs(300), // 5 minute L1 TTL
+            l2_ttl: Duration::from_secs(900), // 15 minute L2 TTL (longer than L1)
+            redis_key_prefix: "vex:apikey:".to_string(),
         }
     }
 }
@@ -90,6 +102,9 @@ impl Default for CacheConfig {
 pub struct CacheMetrics {
     pub l1_hits: std::sync::atomic::AtomicU64,
     pub l1_misses: std::sync::atomic::AtomicU64,
+    pub l2_hits: std::sync::atomic::AtomicU64,
+    pub l2_misses: std::sync::atomic::AtomicU64,
+    pub l2_errors: std::sync::atomic::AtomicU64,
     pub db_queries: std::sync::atomic::AtomicU64,
 }
 
@@ -98,6 +113,9 @@ impl Default for CacheMetrics {
         Self {
             l1_hits: std::sync::atomic::AtomicU64::new(0),
             l1_misses: std::sync::atomic::AtomicU64::new(0),
+            l2_hits: std::sync::atomic::AtomicU64::new(0),
+            l2_misses: std::sync::atomic::AtomicU64::new(0),
+            l2_errors: std::sync::atomic::AtomicU64::new(0),
             db_queries: std::sync::atomic::AtomicU64::new(0),
         }
     }
@@ -118,17 +136,60 @@ impl CacheMetrics {
             hits as f64 / (hits + misses) as f64
         }
     }
+
+    /// Get L2 cache hit rate for monitoring
+    pub fn get_l2_hit_rate(&self) -> f64 {
+        let hits = self.l2_hits.load(std::sync::atomic::Ordering::Relaxed);
+        let misses = self.l2_misses.load(std::sync::atomic::Ordering::Relaxed);
+        if hits + misses == 0 {
+            0.0
+        } else {
+            hits as f64 / (hits + misses) as f64
+        }
+    }
+
+    /// Get overall cache hit rate (L1 + L2 combined)
+    pub fn get_overall_hit_rate(&self) -> f64 {
+        let l1_hits = self.l1_hits.load(std::sync::atomic::Ordering::Relaxed);
+        let l2_hits = self.l2_hits.load(std::sync::atomic::Ordering::Relaxed);
+        let db_queries = self.db_queries.load(std::sync::atomic::Ordering::Relaxed);
+        let total = l1_hits + l2_hits + db_queries;
+        if total == 0 {
+            0.0
+        } else {
+            (l1_hits + l2_hits) as f64 / total as f64
+        }
+    }
 }
 
+/// Default minimum L1 cache size when config specifies 0
+const DEFAULT_L1_CACHE_SIZE: usize = 1000;
+
 impl ApiKeyStore {
+    /// Helper to create NonZeroUsize for cache size with validation
+    /// Returns default size if config.l1_max_size is 0 (prevents panic)
+    fn get_cache_size(config: &CacheConfig) -> std::num::NonZeroUsize {
+        if config.l1_max_size == 0 {
+            tracing::warn!(
+                "l1_max_size is 0, using default minimum size of {}",
+                DEFAULT_L1_CACHE_SIZE
+            );
+            std::num::NonZeroUsize::new(DEFAULT_L1_CACHE_SIZE)
+                .expect("DEFAULT_L1_CACHE_SIZE is non-zero")
+        } else {
+            std::num::NonZeroUsize::new(config.l1_max_size)
+                .expect("l1_max_size is non-zero after check")
+        }
+    }
+
     /// Create new store
     pub fn new(config: CacheConfig) -> Self {
-        let l1_cache = Arc::new(RwLock::new(lru::LruCache::new(
-            std::num::NonZeroUsize::new(config.l1_max_size).expect("L1 cache size must be > 0"),
-        )));
+        let cache_size = Self::get_cache_size(&config);
+        let l1_cache = Arc::new(RwLock::new(lru::LruCache::new(cache_size)));
 
         Self {
             l1_cache,
+            redis_conn: None,
             api_key_repo: None,
             memory_store: Arc::new(HashMap::new()),
             config,
@@ -138,16 +199,152 @@ impl ApiKeyStore {
 
     /// Create store with database repository
     pub fn with_repository(config: CacheConfig, api_key_repo: Arc<dyn ApiKeyRepository>) -> Self {
-        let l1_cache = Arc::new(RwLock::new(lru::LruCache::new(
-            std::num::NonZeroUsize::new(config.l1_max_size).expect("L1 cache size must be > 0"),
-        )));
+        let cache_size = Self::get_cache_size(&config);
+        let l1_cache = Arc::new(RwLock::new(lru::LruCache::new(cache_size)));
 
         Self {
             l1_cache,
+            redis_conn: None,
             api_key_repo: Some(api_key_repo),
             memory_store: Arc::new(HashMap::new()),
             config,
             metrics: Arc::new(CacheMetrics::new()),
+        }
+    }
+
+    /// Create store with Redis L2 cache
+    pub fn with_redis(mut self, redis_conn: ConnectionManager) -> Self {
+        self.redis_conn = Some(redis_conn);
+        self
+    }
+
+    /// Create store with both database repository and Redis
+    pub fn with_repository_and_redis(
+        config: CacheConfig,
+        api_key_repo: Arc<dyn ApiKeyRepository>,
+        redis_conn: ConnectionManager,
+    ) -> Self {
+        let cache_size = Self::get_cache_size(&config);
+        let l1_cache = Arc::new(RwLock::new(lru::LruCache::new(cache_size)));
+
+        Self {
+            l1_cache,
+            redis_conn: Some(redis_conn),
+            api_key_repo: Some(api_key_repo),
+            memory_store: Arc::new(HashMap::new()),
+            config,
+            metrics: Arc::new(CacheMetrics::new()),
+        }
+    }
+
+    /// Generate Redis key for API key
+    fn redis_key(&self, api_key: &str) -> String {
+        format!("{}{}", self.config.redis_key_prefix, api_key)
+    }
+
+    /// Check L2 Redis cache for API key
+    async fn check_l2_cache(&self, api_key: &str) -> Option<ApiKeyConfig> {
+        let redis_conn = self.redis_conn.as_ref()?;
+        let key = self.redis_key(api_key);
+
+        let mut conn = redis_conn.clone();
+        match conn.get::<_, Option<Vec<u8>>>(&key).await {
+            Ok(Some(data)) => {
+                match bincode::deserialize::<ApiKeyConfig>(&data) {
+                    Ok(config) => {
+                        self.metrics
+                            .l2_hits
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        debug!(
+                            "L2 Redis cache hit for key: {}",
+                            Self::mask_api_key(api_key)
+                        );
+                        Some(config)
+                    }
+                    Err(e) => {
+                        error!("Failed to deserialize API key from Redis: {}", e);
+                        self.metrics
+                            .l2_errors
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        // Delete corrupted cache entry
+                        let _ = conn.del::<_, ()>(&key).await;
+                        None
+                    }
+                }
+            }
+            Ok(None) => {
+                self.metrics
+                    .l2_misses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                debug!(
+                    "L2 Redis cache miss for key: {}",
+                    Self::mask_api_key(api_key)
+                );
+                None
+            }
+            Err(e) => {
+                error!("Redis error while fetching API key: {}", e);
+                self.metrics
+                    .l2_errors
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                None
+            }
+        }
+    }
+
+    /// Update L2 Redis cache with API key
+    async fn update_l2_cache(&self, api_key: &str, config: &ApiKeyConfig) {
+        let Some(redis_conn) = self.redis_conn.as_ref() else {
+            return;
+        };
+
+        let key = self.redis_key(api_key);
+        let ttl_secs = self.config.l2_ttl.as_secs() as i64;
+
+        match bincode::serialize(config) {
+            Ok(data) => {
+                let mut conn = redis_conn.clone();
+                if let Err(e) = conn.set_ex::<_, _, ()>(&key, data, ttl_secs as u64).await {
+                    error!("Failed to set API key in Redis: {}", e);
+                    self.metrics
+                        .l2_errors
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    debug!(
+                        "Updated L2 Redis cache for key: {} (TTL: {}s)",
+                        Self::mask_api_key(api_key),
+                        ttl_secs
+                    );
+                }
+            }
+            Err(e) => {
+                error!("Failed to serialize API key for Redis: {}", e);
+                self.metrics
+                    .l2_errors
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Invalidate L2 Redis cache entry
+    async fn invalidate_l2_cache(&self, api_key: &str) {
+        let Some(redis_conn) = self.redis_conn.as_ref() else {
+            return;
+        };
+
+        let key = self.redis_key(api_key);
+        let mut conn = redis_conn.clone();
+
+        if let Err(e) = conn.del::<_, ()>(&key).await {
+            error!("Failed to delete API key from Redis: {}", e);
+            self.metrics
+                .l2_errors
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            debug!(
+                "Invalidated L2 Redis cache for key: {}",
+                Self::mask_api_key(api_key)
+            );
         }
     }
 
@@ -161,7 +358,12 @@ impl ApiKeyStore {
         self
     }
 
-    /// Fast API key lookup with caching
+    /// Fast API key lookup with multi-level caching
+    ///
+    /// Cache hierarchy:
+    /// 1. L1 (In-Memory LRU) - fastest, per-instance
+    /// 2. L2 (Redis) - shared, distributed
+    /// 3. L3 (Database) - source of truth
     pub async fn get_api_key(&self, api_key: &str) -> Option<Arc<ApiKeyConfig>> {
         // L1 Cache: Check in-memory LRU first
         {
@@ -187,7 +389,29 @@ impl ApiKeyStore {
             .l1_misses
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // L3: Check database first (if available)
+        // L2 Cache: Check Redis (shared distributed cache)
+        if let Some(config) = self.check_l2_cache(api_key).await {
+            if config.is_valid() {
+                let config_arc = Arc::new(config.clone());
+
+                // Update L1 cache
+                let cached = CachedApiKey::new(config);
+                let mut cache = self.l1_cache.write().await;
+                cache.put(api_key.to_string(), cached);
+
+                return Some(config_arc);
+            } else {
+                debug!(
+                    "API key found in L2 cache but invalid (disabled/expired): {}",
+                    ApiKeyStore::mask_api_key(api_key)
+                );
+                // Invalidate stale L2 cache entry
+                self.invalidate_l2_cache(api_key).await;
+                return None;
+            }
+        }
+
+        // L3: Check database (if available)
         if let Some(repo) = &self.api_key_repo {
             match repo.find_by_api_key(api_key).await {
                 Ok(Some(model)) => {
@@ -197,6 +421,9 @@ impl ApiKeyStore {
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let config = model.to_api_key_config();
                         let config_arc = Arc::new(config.clone());
+
+                        // Update L2 cache (Redis)
+                        self.update_l2_cache(api_key, &config).await;
 
                         // Update L1 cache
                         let cached = CachedApiKey::new(config);
@@ -239,6 +466,9 @@ impl ApiKeyStore {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let config_arc = Arc::new(config.clone());
 
+            // Update L2 cache (Redis) if available
+            self.update_l2_cache(api_key, config).await;
+
             // Update L1 cache
             let cached = CachedApiKey::new(config.clone());
             let mut cache = self.l1_cache.write().await;
@@ -251,21 +481,21 @@ impl ApiKeyStore {
             return Some(config_arc);
         }
 
-        // TODO: Add Redis (L2) lookup between L1 and L3
-        // if let Some(config) = self.check_redis(api_key).await {
-        //     self.update_l1_cache(api_key, config.clone()).await;
-        //     return Some(config);
-        // }
-
         warn!("API key not found: {}", api_key);
         None
     }
 
-    /// Invalidate cache entry (when key is updated/disabled)
+    /// Invalidate cache entry across all levels (when key is updated/disabled)
     pub async fn invalidate(&self, api_key: &str) {
-        let mut cache = self.l1_cache.write().await;
-        cache.pop(api_key);
-        // TODO: Invalidate Redis cache when implemented
+        // Invalidate L1 (in-memory) cache
+        {
+            let mut cache = self.l1_cache.write().await;
+            cache.pop(api_key);
+        }
+
+        // Invalidate L2 (Redis) cache
+        self.invalidate_l2_cache(api_key).await;
+
         info!(
             "Invalidated cache for key: {}",
             ApiKeyStore::mask_api_key(api_key)
@@ -277,22 +507,31 @@ impl ApiKeyStore {
         &self.metrics
     }
 
-    /// Add a new API key to the cache
+    /// Add a new API key to the cache (L1 and L2)
     pub async fn add_api_key(&self, config: ApiKeyConfig) {
-        let mut cache = self.l1_cache.write().await;
-        let cached = CachedApiKey::new(config.clone());
-        cache.put(config.api_key.clone(), cached);
+        let api_key = config.api_key.clone();
 
-        info!(
-            "Added API key to cache: {}",
-            Self::mask_api_key(&config.api_key)
-        );
+        // Update L2 (Redis) cache
+        self.update_l2_cache(&api_key, &config).await;
+
+        // Update L1 (in-memory) cache
+        let mut cache = self.l1_cache.write().await;
+        let cached = CachedApiKey::new(config);
+        cache.put(api_key.clone(), cached);
+
+        info!("Added API key to cache: {}", Self::mask_api_key(&api_key));
     }
 
-    /// Remove an API key from the cache
+    /// Remove an API key from the cache (L1 and L2)
     pub async fn remove_api_key(&self, api_key: &str) {
-        let mut cache = self.l1_cache.write().await;
-        cache.pop(api_key);
+        // Invalidate L1 (in-memory) cache
+        {
+            let mut cache = self.l1_cache.write().await;
+            cache.pop(api_key);
+        }
+
+        // Invalidate L2 (Redis) cache
+        self.invalidate_l2_cache(api_key).await;
 
         info!(
             "Removed API key from cache: {}",
@@ -316,6 +555,7 @@ impl ApiKeyStore {
     }
 }
 
+#[derive(Clone)]
 pub struct ApiKeyMiddleware {
     api_key_store: ApiKeyStore,
     default_security: SecurityType,
@@ -349,6 +589,36 @@ impl ApiKeyMiddleware {
     /// Configure with database repository for dynamic loading
     pub fn with_repository(mut self, api_key_repo: Arc<dyn ApiKeyRepository>) -> Self {
         self.api_key_store = ApiKeyStore::with_repository(CacheConfig::default(), api_key_repo);
+        self
+    }
+
+    /// Configure with Redis L2 cache
+    pub fn with_redis(mut self, redis_conn: ConnectionManager) -> Self {
+        self.api_key_store = self.api_key_store.with_redis(redis_conn);
+        self
+    }
+
+    /// Configure with both database repository and Redis L2 cache
+    pub fn with_repository_and_redis(
+        mut self,
+        api_key_repo: Arc<dyn ApiKeyRepository>,
+        redis_conn: ConnectionManager,
+    ) -> Self {
+        self.api_key_store = ApiKeyStore::with_repository_and_redis(
+            CacheConfig::default(),
+            api_key_repo,
+            redis_conn,
+        );
+        self
+    }
+
+    /// Configure with custom cache config and Redis L2 cache
+    pub fn with_cache_config_and_redis(
+        mut self,
+        config: CacheConfig,
+        redis_conn: ConnectionManager,
+    ) -> Self {
+        self.api_key_store = ApiKeyStore::new(config).with_redis(redis_conn);
         self
     }
 
@@ -598,7 +868,10 @@ impl ApiKeyMiddleware {
 
         let server_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .map_err(|e| {
+                tracing::error!(error = %e, "System time went backwards during API key validation");
+                ApiKeyError::Internal("System clock error".into())
+            })?
             .as_millis() as u64;
 
         // Validate using the exact Binance timing logic
@@ -713,8 +986,6 @@ where
                     return Err(actix_web::error::ErrorUnauthorized("Invalid API key"));
                 }
             };
-
-            println!("API CONFIG: {:?}", api_config);
 
             // Validate API key state
             if !api_config.is_valid() {

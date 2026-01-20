@@ -13,6 +13,7 @@ mod combined_auth;
 mod correlation_handler;
 pub mod cors;
 pub mod metrics;
+pub mod openapi;
 mod state;
 
 pub use app::create_app;
@@ -25,6 +26,7 @@ pub use state::AppState;
 
 pub use cors::{CorsConfig, build_cors, build_permissive_cors};
 pub use metrics::{BusinessMetrics, MetricsConfig, build_metrics};
+pub use openapi::ApiDoc;
 
 /// Initialize the HTTP server with proper configuration
 pub async fn initialize_server(

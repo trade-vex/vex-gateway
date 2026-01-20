@@ -7,7 +7,13 @@ use jsonwebtoken::{DecodingKey, Validation, decode};
 use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
+use tracing::warn;
 use uuid::Uuid;
+
+/// Retry configuration for critical Redis operations
+const BLACKLIST_RETRY_COUNT: u32 = 3;
+const BLACKLIST_RETRY_DELAY_MS: u64 = 100;
 #[derive(Clone)]
 pub struct TokenService {
     jwt_config: Arc<JwtConfig>,
@@ -29,6 +35,60 @@ impl TokenService {
             encoding_key,
             decoding_key,
         }
+    }
+
+    /// Execute a Redis blacklist operation with retry logic.
+    ///
+    /// This is critical for security - if blacklisting fails, a token that should
+    /// be invalidated (logout, password change) could remain valid. Retry logic
+    /// ensures transient Redis issues don't compromise security.
+    async fn blacklist_with_retry(
+        conn: &mut ConnectionManager,
+        key: &str,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        let mut last_error = None;
+
+        for attempt in 0..BLACKLIST_RETRY_COUNT {
+            match conn.set_ex::<&str, &str, ()>(key, "1", ttl_secs).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    let is_retryable = matches!(
+                        e.kind(),
+                        redis::ErrorKind::Io | redis::ErrorKind::ClusterConnectionNotFound
+                    );
+
+                    if is_retryable && attempt < BLACKLIST_RETRY_COUNT - 1 {
+                        warn!(
+                            attempt = attempt + 1,
+                            max_attempts = BLACKLIST_RETRY_COUNT,
+                            error = %e,
+                            key = %key,
+                            "Blacklist operation failed, retrying"
+                        );
+                        tokio::time::sleep(StdDuration::from_millis(
+                            BLACKLIST_RETRY_DELAY_MS * (attempt as u64 + 1),
+                        ))
+                        .await;
+                        last_error = Some(e);
+                        continue;
+                    }
+
+                    // Non-retryable error or max retries exceeded
+                    return Err(AuthError::Redis(format!(
+                        "Failed to blacklist token after {} attempts: {}",
+                        attempt + 1,
+                        e
+                    )));
+                }
+            }
+        }
+
+        Err(AuthError::Redis(format!(
+            "Failed to blacklist token after {} attempts: {}",
+            BLACKLIST_RETRY_COUNT,
+            last_error.map(|e| e.to_string()).unwrap_or_default()
+        )))
     }
 
     pub async fn mint_tokens(&self, user_id: Uuid) -> Result<JwtTokenResponse, AuthError> {
@@ -108,16 +168,15 @@ impl TokenService {
             let user_id = Uuid::parse_str(parts[0]).map_err(|_| AuthError::InvalidResetToken)?;
             let old_jti = parts[1];
 
-            // Blacklist the old access token's JTI
+            // Blacklist the old access token's JTI with retry logic
             let blacklist_key = format!("blacklist:{}", old_jti);
             let blacklist_ttl = self.jwt_config.access_token_ttl_minutes * 60;
             let blacklist_ttl_u64 = blacklist_ttl
                 .try_into()
                 .map_err(|_| AuthError::Validation("Blacklist TTL is too large".to_string()))?;
-            let _: () = conn
-                .set_ex(blacklist_key, "1", blacklist_ttl_u64)
-                .await
-                .map_err(|e| AuthError::Redis(format!("Failed to blacklist token: {}", e)))?;
+
+            // Use retry logic for this security-critical operation
+            Self::blacklist_with_retry(&mut conn, &blacklist_key, blacklist_ttl_u64).await?;
 
             // Mint a fresh pair of tokens
             self.mint_tokens(user_id).await
@@ -150,7 +209,11 @@ impl TokenService {
         Ok(exists)
     }
 
-    // Blacklist a token (for logout)
+    /// Blacklist a token (for logout).
+    ///
+    /// Uses retry logic to ensure the blacklist operation succeeds even under
+    /// transient Redis issues. This is security-critical - failing to blacklist
+    /// means a logged-out user's token could still be used.
     pub async fn blacklist_token(&self, token: &str) -> Result<(), AuthError> {
         // First validate the token to get the JTI and expiration
         let claims = self.validate_jwt(token)?;
@@ -169,25 +232,20 @@ impl TokenService {
         let ttl_u64 = ttl
             .try_into()
             .map_err(|_| AuthError::Validation("Token TTL is too large".to_string()))?;
-        let _: () = conn
-            .set_ex(blacklist_key, "1", ttl_u64)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to blacklist token: {}", e)))?;
 
-        Ok(())
+        // Use retry logic for this security-critical operation
+        Self::blacklist_with_retry(&mut conn, &blacklist_key, ttl_u64).await
     }
 
-    // Blacklist a JTI with specific TTL
+    /// Blacklist a JTI with specific TTL.
+    ///
+    /// Uses retry logic to ensure the blacklist operation succeeds.
     pub async fn blacklist_jti(&self, jti: &str, ttl_secs: u64) -> Result<(), AuthError> {
         let mut conn = self.conn.clone();
-
         let blacklist_key = format!("blacklist:{}", jti);
-        let _: () = conn
-            .set_ex(blacklist_key, "1", ttl_secs)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to blacklist JTI: {}", e)))?;
 
-        Ok(())
+        // Use retry logic for this security-critical operation
+        Self::blacklist_with_retry(&mut conn, &blacklist_key, ttl_secs).await
     }
 
     // Mint tokens with specific password timestamp (for session invalidation)
@@ -247,38 +305,55 @@ impl TokenService {
         })
     }
 
-    // Revoke all sessions for a user by blacklisting all refresh tokens
+    /// Revoke all sessions for a user by blacklisting all refresh tokens
+    ///
+    /// Uses Redis SCAN instead of KEYS to avoid blocking the Redis server.
+    /// SCAN is non-blocking and iterates through keys incrementally.
     pub async fn revoke_user_sessions(&self, user_id: Uuid) -> Result<(), AuthError> {
         let mut conn = self.conn.clone();
 
-        // Find all refresh tokens for this user
-        let pattern = "refresh:*".to_string();
-        let keys: Vec<String> = conn
-            .keys(pattern)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to find refresh tokens: {}", e)))?;
+        // Use SCAN instead of KEYS to avoid blocking Redis
+        // SCAN iterates through keys incrementally without blocking
+        // Collect keys first to avoid borrow issues with the connection
+        let keys: Vec<String> = {
+            let mut iter: redis::AsyncIter<String> = conn
+                .scan_match("refresh:*")
+                .await
+                .map_err(|e| AuthError::Redis(format!("Failed to scan refresh tokens: {}", e)))?;
 
-        // Check each refresh token and delete if it belongs to this user
+            let mut keys = Vec::new();
+            while let Some(key_result) = iter.next_item().await {
+                match key_result {
+                    Ok(k) => keys.push(k),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Error during refresh token scan, skipping key");
+                    }
+                }
+            }
+            keys
+        };
+
+        // Process collected keys
         for key in keys {
-            if let Ok(Some(val)) = conn.get::<String, Option<String>>(key.clone()).await {
+            if let Ok(Some(val)) = conn.get::<&str, Option<String>>(&key).await {
                 let parts: Vec<&str> = val.split(':').collect();
                 if parts.len() == 2 && parts[0] == user_id.to_string() {
                     // Delete the refresh token
-                    let _: () = conn.del(key).await.map_err(|e| {
+                    let _: () = conn.del(&key).await.map_err(|e| {
                         AuthError::Redis(format!("Failed to delete refresh token: {}", e))
                     })?;
 
-                    // Blacklist the associated JTI
+                    // Blacklist the associated JTI with retry logic
                     let jti = parts[1];
                     let blacklist_key = format!("blacklist:{}", jti);
                     let blacklist_ttl = self.jwt_config.access_token_ttl_minutes * 60;
                     let blacklist_ttl_u64 = blacklist_ttl.try_into().map_err(|_| {
                         AuthError::Validation("Blacklist TTL is too large".to_string())
                     })?;
-                    let _: () = conn
-                        .set_ex(blacklist_key, "1", blacklist_ttl_u64)
-                        .await
-                        .map_err(|e| AuthError::Redis(format!("Failed to blacklist JTI: {}", e)))?;
+
+                    // Use retry logic for this security-critical operation
+                    Self::blacklist_with_retry(&mut conn, &blacklist_key, blacklist_ttl_u64)
+                        .await?;
                 }
             }
         }

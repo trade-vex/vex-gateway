@@ -4,6 +4,7 @@ use actix_web::{FromRequest, HttpMessage, HttpResponse, Result, web};
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, Serializer};
+use tracing::error;
 use uuid::Uuid;
 
 use lib_middleware::{
@@ -14,6 +15,8 @@ use lib_middleware::{
 };
 use sea_orm::Set;
 use std::sync::Arc;
+
+use crate::error::ApiError;
 
 /// Combined authentication result that can be either JWT or API key
 #[derive(Debug, Clone)]
@@ -325,11 +328,10 @@ pub async fn create_api_key(
             Ok(HttpResponse::Created().json(response))
         }
         Err(e) => {
-            tracing::error!("Failed to create API key: {}", e);
-            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to create API key",
-                "message": e.to_string()
-            })))
+            error!("Failed to create API key: {}", e);
+            Ok(ApiError::internal_error(
+                "Failed to create API key. Please try again later.",
+            ))
         }
     }
 }
@@ -339,7 +341,6 @@ pub async fn list_api_keys(
     repo: web::Data<Arc<dyn ApiKeyRepository>>,
     auth_user: AuthenticatedUser,
 ) -> Result<HttpResponse> {
-    println!("AUTH USER IN CREATE: {:?}", auth_user);
     // Get user ID from either JWT or API key authentication
     let user_id = auth_user.user_id().ok_or_else(|| {
         actix_web::error::ErrorUnauthorized("User ID not found in authentication")
@@ -355,11 +356,10 @@ pub async fn list_api_keys(
             Ok(HttpResponse::Ok().json(response))
         }
         Err(e) => {
-            tracing::error!("Failed to list API keys: {}", e);
-            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to list API keys",
-                "message": e.to_string()
-            })))
+            error!("Failed to list API keys: {}", e);
+            Ok(ApiError::internal_error(
+                "Failed to list API keys. Please try again later.",
+            ))
         }
     }
 }
@@ -390,15 +390,12 @@ pub async fn get_api_key(
             let response = ApiKeyResponse::from(api_key);
             Ok(HttpResponse::Ok().json(response))
         }
-        Ok(None) => Ok(HttpResponse::NotFound().json(serde_json::json!({
-            "error": "API key not found"
-        }))),
+        Ok(None) => Ok(ApiError::not_found("API key not found")),
         Err(e) => {
-            tracing::error!("Failed to get API key: {}", e);
-            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to get API key",
-                "message": e.to_string()
-            })))
+            error!("Failed to get API key: {}", e);
+            Ok(ApiError::internal_error(
+                "Failed to get API key. Please try again later.",
+            ))
         }
     }
 }
@@ -421,23 +418,19 @@ pub async fn update_api_key(
     match repo.as_ref().find_by_id(api_key_id).await {
         Ok(Some(api_key)) => {
             if api_key.user_id != Some(user_id) {
-                return Ok(HttpResponse::Forbidden().json(serde_json::json!({
-                    "error": "Access denied",
-                    "message": "You don't have permission to update this API key"
-                })));
+                return Ok(ApiError::forbidden(
+                    "You don't have permission to update this API key",
+                ));
             }
         }
         Ok(None) => {
-            return Ok(HttpResponse::NotFound().json(serde_json::json!({
-                "error": "API key not found"
-            })));
+            return Ok(ApiError::not_found("API key not found"));
         }
         Err(e) => {
-            tracing::error!("Failed to find API key: {}", e);
-            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to find API key",
-                "message": e.to_string()
-            })));
+            error!("Failed to find API key: {}", e);
+            return Ok(ApiError::internal_error(
+                "Failed to find API key. Please try again later.",
+            ));
         }
     }
 
@@ -475,11 +468,10 @@ pub async fn update_api_key(
             Ok(HttpResponse::Ok().json(response))
         }
         Err(e) => {
-            tracing::error!("Failed to update API key: {}", e);
-            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to update API key",
-                "message": e.to_string()
-            })))
+            error!("Failed to update API key: {}", e);
+            Ok(ApiError::internal_error(
+                "Failed to update API key. Please try again later.",
+            ))
         }
     }
 }
@@ -501,23 +493,19 @@ pub async fn delete_api_key(
     match repo.as_ref().find_by_id(api_key_id).await {
         Ok(Some(api_key)) => {
             if api_key.user_id != Some(user_id) {
-                return Ok(HttpResponse::Forbidden().json(serde_json::json!({
-                    "error": "Access denied",
-                    "message": "You don't have permission to delete this API key"
-                })));
+                return Ok(ApiError::forbidden(
+                    "You don't have permission to delete this API key",
+                ));
             }
         }
         Ok(None) => {
-            return Ok(HttpResponse::NotFound().json(serde_json::json!({
-                "error": "API key not found"
-            })));
+            return Ok(ApiError::not_found("API key not found"));
         }
         Err(e) => {
-            tracing::error!("Failed to find API key: {}", e);
-            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to find API key",
-                "message": e.to_string()
-            })));
+            error!("Failed to find API key: {}", e);
+            return Ok(ApiError::internal_error(
+                "Failed to find API key. Please try again later.",
+            ));
         }
     }
 
@@ -526,11 +514,10 @@ pub async fn delete_api_key(
             "message": "API key deleted successfully"
         }))),
         Err(e) => {
-            tracing::error!("Failed to delete API key: {}", e);
-            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to delete API key",
-                "message": e.to_string()
-            })))
+            error!("Failed to delete API key: {}", e);
+            Ok(ApiError::internal_error(
+                "Failed to delete API key. Please try again later.",
+            ))
         }
     }
 }
@@ -557,23 +544,19 @@ pub async fn toggle_api_key(
     match repo.as_ref().find_by_id(api_key_id).await {
         Ok(Some(api_key)) => {
             if api_key.user_id != Some(user_id) {
-                return Ok(HttpResponse::Forbidden().json(serde_json::json!({
-                    "error": "Access denied",
-                    "message": "You don't have permission to modify this API key"
-                })));
+                return Ok(ApiError::forbidden(
+                    "You don't have permission to modify this API key",
+                ));
             }
         }
         Ok(None) => {
-            return Ok(HttpResponse::NotFound().json(serde_json::json!({
-                "error": "API key not found"
-            })));
+            return Ok(ApiError::not_found("API key not found"));
         }
         Err(e) => {
-            tracing::error!("Failed to find API key: {}", e);
-            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to find API key",
-                "message": e.to_string()
-            })));
+            error!("Failed to find API key: {}", e);
+            return Ok(ApiError::internal_error(
+                "Failed to find API key. Please try again later.",
+            ));
         }
     }
 
@@ -585,11 +568,10 @@ pub async fn toggle_api_key(
             })))
         }
         Err(e) => {
-            tracing::error!("Failed to toggle API key: {}", e);
-            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to toggle API key",
-                "message": e.to_string()
-            })))
+            error!("Failed to toggle API key: {}", e);
+            Ok(ApiError::internal_error(
+                "Failed to toggle API key. Please try again later.",
+            ))
         }
     }
 }

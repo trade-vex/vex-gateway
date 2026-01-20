@@ -3,10 +3,12 @@ use crate::combined_auth::CombinedAuthMiddleware;
 use lib_utils::AuthContext;
 use lib_middleware::api_key::{middleware::ApiKeyMiddleware, security::{ApiKeyConfig, SecurityType}};
 use lib_auth::middleware::jwt_auth::JwtAuthentication;
+use lib_auth::service::session_service::SessionService;
 use jsonwebtoken::{EncodingKey, DecodingKey, Algorithm, Header, encode};
 use uuid::Uuid;
 use chrono::Utc;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 fn create_test_jwt_token(user_id: Uuid, encoding_key: &EncodingKey) -> String {
     let now = Utc::now().timestamp() as usize;
@@ -48,6 +50,18 @@ fn setup_test_keys() -> Option<(EncodingKey, DecodingKey)> {
     Some((encoding_key, decoding_key))
 }
 
+/// Create a test session service (requires Redis connection)
+/// Returns None if Redis is not available for testing
+async fn create_test_session_service() -> Option<Arc<SessionService>> {
+    // Try to connect to Redis for testing
+    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
+
+    let client = redis::Client::open(redis_url.as_str()).ok()?;
+    let conn = redis::aio::ConnectionManager::new(client).await.ok()?;
+
+    Some(Arc::new(SessionService::new(conn, 1800))) // 30 minute TTL for tests
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,6 +76,14 @@ mod tests {
             }
         };
 
+        let session_service = match create_test_session_service().await {
+            Some(service) => service,
+            None => {
+                println!("Skipping JWT test - Redis not available");
+                return;
+            }
+        };
+
         let jwt_middleware = JwtAuthentication::new(
             decoding_key,
             "vex-gateway".to_string(),
@@ -69,7 +91,7 @@ mod tests {
         );
 
         let api_key_middleware = ApiKeyMiddleware::new();
-        let combined_auth = CombinedAuthMiddleware::new(jwt_middleware, api_key_middleware);
+        let combined_auth = CombinedAuthMiddleware::new(jwt_middleware, api_key_middleware, session_service);
 
         let user_id = Uuid::new_v4();
         let token = create_test_jwt_token(user_id, &encoding_key);
@@ -113,7 +135,7 @@ mod tests {
     #[tokio::test]
     async fn test_combined_auth_api_key_authentication() {
         let api_key_config = create_test_api_key_config();
-        
+
         let api_key_middleware = ApiKeyMiddleware::new()
             .with_api_key(api_key_config.clone());
 
@@ -125,13 +147,21 @@ mod tests {
             }
         };
 
+        let session_service = match create_test_session_service().await {
+            Some(service) => service,
+            None => {
+                println!("Skipping API key test - Redis not available");
+                return;
+            }
+        };
+
         let jwt_middleware = JwtAuthentication::new(
             decoding_key,
             "vex-gateway".to_string(),
             "api".to_string(),
         );
 
-        let combined_auth = CombinedAuthMiddleware::new(jwt_middleware, api_key_middleware);
+        let combined_auth = CombinedAuthMiddleware::new(jwt_middleware, api_key_middleware, session_service);
 
         let app = test::init_service(
             App::new()
@@ -162,7 +192,7 @@ mod tests {
             .to_request();
 
         let resp = test::call_service(&app, req).await;
-        
+
         if resp.status().is_success() {
             let body: serde_json::Value = test::read_body_json(resp).await;
             assert_eq!(body["auth_type"], "api_key");
@@ -182,6 +212,14 @@ mod tests {
             }
         };
 
+        let session_service = match create_test_session_service().await {
+            Some(service) => service,
+            None => {
+                println!("Skipping no-auth test - Redis not available");
+                return;
+            }
+        };
+
         let jwt_middleware = JwtAuthentication::new(
             decoding_key,
             "vex-gateway".to_string(),
@@ -189,7 +227,7 @@ mod tests {
         );
 
         let api_key_middleware = ApiKeyMiddleware::new();
-        let combined_auth = CombinedAuthMiddleware::new(jwt_middleware, api_key_middleware);
+        let combined_auth = CombinedAuthMiddleware::new(jwt_middleware, api_key_middleware, session_service);
 
         let app = test::init_service(
             App::new()
@@ -216,7 +254,7 @@ mod tests {
             .to_request();
 
         let resp = test::try_call_service(&app, req).await;
-        
+
         match resp {
             Ok(response) => {
                 panic!("Expected authentication to fail, but got response: {:?}", response.status());
@@ -262,6 +300,14 @@ mod tests {
             }
         };
 
+        let session_service = match create_test_session_service().await {
+            Some(service) => service,
+            None => {
+                println!("Skipping order endpoint test - Redis not available");
+                return;
+            }
+        };
+
         let jwt_middleware = JwtAuthentication::new(
             decoding_key,
             "vex-gateway".to_string(),
@@ -269,7 +315,7 @@ mod tests {
         );
 
         let api_key_middleware = ApiKeyMiddleware::new();
-        let combined_auth = CombinedAuthMiddleware::new(jwt_middleware, api_key_middleware);
+        let combined_auth = CombinedAuthMiddleware::new(jwt_middleware, api_key_middleware, session_service);
 
         let user_id = Uuid::new_v4();
         let token = create_test_jwt_token(user_id, &encoding_key);
@@ -322,6 +368,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_combined_auth_error_handling() {
+        let session_service = match create_test_session_service().await {
+            Some(service) => service,
+            None => {
+                println!("Skipping error handling test - Redis not available");
+                return;
+            }
+        };
+
         let decoding_key = DecodingKey::from_secret(b"invalid-key");
         let jwt_middleware = JwtAuthentication::new(
             decoding_key,
@@ -330,7 +384,7 @@ mod tests {
         );
 
         let api_key_middleware = ApiKeyMiddleware::new();
-        let combined_auth = CombinedAuthMiddleware::new(jwt_middleware, api_key_middleware);
+        let combined_auth = CombinedAuthMiddleware::new(jwt_middleware, api_key_middleware, session_service);
 
         let app = test::init_service(
             App::new()
@@ -346,7 +400,7 @@ mod tests {
             .to_request();
 
         let resp = test::try_call_service(&app, req).await;
-        
+
         match resp {
             Ok(response) => {
                 panic!("Expected authentication to fail, but got response: {:?}", response.status());

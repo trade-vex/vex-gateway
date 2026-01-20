@@ -116,7 +116,7 @@ where
                 .get(REQUEST_ID_HEADER)
                 .and_then(|v| v.to_str().ok())
                 .map(|s| RequestId::from_string(s.to_string()))
-                .unwrap_or_else(RequestId::new);
+                .unwrap_or_default();
 
             let request_id_str = request_id.0.clone();
 

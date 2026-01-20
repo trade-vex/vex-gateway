@@ -4,7 +4,7 @@ use common::OrderCommand;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
@@ -12,16 +12,27 @@ use tracing::{debug, warn};
 static CLIENT_ORDER_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Generate a globally unique client order ID
+///
+/// This function is designed to never panic, even if system time goes backwards
+/// (e.g., due to VM migration, NTP correction, or container issues).
 #[inline]
 pub fn generate_client_order_id() -> u64 {
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("Time went backwards")
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|e| {
+            // System clock went backwards - use counter-only fallback
+            warn!(
+                error = %e,
+                "System time went backwards, using counter-only client order ID"
+            );
+            Duration::from_secs(0)
+        })
         .as_nanos() as u64;
 
     let counter = CLIENT_ORDER_COUNTER.fetch_add(1, Ordering::Relaxed);
 
     // Combine: top 48 bits = timestamp, bottom 16 bits = counter
+    // Even with timestamp=0, the counter ensures uniqueness
     ((timestamp & 0xFFFF_FFFF_FFFF) << 16) | (counter & 0xFFFF)
 }
 

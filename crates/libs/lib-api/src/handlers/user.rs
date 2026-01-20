@@ -11,6 +11,9 @@ use lib_core::{PnlResolution, PortfolioRepository, TradingRepository};
 use lib_utils::auth_extractors::AuthenticatedUserId;
 use serde::Deserialize;
 use std::sync::Arc;
+use tracing::{error, warn};
+
+use crate::error::ApiError;
 
 /// Get user balances for all assets
 ///
@@ -90,11 +93,10 @@ pub async fn get_balances(
             Ok(HttpResponse::Ok().json(response))
         }
         Err(e) => {
-            tracing::error!("failed to get user balances: {}", e);
-            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "failed to retrieve balances",
-                "message": "An internal error occurred. Please try again later."
-            })))
+            error!("failed to get user balances: {}", e);
+            Ok(ApiError::internal_error(
+                "Failed to retrieve balances. Please try again later.",
+            ))
         }
     }
 }
@@ -201,11 +203,10 @@ pub async fn get_open_orders(
     {
         Ok(count) => count as usize,
         Err(e) => {
-            tracing::error!("failed to count open orders for user_id {}: {}", user_id, e);
-            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "failed to retrieve open orders",
-                "message": "An internal error occurred. Please try again later."
-            })));
+            error!("failed to count open orders for user_id {}: {}", user_id, e);
+            return Ok(ApiError::internal_error(
+                "Failed to retrieve open orders. Please try again later.",
+            ));
         }
     };
 
@@ -235,11 +236,10 @@ pub async fn get_open_orders(
             Ok(HttpResponse::Ok().json(response))
         }
         Err(e) => {
-            tracing::error!("failed to get open orders for user_id {}: {}", user_id, e);
-            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "failed to retrieve open orders",
-                "message": "An internal error occurred. Please try again later."
-            })))
+            error!("failed to get open orders for user_id {}: {}", user_id, e);
+            Ok(ApiError::internal_error(
+                "Failed to retrieve open orders. Please try again later.",
+            ))
         }
     }
 }
@@ -339,15 +339,13 @@ pub async fn get_order_history(
     {
         Ok(count) => count as usize,
         Err(e) => {
-            tracing::error!(
+            error!(
                 "failed to count order history for user_id {}: {}",
-                user_id,
-                e
+                user_id, e
             );
-            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "failed to retrieve order history",
-                "message": "An internal error occurred. Please try again later."
-            })));
+            return Ok(ApiError::internal_error(
+                "Failed to retrieve order history. Please try again later.",
+            ));
         }
     };
 
@@ -377,11 +375,10 @@ pub async fn get_order_history(
             Ok(HttpResponse::Ok().json(response))
         }
         Err(e) => {
-            tracing::error!("failed to get order history for user_id {}: {}", user_id, e);
-            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "failed to retrieve order history",
-                "message": "An internal error occurred. Please try again later."
-            })))
+            error!("failed to get order history for user_id {}: {}", user_id, e);
+            Ok(ApiError::internal_error(
+                "Failed to retrieve order history. Please try again later.",
+            ))
         }
     }
 }
@@ -665,7 +662,7 @@ pub async fn get_favorite_markets(
                 .into_iter()
                 .filter_map(|fav| {
                     u32::try_from(fav.market_id).ok().or_else(|| {
-                        tracing::warn!(
+                        warn!(
                             market_id = fav.market_id,
                             "Invalid market_id (negative value), skipping"
                         );
@@ -679,11 +676,10 @@ pub async fn get_favorite_markets(
             Ok(HttpResponse::Ok().json(response))
         }
         Err(e) => {
-            tracing::error!("failed to get favorite markets: {}", e);
-            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "failed to retrieve favorite markets",
-                "message": "An internal error occurred. Please try again later."
-            })))
+            error!("failed to get favorite markets: {}", e);
+            Ok(ApiError::internal_error(
+                "Failed to retrieve favorite markets. Please try again later.",
+            ))
         }
     }
 }
@@ -767,11 +763,10 @@ pub async fn toggle_favorite_market(
             })))
         }
         Err(e) => {
-            tracing::error!("failed to toggle favorite market: {}", e);
-            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "failed to toggle favorite market",
-                "message": "An internal error occurred. Please try again later."
-            })))
+            error!("failed to toggle favorite market: {}", e);
+            Ok(ApiError::internal_error(
+                "Failed to toggle favorite market. Please try again later.",
+            ))
         }
     }
 }

@@ -90,6 +90,95 @@ impl RateLimitConfig {
             trading_burst: 500,
         }
     }
+
+    /// Load rate limit configuration from environment variables.
+    ///
+    /// Environment variables:
+    /// - `RATE_LIMIT_GENERAL_RPS` - Requests per second for general endpoints (default: 100)
+    /// - `RATE_LIMIT_GENERAL_BURST` - Burst size for general endpoints (default: 200)
+    /// - `RATE_LIMIT_AUTH_RPS` - Requests per second for auth endpoints (default: 10)
+    /// - `RATE_LIMIT_AUTH_BURST` - Burst size for auth endpoints (default: 20)
+    /// - `RATE_LIMIT_TRADING_RPS` - Requests per second for trading endpoints (default: 50)
+    /// - `RATE_LIMIT_TRADING_BURST` - Burst size for trading endpoints (default: 100)
+    ///
+    /// # Example
+    /// ```bash
+    /// export RATE_LIMIT_GENERAL_RPS=200
+    /// export RATE_LIMIT_GENERAL_BURST=400
+    /// ```
+    pub fn from_env() -> Self {
+        let default = Self::default();
+
+        Self {
+            general_rps: std::env::var("RATE_LIMIT_GENERAL_RPS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default.general_rps),
+            general_burst: std::env::var("RATE_LIMIT_GENERAL_BURST")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default.general_burst),
+            auth_rps: std::env::var("RATE_LIMIT_AUTH_RPS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default.auth_rps),
+            auth_burst: std::env::var("RATE_LIMIT_AUTH_BURST")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default.auth_burst),
+            trading_rps: std::env::var("RATE_LIMIT_TRADING_RPS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default.trading_rps),
+            trading_burst: std::env::var("RATE_LIMIT_TRADING_BURST")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default.trading_burst),
+        }
+    }
+
+    /// Load rate limit configuration based on environment name.
+    ///
+    /// - "production" -> default (balanced)
+    /// - "development" or "testing" -> permissive
+    /// - other -> strict
+    ///
+    /// Environment variables always override these defaults.
+    pub fn for_environment(env_name: &str) -> Self {
+        let base = match env_name.to_lowercase().as_str() {
+            "production" => Self::default(),
+            "development" | "testing" | "test" => Self::permissive(),
+            _ => Self::strict(),
+        };
+
+        // Allow environment variables to override
+        Self {
+            general_rps: std::env::var("RATE_LIMIT_GENERAL_RPS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(base.general_rps),
+            general_burst: std::env::var("RATE_LIMIT_GENERAL_BURST")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(base.general_burst),
+            auth_rps: std::env::var("RATE_LIMIT_AUTH_RPS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(base.auth_rps),
+            auth_burst: std::env::var("RATE_LIMIT_AUTH_BURST")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(base.auth_burst),
+            trading_rps: std::env::var("RATE_LIMIT_TRADING_RPS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(base.trading_rps),
+            trading_burst: std::env::var("RATE_LIMIT_TRADING_BURST")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(base.trading_burst),
+        }
+    }
 }
 
 /// Key extractor that uses client IP address
@@ -250,5 +339,46 @@ mod tests {
     fn test_custom_rate_limiter() {
         // 1 request per minute
         let _limiter = create_custom_rate_limiter(Duration::from_secs(60), 1);
+    }
+
+    #[test]
+    fn test_from_env_defaults() {
+        // Clear any existing env vars to test defaults
+        std::env::remove_var("RATE_LIMIT_GENERAL_RPS");
+        std::env::remove_var("RATE_LIMIT_GENERAL_BURST");
+
+        let config = RateLimitConfig::from_env();
+        let default = RateLimitConfig::default();
+
+        assert_eq!(config.general_rps, default.general_rps);
+        assert_eq!(config.general_burst, default.general_burst);
+    }
+
+    #[test]
+    fn test_for_environment_production() {
+        let config = RateLimitConfig::for_environment("production");
+        let default = RateLimitConfig::default();
+        assert_eq!(config.general_rps, default.general_rps);
+    }
+
+    #[test]
+    fn test_for_environment_development() {
+        let config = RateLimitConfig::for_environment("development");
+        let permissive = RateLimitConfig::permissive();
+        assert_eq!(config.general_rps, permissive.general_rps);
+    }
+
+    #[test]
+    fn test_for_environment_testing() {
+        let config = RateLimitConfig::for_environment("testing");
+        let permissive = RateLimitConfig::permissive();
+        assert_eq!(config.general_rps, permissive.general_rps);
+    }
+
+    #[test]
+    fn test_for_environment_unknown() {
+        let config = RateLimitConfig::for_environment("unknown");
+        let strict = RateLimitConfig::strict();
+        assert_eq!(config.general_rps, strict.general_rps);
     }
 }

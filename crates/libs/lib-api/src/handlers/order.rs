@@ -3,15 +3,31 @@
 use actix_web::{HttpResponse, web};
 use common::{OrderCommand, OrderCommandType, Side, Status, TimeInForce, UserBalance};
 use lib_core::{
-    CorrelationService, Publisher, ResponseError, TradingRepository, generate_client_order_id,
-    model::orders::Model as OrderModel, wait_for_response,
+    CorrelationService, PublisherHandle, ResponseError, TradingRepository,
+    generate_client_order_id, model::orders::Model as OrderModel, wait_for_response,
 };
 use lib_utils::AuthenticatedUserId;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info, warn};
+
+/// Get current timestamp in nanoseconds without panicking.
+///
+/// If system time goes backwards (VM migration, NTP correction, etc.),
+/// returns 0 instead of panicking. This is acceptable for order timestamps
+/// as VEX Core will assign its own authoritative timestamp.
+#[inline]
+fn current_timestamp_nanos() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|e| {
+            warn!(error = %e, "System time went backwards, using 0 for order timestamp");
+            Duration::from_secs(0)
+        })
+        .as_nanos() as u64
+}
 
 // Request/Response DTOs
 
@@ -73,15 +89,22 @@ pub struct OrderRequest {
 /// # Example
 /// ```json
 /// {
-///   "order_id": "123456789",
-///   "market_id": 1
-/// }
-/// ```
+/// Path parameters for cancel order endpoint
+///
+/// # Fields
+/// * `order_id` - The unique identifier of the order to cancel (string format for JavaScript BigInt support)
 #[derive(Debug, Deserialize)]
-pub struct CancelOrderRequest {
+pub struct CancelOrderPath {
     /// Unique identifier of the order to cancel (string format for JavaScript BigInt support)
     pub order_id: String,
+}
 
+/// Query parameters for cancel order endpoint
+///
+/// # Fields
+/// * `market_id` - Market identifier for validation
+#[derive(Debug, Deserialize)]
+pub struct CancelOrderQuery {
     /// Market identifier for validation
     pub market_id: u32,
 }
@@ -199,7 +222,7 @@ pub struct OrderResponse {
 pub async fn place_order(
     order_data: web::Json<OrderRequest>,
     auth_user: AuthenticatedUserId,
-    publisher: web::Data<Arc<tokio::sync::Mutex<Publisher>>>,
+    publisher: web::Data<PublisherHandle>,
     correlation_service: web::Data<Arc<CorrelationService>>,
     trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> HttpResponse {
@@ -261,10 +284,7 @@ pub async fn place_order(
         size: volume,
         side,
         time_in_force,
-        timestamp: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64,
+        timestamp: current_timestamp_nanos(),
         status: Status::Processing,
         events: None,
         balance: [UserBalance::default(); 2],
@@ -272,13 +292,8 @@ pub async fn place_order(
         route_gateway_id: 0,
     };
 
-    // Send to VEX Core
-    let send_result = {
-        let publisher = publisher.lock().await;
-        publisher.send_order_command(&command)
-    };
-
-    if let Err(e) = send_result {
+    // Send to VEX Core via PublisherHandle (lock-free channel-based approach)
+    if let Err(e) = publisher.send_order_command(&command).await {
         correlation_service.cancel_request(client_order_id);
         error!(
             client_order_id = client_order_id,
@@ -334,7 +349,9 @@ pub async fn place_order(
                             order_size: Decimal::from(volume),
                             filled_size: Decimal::from(0),
                             order_side: format!("{:?}", side),
-                            order_timestamp: command.timestamp as i64, // Store nanoseconds as i64
+                            // Nanoseconds since UNIX epoch stored as i64
+                            // Safe until year 2262 (i64::MAX / 1e9 / 86400 / 365 ≈ 292 years from 1970)
+                            order_timestamp: command.timestamp as i64,
                             market_id: market_id as i32,
                             time_in_force: format!("{:?}", time_in_force),
                             status: status_str.clone(),
@@ -409,26 +426,24 @@ pub async fn place_order(
 /// The cancellation is processed asynchronously with correlation tracking.
 ///
 /// # Endpoint
-/// `POST /api/order/cancel`
+/// `DELETE /api/v1/orders/{order_id}?market_id={market_id}`
 ///
 /// # Authentication
 /// Requires valid JWT token in Authorization header: `Bearer <token>`
 ///
-/// # Request Body
-/// See [`CancelOrderRequest`] for request payload structure.
+/// # Path Parameters
+/// * `order_id` - The unique identifier of the order to cancel (string format for JavaScript BigInt support)
+///
+/// # Query Parameters
+/// * `market_id` - Market identifier for validation
 ///
 /// # Response
 /// Returns [`OrderResponse`] with cancellation status.
 ///
 /// # Example Request
 /// ```bash
-/// curl -X POST http://localhost:8080/api/order/cancel \
-///   -H "Authorization: Bearer <jwt_token>" \
-///   -H "Content-Type: application/json" \
-///   -d '{
-///     "order_id": "123456789",
-///     "market_id": 1
-///   }'
+/// curl -X DELETE "http://localhost:8080/api/v1/orders/123456789?market_id=1" \
+///   -H "Authorization: Bearer <jwt_token>"
 /// ```
 ///
 /// # Example Success Response (200 OK)
@@ -461,23 +476,25 @@ pub async fn place_order(
 /// }
 /// ```
 pub async fn cancel_order(
-    cancel_data: web::Json<CancelOrderRequest>,
+    path: web::Path<CancelOrderPath>,
+    query: web::Query<CancelOrderQuery>,
     auth_user: AuthenticatedUserId,
-    publisher: web::Data<Arc<tokio::sync::Mutex<Publisher>>>,
+    publisher: web::Data<PublisherHandle>,
     correlation_service: web::Data<Arc<CorrelationService>>,
 ) -> HttpResponse {
     let start = Instant::now();
 
     let raw = auth_user.0.as_u128();
     let user_id = ((raw >> 64) as u64) ^ (raw as u64);
-    let cancel_data = cancel_data.into_inner();
+    let path = path.into_inner();
+    let query = query.into_inner();
 
     // Parse order_id from string to u64
-    let order_id = match cancel_data.order_id.parse::<u64>() {
+    let order_id = match path.order_id.parse::<u64>() {
         Ok(id) => id,
         Err(e) => {
             error!(
-                order_id = cancel_data.order_id,
+                order_id = path.order_id,
                 error = %e,
                 "Invalid order_id format"
             );
@@ -499,16 +516,13 @@ pub async fn cancel_order(
         command: OrderCommandType::CancelOrder,
         order_id,        // The order to cancel
         client_order_id, // NEW correlation ID for this cancel request
-        market_id: cancel_data.market_id,
+        market_id: query.market_id,
         user_id,
         price: 0,
         size: 0,
         side: Side::Bid,
         time_in_force: TimeInForce::Gtc,
-        timestamp: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64,
+        timestamp: current_timestamp_nanos(),
         status: Status::Processing,
         events: None,
         balance: [UserBalance::default(); 2],
@@ -516,13 +530,8 @@ pub async fn cancel_order(
         route_gateway_id: 0,
     };
 
-    // Send cancel command
-    let send_result = {
-        let publisher = publisher.lock().await;
-        publisher.send_order_command(&command)
-    };
-
-    if let Err(e) = send_result {
+    // Send cancel command via PublisherHandle (lock-free channel-based approach)
+    if let Err(e) = publisher.send_order_command(&command).await {
         correlation_service.cancel_request(client_order_id);
         return HttpResponse::InternalServerError().json(OrderResponse {
             order_id,

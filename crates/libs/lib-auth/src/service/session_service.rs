@@ -98,7 +98,10 @@ impl SessionService {
         Ok(session_data)
     }
 
-    /// Delete a session
+    /// Delete a session (without ownership check)
+    ///
+    /// **Security Note:** This method does NOT verify session ownership.
+    /// Use `delete_session_for_user` for user-facing endpoints.
     pub async fn delete_session(&self, session_id: &str) -> Result<(), AuthError> {
         let session_key = format!("session:{}", session_id);
 
@@ -112,7 +115,47 @@ impl SessionService {
         Ok(())
     }
 
-    /// Refresh/extend a session's TTL
+    /// Delete a session with ownership verification
+    ///
+    /// This method verifies that the session belongs to the specified user
+    /// before deleting it, preventing users from deleting other users' sessions.
+    ///
+    /// # Arguments
+    ///
+    /// * `session_id` - The session ID to delete
+    /// * `user_id` - The user ID that must own the session
+    ///
+    /// # Errors
+    ///
+    /// * `AuthError::InvalidRequest` - Session not found
+    /// * `AuthError::Unauthorized` - Session does not belong to the user
+    /// * `AuthError::Redis` - Redis operation failed
+    pub async fn delete_session_for_user(
+        &self,
+        session_id: &str,
+        user_id: Uuid,
+    ) -> Result<(), AuthError> {
+        // First, verify the session exists and belongs to the user
+        let session_data = self.get_session(session_id).await?;
+
+        if session_data.user_id != user_id {
+            tracing::warn!(
+                session_id = session_id,
+                claimed_user_id = %user_id,
+                actual_user_id = %session_data.user_id,
+                "Session ownership verification failed"
+            );
+            return Err(AuthError::Unauthorized);
+        }
+
+        // Session belongs to user, safe to delete
+        self.delete_session(session_id).await
+    }
+
+    /// Refresh/extend a session's TTL (without ownership check)
+    ///
+    /// **Security Note:** This method does NOT verify session ownership.
+    /// Use `refresh_session_for_user` for user-facing endpoints.
     pub async fn refresh_session(&self, session_id: &str) -> Result<(), AuthError> {
         let session_key = format!("session:{}", session_id);
 
@@ -137,7 +180,48 @@ impl SessionService {
         Ok(())
     }
 
-    /// Update tokens in an existing session
+    /// Refresh/extend a session's TTL with ownership verification
+    ///
+    /// This method verifies that the session belongs to the specified user
+    /// before refreshing it, preventing users from refreshing other users' sessions.
+    ///
+    /// # Arguments
+    ///
+    /// * `session_id` - The session ID to refresh
+    /// * `user_id` - The user ID that must own the session
+    ///
+    /// # Errors
+    ///
+    /// * `AuthError::InvalidRequest` - Session not found
+    /// * `AuthError::Unauthorized` - Session does not belong to the user
+    /// * `AuthError::Redis` - Redis operation failed
+    pub async fn refresh_session_for_user(
+        &self,
+        session_id: &str,
+        user_id: Uuid,
+    ) -> Result<(), AuthError> {
+        // First, verify the session exists and belongs to the user
+        let session_data = self.get_session(session_id).await?;
+
+        if session_data.user_id != user_id {
+            tracing::warn!(
+                session_id = session_id,
+                claimed_user_id = %user_id,
+                actual_user_id = %session_data.user_id,
+                "Session ownership verification failed during refresh"
+            );
+            return Err(AuthError::Unauthorized);
+        }
+
+        // Session belongs to user, safe to refresh
+        self.refresh_session(session_id).await
+    }
+
+    /// Update tokens in an existing session (without ownership check)
+    ///
+    /// **Security Note:** This method does NOT verify session ownership.
+    /// Use `update_session_tokens_for_user` for user-facing endpoints.
+    ///
     /// Uses a single Redis connection for read-modify-write to minimize race conditions
     pub async fn update_session_tokens(
         &self,
@@ -171,7 +255,70 @@ impl SessionService {
         Ok(())
     }
 
+    /// Update tokens in an existing session with ownership verification
+    ///
+    /// This method verifies that the session belongs to the specified user
+    /// before updating tokens, preventing users from hijacking other users' sessions.
+    ///
+    /// # Arguments
+    ///
+    /// * `session_id` - The session ID to update
+    /// * `user_id` - The user ID that must own the session
+    /// * `access_token` - New access token
+    /// * `refresh_token` - New refresh token
+    ///
+    /// # Errors
+    ///
+    /// * `AuthError::InvalidRequest` - Session not found
+    /// * `AuthError::Unauthorized` - Session does not belong to the user
+    /// * `AuthError::Redis` - Redis operation failed
+    pub async fn update_session_tokens_for_user(
+        &self,
+        session_id: &str,
+        user_id: Uuid,
+        access_token: String,
+        refresh_token: String,
+    ) -> Result<(), AuthError> {
+        let session_key = format!("session:{}", session_id);
+
+        // Get existing session and verify ownership
+        let session_data = self.get_session(session_id).await?;
+
+        if session_data.user_id != user_id {
+            tracing::warn!(
+                session_id = session_id,
+                claimed_user_id = %user_id,
+                actual_user_id = %session_data.user_id,
+                "Session ownership verification failed during token update"
+            );
+            return Err(AuthError::Unauthorized);
+        }
+
+        // Session belongs to user, safe to update
+        let updated_session = SessionData {
+            user_id,
+            access_token,
+            refresh_token,
+        };
+
+        let updated_json = serde_json::to_string(&updated_session)
+            .map_err(|e| AuthError::Redis(format!("Failed to serialize session: {}", e)))?;
+
+        let mut conn = self.conn.clone();
+
+        // Update the session with new tokens
+        let _: () = conn
+            .set_ex(&session_key, updated_json, self.session_ttl_seconds)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to update session: {}", e)))?;
+
+        Ok(())
+    }
+
     /// Revoke all sessions for a user except the specified session
+    ///
+    /// Uses Redis SCAN instead of KEYS to avoid blocking the Redis server.
+    /// SCAN is non-blocking and iterates through keys incrementally.
     pub async fn revoke_user_sessions_except(
         &self,
         user_id: Uuid,
@@ -179,18 +326,32 @@ impl SessionService {
     ) -> Result<usize, AuthError> {
         let mut conn = self.conn.clone();
 
-        // Find all sessions
-        let pattern = "session:*".to_string();
-        let keys: Vec<String> = conn
-            .keys(pattern)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to find sessions: {}", e)))?;
+        // Use SCAN instead of KEYS to avoid blocking Redis
+        // SCAN iterates through keys incrementally without blocking
+        // Collect keys first to avoid borrow issues with the connection
+        let keys: Vec<String> = {
+            let mut iter: redis::AsyncIter<String> = conn
+                .scan_match("session:*")
+                .await
+                .map_err(|e| AuthError::Redis(format!("Failed to scan sessions: {}", e)))?;
+
+            let mut keys = Vec::new();
+            while let Some(key_result) = iter.next_item().await {
+                match key_result {
+                    Ok(k) => keys.push(k),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Error during session scan, skipping key");
+                    }
+                }
+            }
+            keys
+        };
 
         let mut revoked_count = 0;
 
-        // Check each session and delete if it belongs to this user but isn't the current session
+        // Process collected keys
         for key in keys {
-            if let Ok(Some(session_json)) = conn.get::<String, Option<String>>(key.clone()).await
+            if let Ok(Some(session_json)) = conn.get::<&str, Option<String>>(&key).await
                 && let Ok(session_data) = serde_json::from_str::<SessionData>(&session_json)
                 && session_data.user_id == user_id
             {
@@ -198,7 +359,7 @@ impl SessionService {
                 if let Some(session_id) = key.strip_prefix("session:") {
                     // Delete if it's not the session we want to keep
                     if session_id != keep_session_id {
-                        let _: () = conn.del(key).await.map_err(|e| {
+                        let _: () = conn.del(&key).await.map_err(|e| {
                             AuthError::Redis(format!("Failed to delete session: {}", e))
                         })?;
                         revoked_count += 1;
@@ -211,26 +372,43 @@ impl SessionService {
     }
 
     /// Revoke all sessions for a user
+    ///
+    /// Uses Redis SCAN instead of KEYS to avoid blocking the Redis server.
+    /// SCAN is non-blocking and iterates through keys incrementally.
     pub async fn revoke_all_user_sessions(&self, user_id: Uuid) -> Result<usize, AuthError> {
         let mut conn = self.conn.clone();
 
-        // Find all sessions
-        let pattern = "session:*".to_string();
-        let keys: Vec<String> = conn
-            .keys(pattern)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to find sessions: {}", e)))?;
+        // Use SCAN instead of KEYS to avoid blocking Redis
+        // SCAN iterates through keys incrementally without blocking
+        // Collect keys first to avoid borrow issues with the connection
+        let keys: Vec<String> = {
+            let mut iter: redis::AsyncIter<String> = conn
+                .scan_match("session:*")
+                .await
+                .map_err(|e| AuthError::Redis(format!("Failed to scan sessions: {}", e)))?;
+
+            let mut keys = Vec::new();
+            while let Some(key_result) = iter.next_item().await {
+                match key_result {
+                    Ok(k) => keys.push(k),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Error during session scan, skipping key");
+                    }
+                }
+            }
+            keys
+        };
 
         let mut revoked_count = 0;
 
-        // Check each session and delete if it belongs to this user
+        // Process collected keys
         for key in keys {
-            if let Ok(Some(session_json)) = conn.get::<String, Option<String>>(key.clone()).await
+            if let Ok(Some(session_json)) = conn.get::<&str, Option<String>>(&key).await
                 && let Ok(session_data) = serde_json::from_str::<SessionData>(&session_json)
                 && session_data.user_id == user_id
             {
                 let _: () = conn
-                    .del(key)
+                    .del(&key)
                     .await
                     .map_err(|e| AuthError::Redis(format!("Failed to delete session: {}", e)))?;
                 revoked_count += 1;

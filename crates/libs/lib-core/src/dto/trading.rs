@@ -40,7 +40,7 @@ impl std::str::FromStr for Side {
 }
 
 // API Response DTOs
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderResponse {
     pub order_id: Decimal,
     pub user_id: Decimal,
@@ -54,7 +54,7 @@ pub struct OrderResponse {
 }
 
 /// Enhanced order response for order history with status and fill information
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderHistoryResponse {
     pub order_id: Decimal,
     pub user_id: Decimal,
@@ -68,7 +68,7 @@ pub struct OrderHistoryResponse {
     pub filled_size: Decimal,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserBalanceResponse {
     pub user_id: Decimal,
     pub asset_id: u32,
@@ -78,13 +78,13 @@ pub struct UserBalanceResponse {
     pub timestamp: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BalancesListResponse {
     pub balances: Vec<UserBalanceResponse>,
     pub total_assets: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrdersListResponse {
     pub orders: Vec<OrderResponse>,
     pub total: usize,
@@ -95,7 +95,7 @@ pub struct OrdersListResponse {
     pub has_prev: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrdersHistoryListResponse {
     pub orders: Vec<OrderHistoryResponse>,
     pub total: usize,
@@ -106,7 +106,7 @@ pub struct OrdersHistoryListResponse {
     pub has_prev: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortfolioOverviewResponse {
     pub balance: Decimal,
     pub balance_24h_ago: Decimal,
@@ -118,7 +118,7 @@ pub struct PortfolioOverviewResponse {
 }
 
 /// Portfolio metrics response (without PnL series)
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortfolioMetricsResponse {
     pub balance: Decimal,
     pub balance_24h_ago: Decimal,
@@ -127,21 +127,21 @@ pub struct PortfolioMetricsResponse {
     pub max_drawdown_1m: Decimal,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BalanceChartResponse {
     pub balance_series: Vec<BalancePoint>,
     pub resolution: String,
 }
 
 /// PnL chart response
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PnlChartResponse {
     pub pnl_series: Vec<PnlPoint>,
     pub resolution: String,
 }
 
 /// List of favorite markets response
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FavoriteMarketsListResponse {
     pub market_ids: Vec<u32>,
 }
