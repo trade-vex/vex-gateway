@@ -191,4 +191,7 @@ jobs:
         # RUSTSEC-2025-0134: rustls-pemfile unmaintained (informational).
         #   Ignored because: Migration to rustls-pki-types planned for future release.
         #   This is informational only, not a security vulnerability.
-        run: cargo audit --deny warnings --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2025-0134
+        # RUSTSEC-2025-0141: bincode unmaintained (informational).
+        #   Ignored because: Migration to bincode 2.x/3.x requires significant API changes.
+        #   Used for binary serialization in cache layer. Not a security vulnerability.
+        run: cargo audit --deny warnings --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2025-0141
