@@ -3,95 +3,32 @@ use crate::{
     traits::{AdvancedKvStore, AtomicKvStore, BasicKvStore, ExpiringKvStore, PoolStats},
 };
 use async_trait::async_trait;
-use bb8::{Pool, RunError};
 use redis::{AsyncCommands, Client, ErrorKind, RedisError, aio::ConnectionManager};
 use serde::{Serialize, de::DeserializeOwned};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Redis backend
+/// Redis backend using ConnectionManager
+/// ConnectionManager provides auto-reconnection and is cheaply cloneable
 #[derive(Clone)]
 pub struct RedisDb {
-    pool: Pool<RedisConnectionManager>,
+    conn: ConnectionManager,
     config: Arc<RedisConfig>,
 }
 
 /// Redis configuration
 #[derive(Debug, Clone)]
 pub struct RedisConfig {
-    pub max_connections: u32,
-    pub min_connections: u32,
-    pub connection_timeout_ms: u64,
-    pub max_lifetime_secs: u64,
-    pub idle_timeout_secs: u64,
     pub retry_count: u32,
 }
 
 impl Default for RedisConfig {
     fn default() -> Self {
-        Self {
-            max_connections: 50,
-            min_connections: 10,
-            connection_timeout_ms: 500,
-            max_lifetime_secs: 300,
-            idle_timeout_secs: 60,
-            retry_count: 3,
-        }
-    }
-}
-
-/// Custom connection manager for bb8 pool
-#[derive(Clone)]
-struct RedisConnectionManager {
-    client: Client,
-}
-
-#[async_trait]
-impl bb8::ManageConnection for RedisConnectionManager {
-    type Connection = ConnectionManager;
-    type Error = RedisError;
-
-    async fn connect(&self) -> std::result::Result<Self::Connection, Self::Error> {
-        ConnectionManager::new(self.client.clone()).await
-    }
-
-    async fn is_valid(&self, conn: &mut Self::Connection) -> std::result::Result<(), Self::Error> {
-        redis::cmd("PING").query_async(conn).await
-    }
-
-    fn has_broken(&self, _conn: &mut Self::Connection) -> bool {
-        false
+        Self { retry_count: 3 }
     }
 }
 
 impl RedisDb {
-    /// Create with custom configuration
-    pub fn with_config(config: RedisConfig) -> Self {
-        // Create a dummy client - will be replaced in connect()
-        let dummy_client = Client::open("redis://127.0.0.1:6379")
-            .unwrap_or_else(|_| panic!("Failed to create dummy Redis client"));
-
-        Self {
-            pool: Pool::builder().build_unchecked(RedisConnectionManager {
-                client: dummy_client,
-            }),
-            config: Arc::new(config),
-        }
-    }
-
-    /// Get a connection from the pool
-    async fn get_conn(&self) -> Result<bb8::PooledConnection<'_, RedisConnectionManager>> {
-        self.pool
-            .get()
-            .await
-            .map_err(|e: RunError<RedisError>| match e {
-                RunError::TimedOut => DbError::Timeout {
-                    duration_ms: self.config.connection_timeout_ms,
-                },
-                RunError::User(e) => e.into(),
-            })
-    }
-
     /// Execute with retry logic
     async fn execute_with_retry<F, T>(&self, f: F) -> Result<T>
     where
@@ -103,10 +40,9 @@ impl RedisDb {
     {
         let mut last_error = None;
         let attempts = std::cmp::max(1, self.config.retry_count);
+        let mut conn = self.conn.clone();
 
         for _ in 0..attempts {
-            let mut conn = self.get_conn().await?;
-
             match f(&mut conn).await {
                 Ok(result) => return Ok(result),
                 Err(e) if Self::is_retryable(&e) => {
@@ -129,10 +65,7 @@ impl RedisDb {
 
     /// Check if error is retryable
     fn is_retryable(error: &RedisError) -> bool {
-        matches!(
-            error.kind(),
-            ErrorKind::IoError | ErrorKind::BusyLoadingError | ErrorKind::TryAgain
-        )
+        matches!(error.kind(), ErrorKind::Io | ErrorKind::Server(_))
     }
 }
 
@@ -148,30 +81,15 @@ impl BasicKvStore for RedisDb {
             source: Some(Box::new(e)),
         })?;
 
-        // Test connection
-        let test_conn = ConnectionManager::new(client.clone()).await?;
-        drop(test_conn);
-
-        // Create connection pool
-        let manager = RedisConnectionManager {
-            client: client.clone(),
-        };
-
-        let pool = Pool::builder()
-            .max_size(config.max_connections)
-            .min_idle(Some(config.min_connections))
-            .connection_timeout(Duration::from_millis(config.connection_timeout_ms))
-            .idle_timeout(Some(Duration::from_secs(config.idle_timeout_secs)))
-            .max_lifetime(Some(Duration::from_secs(config.max_lifetime_secs)))
-            .build(manager)
+        let conn = ConnectionManager::new(client)
             .await
             .map_err(|e| DbError::Connection {
-                message: format!("Failed to create connection pool: {}", e),
+                message: format!("Failed to create connection manager: {}", e),
                 source: Some(Box::new(e)),
             })?;
 
         Ok(Self {
-            pool,
+            conn,
             config: Arc::new(config),
         })
     }
@@ -264,12 +182,12 @@ impl AdvancedKvStore for RedisDb {
     }
 
     fn pool_stats(&self) -> PoolStats {
-        let state = self.pool.state();
+        // ConnectionManager doesn't have pool stats - return dummy values
         PoolStats {
-            size: state.connections,
-            idle: state.idle_connections,
-            active: state.connections - state.idle_connections,
-            max_size: self.config.max_connections,
+            size: 1,
+            idle: 1,
+            active: 0,
+            max_size: 1,
         }
     }
 
@@ -277,12 +195,17 @@ impl AdvancedKvStore for RedisDb {
     where
         T: DeserializeOwned,
     {
-        let values: Vec<Option<Vec<u8>>> = self
-            .execute_with_retry(|conn| {
-                let keys: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
-                Box::pin(async move { conn.get(keys).await })
-            })
-            .await?;
+        let mut conn = self.conn.clone();
+        let keys: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+
+        // Build MGET command manually since the AsyncCommands trait doesn't have a nice mget
+        let values: Vec<Option<Vec<u8>>> = {
+            let mut cmd = redis::cmd("MGET");
+            for key in &keys {
+                cmd.arg(key);
+            }
+            cmd.query_async(&mut conn).await?
+        };
 
         let mut results = Vec::with_capacity(values.len());
         for value_opt in values {
@@ -324,7 +247,7 @@ impl AdvancedKvStore for RedisDb {
         let attempts = std::cmp::max(1, self.config.retry_count);
 
         for _ in 0..attempts {
-            let mut conn = self.get_conn().await?;
+            let mut conn = self.conn.clone();
 
             let result = {
                 let mut pipe = redis::pipe();
@@ -332,7 +255,7 @@ impl AdvancedKvStore for RedisDb {
                 for (key, value) in &items_owned {
                     pipe.set(key, value);
                 }
-                pipe.query_async(&mut *conn).await
+                pipe.query_async(&mut conn).await
             };
 
             match result {
@@ -539,7 +462,7 @@ impl RedisDb {
 
     /// Scan for keys matching pattern (SCAN)
     pub async fn scan_keys(&self, pattern: &str) -> Result<Vec<String>> {
-        let mut conn = self.get_conn().await?;
+        let mut conn = self.conn.clone();
         let mut cursor = 0u64;
         let mut keys = Vec::new();
 
@@ -550,7 +473,7 @@ impl RedisDb {
                 .arg(pattern)
                 .arg("COUNT")
                 .arg(100)
-                .query_async(&mut *conn)
+                .query_async(&mut conn)
                 .await?;
 
             keys.extend(batch);

@@ -212,8 +212,8 @@ impl From<redis::RedisError> for DbError {
         use redis::ErrorKind;
 
         match err.kind() {
-            // Connection errors
-            ErrorKind::IoError | ErrorKind::ClientError => DbError::Connection {
+            // Connection/IO errors
+            ErrorKind::Io | ErrorKind::Client => DbError::Connection {
                 message: err.to_string(),
                 source: Some(Box::new(err)),
             },
@@ -225,40 +225,31 @@ impl From<redis::RedisError> for DbError {
             },
 
             // Type errors (wrong data type for operation)
-            ErrorKind::TypeError => DbError::QueryExecution {
+            ErrorKind::UnexpectedReturnType => DbError::QueryExecution {
                 message: format!("type error: {}", err),
                 source: Some(Box::new(err)),
             },
 
-            // Command execution errors
-            ErrorKind::ExecAbortError => DbError::Transaction {
-                message: "transaction aborted".to_string(),
+            // Parse errors
+            ErrorKind::Parse => DbError::Serialization {
+                message: format!("parse error: {}", err),
                 source: Some(Box::new(err)),
             },
 
-            // Busy/Loading errors
-            ErrorKind::BusyLoadingError => DbError::Connection {
-                message: "server is busy loading dataset".to_string(),
+            // Invalid client config
+            ErrorKind::InvalidClientConfig => DbError::Configuration {
+                message: err.to_string(),
+            },
+
+            // Server errors (covers BusyLoading, TryAgain, ClusterDown, etc.)
+            ErrorKind::Server(_) => DbError::Connection {
+                message: format!("server error: {}", err),
                 source: Some(Box::new(err)),
             },
 
-            // Read-only errors
-            ErrorKind::ReadOnly => DbError::QueryExecution {
-                message: "server is in read-only mode".to_string(),
-                source: Some(Box::new(err)),
-            },
-
-            // Cluster errors
-            ErrorKind::ClusterDown | ErrorKind::CrossSlot | ErrorKind::TryAgain => {
-                DbError::Connection {
-                    message: format!("cluster error: {}", err),
-                    source: Some(Box::new(err)),
-                }
-            }
-
-            // Master down error
-            ErrorKind::MasterDown => DbError::Connection {
-                message: "master is down".to_string(),
+            // Cluster connection errors
+            ErrorKind::ClusterConnectionNotFound => DbError::Connection {
+                message: "cluster connection not found".to_string(),
                 source: Some(Box::new(err)),
             },
 
@@ -280,27 +271,6 @@ impl From<bincode::Error> for DbError {
         DbError::Serialization {
             message: format!("bincode error: {}", err),
             source: Some(Box::new(err)),
-        }
-    }
-}
-
-// ============================================================================
-// BB8 POOL ERROR CONVERSION
-// ============================================================================
-
-#[cfg(feature = "redis")]
-impl<E> From<bb8::RunError<E>> for DbError
-where
-    E: std::error::Error + Send + Sync + 'static,
-{
-    fn from(err: bb8::RunError<E>) -> Self {
-        use bb8::RunError;
-
-        match err {
-            RunError::User(user_err) => DbError::Internal {
-                source: Box::new(user_err),
-            },
-            RunError::TimedOut => DbError::Timeout { duration_ms: 30000 },
         }
     }
 }

@@ -27,7 +27,7 @@ pub fn create_app(
         app_state.decoding_key.clone(),
         app_state.jwt_config.issuer.clone(),
         app_state.jwt_config.audience.clone(),
-        app_state.redis_pool.clone(),
+        app_state.redis_conn.clone(),
         Arc::new(app_state.token_service.clone()),
         Arc::new(app_state.session_service.clone()),
     );
@@ -43,7 +43,7 @@ pub fn create_app(
         .app_data(web::Data::new(app_state.clone()))
         .app_data(web::Data::new(app_state.user_repo.clone()))
         .app_data(web::Data::new(app_state.db.clone()))
-        .app_data(web::Data::new(app_state.redis_pool.clone()))
+        .app_data(web::Data::new(app_state.redis_conn.clone()))
         .app_data(web::Data::new(app_state.http_client.clone()))
         .app_data(web::Data::new(Arc::new(app_state.token_service.clone())))
         .app_data(web::Data::new(Arc::new(app_state.oauth_service.clone())))

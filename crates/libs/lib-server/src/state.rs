@@ -3,7 +3,6 @@
 //! Central application state containing all dependencies
 
 use clickhouse::Client as ClickHouseClient;
-use deadpool_redis::Pool as RedisPool;
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use lib_auth::config::{AuthConfig, JwtConfig, OAuthProviderConfig, RedisConfig};
 use lib_auth::repository::{PostgresUserRepository, UserRepository};
@@ -20,6 +19,7 @@ use lib_middleware::{
     ApiKeyMiddleware, SecurityType,
     repository::api_key_repository::{ApiKeyRepository, PostgresApiKeyRepository},
 };
+use redis::aio::ConnectionManager;
 use reqwest::Client;
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
@@ -36,7 +36,7 @@ use url::Url;
 pub struct AppState {
     // Database and infrastructure
     pub db: Arc<DatabaseConnection>,
-    pub redis_pool: Arc<RedisPool>,
+    pub redis_conn: ConnectionManager,
     pub http_client: Client,
 
     // DB Repository
@@ -83,7 +83,7 @@ impl AppState {
         let db = Arc::new(Self::init_database(&config.database).await?);
 
         // Initialize Redis connection
-        let redis_pool = Self::init_redis(&config.redis).await?;
+        let redis_conn = Self::init_redis(&config.redis).await?;
 
         // Initialize HTTP client
         let http_client = Self::init_http_client()?;
@@ -114,13 +114,13 @@ impl AppState {
         // Initialize services
         let token_service = TokenService::new(
             Arc::new(config.jwt.clone()),
-            Arc::new(redis_pool.clone()),
+            redis_conn.clone(),
             Arc::new(encoding_key.clone()),
             Arc::new(decoding_key.clone()),
         );
 
         let oauth_service = OAuthService::new(
-            Arc::new(redis_pool.clone()),
+            redis_conn.clone(),
             http_client.clone(),
             config.oauth.providers.clone(),
             Arc::new(token_service.clone()),
@@ -132,7 +132,7 @@ impl AppState {
 
         let email_service = EmailService::new(
             &config.email,
-            Arc::new(redis_pool.clone()),
+            redis_conn.clone(),
             config.otp.otp_length,
             config.otp.email_verification_expiry_minutes,
         )?;
@@ -158,13 +158,13 @@ impl AppState {
         .await?;
 
         // Initialize session service with 30-minute inactivity TTL
-        let session_service = SessionService::new(Arc::new(redis_pool.clone()), 30 * 60);
+        let session_service = SessionService::new(redis_conn.clone(), 30 * 60);
 
         tracing::info!("AppState initialization completed successfully");
 
         Ok(Arc::new(Self {
             db,
-            redis_pool: Arc::new(redis_pool),
+            redis_conn,
             http_client,
             user_repo,
             jwt_config: config.jwt.clone(),
@@ -257,17 +257,17 @@ impl AppState {
             .map_err(|e| format!("Failed to connect to database: {}", e).into())
     }
 
-    /// Initialize Redis connection pool
+    /// Initialize Redis connection manager
     async fn init_redis(
         config: &RedisConfig,
-    ) -> Result<RedisPool, Box<dyn std::error::Error + Send + Sync>> {
-        use deadpool_redis::{Config as RedisConfig, Runtime};
+    ) -> Result<ConnectionManager, Box<dyn std::error::Error + Send + Sync>> {
         let sanitized_url = Self::sanitize_url(&config.url);
         info!("Connecting to Redis: {}", sanitized_url);
-        let redis_config = RedisConfig::from_url(&config.url);
-        redis_config
-            .create_pool(Some(Runtime::Tokio1))
-            .map_err(|e| format!("Failed to create Redis pool: {}", e).into())
+        let client = redis::Client::open(config.url.as_str())
+            .map_err(|e| format!("Failed to create Redis client: {}", e))?;
+        ConnectionManager::new(client)
+            .await
+            .map_err(|e| format!("Failed to create Redis connection manager: {}", e).into())
     }
 
     /// Initialize HTTP client for Oauth service

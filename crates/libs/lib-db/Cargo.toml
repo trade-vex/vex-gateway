@@ -25,7 +25,6 @@ sqlx = { version = "0.8.4", optional = true }
 redis = { workspace = true, optional = true }
 
 # Redis-specific dependencies (only needed with Redis)
-bb8 = { version = "0.8", optional = true }
 bincode = { version = "1.3", optional = true }
 futures = { version = "0.3", optional = true }
 
@@ -39,12 +38,9 @@ postgres = [
     "sqlx/runtime-tokio-rustls"  # Enable tokio runtime with rustls
 ]
 
-# Redis feature 
+# Redis feature
 redis = [
     "dep:redis",          # Enable redis dependency
-    "redis/tokio-comp",   # Enable tokio support in redis
-    "redis/connection-manager",  # Enable connection manager
-    "dep:bb8",            # Enable bb8 for connection pooling
     "dep:bincode",        # Enable bincode for serialization
     "dep:futures"         # Enable futures for BoxFuture
 ]

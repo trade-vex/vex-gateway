@@ -4,11 +4,10 @@ use crate::api_key::{
     security::ApiKeyConfig,
 };
 use async_trait::async_trait;
-use bb8::Pool;
 use redis::{aio::ConnectionManager, AsyncCommands, Client, ErrorKind, RedisError};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 /// this function redacts an API key for safe logging by showing only the last 4 characters
 /// or "***" for short keys to avoid leaking sensitive data
@@ -23,7 +22,7 @@ fn redact_key(key: &str) -> String {
 
 #[derive(Clone)]
 pub struct RedisApiKeyCache {
-    pool: Pool<RedisConnectionManager>,
+    conn: ConnectionManager,
     key_prefix: String,
     stats: Arc<CacheStatsInternal>,
 }
@@ -41,11 +40,6 @@ struct CacheStatsInternal {
 pub struct RedisCacheConfig {
     pub url: String,
     pub key_prefix: String,
-    pub max_connections: u32,
-    pub min_connections: u32,
-    pub connection_timeout_ms: u64,
-    pub max_lifetime_secs: u64,
-    pub idle_timeout_secs: u64,
     pub retry_count: u32,
 }
 
@@ -54,37 +48,8 @@ impl Default for RedisCacheConfig {
         Self {
             url: "redis://localhost:6379".to_string(),
             key_prefix: "api_key:".to_string(),
-            max_connections: 20,
-            min_connections: 5,
-            connection_timeout_ms: 1000,
-            max_lifetime_secs: 300,
-            idle_timeout_secs: 60,
             retry_count: 3,
         }
-    }
-}
-
-#[derive(Clone)]
-struct RedisConnectionManager {
-    client: Client,
-}
-
-#[async_trait]
-impl bb8::ManageConnection for RedisConnectionManager {
-    type Connection = ConnectionManager;
-    type Error = RedisError;
-
-    async fn connect(&self) -> std::result::Result<Self::Connection, Self::Error> {
-        ConnectionManager::new(self.client.clone()).await
-    }
-
-    async fn is_valid(&self, conn: &mut Self::Connection) -> std::result::Result<(), Self::Error> {
-        let _: String = redis::cmd("PING").query_async(conn).await?;
-        Ok(())
-    }
-
-    fn has_broken(&self, _conn: &mut Self::Connection) -> bool {
-        false
     }
 }
 
@@ -93,31 +58,14 @@ impl RedisApiKeyCache {
         let client = Client::open(config.url.clone())
             .map_err(|e| ApiKeyError::Internal(format!("Failed to create Redis client: {}", e)))?;
 
-        let manager = RedisConnectionManager { client };
-
-        let pool = Pool::builder()
-            .max_size(config.max_connections)
-            .min_idle(Some(config.min_connections))
-            .connection_timeout(Duration::from_millis(config.connection_timeout_ms))
-            .max_lifetime(Some(Duration::from_secs(config.max_lifetime_secs)))
-            .idle_timeout(Some(Duration::from_secs(config.idle_timeout_secs)))
-            .build(manager)
-            .await
-            .map_err(|e| ApiKeyError::Internal(format!("Failed to create Redis pool: {}", e)))?;
+        let conn = ConnectionManager::new(client).await.map_err(|e| {
+            ApiKeyError::Internal(format!("Failed to create Redis connection: {}", e))
+        })?;
 
         Ok(Self {
-            pool,
+            conn,
             key_prefix: config.key_prefix,
             stats: Arc::new(CacheStatsInternal::default()),
-        })
-    }
-
-    async fn get_conn(
-        &self,
-    ) -> Result<bb8::PooledConnection<'_, RedisConnectionManager>, ApiKeyError> {
-        self.pool.get().await.map_err(|e| {
-            error!("Failed to get Redis connection: {}", e);
-            ApiKeyError::Internal(format!("Redis connection error: {}", e))
         })
     }
 
@@ -130,36 +78,19 @@ impl RedisApiKeyCache {
         >,
     {
         let mut last_error = None;
+        let mut conn = self.conn.clone();
 
         for attempt in 0..=3 {
-            match self.get_conn().await {
-                Ok(mut conn) => match f(&mut conn).await {
-                    Ok(result) => return Ok(result),
-                    Err(e) => {
-                        last_error = Some(e);
-                        if !self.is_retryable(last_error.as_ref().unwrap()) {
-                            break;
-                        }
-                        if attempt < 3 {
-                            debug!(
-                                "Redis operation failed, retrying (attempt {}/3): {}",
-                                attempt + 1,
-                                last_error.as_ref().unwrap()
-                            );
-                            tokio::time::sleep(Duration::from_millis(100 * (attempt + 1) as u64))
-                                .await;
-                        }
-                    }
-                },
+            match f(&mut conn).await {
+                Ok(result) => return Ok(result),
                 Err(e) => {
-                    last_error = Some(RedisError::from((
-                        ErrorKind::IoError,
-                        "Connection pool error",
-                        e.to_string(),
-                    )));
+                    last_error = Some(e);
+                    if !self.is_retryable(last_error.as_ref().unwrap()) {
+                        break;
+                    }
                     if attempt < 3 {
                         debug!(
-                            "Redis connection failed, retrying (attempt {}/3): {}",
+                            "Redis operation failed, retrying (attempt {}/3): {}",
                             attempt + 1,
                             last_error.as_ref().unwrap()
                         );
@@ -179,7 +110,7 @@ impl RedisApiKeyCache {
     }
 
     fn is_retryable(&self, error: &RedisError) -> bool {
-        matches!(error.kind(), ErrorKind::IoError)
+        matches!(error.kind(), ErrorKind::Io | ErrorKind::Server(_))
     }
 
     fn build_key(&self, key: &str) -> String {
