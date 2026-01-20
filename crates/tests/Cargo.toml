@@ -21,7 +21,7 @@ vex-networking = { workspace = true }
 vex-config = { workspace = true }
 sea-orm = { workspace = true }
 tracing = { workspace = true }
-rust_decimal = "1"
+rust_decimal = "1.40"
 
 # Dev dependencies are used exclusively when running tests or examples
 # They do not get included in the final application binary!

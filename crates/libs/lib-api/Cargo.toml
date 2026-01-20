@@ -22,9 +22,9 @@ lib-core = { path = "../lib-core" }
 vex-networking ={ workspace = true }
 vex-config = { workspace = true}
 common = { workspace = true}
-rust_decimal = "1"
+rust_decimal = "1.40"
 
 [dev-dependencies]
 tokio-test = "0.4"
 async-trait = "0.1"
-rust_decimal = "1"
+rust_decimal = "1.40"

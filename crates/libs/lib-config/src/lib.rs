@@ -63,7 +63,7 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::util::find_config_dir;
 
@@ -74,6 +74,11 @@ pub use lib_auth::config::AuthConfig;
 ///
 /// Contains all configuration settings organized by category.
 /// This is the primary configuration type that applications should use.
+///
+/// # Security Note
+/// This struct intentionally does not derive `Serialize` to prevent accidental
+/// serialization of sensitive configuration values (database credentials, JWT keys, etc.)
+/// into logs, responses, or debug output.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     /// Current runtime environment (determines validation rules)
@@ -156,9 +161,11 @@ impl Config {
         let mut config: Config = config.try_deserialize().map_err(ConfigError::LoadError)?;
         config.environment = environment;
 
-        // Override frontend_url from FRONTEND_URL environment variable if set
+        // Override frontend_url from FRONTEND_URL environment variable if set and non-empty
         if let Ok(frontend_url) = std::env::var("FRONTEND_URL") {
-            config.auth.server.frontend_url = frontend_url;
+            if !frontend_url.trim().is_empty() {
+                config.auth.server.frontend_url = frontend_url;
+            }
         }
 
         // Log what we loaded before validation
@@ -227,7 +234,7 @@ impl Config {
         Self {
             environment: Environment::Development,
             server: ServerConfig::from_env().unwrap_or_else(|_| ServerConfig {
-                host: "0.0.0.0".to_string(),
+                host: "127.0.0.1".to_string(),
                 port: 8081,
             }),
             logging: LoggingConfig {
@@ -236,8 +243,10 @@ impl Config {
                 colored: true,
                 file_path: None,
             },
-            auth: AuthConfig::from_env_with_oauth()
-                .unwrap_or_else(|_| AuthConfig::development_defaults()),
+            auth: AuthConfig::from_env_with_oauth().unwrap_or_else(|err| {
+                warn!("AuthConfig env loading failed; using development defaults: {err}");
+                AuthConfig::development_defaults()
+            }),
         }
     }
 

@@ -89,9 +89,10 @@ pub async fn handle_oauth_callback(
     // Check for state cookie (present for web, absent for mobile)
     let cookie_name = format!("oauth_state_{}", provider.as_str());
     let cookie_state = req.cookie(&cookie_name).map(|c| c.value().to_string());
+    let has_state_cookie = cookie_state.is_some();
 
     // For web flow: enforce state cookie binding (prevents login CSRF / session swapping)
-    // Mobile apps don't have cookies, they use app_challenge verification instead
+    // If cookie exists, it must match the query state
     if let Some(ref state_from_cookie) = cookie_state
         && state_from_cookie != &query.state
     {
@@ -103,6 +104,12 @@ pub async fn handle_oauth_callback(
         .await
     {
         Ok((response, meta)) => {
+            // For web flows (non-app), require the state cookie to prevent CSRF
+            // Mobile apps don't have cookies, they use app_challenge verification instead
+            if meta.app_challenge.is_none() && !has_state_cookie {
+                return Err(AuthError::StateMismatch);
+            }
+
             // Get user_id and user_info from the response
             let user_id = response.user.user_id;
             let user_info = response.user.clone();
@@ -177,12 +184,13 @@ pub async fn handle_oauth_callback(
                 _ => {
                     // For web: session cookie only; frontend can call /profile to fetch user info
                     // Removed user_info cookie - it was XSS-sensitive (not HttpOnly)
+                    // Use SessionService TTL for cookie max_age to align client/server state
                     let session_cookie = Cookie::build("session_id", session_id.clone())
                         .path("/")
                         .http_only(true)
                         .secure(is_secure)
                         .same_site(SameSite::Strict)
-                        .max_age(Duration::seconds(response.expires_in as i64))
+                        .max_age(Duration::seconds(session_service.ttl_seconds() as i64))
                         .finish();
 
                     // Clear the oauth_state cookie on success

@@ -219,6 +219,20 @@ pub async fn place_order(
         order_type,
     } = order_data;
 
+    // Validate market_id fits in i32 (database storage type)
+    if market_id > i32::MAX as u32 {
+        return HttpResponse::BadRequest().json(OrderResponse {
+            order_id: 0,
+            client_order_id: 0,
+            status: "rejected".to_string(),
+            message: format!(
+                "market_id {} exceeds maximum allowed value {}",
+                market_id,
+                i32::MAX
+            ),
+        });
+    }
+
     let command_price = match order_type {
         OrderType::Limit => price,
         OrderType::Market => {

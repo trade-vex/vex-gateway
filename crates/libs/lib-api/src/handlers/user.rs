@@ -93,7 +93,7 @@ pub async fn get_balances(
             tracing::error!("failed to get user balances: {}", e);
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "failed to retrieve balances",
-                "message": e.to_string()
+                "message": "An internal error occurred. Please try again later."
             })))
         }
     }
@@ -182,7 +182,7 @@ pub struct OrdersQuery {
 pub async fn get_open_orders(
     user: AuthenticatedUserId,
     query: web::Query<OrdersQuery>,
-    order_store: web::Data<Arc<OrderStore>>,
+    _order_store: web::Data<Arc<OrderStore>>,
     trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
     let raw = user.0.as_u128();
@@ -204,13 +204,14 @@ pub async fn get_open_orders(
             tracing::error!("failed to count open orders for user_id {}: {}", user_id, e);
             return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "failed to retrieve open orders",
-                "message": e.to_string()
+                "message": "An internal error occurred. Please try again later."
             })));
         }
     };
 
-    match order_store
-        .get_user_orders_paginated(user_id, offset, limit_u64, query.market_id)
+    // Use trading_repo for paginated orders to ensure consistency with count
+    match trading_repo
+        .get_open_orders_paginated(user_id, offset, limit_u64, query.market_id)
         .await
     {
         Ok(orders) => {
@@ -237,7 +238,7 @@ pub async fn get_open_orders(
             tracing::error!("failed to get open orders for user_id {}: {}", user_id, e);
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "failed to retrieve open orders",
-                "message": e.to_string()
+                "message": "An internal error occurred. Please try again later."
             })))
         }
     }
@@ -319,7 +320,7 @@ pub async fn get_open_orders(
 pub async fn get_order_history(
     user: AuthenticatedUserId,
     query: web::Query<OrdersQuery>,
-    order_store: web::Data<Arc<OrderStore>>,
+    _order_store: web::Data<Arc<OrderStore>>,
     trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
     let raw = user.0.as_u128();
@@ -345,13 +346,14 @@ pub async fn get_order_history(
             );
             return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "failed to retrieve order history",
-                "message": e.to_string()
+                "message": "An internal error occurred. Please try again later."
             })));
         }
     };
 
-    match order_store
-        .get_user_order_history_paginated(user_id, offset, limit_u64, query.market_id)
+    // Use trading_repo (not order_store cache) for consistency with count_order_history
+    match trading_repo
+        .get_order_history_paginated(user_id, offset, limit_u64, query.market_id)
         .await
     {
         Ok(orders) => {
@@ -378,7 +380,7 @@ pub async fn get_order_history(
             tracing::error!("failed to get order history for user_id {}: {}", user_id, e);
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "failed to retrieve order history",
-                "message": e.to_string()
+                "message": "An internal error occurred. Please try again later."
             })))
         }
     }
@@ -661,7 +663,15 @@ pub async fn get_favorite_markets(
         Ok(favorites) => {
             let market_ids: Vec<u32> = favorites
                 .into_iter()
-                .map(|fav| fav.market_id as u32)
+                .filter_map(|fav| {
+                    u32::try_from(fav.market_id).ok().or_else(|| {
+                        tracing::warn!(
+                            market_id = fav.market_id,
+                            "Invalid market_id (negative value), skipping"
+                        );
+                        None
+                    })
+                })
                 .collect();
 
             let response = FavoriteMarketsListResponse { market_ids };
@@ -672,7 +682,7 @@ pub async fn get_favorite_markets(
             tracing::error!("failed to get favorite markets: {}", e);
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "failed to retrieve favorite markets",
-                "message": e.to_string()
+                "message": "An internal error occurred. Please try again later."
             })))
         }
     }
@@ -743,51 +753,24 @@ pub async fn toggle_favorite_market(
     let user_id = ((raw >> 64) as u64) ^ (raw as u64);
     let market_id = request.market_id;
 
-    // Check if market is already favorited
-    match trading_repo.is_market_favorited(user_id, market_id).await {
-        Ok(is_favorited) => {
-            if is_favorited {
-                // Remove from favorites
-                match trading_repo
-                    .remove_favorite_market(user_id, market_id)
-                    .await
-                {
-                    Ok(_) => Ok(HttpResponse::Ok().json(serde_json::json!({
-                        "success": true,
-                        "action": "removed",
-                        "market_id": market_id
-                    }))),
-                    Err(e) => {
-                        tracing::error!("failed to remove favorite market: {}", e);
-                        Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                            "error": "failed to remove favorite market",
-                            "message": e.to_string()
-                        })))
-                    }
-                }
-            } else {
-                // Add to favorites
-                match trading_repo.add_favorite_market(user_id, market_id).await {
-                    Ok(_) => Ok(HttpResponse::Ok().json(serde_json::json!({
-                        "success": true,
-                        "action": "added",
-                        "market_id": market_id
-                    }))),
-                    Err(e) => {
-                        tracing::error!("failed to add favorite market: {}", e);
-                        Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                            "error": "failed to add favorite market",
-                            "message": e.to_string()
-                        })))
-                    }
-                }
-            }
+    // Use atomic toggle operation to prevent race conditions
+    match trading_repo
+        .toggle_favorite_market(user_id, market_id)
+        .await
+    {
+        Ok(was_added) => {
+            let action = if was_added { "added" } else { "removed" };
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "action": action,
+                "market_id": market_id
+            })))
         }
         Err(e) => {
-            tracing::error!("failed to check if market is favorited: {}", e);
+            tracing::error!("failed to toggle favorite market: {}", e);
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "failed to toggle favorite market",
-                "message": e.to_string()
+                "message": "An internal error occurred. Please try again later."
             })))
         }
     }

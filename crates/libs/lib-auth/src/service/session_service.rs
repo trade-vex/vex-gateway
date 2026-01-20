@@ -45,6 +45,11 @@ impl SessionService {
         }
     }
 
+    /// Get the session TTL in seconds (for cookie max_age alignment)
+    pub fn ttl_seconds(&self) -> u64 {
+        self.session_ttl_seconds
+    }
+
     /// Create a new session for a user
     pub async fn create_session(
         &self,
@@ -133,6 +138,7 @@ impl SessionService {
     }
 
     /// Update tokens in an existing session
+    /// Uses a single Redis connection for read-modify-write to minimize race conditions
     pub async fn update_session_tokens(
         &self,
         session_id: &str,
@@ -151,22 +157,16 @@ impl SessionService {
             refresh_token,
         };
 
-        let session_json = serde_json::to_string(&updated_session)
+        let updated_json = serde_json::to_string(&updated_session)
             .map_err(|e| AuthError::Redis(format!("Failed to serialize session: {}", e)))?;
 
         let mut conn = self.conn.clone();
 
         // Update the session with new tokens
         let _: () = conn
-            .set(&session_key, session_json)
+            .set_ex(&session_key, updated_json, self.session_ttl_seconds)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to update session: {}", e)))?;
-
-        // Reset TTL to the configured session TTL value
-        let _: () = conn
-            .expire(&session_key, self.session_ttl_seconds as i64)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to extend session TTL: {}", e)))?;
 
         Ok(())
     }

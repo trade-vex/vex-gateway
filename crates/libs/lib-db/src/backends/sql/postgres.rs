@@ -30,10 +30,10 @@ impl Default for DbConfig {
     fn default() -> Self {
         Self {
             max_connections: 50,
-            min_connections: 10,
-            acquire_timeout_ms: 500,
-            idle_timeout_secs: 300,  // 5 minutes
-            max_lifetime_secs: 1800, // 30 minutes
+            min_connections: 5,
+            acquire_timeout_ms: 5000, // 5 seconds - allows for CI/container startup latency
+            idle_timeout_secs: 300,   // 5 minutes
+            max_lifetime_secs: 1800,  // 30 minutes
         }
     }
 }

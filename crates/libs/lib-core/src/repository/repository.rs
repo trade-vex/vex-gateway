@@ -83,6 +83,9 @@ pub trait TradingRepository: Send + Sync {
     async fn add_favorite_market(&self, user_id: u64, market_id: u32) -> Result<()>;
     async fn remove_favorite_market(&self, user_id: u64, market_id: u32) -> Result<()>;
     async fn is_market_favorited(&self, user_id: u64, market_id: u32) -> Result<bool>;
+    /// Atomically toggle a market's favorite status.
+    /// Returns Ok(true) if the market was added to favorites, Ok(false) if removed.
+    async fn toggle_favorite_market(&self, user_id: u64, market_id: u32) -> Result<bool>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -492,6 +495,53 @@ impl TradingRepository for PostgresTradingRepository {
             .await?;
 
         Ok(count > 0)
+    }
+
+    async fn toggle_favorite_market(&self, user_id: u64, market_id: u32) -> Result<bool> {
+        use sea_orm::TransactionTrait;
+
+        let market_id_i32 = market_id as i32;
+
+        // Use a transaction to ensure atomicity
+        let txn = self.db.begin().await?;
+
+        // Check if already favorited within the transaction
+        let existing = UserFavoriteMarketEntity::find()
+            .filter(
+                UserFavoriteMarketColumn::UserId
+                    .eq(user_id as i64)
+                    .and(UserFavoriteMarketColumn::MarketId.eq(market_id_i32)),
+            )
+            .one(&txn)
+            .await?;
+
+        let was_added = if existing.is_some() {
+            // Remove the favorite
+            UserFavoriteMarketEntity::delete_many()
+                .filter(
+                    UserFavoriteMarketColumn::UserId
+                        .eq(user_id as i64)
+                        .and(UserFavoriteMarketColumn::MarketId.eq(market_id_i32)),
+                )
+                .exec(&txn)
+                .await?;
+            false
+        } else {
+            // Add the favorite
+            let favorite = UserFavoriteMarketActiveModel {
+                user_id: Set(user_id as i64),
+                market_id: Set(market_id_i32),
+                favorited_at: Set(Some(chrono::Utc::now())),
+                ..Default::default()
+            };
+            UserFavoriteMarketEntity::insert(favorite)
+                .exec(&txn)
+                .await?;
+            true
+        };
+
+        txn.commit().await?;
+        Ok(was_added)
     }
 }
 

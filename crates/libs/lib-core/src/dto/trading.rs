@@ -27,10 +27,14 @@ impl std::str::FromStr for Side {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "Bid" => Ok(Side::Bid),
-            "Ask" => Ok(Side::Ask),
-            _ => Err(format!("Invalid side: {}", s)),
+        // Case-insensitive matching with common aliases
+        match s.to_lowercase().as_str() {
+            "bid" | "buy" => Ok(Side::Bid),
+            "ask" | "sell" => Ok(Side::Ask),
+            _ => Err(format!(
+                "Invalid side: '{}'. Expected: Bid, Ask, Buy, or Sell",
+                s
+            )),
         }
     }
 }
@@ -151,14 +155,33 @@ pub struct ToggleFavoriteMarketRequest {
 // Conversion implementations
 impl From<OrderModel> for OrderResponse {
     fn from(model: OrderModel) -> Self {
-        let remaining_size = model.order_size - model.filled_size;
+        // Defensive arithmetic: ensure remaining_size is never negative
+        let remaining_size = if model.order_size >= model.filled_size {
+            model.order_size - model.filled_size
+        } else {
+            tracing::warn!(
+                order_id = %model.order_order_id,
+                order_size = %model.order_size,
+                filled_size = %model.filled_size,
+                "filled_size exceeds order_size, returning zero remaining"
+            );
+            Decimal::ZERO
+        };
+        let side = model.order_side.parse().unwrap_or_else(|_| {
+            tracing::warn!(
+                order_id = %model.order_order_id,
+                order_side = %model.order_side,
+                "Invalid order_side value, defaulting to Bid"
+            );
+            Side::Bid
+        });
         Self {
             order_id: model.order_order_id,
             user_id: model.order_user_id,
             market_id: model.market_id as u32,
             price: model.order_price,
             size: remaining_size,
-            side: model.order_side.parse().unwrap_or(Side::Bid),
+            side,
             timestamp: model.order_timestamp as u64,
             time_in_force: model.time_in_force,
             status: model.status,
@@ -181,13 +204,21 @@ impl From<UserBalanceModel> for UserBalanceResponse {
 
 impl From<OrderModel> for OrderHistoryResponse {
     fn from(model: OrderModel) -> Self {
+        let side = model.order_side.parse().unwrap_or_else(|_| {
+            tracing::warn!(
+                order_id = %model.order_order_id,
+                order_side = %model.order_side,
+                "Invalid order_side value, defaulting to Bid"
+            );
+            Side::Bid
+        });
         Self {
             order_id: model.order_order_id,
             user_id: model.order_user_id,
             market_id: model.market_id as u32,
             price: model.order_price,
             size: model.order_size,
-            side: model.order_side.parse().unwrap_or(Side::Bid),
+            side,
             timestamp: model.order_timestamp as u64,
             time_in_force: model.time_in_force,
             status: model.status,

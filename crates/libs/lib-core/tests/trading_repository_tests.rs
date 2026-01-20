@@ -144,6 +144,7 @@ impl TradingRepository for MockTradingRepository {
         user_id: u64,
         offset: u64,
         limit: u64,
+        _market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>> {
         if self.should_error {
             return Err(TradingError::Database("Mock database error".to_string()));
@@ -172,7 +173,7 @@ impl TradingRepository for MockTradingRepository {
             .collect())
     }
 
-    async fn count_open_orders(&self, user_id: u64) -> Result<u64> {
+    async fn count_open_orders(&self, user_id: u64, _market_id: Option<u32>) -> Result<u64> {
         if self.should_error {
             return Err(TradingError::Database("Mock database error".to_string()));
         }
@@ -244,6 +245,7 @@ impl TradingRepository for MockTradingRepository {
         user_id: u64,
         offset: u64,
         limit: u64,
+        _market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>> {
         if self.should_error {
             return Err(TradingError::Database("Mock database error".to_string()));
@@ -271,7 +273,7 @@ impl TradingRepository for MockTradingRepository {
             .collect())
     }
 
-    async fn count_order_history(&self, user_id: u64) -> Result<u64> {
+    async fn count_order_history(&self, user_id: u64, _market_id: Option<u32>) -> Result<u64> {
         if self.should_error {
             return Err(TradingError::Database("Mock database error".to_string()));
         }
@@ -286,6 +288,13 @@ impl TradingRepository for MockTradingRepository {
             })
             .count();
         Ok(count as u64)
+    }
+
+    async fn toggle_favorite_market(&self, _user_id: u64, _market_id: u32) -> Result<bool> {
+        if self.should_error {
+            return Err(TradingError::Database("Mock database error".to_string()));
+        }
+        Ok(true)
     }
 
     async fn get_user_favorite_markets(

@@ -20,7 +20,8 @@ pub struct ServerConfig {
 impl ServerConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
         Ok(Self {
-            host: env::var("APP_SERVER_HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
+            // Default to 127.0.0.1 for development safety; production should explicitly set APP_SERVER_HOST
+            host: env::var("APP_SERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
             port: env::var("APP_SERVER_PORT")
                 .unwrap_or_else(|_| "8081".to_string())
                 .parse()
