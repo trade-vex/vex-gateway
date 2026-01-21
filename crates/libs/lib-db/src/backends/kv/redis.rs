@@ -380,7 +380,11 @@ impl ExpiringKvStore for RedisDb {
         self.execute_with_retry(move |conn| {
             let key = key.clone();
             let bytes = bytes.clone();
-            Box::pin(async move { conn.set_ex(key, bytes, ttl_secs).await })
+            Box::pin(async move {
+                // Use explicit type parameters to ensure correct Redis command
+                conn.set_ex::<_, _, ()>(key, bytes, ttl_secs).await?;
+                Ok(())
+            })
         })
         .await
     }
@@ -395,6 +399,7 @@ impl ExpiringKvStore for RedisDb {
     }
 
     async fn ttl(&self, key: &str) -> Result<Option<u64>> {
+        // Use TTL command (returns seconds), not PTTL (milliseconds)
         let ttl: i64 = self
             .execute_with_retry(|conn| {
                 let key = key.to_string();
@@ -405,7 +410,7 @@ impl ExpiringKvStore for RedisDb {
         match ttl {
             -2 => Ok(None),           // Key doesn't exist
             -1 => Ok(Some(u64::MAX)), // No TTL set
-            n if n >= 0 => Ok(Some(n as u64)),
+            n if n >= 0 => Ok(Some(n as u64)), // TTL in seconds
             _ => Ok(None),
         }
     }
