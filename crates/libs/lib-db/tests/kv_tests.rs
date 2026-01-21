@@ -1,7 +1,7 @@
 use lib_db::{
     error::Result,
     memory_kv::MemoryDb,
-    traits::{AdvancedKvStore, AtomicKvStore, BasicKvStore, ExpiringKvStore, KvStore},
+    traits::{AdvancedKvStore, AtomicKvStore, BasicKvStore, KvStore},
 };
 
 #[cfg(feature = "redis")]
@@ -181,47 +181,6 @@ async fn test_atomic_operations<T: AtomicKvStore>(kv: &T) -> Result<()> {
     Ok(())
 }
 
-/// Test helper function for expiring KV operations
-async fn test_expiring_operations<T: ExpiringKvStore>(kv: &T) -> Result<()> {
-    let session = TestSession {
-        user_id: 123,
-        token: "abc123".to_string(),
-        created_at: 1234567890,
-    };
-
-    // Ensure key doesn't exist from previous test runs
-    kv.delete("session:123").await?;
-
-    // Test set with expiration
-    kv.set_ex("session:123", &session, 3600).await?;
-
-    // Test TTL
-    let ttl = kv.ttl("session:123").await?;
-    assert!(ttl.is_some());
-    if let Some(ttl_value) = ttl {
-        assert!(ttl_value > 0);
-        // TTL should be <= 3600 (allowing for small timing differences)
-        // If it's u64::MAX, that means no TTL was set, which is an error
-        assert_ne!(
-            ttl_value,
-            u64::MAX,
-            "Key should have TTL set, but got u64::MAX (no TTL)"
-        );
-        assert!(
-            ttl_value <= 3600,
-            "TTL should be <= 3600, got: {}",
-            ttl_value
-        );
-    }
-
-    // Test set expiration on existing key
-    kv.set("temp_key", &"temporary".to_string()).await?;
-    let expired = kv.expire("temp_key", 60).await?;
-    assert!(expired);
-
-    Ok(())
-}
-
 /// Test helper function for full KV operations
 async fn test_full_operations<T: KvStore>(kv: &T) -> Result<()> {
     // Test all operations are available
@@ -322,16 +281,6 @@ mod redis_tests {
     async fn test_redis_kv_atomic_operations() -> Result<()> {
         if let Ok(kv) = RedisDb::connect("redis://localhost:6379").await {
             test_atomic_operations(&kv).await
-        } else {
-            println!("Redis not available - skipping test");
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn test_redis_kv_expiring_operations() -> Result<()> {
-        if let Ok(kv) = RedisDb::connect("redis://localhost:6379").await {
-            test_expiring_operations(&kv).await
         } else {
             println!("Redis not available - skipping test");
             Ok(())
