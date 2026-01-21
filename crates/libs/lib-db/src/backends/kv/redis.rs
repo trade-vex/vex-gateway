@@ -408,8 +408,8 @@ impl ExpiringKvStore for RedisDb {
             .await?;
 
         match ttl {
-            -2 => Ok(None),           // Key doesn't exist
-            -1 => Ok(Some(u64::MAX)), // No TTL set
+            -2 => Ok(None),                    // Key doesn't exist
+            -1 => Ok(Some(u64::MAX)),          // No TTL set
             n if n >= 0 => Ok(Some(n as u64)), // TTL in seconds
             _ => Ok(None),
         }
