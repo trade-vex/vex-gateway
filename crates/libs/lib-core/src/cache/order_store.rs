@@ -74,9 +74,11 @@ impl OrderStore {
     /// Descale an order model using the scaling cache
     fn descale_order(&self, mut order: OrderModel) -> OrderModel {
         if let Some(scaling_cache) = &self.scaling_cache {
-            order.order_price = scaling_cache.scale_price(order.market_id as u32, order.order_price);
+            order.order_price =
+                scaling_cache.scale_price(order.market_id as u32, order.order_price);
             order.order_size = scaling_cache.scale_volume(order.market_id as u32, order.order_size);
-            order.filled_size = scaling_cache.scale_volume(order.market_id as u32, order.filled_size);
+            order.filled_size =
+                scaling_cache.scale_volume(order.market_id as u32, order.filled_size);
         }
         order
     }
@@ -88,9 +90,12 @@ impl OrderStore {
                 .into_iter()
                 .map(|order| {
                     let mut descaled = order.clone();
-                    descaled.order_price = scaling_cache.scale_price(descaled.market_id as u32, descaled.order_price);
-                    descaled.order_size = scaling_cache.scale_volume(descaled.market_id as u32, descaled.order_size);
-                    descaled.filled_size = scaling_cache.scale_volume(descaled.market_id as u32, descaled.filled_size);
+                    descaled.order_price =
+                        scaling_cache.scale_price(descaled.market_id as u32, descaled.order_price);
+                    descaled.order_size =
+                        scaling_cache.scale_volume(descaled.market_id as u32, descaled.order_size);
+                    descaled.filled_size =
+                        scaling_cache.scale_volume(descaled.market_id as u32, descaled.filled_size);
                     descaled
                 })
                 .collect()

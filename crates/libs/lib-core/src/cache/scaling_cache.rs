@@ -1,6 +1,6 @@
 use rust_decimal::Decimal;
-use sea_orm::{DatabaseConnection, Statement};
 use sea_orm::prelude::*;
+use sea_orm::{DatabaseConnection, Statement};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tracing::{debug, info, warn};
@@ -48,10 +48,7 @@ impl ScalingCache {
             WHERE active = true
         "#;
 
-        let stmt = Statement::from_string(
-            sea_orm::DatabaseBackend::Postgres,
-            query.to_string(),
-        );
+        let stmt = Statement::from_string(sea_orm::DatabaseBackend::Postgres, query.to_string());
 
         let result = self
             .db
@@ -96,10 +93,7 @@ impl ScalingCache {
             WHERE active = true
         "#;
 
-        let stmt = Statement::from_string(
-            sea_orm::DatabaseBackend::Postgres,
-            query.to_string(),
-        );
+        let stmt = Statement::from_string(sea_orm::DatabaseBackend::Postgres, query.to_string());
 
         let result = self
             .db
