@@ -189,6 +189,9 @@ async fn test_expiring_operations<T: ExpiringKvStore>(kv: &T) -> Result<()> {
         created_at: 1234567890,
     };
 
+    // Ensure key doesn't exist from previous test runs
+    kv.delete("session:123").await?;
+
     // Test set with expiration
     kv.set_ex("session:123", &session, 3600).await?;
 
@@ -197,7 +200,18 @@ async fn test_expiring_operations<T: ExpiringKvStore>(kv: &T) -> Result<()> {
     assert!(ttl.is_some());
     if let Some(ttl_value) = ttl {
         assert!(ttl_value > 0);
-        assert!(ttl_value <= 3600);
+        // TTL should be <= 3600 (allowing for small timing differences)
+        // If it's u64::MAX, that means no TTL was set, which is an error
+        assert_ne!(
+            ttl_value,
+            u64::MAX,
+            "Key should have TTL set, but got u64::MAX (no TTL)"
+        );
+        assert!(
+            ttl_value <= 3600,
+            "TTL should be <= 3600, got: {}",
+            ttl_value
+        );
     }
 
     // Test set expiration on existing key
