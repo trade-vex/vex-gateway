@@ -193,65 +193,6 @@ async fn test_full_operations<T: KvStore>(kv: &T) -> Result<()> {
     Ok(())
 }
 
-// #[tokio::test]
-// async fn test_memory_kv_basic_operations() -> Result<()> {
-//     let kv = MemoryDb::connect("memory://").await?;
-//     test_basic_operations(&kv).await
-// }
-
-// #[tokio::test]
-// async fn test_memory_kv_advanced_operations() -> Result<()> {
-//     let kv = MemoryDb::connect("memory://").await?;
-//     test_advanced_operations(&kv).await
-// }
-
-// #[tokio::test]
-// async fn test_memory_kv_atomic_operations() -> Result<()> {
-//     let kv = MemoryDb::connect("memory://").await?;
-//     test_atomic_operations(&kv).await
-// }
-
-// #[tokio::test]
-// async fn test_memory_kv_expiring_operations() -> Result<()> {
-//     let kv = MemoryDb::connect("memory://").await?;
-//     test_expiring_operations(&kv).await
-// }
-
-// #[tokio::test]
-// async fn test_memory_kv_full_operations() -> Result<()> {
-//     let kv = MemoryDb::connect("memory://").await?;
-//     test_full_operations(&kv).await
-// }
-
-// #[tokio::test]
-// async fn test_memory_kv_generic_operations() -> Result<()> {
-//     let kv = MemoryDb::connect("memory://").await?;
-
-//     // Test that generic functions work with any BasicKvStore
-//     let cache_data = vec![1, 2, 3, 4, 5];
-//     kv.set("cache:data", &cache_data).await?;
-
-//     let retrieved: Option<Vec<i32>> = kv.get("cache:data").await?;
-//     assert_eq!(retrieved, Some(cache_data));
-
-//     Ok(())
-// }
-
-// #[tokio::test]
-// async fn test_memory_kv_error_handling() -> Result<()> {
-//     let kv = MemoryDb::connect("memory://").await?;
-
-//     // Test getting non-existent key
-//     let result: Option<String> = kv.get("non_existent").await?;
-//     assert_eq!(result, None);
-
-//     // Test deleting non-existent key
-//     let deleted = kv.delete("non_existent").await?;
-//     assert!(!deleted);
-
-//     Ok(())
-// }
-
 // Redis tests (only run if Redis is available)
 #[cfg(feature = "redis")]
 mod redis_tests {
