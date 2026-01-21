@@ -107,7 +107,7 @@ impl TradingRepository for MockTradingRepository {
             .iter()
             .filter(|o| {
                 o.order_user_id == Decimal::from(user_id)
-                    && market_id.map_or(true, |mid| o.market_id == mid as i32)
+                    && market_id.is_none_or(|mid| o.market_id == mid as i32)
             })
             .cloned()
             .collect();
@@ -132,7 +132,7 @@ impl TradingRepository for MockTradingRepository {
             .iter()
             .filter(|o| {
                 o.order_user_id == Decimal::from(user_id)
-                    && market_id.map_or(true, |mid| o.market_id == mid as i32)
+                    && market_id.is_none_or(|mid| o.market_id == mid as i32)
             })
             .count();
         Ok(count as u64)
@@ -195,7 +195,7 @@ impl TradingRepository for MockTradingRepository {
                     && (o.status.to_lowercase() == "cancelled"
                         || o.status.to_lowercase() == "partiallyfilled"
                         || o.status.to_lowercase() == "filled")
-                    && market_id.map_or(true, |mid| o.market_id == mid as i32)
+                    && market_id.is_none_or(|mid| o.market_id == mid as i32)
             })
             .cloned()
             .collect();
@@ -220,7 +220,7 @@ impl TradingRepository for MockTradingRepository {
             .iter()
             .filter(|o| {
                 o.order_user_id == Decimal::from(user_id)
-                    && market_id.map_or(true, |mid| o.market_id == mid as i32)
+                    && market_id.is_none_or(|mid| o.market_id == mid as i32)
                     && (o.status.to_lowercase() == "cancelled"
                         || o.status.to_lowercase() == "partiallyfilled"
                         || o.status.to_lowercase() == "filled")
