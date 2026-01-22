@@ -21,7 +21,6 @@ use lib_core::model::orders::Model as OrderModel;
 use lib_core::model::user_balances::Model as UserBalanceModel;
 use lib_core::model::user_favorite_markets::Model as UserFavoriteMarketModel;
 use lib_core::repository::repository::{TradingError, TradingRepository};
-use rust_decimal::Decimal;
 use std::sync::Arc;
 
 type Result<T> = std::result::Result<T, TradingError>;
@@ -87,7 +86,7 @@ impl TradingRepository for MockTradingRepository {
         Ok(self
             .orders
             .iter()
-            .filter(|o| o.order_user_id == Decimal::from(user_id))
+            .filter(|o| o.order_user_id == user_id as i64)
             .cloned()
             .collect())
     }
@@ -106,7 +105,7 @@ impl TradingRepository for MockTradingRepository {
             .orders
             .iter()
             .filter(|o| {
-                o.order_user_id == Decimal::from(user_id)
+                o.order_user_id == user_id as i64
                     && market_id.is_none_or(|mid| o.market_id == mid as i32)
             })
             .cloned()
@@ -131,7 +130,7 @@ impl TradingRepository for MockTradingRepository {
             .orders
             .iter()
             .filter(|o| {
-                o.order_user_id == Decimal::from(user_id)
+                o.order_user_id == user_id as i64
                     && market_id.is_none_or(|mid| o.market_id == mid as i32)
             })
             .count();
@@ -146,8 +145,8 @@ impl TradingRepository for MockTradingRepository {
             .orders
             .iter()
             .find(|o| {
-                o.order_order_id == Decimal::from(order_id)
-                    && o.order_user_id == Decimal::from(user_id)
+                o.order_order_id == order_id as i64
+                    && o.order_user_id == user_id as i64
             })
             .cloned())
     }
@@ -168,10 +167,10 @@ impl TradingRepository for MockTradingRepository {
             .orders
             .iter()
             .filter(|o| {
-                o.order_user_id == Decimal::from(user_id)
-                    && (o.status.to_lowercase() == "cancelled"
-                        || o.status.to_lowercase() == "partiallyfilled"
-                        || o.status.to_lowercase() == "filled")
+                o.order_user_id == user_id as i64
+                    && (o.order_status.to_lowercase() == "cancelled"
+                        || o.order_status.to_lowercase() == "partiallyfilled"
+                        || o.order_status.to_lowercase() == "filled")
             })
             .cloned()
             .collect())
@@ -191,10 +190,10 @@ impl TradingRepository for MockTradingRepository {
             .orders
             .iter()
             .filter(|o| {
-                o.order_user_id == Decimal::from(user_id)
-                    && (o.status.to_lowercase() == "cancelled"
-                        || o.status.to_lowercase() == "partiallyfilled"
-                        || o.status.to_lowercase() == "filled")
+                o.order_user_id == user_id as i64
+                    && (o.order_status.to_lowercase() == "cancelled"
+                        || o.order_status.to_lowercase() == "partiallyfilled"
+                        || o.order_status.to_lowercase() == "filled")
                     && market_id.is_none_or(|mid| o.market_id == mid as i32)
             })
             .cloned()
@@ -219,11 +218,11 @@ impl TradingRepository for MockTradingRepository {
             .orders
             .iter()
             .filter(|o| {
-                o.order_user_id == Decimal::from(user_id)
+                o.order_user_id == user_id as i64
                     && market_id.is_none_or(|mid| o.market_id == mid as i32)
-                    && (o.status.to_lowercase() == "cancelled"
-                        || o.status.to_lowercase() == "partiallyfilled"
-                        || o.status.to_lowercase() == "filled")
+                    && (o.order_status.to_lowercase() == "cancelled"
+                        || o.order_status.to_lowercase() == "partiallyfilled"
+                        || o.order_status.to_lowercase() == "filled")
             })
             .count();
         Ok(count as u64)
@@ -305,8 +304,8 @@ async fn test_order_store_with_repository() {
     assert!(result.is_ok());
     let fetched_orders = result.unwrap();
     assert_eq!(fetched_orders.len(), 2);
-    assert_eq!(fetched_orders[0].order_order_id, Decimal::from(1));
-    assert_eq!(fetched_orders[1].order_order_id, Decimal::from(2));
+    assert_eq!(fetched_orders[0].order_order_id, 1);
+    assert_eq!(fetched_orders[1].order_order_id, 2);
 }
 
 #[tokio::test]
@@ -324,8 +323,8 @@ async fn test_get_order_by_id() {
     let order = result.unwrap();
     assert!(order.is_some());
     let order = order.unwrap();
-    assert_eq!(order.order_order_id, Decimal::from(1));
-    assert_eq!(order.order_user_id, Decimal::from(100));
+    assert_eq!(order.order_order_id, 1);
+    assert_eq!(order.order_user_id, 100);
 
     // Test order not found
     let result = store.get_order_by_id(999, 100).await;
@@ -424,7 +423,7 @@ async fn test_multiple_users() {
     assert!(result.is_ok());
     let user200_orders = result.unwrap();
     assert_eq!(user200_orders.len(), 1);
-    assert_eq!(user200_orders[0].order_order_id, Decimal::from(2));
+    assert_eq!(user200_orders[0].order_order_id, 2);
 }
 
 #[tokio::test]
@@ -494,8 +493,8 @@ async fn test_large_order_values() {
     let result = store.get_order_by_id(1, 100).await;
     assert!(result.is_ok());
     let order = result.unwrap().unwrap();
-    assert_eq!(order.order_price, Decimal::from(large_price));
-    assert_eq!(order.order_size, Decimal::from(large_size));
+    assert_eq!(order.order_price, large_price);
+    assert_eq!(order.order_size, large_size);
 }
 
 #[tokio::test]

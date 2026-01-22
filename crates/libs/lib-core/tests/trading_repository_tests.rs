@@ -128,11 +128,11 @@ impl TradingRepository for MockTradingRepository {
             .orders
             .iter()
             .filter(|o| {
-                o.order_user_id == Decimal::from(user_id)
-                    && (o.status.to_lowercase() == "placed"
-                        || o.status.to_lowercase() == "pending"
-                        || o.status.to_lowercase() == "partiallyfilled"
-                        || o.status.to_lowercase() == "processing")
+                o.order_user_id == user_id as i64
+                    && (o.order_status.to_lowercase() == "placed"
+                        || o.order_status.to_lowercase() == "pending"
+                        || o.order_status.to_lowercase() == "partiallyfilled"
+                        || o.order_status.to_lowercase() == "processing")
             })
             .cloned()
             .collect();
@@ -153,11 +153,11 @@ impl TradingRepository for MockTradingRepository {
             .orders
             .iter()
             .filter(|o| {
-                o.order_user_id == Decimal::from(user_id)
-                    && (o.status.to_lowercase() == "placed"
-                        || o.status.to_lowercase() == "pending"
-                        || o.status.to_lowercase() == "partiallyfilled"
-                        || o.status.to_lowercase() == "processing")
+                o.order_user_id == user_id as i64
+                    && (o.order_status.to_lowercase() == "placed"
+                        || o.order_status.to_lowercase() == "pending"
+                        || o.order_status.to_lowercase() == "partiallyfilled"
+                        || o.order_status.to_lowercase() == "processing")
                     && market_id.is_none_or(|mid| o.market_id == mid as i32)
             })
             .cloned()
@@ -182,11 +182,11 @@ impl TradingRepository for MockTradingRepository {
             .orders
             .iter()
             .filter(|o| {
-                o.order_user_id == Decimal::from(user_id)
-                    && (o.status.to_lowercase() == "placed"
-                        || o.status.to_lowercase() == "pending"
-                        || o.status.to_lowercase() == "partiallyfilled"
-                        || o.status.to_lowercase() == "processing")
+                o.order_user_id == user_id as i64
+                    && (o.order_status.to_lowercase() == "placed"
+                        || o.order_status.to_lowercase() == "pending"
+                        || o.order_status.to_lowercase() == "partiallyfilled"
+                        || o.order_status.to_lowercase() == "processing")
                     && market_id.is_none_or(|mid| o.market_id == mid as i32)
             })
             .count();
@@ -201,8 +201,8 @@ impl TradingRepository for MockTradingRepository {
             .orders
             .iter()
             .find(|o| {
-                o.order_order_id == Decimal::from(order_id)
-                    && o.order_user_id == Decimal::from(user_id)
+                o.order_order_id == order_id as i64
+                    && o.order_user_id == user_id as i64
             })
             .cloned())
     }
@@ -221,7 +221,7 @@ impl TradingRepository for MockTradingRepository {
         Ok(self
             .orders
             .iter()
-            .filter(|o| o.order_user_id == Decimal::from(user_id))
+            .filter(|o| o.order_user_id == user_id as i64)
             .count() as u64)
     }
 
@@ -233,10 +233,10 @@ impl TradingRepository for MockTradingRepository {
             .orders
             .iter()
             .filter(|o| {
-                o.order_user_id == Decimal::from(user_id)
-                    && (o.status.to_lowercase() == "cancelled"
-                        || o.status.to_lowercase() == "partiallyfilled"
-                        || o.status.to_lowercase() == "filled")
+                o.order_user_id == user_id as i64
+                    && (o.order_status.to_lowercase() == "cancelled"
+                        || o.order_status.to_lowercase() == "partiallyfilled"
+                        || o.order_status.to_lowercase() == "filled")
             })
             .cloned()
             .collect())
@@ -256,10 +256,10 @@ impl TradingRepository for MockTradingRepository {
             .orders
             .iter()
             .filter(|o| {
-                o.order_user_id == Decimal::from(user_id)
-                    && (o.status.to_lowercase() == "cancelled"
-                        || o.status.to_lowercase() == "partiallyfilled"
-                        || o.status.to_lowercase() == "filled")
+                o.order_user_id == user_id as i64
+                    && (o.order_status.to_lowercase() == "cancelled"
+                        || o.order_status.to_lowercase() == "partiallyfilled"
+                        || o.order_status.to_lowercase() == "filled")
                     && market_id.is_none_or(|mid| o.market_id == mid as i32)
             })
             .cloned()
@@ -284,10 +284,10 @@ impl TradingRepository for MockTradingRepository {
             .orders
             .iter()
             .filter(|o| {
-                o.order_user_id == Decimal::from(user_id)
-                    && (o.status.to_lowercase() == "cancelled"
-                        || o.status.to_lowercase() == "partiallyfilled"
-                        || o.status.to_lowercase() == "filled")
+                o.order_user_id == user_id as i64
+                    && (o.order_status.to_lowercase() == "cancelled"
+                        || o.order_status.to_lowercase() == "partiallyfilled"
+                        || o.order_status.to_lowercase() == "filled")
                     && market_id.is_none_or(|mid| o.market_id == mid as i32)
             })
             .count();
@@ -488,11 +488,11 @@ async fn test_get_open_orders_filters_by_status() {
 
     let result = repo.get_open_orders(100).await.unwrap();
     assert_eq!(result.len(), 3);
-    assert!(result.iter().any(|o| o.status == "Pending"));
-    assert!(result.iter().any(|o| o.status == "Processing"));
-    assert!(result.iter().any(|o| o.status == "PartiallyFilled"));
-    assert!(!result.iter().any(|o| o.status == "Filled"));
-    assert!(!result.iter().any(|o| o.status == "Cancelled"));
+    assert!(result.iter().any(|o| o.order_status == "Pending"));
+    assert!(result.iter().any(|o| o.order_status == "Processing"));
+    assert!(result.iter().any(|o| o.order_status == "PartiallyFilled"));
+    assert!(!result.iter().any(|o| o.order_status == "Filled"));
+    assert!(!result.iter().any(|o| o.order_status == "Cancelled"));
 }
 
 #[tokio::test]
@@ -504,7 +504,7 @@ async fn test_get_open_orders_filters_by_user() {
 
     let result = repo.get_open_orders(100).await.unwrap();
     assert_eq!(result.len(), 1);
-    assert_eq!(result[0].order_user_id, Decimal::from(100));
+    assert_eq!(result[0].order_user_id, 100);
 }
 
 #[tokio::test]
@@ -515,8 +515,8 @@ async fn test_get_order_by_id_success() {
     let result = repo.get_order_by_id(1, 100).await.unwrap();
     assert!(result.is_some());
     let order = result.unwrap();
-    assert_eq!(order.order_order_id, Decimal::from(1));
-    assert_eq!(order.order_user_id, Decimal::from(100));
+    assert_eq!(order.order_order_id, 1);
+    assert_eq!(order.order_user_id, 100);
 }
 
 #[tokio::test]
