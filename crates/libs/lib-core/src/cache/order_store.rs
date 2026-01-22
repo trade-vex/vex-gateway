@@ -69,18 +69,80 @@ impl OrderStore {
         self
     }
 
-    /// Descale an order model using the scaling cache
-    /// Note: order_price and order_size are raw integers from the matching engine
-    fn descale_order(&self, order: OrderModel) -> OrderModel {
-        // Raw integer values from VEX Core - no scaling needed at this layer
-        // Scaling is handled at the API response layer if needed
-        order
+    /// Convert OrderModel to OrderResponse with scaling applied
+    pub fn to_response(&self, model: OrderModel) -> crate::dto::trading::OrderResponse {
+        use crate::dto::trading::{OrderResponse, Side};
+        use rust_decimal::Decimal;
+
+        let market_id = model.market_id as u32;
+
+        // Apply scaling if scaling cache is available
+        let (price, size) = if let Some(scaling_cache) = &self.scaling_cache {
+            let price_decimal = scaling_cache.scale_price(market_id, Decimal::from(model.order_price));
+            let size_decimal = scaling_cache.scale_volume(market_id, Decimal::from(model.order_size));
+            (price_decimal, size_decimal)
+        } else {
+            (Decimal::from(model.order_price), Decimal::from(model.order_size))
+        };
+
+        let side = model.order_side.parse().unwrap_or_else(|_| {
+            warn!(
+                order_id = model.order_order_id,
+                order_side = %model.order_side,
+                "Invalid order_side value, defaulting to Bid"
+            );
+            Side::Bid
+        });
+
+        OrderResponse {
+            order_id: model.order_order_id,
+            user_id: model.order_user_id,
+            market_id: model.market_id,
+            price,
+            size,
+            side,
+            timestamp: model.order_timestamp,
+            time_in_force: model.order_time_in_force,
+            status: model.order_status,
+        }
     }
 
-    /// Descale a vector of orders
-    fn descale_orders(&self, orders: Vec<OrderModel>) -> Vec<OrderModel> {
-        // Raw integer values from VEX Core - no scaling needed at this layer
-        orders
+    /// Convert OrderModel to OrderHistoryResponse with scaling applied
+    pub fn to_history_response(&self, model: OrderModel) -> crate::dto::trading::OrderHistoryResponse {
+        use crate::dto::trading::{OrderHistoryResponse, Side};
+        use rust_decimal::Decimal;
+
+        let market_id = model.market_id as u32;
+
+        // Apply scaling if scaling cache is available
+        let (price, size) = if let Some(scaling_cache) = &self.scaling_cache {
+            let price_decimal = scaling_cache.scale_price(market_id, Decimal::from(model.order_price));
+            let size_decimal = scaling_cache.scale_volume(market_id, Decimal::from(model.order_size));
+            (price_decimal, size_decimal)
+        } else {
+            (Decimal::from(model.order_price), Decimal::from(model.order_size))
+        };
+
+        let side = model.order_side.parse().unwrap_or_else(|_| {
+            warn!(
+                order_id = model.order_order_id,
+                order_side = %model.order_side,
+                "Invalid order_side value, defaulting to Bid"
+            );
+            Side::Bid
+        });
+
+        OrderHistoryResponse {
+            order_id: model.order_order_id,
+            user_id: model.order_user_id,
+            market_id: model.market_id,
+            price,
+            size,
+            side,
+            timestamp: model.order_timestamp,
+            time_in_force: model.order_time_in_force,
+            status: model.order_status,
+        }
     }
 
     pub async fn get_order_by_id(
@@ -98,7 +160,7 @@ impl OrderStore {
                         // Parse hash to OrderModel
                         if let Some(order) = Self::parse_order_hash(hash) {
                             debug!("Order cache hit for order ID: {}", order_id);
-                            return Ok(Some(self.descale_order(order)));
+                            return Ok(Some(order));
                         }
                     }
                     Ok(_) => {
@@ -116,7 +178,7 @@ impl OrderStore {
             match repo.get_order_by_id(order_id, user_id).await {
                 Ok(Some(order)) => {
                     debug!("Database hit for order ID: {}", order_id);
-                    return Ok(Some(self.descale_order(order)));
+                    return Ok(Some(order));
                 }
                 Ok(None) => {
                     debug!("Order not found in database: {}", order_id);
@@ -191,7 +253,7 @@ impl OrderStore {
                                 "Redis cache hit: {} history orders (paginated)",
                                 paginated_orders.len()
                             );
-                            return Ok(self.descale_orders(paginated_orders));
+                            return Ok(paginated_orders);
                         }
                     }
                     Ok(_) => {
@@ -210,7 +272,7 @@ impl OrderStore {
                 .get_order_history_paginated(user_id, offset, limit, market_id)
                 .await?;
             debug!("Postgres: Got {} history orders (paginated)", orders.len());
-            return Ok(self.descale_orders(orders));
+            return Ok(orders);
         }
 
         debug!(
@@ -257,7 +319,7 @@ impl OrderStore {
 
                         if !orders.is_empty() {
                             debug!("Redis cache hit: {} history orders", orders.len());
-                            return Ok(self.descale_orders(orders));
+                            return Ok(orders);
                         }
                     }
                     Ok(_) => {
@@ -274,7 +336,7 @@ impl OrderStore {
         if let Some(repo) = &self.trading_repo {
             let orders = repo.get_order_history(user_id).await?;
             debug!("Postgres: Got {} history orders", orders.len());
-            return Ok(self.descale_orders(orders));
+            return Ok(orders);
         }
 
         debug!(
@@ -353,7 +415,7 @@ impl OrderStore {
                             .collect();
 
                         if !paginated_orders.is_empty() {
-                            return Ok(self.descale_orders(paginated_orders));
+                            return Ok(paginated_orders);
                         }
                     }
                     Ok(_) => {
@@ -374,7 +436,7 @@ impl OrderStore {
             {
                 Ok(orders) => {
                     debug!("Database hit for user orders (paginated): {}", user_id);
-                    return Ok(self.descale_orders(orders));
+                    return Ok(orders);
                 }
                 Err(e) => {
                     return Err(e);
@@ -450,7 +512,7 @@ impl OrderStore {
                         debug!("Returning {} orders after filtering", orders.len());
 
                         if !orders.is_empty() {
-                            return Ok(self.descale_orders(orders));
+                            return Ok(orders);
                         }
 
                         // If all orders were filtered out (all cancelled), return empty vec
@@ -472,7 +534,7 @@ impl OrderStore {
             match repo.get_open_orders(user_id).await {
                 Ok(orders) => {
                     debug!("Database hit for user orders: {}", user_id);
-                    return Ok(self.descale_orders(orders));
+                    return Ok(orders);
                 }
                 Err(e) => {
                     return Err(e);

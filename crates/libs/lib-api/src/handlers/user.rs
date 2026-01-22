@@ -182,7 +182,7 @@ pub struct OrdersQuery {
 pub async fn get_open_orders(
     user: AuthenticatedUserId,
     query: web::Query<OrdersQuery>,
-    _order_store: web::Data<Arc<OrderStore>>,
+    order_store: web::Data<Arc<OrderStore>>,
     trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
     let raw = user.0.as_u128();
@@ -215,8 +215,9 @@ pub async fn get_open_orders(
         .await
     {
         Ok(orders) => {
+            // Use order_store.to_response for scaling
             let order_responses: Vec<OrderResponse> =
-                orders.into_iter().map(|order| order.into()).collect();
+                orders.into_iter().map(|order| order_store.to_response(order)).collect();
 
             let total_pages = total_count.div_ceil(limit);
             let has_next = page < total_pages;
@@ -316,7 +317,7 @@ pub async fn get_open_orders(
 pub async fn get_order_history(
     user: AuthenticatedUserId,
     query: web::Query<OrdersQuery>,
-    _order_store: web::Data<Arc<OrderStore>>,
+    order_store: web::Data<Arc<OrderStore>>,
     trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
     let raw = user.0.as_u128();
@@ -353,8 +354,9 @@ pub async fn get_order_history(
         .await
     {
         Ok(orders) => {
+            // Use order_store.to_history_response for scaling
             let order_responses: Vec<OrderHistoryResponse> =
-                orders.into_iter().map(|order| order.into()).collect();
+                orders.into_iter().map(|order| order_store.to_history_response(order)).collect();
 
             let total_pages = total_count.div_ceil(limit);
             let has_next = page < total_pages;

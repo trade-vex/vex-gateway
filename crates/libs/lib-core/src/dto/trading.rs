@@ -45,8 +45,8 @@ pub struct OrderResponse {
     pub order_id: i64,
     pub user_id: i64,
     pub market_id: i32,
-    pub price: i64,
-    pub size: i64,
+    pub price: Decimal,
+    pub size: Decimal,
     pub side: Side,
     pub timestamp: i64,
     pub time_in_force: String,
@@ -59,8 +59,8 @@ pub struct OrderHistoryResponse {
     pub order_id: i64,
     pub user_id: i64,
     pub market_id: i32,
-    pub price: i64,
-    pub size: i64,
+    pub price: Decimal,
+    pub size: Decimal,
     pub side: Side,
     pub timestamp: i64,
     pub time_in_force: String,
@@ -149,58 +149,6 @@ pub struct FavoriteMarketsListResponse {
 #[derive(Debug, Deserialize)]
 pub struct ToggleFavoriteMarketRequest {
     pub market_id: u32,
-}
-
-// Conversion implementations
-impl From<OrderModel> for OrderResponse {
-    fn from(model: OrderModel) -> Self {
-        let side = model.order_side.parse().unwrap_or_else(|_| {
-            tracing::warn!(
-                order_id = model.order_order_id,
-                order_side = %model.order_side,
-                "Invalid order_side value, defaulting to Bid"
-            );
-            Side::Bid
-        });
-        Self {
-            order_id: model.order_order_id,
-            user_id: model.order_user_id,
-            market_id: model.market_id,
-            price: model.order_price,
-            size: model.order_size,
-            side,
-            timestamp: model.order_timestamp,
-            time_in_force: model.order_time_in_force,
-            status: model.order_status,
-        }
-    }
-}
-
-// Note: UserBalanceModel -> UserBalanceResponse conversion with scaling
-// is handled by UserBalanceStore::to_response() method which has access to scaling cache
-
-impl From<OrderModel> for OrderHistoryResponse {
-    fn from(model: OrderModel) -> Self {
-        let side = model.order_side.parse().unwrap_or_else(|_| {
-            tracing::warn!(
-                order_id = model.order_order_id,
-                order_side = %model.order_side,
-                "Invalid order_side value, defaulting to Bid"
-            );
-            Side::Bid
-        });
-        Self {
-            order_id: model.order_order_id,
-            user_id: model.order_user_id,
-            market_id: model.market_id,
-            price: model.order_price,
-            size: model.order_size,
-            side,
-            timestamp: model.order_timestamp,
-            time_in_force: model.order_time_in_force,
-            status: model.order_status,
-        }
-    }
 }
 
 impl PortfolioOverviewResponse {
