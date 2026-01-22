@@ -277,13 +277,13 @@ pub async fn get_open_orders(
 ///     {
 ///       "order_id": 123456789,
 ///       "user_id": 123456,
-///       "market_id": 1,
+///       "market_id": 65538,
 ///       "price": 5000000,
 ///       "size": 100,
 ///       "side": "Bid",
 ///       "timestamp": 1697452800000000,
-///       "status": "Filled",
-///       "filled_size": 100
+///       "time_in_force": "GTC",
+///       "status": "Filled"
 ///     }
 ///   ],
 ///   "total": 3,
@@ -313,10 +313,6 @@ pub async fn get_open_orders(
 /// - PartiallyFilled - Order partially executed
 /// - Filled - Completely executed orders
 /// - Cancelled - User-cancelled orders
-///
-/// # Fill Information
-/// - `filled_size`: Amount of the order that has been executed
-/// - `status`: Current status of the order (PartiallyFilled, Filled, Cancelled)
 pub async fn get_order_history(
     user: AuthenticatedUserId,
     query: web::Query<OrdersQuery>,

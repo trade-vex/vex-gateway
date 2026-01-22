@@ -264,16 +264,15 @@ fn create_test_order(
 ) -> OrderModel {
     OrderModel {
         id: 0,
-        order_order_id: Decimal::from(order_id),
-        order_user_id: Decimal::from(user_id),
-        order_price: Decimal::from(price),
-        order_size: Decimal::from(size),
-        filled_size: Decimal::ZERO,
-        order_side: side.to_string(),
-        order_timestamp: 1700000000,
         market_id: 1,
-        time_in_force: "GTC".to_string(),
-        status: status.to_string(),
+        order_order_id: order_id as i64,
+        order_user_id: user_id as i64,
+        order_price: price,
+        order_size: size,
+        order_side: side.to_string(),
+        order_time_in_force: "GTC".to_string(),
+        order_status: status.to_string(),
+        order_timestamp: 1700000000,
         created_at: None,
     }
 }

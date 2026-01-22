@@ -3,9 +3,7 @@ use crate::model::orders::Model as OrderModel;
 use crate::repository::repository::{TradingError, TradingRepository};
 use lib_db::backends::kv::redis::RedisDb;
 use lib_db::traits::BasicKvStore;
-use rust_decimal::Decimal;
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -72,36 +70,17 @@ impl OrderStore {
     }
 
     /// Descale an order model using the scaling cache
-    fn descale_order(&self, mut order: OrderModel) -> OrderModel {
-        if let Some(scaling_cache) = &self.scaling_cache {
-            order.order_price =
-                scaling_cache.scale_price(order.market_id as u32, order.order_price);
-            order.order_size = scaling_cache.scale_volume(order.market_id as u32, order.order_size);
-            order.filled_size =
-                scaling_cache.scale_volume(order.market_id as u32, order.filled_size);
-        }
+    /// Note: order_price and order_size are raw integers from the matching engine
+    fn descale_order(&self, order: OrderModel) -> OrderModel {
+        // Raw integer values from VEX Core - no scaling needed at this layer
+        // Scaling is handled at the API response layer if needed
         order
     }
 
     /// Descale a vector of orders
     fn descale_orders(&self, orders: Vec<OrderModel>) -> Vec<OrderModel> {
-        if let Some(scaling_cache) = &self.scaling_cache {
-            orders
-                .into_iter()
-                .map(|order| {
-                    let mut descaled = order.clone();
-                    descaled.order_price =
-                        scaling_cache.scale_price(descaled.market_id as u32, descaled.order_price);
-                    descaled.order_size =
-                        scaling_cache.scale_volume(descaled.market_id as u32, descaled.order_size);
-                    descaled.filled_size =
-                        scaling_cache.scale_volume(descaled.market_id as u32, descaled.filled_size);
-                    descaled
-                })
-                .collect()
-        } else {
-            orders
-        }
+        // Raw integer values from VEX Core - no scaling needed at this layer
+        orders
     }
 
     pub async fn get_order_by_id(
@@ -153,7 +132,7 @@ impl OrderStore {
         Ok(None)
     }
 
-    /// Get user's order history with filled_size from orders table only (paginated)
+    /// Get user's order history from orders table (paginated)
     /// Returns Cancelled, PartiallyFilled, and Filled orders
     pub async fn get_user_order_history_paginated(
         &self,
@@ -176,7 +155,7 @@ impl OrderStore {
                             if let Ok(hash) = cache.hgetall_string(&order_key).await {
                                 if !hash.is_empty() {
                                     // Only include Cancelled, PartiallyFilled, Filled
-                                    if let Some(status) = hash.get("status") {
+                                    if let Some(status) = hash.get("order_status") {
                                         let status_lower = status.to_lowercase();
                                         if status_lower == "cancelled"
                                             || status_lower == "partiallyfilled"
@@ -241,7 +220,7 @@ impl OrderStore {
         Ok(vec![])
     }
 
-    /// Get user's order history with filled_size from orders table only
+    /// Get user's order history from orders table
     /// Returns Cancelled, PartiallyFilled, and Filled orders
     pub async fn get_user_order_history(
         &self,
@@ -261,7 +240,7 @@ impl OrderStore {
                             if let Ok(hash) = cache.hgetall_string(&order_key).await {
                                 if !hash.is_empty() {
                                     // Only include Cancelled, PartiallyFilled, Filled
-                                    if let Some(status) = hash.get("status") {
+                                    if let Some(status) = hash.get("order_status") {
                                         let status_lower = status.to_lowercase();
                                         if status_lower == "cancelled"
                                             || status_lower == "partiallyfilled"
@@ -277,10 +256,7 @@ impl OrderStore {
                         }
 
                         if !orders.is_empty() {
-                            debug!(
-                                "Redis cache hit: {} history orders (includes filled_size)",
-                                orders.len()
-                            );
+                            debug!("Redis cache hit: {} history orders", orders.len());
                             return Ok(self.descale_orders(orders));
                         }
                     }
@@ -294,13 +270,10 @@ impl OrderStore {
             }
         }
 
-        // Database fallback - Query orders_events table only (filled_size is already there)
+        // Database fallback - Query orders_events table
         if let Some(repo) = &self.trading_repo {
             let orders = repo.get_order_history(user_id).await?;
-            debug!(
-                "Postgres: Got {} history orders (includes filled_size)",
-                orders.len()
-            );
+            debug!("Postgres: Got {} history orders", orders.len());
             return Ok(self.descale_orders(orders));
         }
 
@@ -334,7 +307,7 @@ impl OrderStore {
                             match cache.hgetall_string(&order_key).await {
                                 Ok(hash) if !hash.is_empty() => {
                                     // Filter orders by status - only include "open" orders
-                                    if let Some(status) = hash.get("status") {
+                                    if let Some(status) = hash.get("order_status") {
                                         let status_lower = status.to_lowercase();
 
                                         // Skip orders that are in terminal states (not open)
@@ -445,7 +418,7 @@ impl OrderStore {
                                     // Filter orders by status - only include "open" orders
                                     // Open orders: Placed, Pending, PartiallyFilled, Processing
                                     // Exclude: Filled, Cancelled, Rejected
-                                    if let Some(status) = hash.get("status") {
+                                    if let Some(status) = hash.get("order_status") {
                                         let status_lower = status.to_lowercase();
 
                                         // Skip orders that are in terminal states (not open)
@@ -579,34 +552,34 @@ impl OrderStore {
         }
     }
 
-    // Helper: Parse order hash from Redis into OrderModel
-    // Kafka writes: order_id, user_id, price, size, filled_size, side, timestamp, market_id, time_in_force, status
-    // Parse all values as Decimal to handle full u64 range without overflow
+    /// Parse order hash from Redis into OrderModel
+    /// Redis keys from Kafka sink: orders:{order_id}
+    /// Fields are flattened from protobuf with `order_` prefix for nested Order struct:
+    ///   market_id, order_order_id, order_user_id, order_price, order_size,
+    ///   order_side, order_time_in_force, order_status, order_timestamp
     fn parse_order_hash(hash: HashMap<String, String>) -> Option<OrderModel> {
-        let order_order_id = Decimal::from_str(hash.get("order_id")?).ok()?;
-        let order_user_id = Decimal::from_str(hash.get("user_id")?).ok()?;
-        let order_price = Decimal::from_str(hash.get("price")?).ok()?;
-        let order_size = Decimal::from_str(hash.get("size")?).ok()?;
-        let filled_size = Decimal::from_str(hash.get("filled_size").unwrap_or(&"0".to_string()))
-            .unwrap_or(Decimal::ZERO);
-        let order_side = hash.get("side")?.clone();
-        let order_timestamp = hash.get("timestamp")?.parse::<i64>().ok()?;
+        // Parse with order_ prefix (from Kafka Flatten transform)
+        let order_order_id = hash.get("order_order_id")?.parse::<i64>().ok()?;
+        let order_user_id = hash.get("order_user_id")?.parse::<i64>().ok()?;
+        let order_price = hash.get("order_price")?.parse::<i64>().ok()?;
+        let order_size = hash.get("order_size")?.parse::<i64>().ok()?;
+        let order_side = hash.get("order_side")?.clone();
+        let order_timestamp = hash.get("order_timestamp")?.parse::<i64>().ok()?;
         let market_id = hash.get("market_id")?.parse::<i32>().ok()?;
-        let time_in_force = hash.get("time_in_force")?.clone();
-        let status = hash.get("status")?.clone();
+        let order_time_in_force = hash.get("order_time_in_force")?.clone();
+        let order_status = hash.get("order_status")?.clone();
 
         Some(OrderModel {
             id: 0, // Auto-generated by DB
+            market_id,
             order_order_id,
             order_user_id,
             order_price,
             order_size,
-            filled_size,
             order_side,
+            order_time_in_force,
+            order_status,
             order_timestamp,
-            market_id,
-            time_in_force,
-            status,
             created_at: None,
         })
     }

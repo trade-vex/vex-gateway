@@ -7,7 +7,6 @@ use lib_core::{
     model::orders::Model as OrderModel, wait_for_response,
 };
 use lib_utils::AuthenticatedUserId;
-use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -328,16 +327,15 @@ pub async fn place_order(
                         // Order doesn't exist, create it
                         let order_model = OrderModel {
                             id: 0, // Will be auto-generated
-                            order_order_id: Decimal::from(response.order_id),
-                            order_user_id: Decimal::from(user_id),
-                            order_price: Decimal::from(price),
-                            order_size: Decimal::from(volume),
-                            filled_size: Decimal::from(0),
-                            order_side: format!("{:?}", side),
-                            order_timestamp: command.timestamp as i64, // Store nanoseconds as i64
                             market_id: market_id as i32,
-                            time_in_force: format!("{:?}", time_in_force),
-                            status: status_str.clone(),
+                            order_order_id: response.order_id as i64,
+                            order_user_id: user_id as i64,
+                            order_price: price as i64,
+                            order_size: volume as i64,
+                            order_side: format!("{:?}", side),
+                            order_time_in_force: format!("{:?}", time_in_force),
+                            order_status: status_str.clone(),
+                            order_timestamp: command.timestamp as i64, // Store nanoseconds as i64
                             created_at: None,
                         };
 

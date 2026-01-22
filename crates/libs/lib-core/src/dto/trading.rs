@@ -1,4 +1,3 @@
-use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 // Re-export models from separate modules
@@ -6,6 +5,7 @@ pub use crate::model::orders::Model as OrderModel;
 pub use crate::model::user_balances::Model as UserBalanceModel;
 pub use crate::model::user_favorite_markets::Model as UserFavoriteMarketModel;
 use crate::{BalancePoint, PnlPoint, PnlResolution};
+use rust_decimal::Decimal;
 
 // Simple types as specified
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -42,30 +42,29 @@ impl std::str::FromStr for Side {
 // API Response DTOs
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OrderResponse {
-    pub order_id: Decimal,
-    pub user_id: Decimal,
-    pub market_id: u32,
-    pub price: Decimal,
-    pub size: Decimal,
+    pub order_id: i64,
+    pub user_id: i64,
+    pub market_id: i32,
+    pub price: i64,
+    pub size: i64,
     pub side: Side,
-    pub timestamp: u64,
+    pub timestamp: i64,
     pub time_in_force: String,
     pub status: String,
 }
 
-/// Enhanced order response for order history with status and fill information
+/// Enhanced order response for order history with status
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OrderHistoryResponse {
-    pub order_id: Decimal,
-    pub user_id: Decimal,
-    pub market_id: u32,
-    pub price: Decimal,
-    pub size: Decimal,
+    pub order_id: i64,
+    pub user_id: i64,
+    pub market_id: i32,
+    pub price: i64,
+    pub size: i64,
     pub side: Side,
-    pub timestamp: u64,
+    pub timestamp: i64,
     pub time_in_force: String,
     pub status: String,
-    pub filled_size: Decimal,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -155,21 +154,9 @@ pub struct ToggleFavoriteMarketRequest {
 // Conversion implementations
 impl From<OrderModel> for OrderResponse {
     fn from(model: OrderModel) -> Self {
-        // Defensive arithmetic: ensure remaining_size is never negative
-        let remaining_size = if model.order_size >= model.filled_size {
-            model.order_size - model.filled_size
-        } else {
-            tracing::warn!(
-                order_id = %model.order_order_id,
-                order_size = %model.order_size,
-                filled_size = %model.filled_size,
-                "filled_size exceeds order_size, returning zero remaining"
-            );
-            Decimal::ZERO
-        };
         let side = model.order_side.parse().unwrap_or_else(|_| {
             tracing::warn!(
-                order_id = %model.order_order_id,
+                order_id = model.order_order_id,
                 order_side = %model.order_side,
                 "Invalid order_side value, defaulting to Bid"
             );
@@ -178,13 +165,13 @@ impl From<OrderModel> for OrderResponse {
         Self {
             order_id: model.order_order_id,
             user_id: model.order_user_id,
-            market_id: model.market_id as u32,
+            market_id: model.market_id,
             price: model.order_price,
-            size: remaining_size,
+            size: model.order_size,
             side,
-            timestamp: model.order_timestamp as u64,
-            time_in_force: model.time_in_force,
-            status: model.status,
+            timestamp: model.order_timestamp,
+            time_in_force: model.order_time_in_force,
+            status: model.order_status,
         }
     }
 }
@@ -206,7 +193,7 @@ impl From<OrderModel> for OrderHistoryResponse {
     fn from(model: OrderModel) -> Self {
         let side = model.order_side.parse().unwrap_or_else(|_| {
             tracing::warn!(
-                order_id = %model.order_order_id,
+                order_id = model.order_order_id,
                 order_side = %model.order_side,
                 "Invalid order_side value, defaulting to Bid"
             );
@@ -215,14 +202,13 @@ impl From<OrderModel> for OrderHistoryResponse {
         Self {
             order_id: model.order_order_id,
             user_id: model.order_user_id,
-            market_id: model.market_id as u32,
+            market_id: model.market_id,
             price: model.order_price,
             size: model.order_size,
             side,
-            timestamp: model.order_timestamp as u64,
-            time_in_force: model.time_in_force,
-            status: model.status,
-            filled_size: model.filled_size,
+            timestamp: model.order_timestamp,
+            time_in_force: model.order_time_in_force,
+            status: model.order_status,
         }
     }
 }
