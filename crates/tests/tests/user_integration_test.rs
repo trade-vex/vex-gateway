@@ -275,8 +275,8 @@ async fn test_get_balances(
             }
 
             let total_assets = balances.len();
-            let balance_responses: Vec<_> =
-                balances.into_iter().map(|balance| balance.into()).collect();
+            let balance_responses: Vec<lib_core::dto::trading::UserBalanceResponse> =
+                balances.into_iter().map(|balance| balance_store.to_response(balance)).collect();
 
             let response = BalancesListResponse {
                 balances: balance_responses,
@@ -322,7 +322,7 @@ async fn test_get_open_orders(
             }
 
             let total = orders.len();
-            let order_responses: Vec<_> = orders.into_iter().map(|order| order.into()).collect();
+            let order_responses: Vec<_> = orders.into_iter().map(|order| order_store.to_response(order)).collect();
 
             let response = OrdersListResponse {
                 orders: order_responses,

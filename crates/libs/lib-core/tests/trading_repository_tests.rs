@@ -21,7 +21,6 @@ use lib_core::model::user_favorite_markets::Model as UserFavoriteMarketModel;
 use lib_core::repository::repository::{
     PostgresTradingRepository, TradingError, TradingRepository,
 };
-use rust_decimal::Decimal;
 use sea_orm::{Database, DbErr};
 use std::sync::Arc;
 
@@ -80,7 +79,7 @@ impl TradingRepository for MockTradingRepository {
         Ok(self
             .balances
             .iter()
-            .filter(|b| b.user_id == Decimal::from(user_id))
+            .filter(|b| b.user_id == user_id as i64)
             .cloned()
             .collect())
     }
@@ -92,7 +91,7 @@ impl TradingRepository for MockTradingRepository {
         Ok(self
             .balances
             .iter()
-            .find(|b| b.user_id == Decimal::from(user_id))
+            .find(|b| b.user_id == user_id as i64)
             .cloned())
     }
 
@@ -353,11 +352,11 @@ fn create_test_balance(
 ) -> UserBalanceModel {
     UserBalanceModel {
         id: 1,
-        user_id: Decimal::from(user_id),
+        user_id,
         asset_id,
-        available: Decimal::from(available),
-        locked: Decimal::from(locked),
-        total: Decimal::from(available) + Decimal::from(locked),
+        available,
+        locked,
+        total: available + locked,
         timestamp: Utc::now().timestamp(),
         created_at: Some(Utc::now().naive_utc()),
     }
@@ -415,7 +414,7 @@ async fn test_get_user_balances_success() {
     assert_eq!(result.len(), 2);
     assert!(result.iter().any(|b| b.asset_id == 0));
     assert!(result.iter().any(|b| b.asset_id == 1));
-    assert!(result.iter().all(|b| b.user_id == Decimal::from(100)));
+    assert!(result.iter().all(|b| b.user_id == 100));
 }
 
 #[tokio::test]
@@ -444,9 +443,9 @@ async fn test_get_user_balance_success() {
     let result = repo.get_user_balance(100).await.unwrap();
     assert!(result.is_some());
     let balance = result.unwrap();
-    assert_eq!(balance.user_id, Decimal::from(100));
-    assert_eq!(balance.available, Decimal::from(1000000));
-    assert_eq!(balance.locked, Decimal::from(500000));
+    assert_eq!(balance.user_id, 100);
+    assert_eq!(balance.available, 1000000);
+    assert_eq!(balance.locked, 500000);
 }
 
 #[tokio::test]
@@ -737,7 +736,7 @@ async fn test_get_open_orders_case_insensitive_status() {
 #[tokio::test]
 async fn test_balance_total_calculation() {
     let balance = create_test_balance(100, 0, 1000000, 500000);
-    assert_eq!(balance.total, Decimal::from(1500000));
+    assert_eq!(balance.total, 1500000);
     assert_eq!(balance.total, balance.available + balance.locked);
 }
 
