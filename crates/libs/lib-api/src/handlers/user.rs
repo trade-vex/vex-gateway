@@ -79,8 +79,10 @@ pub async fn get_balances(
     match balance_store.get_user_balances(user_id).await {
         Ok(balances) => {
             let total_assets = balances.len();
-            let balance_responses: Vec<UserBalanceResponse> =
-                balances.into_iter().map(|balance| balance_store.to_response(balance)).collect();
+            let balance_responses: Vec<UserBalanceResponse> = balances
+                .into_iter()
+                .map(|balance| balance_store.to_response(balance))
+                .collect();
 
             let response = BalancesListResponse {
                 balances: balance_responses,
@@ -216,8 +218,10 @@ pub async fn get_open_orders(
     {
         Ok(orders) => {
             // Use order_store.to_response for scaling
-            let order_responses: Vec<OrderResponse> =
-                orders.into_iter().map(|order| order_store.to_response(order)).collect();
+            let order_responses: Vec<OrderResponse> = orders
+                .into_iter()
+                .map(|order| order_store.to_response(order))
+                .collect();
 
             let total_pages = total_count.div_ceil(limit);
             let has_next = page < total_pages;
@@ -355,8 +359,10 @@ pub async fn get_order_history(
     {
         Ok(orders) => {
             // Use order_store.to_history_response for scaling
-            let order_responses: Vec<OrderHistoryResponse> =
-                orders.into_iter().map(|order| order_store.to_history_response(order)).collect();
+            let order_responses: Vec<OrderHistoryResponse> = orders
+                .into_iter()
+                .map(|order| order_store.to_history_response(order))
+                .collect();
 
             let total_pages = total_count.div_ceil(limit);
             let has_next = page < total_pages;

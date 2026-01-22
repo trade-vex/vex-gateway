@@ -78,11 +78,16 @@ impl OrderStore {
 
         // Apply scaling if scaling cache is available
         let (price, size) = if let Some(scaling_cache) = &self.scaling_cache {
-            let price_decimal = scaling_cache.scale_price(market_id, Decimal::from(model.order_price));
-            let size_decimal = scaling_cache.scale_volume(market_id, Decimal::from(model.order_size));
+            let price_decimal =
+                scaling_cache.scale_price(market_id, Decimal::from(model.order_price));
+            let size_decimal =
+                scaling_cache.scale_volume(market_id, Decimal::from(model.order_size));
             (price_decimal, size_decimal)
         } else {
-            (Decimal::from(model.order_price), Decimal::from(model.order_size))
+            (
+                Decimal::from(model.order_price),
+                Decimal::from(model.order_size),
+            )
         };
 
         let side = model.order_side.parse().unwrap_or_else(|_| {
@@ -108,7 +113,10 @@ impl OrderStore {
     }
 
     /// Convert OrderModel to OrderHistoryResponse with scaling applied
-    pub fn to_history_response(&self, model: OrderModel) -> crate::dto::trading::OrderHistoryResponse {
+    pub fn to_history_response(
+        &self,
+        model: OrderModel,
+    ) -> crate::dto::trading::OrderHistoryResponse {
         use crate::dto::trading::{OrderHistoryResponse, Side};
         use rust_decimal::Decimal;
 
@@ -116,11 +124,16 @@ impl OrderStore {
 
         // Apply scaling if scaling cache is available
         let (price, size) = if let Some(scaling_cache) = &self.scaling_cache {
-            let price_decimal = scaling_cache.scale_price(market_id, Decimal::from(model.order_price));
-            let size_decimal = scaling_cache.scale_volume(market_id, Decimal::from(model.order_size));
+            let price_decimal =
+                scaling_cache.scale_price(market_id, Decimal::from(model.order_price));
+            let size_decimal =
+                scaling_cache.scale_volume(market_id, Decimal::from(model.order_size));
             (price_decimal, size_decimal)
         } else {
-            (Decimal::from(model.order_price), Decimal::from(model.order_size))
+            (
+                Decimal::from(model.order_price),
+                Decimal::from(model.order_size),
+            )
         };
 
         let side = model.order_side.parse().unwrap_or_else(|_| {

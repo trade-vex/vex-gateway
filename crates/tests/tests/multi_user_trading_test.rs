@@ -273,8 +273,10 @@ async fn test_get_balances(
     match balance_store.get_user_balances(user_id).await {
         Ok(balances) => {
             let total_assets = balances.len();
-            let balance_responses: Vec<_> =
-                balances.into_iter().map(|balance| balance_store.to_response(balance)).collect();
+            let balance_responses: Vec<_> = balances
+                .into_iter()
+                .map(|balance| balance_store.to_response(balance))
+                .collect();
 
             let response = BalancesListResponse {
                 balances: balance_responses,
@@ -309,7 +311,10 @@ async fn test_get_open_orders(
             }
 
             let total = orders.len();
-            let order_responses: Vec<_> = orders.into_iter().map(|order| order_store.to_response(order)).collect();
+            let order_responses: Vec<_> = orders
+                .into_iter()
+                .map(|order| order_store.to_response(order))
+                .collect();
 
             let response = OrdersListResponse {
                 orders: order_responses,
@@ -523,12 +528,9 @@ async fn check_orders(
 
         // Assert order belongs to this user
         assert_eq!(
-            order.user_id,
-            user_id as i64,
+            order.user_id, user_id as i64,
             "Order {} belongs to user {} but queried for user {}",
-            order.order_id,
-            order.user_id,
-            user_id
+            order.order_id, order.user_id, user_id
         );
     }
 

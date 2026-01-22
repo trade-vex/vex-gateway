@@ -169,15 +169,20 @@ impl UserBalanceStore {
         use rust_decimal::Decimal;
 
         let asset_id = model.asset_id as u16;
-        
+
         // Apply scaling if scaling cache is available
         let (available, locked, total) = if let Some(scaling_cache) = &self.scaling_cache {
-            let available_decimal = scaling_cache.scale_balance(asset_id, Decimal::from(model.available));
+            let available_decimal =
+                scaling_cache.scale_balance(asset_id, Decimal::from(model.available));
             let locked_decimal = scaling_cache.scale_balance(asset_id, Decimal::from(model.locked));
             let total_decimal = scaling_cache.scale_balance(asset_id, Decimal::from(model.total));
             (available_decimal, locked_decimal, total_decimal)
         } else {
-            (Decimal::from(model.available), Decimal::from(model.locked), Decimal::from(model.total))
+            (
+                Decimal::from(model.available),
+                Decimal::from(model.locked),
+                Decimal::from(model.total),
+            )
         };
 
         UserBalanceResponse {
