@@ -244,10 +244,10 @@ impl TradingRepository for PostgresTradingRepository {
         // Filter for "open" orders: Placed, Pending, PartiallyFilled, Processing
         // Exclude: Filled, Cancelled, Rejected
         let open_status_condition = Condition::any()
-            .add(OrderColumn::OrderStatus.eq("Placed"))
-            .add(OrderColumn::OrderStatus.eq("Pending"))
-            .add(OrderColumn::OrderStatus.eq("PartiallyFilled"))
-            .add(OrderColumn::OrderStatus.eq("Processing"));
+            .add(OrderColumn::OrderStatus.eq("STATUS_PLACED"))
+            .add(OrderColumn::OrderStatus.eq("STATUS_PENDING"))
+            .add(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
+            .add(OrderColumn::OrderStatus.eq("STATUS_PROCESSING"));
 
         let orders = OrderEntity::find()
             .filter(OrderColumn::OrderUserId.eq(user_id as i64))
@@ -270,10 +270,10 @@ impl TradingRepository for PostgresTradingRepository {
         // Filter for "open" orders: Placed, Pending, PartiallyFilled, Processing
         // Exclude: Filled, Cancelled, Rejected
         let open_status_condition = Condition::any()
-            .add(OrderColumn::OrderStatus.eq("Placed"))
-            .add(OrderColumn::OrderStatus.eq("Pending"))
-            .add(OrderColumn::OrderStatus.eq("PartiallyFilled"))
-            .add(OrderColumn::OrderStatus.eq("Processing"));
+            .add(OrderColumn::OrderStatus.eq("STATUS_PLACED"))
+            .add(OrderColumn::OrderStatus.eq("STATUS_PENDING"))
+            .add(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
+            .add(OrderColumn::OrderStatus.eq("STATUS_PROCESSING"));
 
         let mut query = OrderEntity::find()
             .filter(OrderColumn::OrderUserId.eq(user_id as i64))
@@ -298,10 +298,10 @@ impl TradingRepository for PostgresTradingRepository {
         // Count only "open" orders: Placed, Pending, PartiallyFilled, Processing
         // Exclude: Filled, Cancelled, Rejected
         let open_status_condition = Condition::any()
-            .add(OrderColumn::OrderStatus.eq("Placed"))
-            .add(OrderColumn::OrderStatus.eq("Pending"))
-            .add(OrderColumn::OrderStatus.eq("PartiallyFilled"))
-            .add(OrderColumn::OrderStatus.eq("Processing"));
+            .add(OrderColumn::OrderStatus.eq("STATUS_PLACED"))
+            .add(OrderColumn::OrderStatus.eq("STATUS_PENDING"))
+            .add(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
+            .add(OrderColumn::OrderStatus.eq("STATUS_PROCESSING"));
 
         let mut query = OrderEntity::find()
             .filter(OrderColumn::OrderUserId.eq(user_id as i64))
@@ -360,9 +360,9 @@ impl TradingRepository for PostgresTradingRepository {
             .filter(OrderColumn::OrderUserId.eq(user_id as i64))
             .filter(
                 OrderColumn::OrderStatus
-                    .eq("Cancelled")
-                    .or(OrderColumn::OrderStatus.eq("PartiallyFilled"))
-                    .or(OrderColumn::OrderStatus.eq("Filled")),
+                    .eq("STATUS_CANCELLED")
+                    .or(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
+                    .or(OrderColumn::OrderStatus.eq("STATUS_FILLED")),
             )
             .order_by_desc(OrderColumn::OrderTimestamp)
             .all(&*self.db)
@@ -382,9 +382,9 @@ impl TradingRepository for PostgresTradingRepository {
             .filter(OrderColumn::OrderUserId.eq(user_id as i64))
             .filter(
                 OrderColumn::OrderStatus
-                    .eq("Cancelled")
-                    .or(OrderColumn::OrderStatus.eq("PartiallyFilled"))
-                    .or(OrderColumn::OrderStatus.eq("Filled")),
+                    .eq("STATUS_CANCELLED")
+                    .or(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
+                    .or(OrderColumn::OrderStatus.eq("STATUS_FILLED")),
             );
 
         if let Some(market_id) = market_id {
@@ -408,9 +408,9 @@ impl TradingRepository for PostgresTradingRepository {
             .filter(OrderColumn::OrderUserId.eq(user_id as i64))
             .filter(
                 OrderColumn::OrderStatus
-                    .eq("Cancelled")
-                    .or(OrderColumn::OrderStatus.eq("PartiallyFilled"))
-                    .or(OrderColumn::OrderStatus.eq("Filled")),
+                    .eq("STATUS_CANCELLED")
+                    .or(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
+                    .or(OrderColumn::OrderStatus.eq("STATUS_FILLED")),
             );
 
         if let Some(market_id) = market_id {
