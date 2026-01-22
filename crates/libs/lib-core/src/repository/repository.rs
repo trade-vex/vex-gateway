@@ -206,15 +206,15 @@ impl TradingRepository for PostgresTradingRepository {
     }
 
     async fn update_user_balance(&self, user_id: u64, available: u64, locked: u64) -> Result<()> {
-        let total = Decimal::from(available) + Decimal::from(locked);
+        let total = available + locked;
 
         // Insert new balance event (this is an event log table, not mutable state)
         let balance = UserBalanceActiveModel {
             user_id: Set(user_id as i64),
             asset_id: Set(0), // Default asset, adjust as needed
-            available: Set(Decimal::from(available)),
-            locked: Set(Decimal::from(locked)),
-            total: Set(total),
+            available: Set(available as i64),
+            locked: Set(locked as i64),
+            total: Set(total as i64),
             timestamp: Set(chrono::Utc::now().timestamp()),
             ..Default::default()
         };
@@ -224,14 +224,14 @@ impl TradingRepository for PostgresTradingRepository {
     }
 
     async fn create_user_balance(&self, user_id: u64, available: u64, locked: u64) -> Result<()> {
-        let total = Decimal::from(available) + Decimal::from(locked);
+        let total = available + locked;
 
         let balance = UserBalanceActiveModel {
             user_id: Set(user_id as i64),
             asset_id: Set(0), // Default asset, adjust as needed
-            available: Set(Decimal::from(available)),
-            locked: Set(Decimal::from(locked)),
-            total: Set(total),
+            available: Set(available as i64),
+            locked: Set(locked as i64),
+            total: Set(total as i64),
             timestamp: Set(chrono::Utc::now().timestamp()),
             ..Default::default()
         };

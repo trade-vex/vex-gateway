@@ -80,7 +80,7 @@ pub async fn get_balances(
         Ok(balances) => {
             let total_assets = balances.len();
             let balance_responses: Vec<UserBalanceResponse> =
-                balances.into_iter().map(|balance| balance.into()).collect();
+                balances.into_iter().map(|balance| balance_store.to_response(balance)).collect();
 
             let response = BalancesListResponse {
                 balances: balance_responses,

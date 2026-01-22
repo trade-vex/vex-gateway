@@ -1,5 +1,4 @@
 use chrono::NaiveDateTime;
-use rust_decimal::Decimal;
 use sea_orm::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -16,12 +15,12 @@ pub struct Model {
     #[sea_orm(column_type = "BigInteger")]
     pub user_id: i64,
     pub asset_id: i32,
-    #[sea_orm(column_type = "Decimal(Some((38, 18)))")]
-    pub available: Decimal,
-    #[sea_orm(column_type = "Decimal(Some((38, 18)))")]
-    pub locked: Decimal,
-    #[sea_orm(column_type = "Decimal(Some((38, 18)))")]
-    pub total: Decimal,
+    #[sea_orm(column_type = "BigInteger")]
+    pub available: i64,
+    #[sea_orm(column_type = "BigInteger")]
+    pub locked: i64,
+    #[sea_orm(column_type = "BigInteger")]
+    pub total: i64,
     pub timestamp: i64,
     #[sea_orm(column_type = "Timestamp")]
     pub created_at: Option<NaiveDateTime>,

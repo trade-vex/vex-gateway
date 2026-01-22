@@ -3,9 +3,7 @@ use crate::model::user_balances::Model as UserBalanceModel;
 use crate::repository::repository::{TradingError, TradingRepository};
 use lib_db::backends::kv::redis::RedisDb;
 use lib_db::traits::BasicKvStore;
-use rust_decimal::Decimal;
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -72,25 +70,6 @@ impl UserBalanceStore {
         self
     }
 
-    /// Descale a vector of balances
-    fn descale_balances(&self, balances: Vec<UserBalanceModel>) -> Vec<UserBalanceModel> {
-        if let Some(scaling_cache) = &self.scaling_cache {
-            balances
-                .into_iter()
-                .map(|balance| {
-                    let mut descaled = balance.clone();
-                    let asset_id = descaled.asset_id as u16;
-                    descaled.available = scaling_cache.scale_balance(asset_id, descaled.available);
-                    descaled.locked = scaling_cache.scale_balance(asset_id, descaled.locked);
-                    descaled.total = scaling_cache.scale_balance(asset_id, descaled.total);
-                    descaled
-                })
-                .collect()
-        } else {
-            balances
-        }
-    }
-
     /// Get user balances from cache: user:{user_id}:asset:{asset_id}:balance hashes
     pub async fn get_user_balances(
         &self,
@@ -124,7 +103,7 @@ impl UserBalanceStore {
                         }
 
                         if !balances.is_empty() {
-                            return Ok(self.descale_balances(balances));
+                            return Ok(balances);
                         }
                     }
                     Ok(_) => {
@@ -142,7 +121,7 @@ impl UserBalanceStore {
             match repo.get_user_balances(user_id).await {
                 Ok(balances) => {
                     debug!("Database hit for user balances: {}", user_id);
-                    return Ok(self.descale_balances(balances));
+                    return Ok(balances);
                 }
                 Err(e) => {
                     return Err(e);
@@ -184,15 +163,41 @@ impl UserBalanceStore {
         }
     }
 
+    /// Convert UserBalanceModel to UserBalanceResponse with scaling applied
+    pub fn to_response(&self, model: UserBalanceModel) -> crate::dto::trading::UserBalanceResponse {
+        use crate::dto::trading::UserBalanceResponse;
+        use rust_decimal::Decimal;
+
+        let asset_id = model.asset_id as u16;
+        
+        // Apply scaling if scaling cache is available
+        let (available, locked, total) = if let Some(scaling_cache) = &self.scaling_cache {
+            let available_decimal = scaling_cache.scale_balance(asset_id, Decimal::from(model.available));
+            let locked_decimal = scaling_cache.scale_balance(asset_id, Decimal::from(model.locked));
+            let total_decimal = scaling_cache.scale_balance(asset_id, Decimal::from(model.total));
+            (available_decimal, locked_decimal, total_decimal)
+        } else {
+            (Decimal::from(model.available), Decimal::from(model.locked), Decimal::from(model.total))
+        };
+
+        UserBalanceResponse {
+            user_id: model.user_id,
+            asset_id: model.asset_id as u32,
+            available,
+            locked,
+            total,
+            timestamp: model.timestamp as u64,
+        }
+    }
+
     // Helper: Parse balance hash from Redis into UserBalanceModel
     // Kafka writes: user_id, asset_id, available, locked, total, timestamp
-    // user_id is stored as i64 (BIGINT) in database
     fn parse_balance_hash(hash: HashMap<String, String>) -> Option<UserBalanceModel> {
         let user_id = hash.get("user_id")?.parse::<i64>().ok()?;
         let asset_id = hash.get("asset_id")?.parse::<i32>().ok()?;
-        let available = Decimal::from_str(hash.get("available")?).ok()?;
-        let locked = Decimal::from_str(hash.get("locked")?).ok()?;
-        let total = Decimal::from_str(hash.get("total")?).ok()?;
+        let available = hash.get("available")?.parse::<i64>().ok()?;
+        let locked = hash.get("locked")?.parse::<i64>().ok()?;
+        let total = hash.get("total")?.parse::<i64>().ok()?;
         let timestamp = hash.get("timestamp")?.parse::<i64>().ok()?;
 
         Some(UserBalanceModel {

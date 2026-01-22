@@ -69,7 +69,7 @@ pub struct OrderHistoryResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserBalanceResponse {
-    pub user_id: Decimal,
+    pub user_id: i64,
     pub asset_id: u32,
     pub available: Decimal,
     pub locked: Decimal,
@@ -176,18 +176,8 @@ impl From<OrderModel> for OrderResponse {
     }
 }
 
-impl From<UserBalanceModel> for UserBalanceResponse {
-    fn from(model: UserBalanceModel) -> Self {
-        Self {
-            user_id: Decimal::from(model.user_id),
-            asset_id: model.asset_id as u32,
-            available: model.available,
-            locked: model.locked,
-            total: model.total,
-            timestamp: model.timestamp as u64,
-        }
-    }
-}
+// Note: UserBalanceModel -> UserBalanceResponse conversion with scaling
+// is handled by UserBalanceStore::to_response() method which has access to scaling cache
 
 impl From<OrderModel> for OrderHistoryResponse {
     fn from(model: OrderModel) -> Self {
