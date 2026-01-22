@@ -179,7 +179,7 @@ impl From<OrderModel> for OrderResponse {
 impl From<UserBalanceModel> for UserBalanceResponse {
     fn from(model: UserBalanceModel) -> Self {
         Self {
-            user_id: model.user_id,
+            user_id: Decimal::from(model.user_id),
             asset_id: model.asset_id as u32,
             available: model.available,
             locked: model.locked,

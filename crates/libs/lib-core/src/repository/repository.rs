@@ -189,7 +189,7 @@ impl PostgresTradingRepository {
 impl TradingRepository for PostgresTradingRepository {
     async fn get_user_balances(&self, user_id: u64) -> Result<Vec<UserBalanceModel>> {
         UserBalanceEntity::find()
-            .filter(UserBalanceColumn::UserId.eq(Decimal::from(user_id)))
+            .filter(UserBalanceColumn::UserId.eq(user_id as i64))
             .order_by_desc(UserBalanceColumn::Timestamp)
             .all(&*self.db)
             .await
@@ -198,7 +198,7 @@ impl TradingRepository for PostgresTradingRepository {
 
     async fn get_user_balance(&self, user_id: u64) -> Result<Option<UserBalanceModel>> {
         UserBalanceEntity::find()
-            .filter(UserBalanceColumn::UserId.eq(Decimal::from(user_id)))
+            .filter(UserBalanceColumn::UserId.eq(user_id as i64))
             .order_by_desc(UserBalanceColumn::Timestamp)
             .one(&*self.db)
             .await
@@ -210,7 +210,7 @@ impl TradingRepository for PostgresTradingRepository {
 
         // Insert new balance event (this is an event log table, not mutable state)
         let balance = UserBalanceActiveModel {
-            user_id: Set(Decimal::from(user_id)),
+            user_id: Set(user_id as i64),
             asset_id: Set(0), // Default asset, adjust as needed
             available: Set(Decimal::from(available)),
             locked: Set(Decimal::from(locked)),
@@ -227,7 +227,7 @@ impl TradingRepository for PostgresTradingRepository {
         let total = Decimal::from(available) + Decimal::from(locked);
 
         let balance = UserBalanceActiveModel {
-            user_id: Set(Decimal::from(user_id)),
+            user_id: Set(user_id as i64),
             asset_id: Set(0), // Default asset, adjust as needed
             available: Set(Decimal::from(available)),
             locked: Set(Decimal::from(locked)),
