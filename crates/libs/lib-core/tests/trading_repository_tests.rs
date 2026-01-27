@@ -371,7 +371,7 @@ fn create_test_order(
         id: order_id,
         market_id: 1,
         order_order_id: order_id,
-        order_user_id: user_id as i64,
+        order_user_id: user_id,
         order_price: price,
         order_size: size,
         order_side: side.to_string(),
