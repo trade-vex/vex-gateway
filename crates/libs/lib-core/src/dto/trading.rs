@@ -27,12 +27,12 @@ impl std::str::FromStr for Side {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // Case-insensitive matching with common aliases
+        // Case-insensitive matching with common aliases and protobuf format
         match s.to_lowercase().as_str() {
-            "bid" | "buy" => Ok(Side::Bid),
-            "ask" | "sell" => Ok(Side::Ask),
+            "bid" | "buy" | "side_bid" => Ok(Side::Bid),
+            "ask" | "sell" | "side_ask" => Ok(Side::Ask),
             _ => Err(format!(
-                "Invalid side: '{}'. Expected: Bid, Ask, Buy, or Sell",
+                "Invalid side: '{}'. Expected: Bid, Ask, Buy, Sell, SIDE_BID, or SIDE_ASK",
                 s
             )),
         }
