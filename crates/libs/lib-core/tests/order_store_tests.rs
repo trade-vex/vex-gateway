@@ -144,10 +144,7 @@ impl TradingRepository for MockTradingRepository {
         Ok(self
             .orders
             .iter()
-            .find(|o| {
-                o.order_order_id == order_id as i64
-                    && o.order_user_id == user_id as i64
-            })
+            .find(|o| o.order_order_id == order_id as i64 && o.order_user_id == user_id as i64)
             .cloned())
     }
 

@@ -523,12 +523,9 @@ async fn check_orders(
 
         // Assert order belongs to this user
         assert_eq!(
-            order.user_id,
-            user_id as i64,
+            order.user_id, user_id as i64,
             "Order {} belongs to user {} but queried for user {}",
-            order.order_id,
-            order.user_id,
-            user_id
+            order.order_id, order.user_id, user_id
         );
     }
 
