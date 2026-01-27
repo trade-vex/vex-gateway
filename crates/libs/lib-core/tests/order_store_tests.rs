@@ -261,8 +261,8 @@ fn create_test_order(
     OrderModel {
         id: 0,
         market_id: 1,
-        order_order_id: order_id as i64,
-        order_user_id: user_id as i64,
+        order_order_id: order_id,
+        order_user_id: user_id,
         order_price: price,
         order_size: size,
         order_side: side.to_string(),
