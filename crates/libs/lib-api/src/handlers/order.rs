@@ -90,16 +90,18 @@ pub struct CancelOrderRequest {
 /// Returns the status and details of an order placement or cancellation request.
 ///
 /// # Fields
-/// * `order_id` - Unique order identifier assigned by the matching engine (0 if failed)
+/// * `order_id` - Unique order identifier assigned by the matching engine ("0" if failed)
 /// * `client_order_id` - Client-side correlation ID for request tracking
 /// * `status` - Order status (Processing, Filled, Cancelled, Rejected, etc.)
 /// * `message` - Human-readable status message
 ///
+/// Note: `order_id` and `client_order_id` are serialized as strings to support JavaScript BigInt.
+///
 /// # Example Success Response
 /// ```json
 /// {
-///   "order_id": 123456789,
-///   "client_order_id": 987654321,
+///   "order_id": "123456789",
+///   "client_order_id": "987654321",
 ///   "status": "Processing",
 ///   "message": "Order processed successfully"
 /// }
@@ -108,18 +110,20 @@ pub struct CancelOrderRequest {
 /// # Example Error Response
 /// ```json
 /// {
-///   "order_id": 0,
-///   "client_order_id": 987654321,
+///   "order_id": "0",
+///   "client_order_id": "987654321",
 ///   "status": "error",
 ///   "message": "Insufficient balance"
 /// }
 /// ```
 #[derive(Debug, Serialize)]
 pub struct OrderResponse {
-    /// Order ID assigned by the matching engine
+    /// Order ID assigned by the matching engine (serialized as string for JavaScript BigInt support)
+    #[serde(serialize_with = "serialize_u64_as_string")]
     pub order_id: u64,
 
-    /// Client order ID for correlation tracking
+    /// Client order ID for correlation tracking (serialized as string for JavaScript BigInt support)
+    #[serde(serialize_with = "serialize_u64_as_string")]
     pub client_order_id: u64,
 
     /// Order status string
@@ -127,6 +131,13 @@ pub struct OrderResponse {
 
     /// Human-readable message describing the result
     pub message: String,
+}
+
+fn serialize_u64_as_string<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&value.to_string())
 }
 
 // API Handlers
@@ -169,8 +180,8 @@ pub struct OrderResponse {
 /// # Example Success Response (200 OK)
 /// ```json
 /// {
-///   "order_id": 123456789,
-///   "client_order_id": 987654321,
+///   "order_id": "123456789",
+///   "client_order_id": "987654321",
 ///   "status": "Processing",
 ///   "message": "Order processed successfully"
 /// }
@@ -179,8 +190,8 @@ pub struct OrderResponse {
 /// # Example Timeout Response (408)
 /// ```json
 /// {
-///   "order_id": 0,
-///   "client_order_id": 987654321,
+///   "order_id": "0",
+///   "client_order_id": "987654321",
 ///   "status": "timeout",
 ///   "message": "Order processing timeout"
 /// }
@@ -189,8 +200,8 @@ pub struct OrderResponse {
 /// # Example Error Response (500)
 /// ```json
 /// {
-///   "order_id": 0,
-///   "client_order_id": 987654321,
+///   "order_id": "0",
+///   "client_order_id": "987654321",
 ///   "status": "error",
 ///   "message": "Failed to send order: connection refused"
 /// }
@@ -432,8 +443,8 @@ pub async fn place_order(
 /// # Example Success Response (200 OK)
 /// ```json
 /// {
-///   "order_id": 123456789,
-///   "client_order_id": 987654321,
+///   "order_id": "123456789",
+///   "client_order_id": "987654321",
 ///   "status": "Cancelled",
 ///   "message": "Cancel processed successfully"
 /// }
@@ -442,8 +453,8 @@ pub async fn place_order(
 /// # Example Timeout Response (408)
 /// ```json
 /// {
-///   "order_id": 123456789,
-///   "client_order_id": 987654321,
+///   "order_id": "123456789",
+///   "client_order_id": "987654321",
 ///   "status": "timeout",
 ///   "message": "Cancel timeout"
 /// }
@@ -452,8 +463,8 @@ pub async fn place_order(
 /// # Example Error Response (500)
 /// ```json
 /// {
-///   "order_id": 123456789,
-///   "client_order_id": 987654321,
+///   "order_id": "123456789",
+///   "client_order_id": "987654321",
 ///   "status": "error",
 ///   "message": "Failed to send cancel: connection refused"
 /// }

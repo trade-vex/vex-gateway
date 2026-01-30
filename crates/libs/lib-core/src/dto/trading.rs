@@ -42,7 +42,9 @@ impl std::str::FromStr for Side {
 // API Response DTOs
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OrderResponse {
+    #[serde(serialize_with = "serialize_i64_as_string", deserialize_with = "deserialize_i64_from_string")]
     pub order_id: i64,
+    #[serde(serialize_with = "serialize_i64_as_string", deserialize_with = "deserialize_i64_from_string")]
     pub user_id: i64,
     pub market_id: i32,
     pub price: Decimal,
@@ -53,10 +55,28 @@ pub struct OrderResponse {
     pub status: String,
 }
 
+fn serialize_i64_as_string<S>(value: &i64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&value.to_string())
+}
+
+fn deserialize_i64_from_string<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let s = String::deserialize(deserializer)?;
+    s.parse::<i64>().map_err(|e| D::Error::custom(format!("Invalid i64: {}", e)))
+}
+
 /// Enhanced order response for order history with status
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OrderHistoryResponse {
+    #[serde(serialize_with = "serialize_i64_as_string", deserialize_with = "deserialize_i64_from_string")]
     pub order_id: i64,
+    #[serde(serialize_with = "serialize_i64_as_string", deserialize_with = "deserialize_i64_from_string")]
     pub user_id: i64,
     pub market_id: i32,
     pub price: Decimal,
@@ -69,6 +89,7 @@ pub struct OrderHistoryResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserBalanceResponse {
+    #[serde(serialize_with = "serialize_i64_as_string", deserialize_with = "deserialize_i64_from_string")]
     pub user_id: i64,
     pub asset_id: u32,
     pub available: Decimal,
