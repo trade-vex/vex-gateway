@@ -69,6 +69,51 @@ impl OrderStore {
         self
     }
 
+    /// Convert status from database format (STATUS_*) to user-friendly format
+    fn normalize_status(status: &str) -> String {
+        match status {
+            "STATUS_FILLED" => "Filled".to_string(),
+            "STATUS_CANCELLED" => "Cancelled".to_string(),
+            "STATUS_PARTIALLY_FILLED" => "PartiallyFilled".to_string(),
+            "STATUS_PLACED" => "Placed".to_string(),
+            "STATUS_PENDING" => "Pending".to_string(),
+            "STATUS_PROCESSING" => "Processing".to_string(),
+            "STATUS_REJECTED" => "Rejected".to_string(),
+            // Handle lowercase variants (from Redis cache)
+            "filled" => "Filled".to_string(),
+            "cancelled" => "Cancelled".to_string(),
+            "partiallyfilled" => "PartiallyFilled".to_string(),
+            "placed" => "Placed".to_string(),
+            "pending" => "Pending".to_string(),
+            "processing" => "Processing".to_string(),
+            "rejected" => "Rejected".to_string(),
+            // Return as-is if already in correct format or unknown
+            _ => {
+                // If it doesn't start with STATUS_, assume it's already normalized
+                if status.starts_with("STATUS_") {
+                    // Convert STATUS_XYZ to Xyz format
+                    let without_prefix = status.strip_prefix("STATUS_").unwrap_or(status);
+                    // Convert to PascalCase
+                    let mut result = String::new();
+                    let mut capitalize_next = true;
+                    for ch in without_prefix.chars() {
+                        if ch == '_' {
+                            capitalize_next = true;
+                        } else if capitalize_next {
+                            result.push(ch.to_uppercase().next().unwrap_or(ch));
+                            capitalize_next = false;
+                        } else {
+                            result.push(ch.to_lowercase().next().unwrap_or(ch));
+                        }
+                    }
+                    result
+                } else {
+                    status.to_string()
+                }
+            }
+        }
+    }
+
     /// Convert OrderModel to OrderResponse with scaling applied
     pub fn to_response(&self, model: OrderModel) -> crate::dto::trading::OrderResponse {
         use crate::dto::trading::{OrderResponse, Side};
@@ -108,7 +153,7 @@ impl OrderStore {
             side,
             timestamp: model.order_timestamp,
             time_in_force: model.order_time_in_force,
-            status: model.order_status,
+            status: Self::normalize_status(&model.order_status),
         }
     }
 
@@ -154,7 +199,7 @@ impl OrderStore {
             side,
             timestamp: model.order_timestamp,
             time_in_force: model.order_time_in_force,
-            status: model.order_status,
+            status: Self::normalize_status(&model.order_status),
         }
     }
 
