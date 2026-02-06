@@ -251,7 +251,8 @@ impl TradingRepository for PostgresTradingRepository {
                     .add(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
                     .add(OrderColumn::OrderTimeInForce.ne("Ioc"))
                     .add(OrderColumn::OrderTimeInForce.ne("IOC"))
-                    .add(OrderColumn::OrderTimeInForce.ne("ioc")),
+                    .add(OrderColumn::OrderTimeInForce.ne("ioc"))
+                    .add(OrderColumn::OrderTimeInForce.ne("TIF_IOC")),
             )
             .add(OrderColumn::OrderStatus.eq("STATUS_PROCESSING"));
 
@@ -283,7 +284,8 @@ impl TradingRepository for PostgresTradingRepository {
                     .add(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
                     .add(OrderColumn::OrderTimeInForce.ne("Ioc"))
                     .add(OrderColumn::OrderTimeInForce.ne("IOC"))
-                    .add(OrderColumn::OrderTimeInForce.ne("ioc")),
+                    .add(OrderColumn::OrderTimeInForce.ne("ioc"))
+                    .add(OrderColumn::OrderTimeInForce.ne("TIF_IOC")),
             )
             .add(OrderColumn::OrderStatus.eq("STATUS_PROCESSING"));
 
@@ -317,7 +319,8 @@ impl TradingRepository for PostgresTradingRepository {
                     .add(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
                     .add(OrderColumn::OrderTimeInForce.ne("Ioc"))
                     .add(OrderColumn::OrderTimeInForce.ne("IOC"))
-                    .add(OrderColumn::OrderTimeInForce.ne("ioc")),
+                    .add(OrderColumn::OrderTimeInForce.ne("ioc"))
+                    .add(OrderColumn::OrderTimeInForce.ne("TIF_IOC")),
             )
             .add(OrderColumn::OrderStatus.eq("STATUS_PROCESSING"));
 
