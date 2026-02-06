@@ -438,6 +438,15 @@ impl OrderStore {
                                             continue;
                                         }
 
+                                        // Skip PartiallyFilled IOC orders
+                                        if status_lower == "partiallyfilled" {
+                                            if let Some(tif) = hash.get("order_time_in_force") {
+                                                if tif.to_lowercase() == "ioc" {
+                                                    continue;
+                                                }
+                                            }
+                                        }
+
                                         // Only include: Placed, Pending, PartiallyFilled, Processing
                                         if status_lower != "placed"
                                             && status_lower != "pending"
@@ -547,6 +556,15 @@ impl OrderStore {
                                             || status_lower == "rejected"
                                         {
                                             continue;
+                                        }
+
+                                        // Skip PartiallyFilled IOC orders
+                                        if status_lower == "partiallyfilled" {
+                                            if let Some(tif) = hash.get("order_time_in_force") {
+                                                if tif.to_lowercase() == "ioc" {
+                                                    continue;
+                                                }
+                                            }
                                         }
 
                                         // Only include: Placed, Pending, PartiallyFilled, Processing
