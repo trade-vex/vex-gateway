@@ -85,6 +85,7 @@ async fn test_deposit_funds(
         user_id,
         price: 0,
         size: amount, // Amount to deposit
+        original_size: amount,
         side: Side::Bid,
         time_in_force: TimeInForce::Gtc,
         timestamp: std::time::SystemTime::now()
@@ -187,6 +188,7 @@ async fn test_place_order(
         user_id,
         price: order_data.price,
         size: order_data.volume,
+        original_size: order_data.volume,
         side: order_data.side,
         time_in_force: order_data.time_in_force,
         timestamp: std::time::SystemTime::now()

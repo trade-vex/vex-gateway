@@ -114,24 +114,25 @@ impl OrderStore {
         }
     }
 
-    /// Convert OrderModel to OrderResponse with scaling applied
+    /// Convert OrderModel to OrderResponse with scaling applied (open orders: size = remaining)
     pub fn to_response(&self, model: OrderModel) -> crate::dto::trading::OrderResponse {
         use crate::dto::trading::{OrderResponse, Side};
         use rust_decimal::Decimal;
 
         let market_id = model.market_id as u32;
+        let remaining = (model.order_size - model.order_filled_size).max(0);
 
         // Apply scaling if scaling cache is available
         let (price, size) = if let Some(scaling_cache) = &self.scaling_cache {
             let price_decimal =
                 scaling_cache.scale_price(market_id, Decimal::from(model.order_price));
             let size_decimal =
-                scaling_cache.scale_volume(market_id, Decimal::from(model.order_size));
+                scaling_cache.scale_volume(market_id, Decimal::from(remaining));
             (price_decimal, size_decimal)
         } else {
             (
                 Decimal::from(model.order_price),
-                Decimal::from(model.order_size),
+                Decimal::from(remaining),
             )
         };
 
@@ -157,7 +158,7 @@ impl OrderStore {
         }
     }
 
-    /// Convert OrderModel to OrderHistoryResponse with scaling applied
+    /// Convert OrderModel to OrderHistoryResponse with scaling applied (size = original, filled = filled amount)
     pub fn to_history_response(
         &self,
         model: OrderModel,
@@ -167,17 +168,20 @@ impl OrderStore {
 
         let market_id = model.market_id as u32;
 
-        // Apply scaling if scaling cache is available
-        let (price, size) = if let Some(scaling_cache) = &self.scaling_cache {
+        // Apply scaling if scaling cache is available (size = original, filled = order_filled_size)
+        let (price, size, filled) = if let Some(scaling_cache) = &self.scaling_cache {
             let price_decimal =
                 scaling_cache.scale_price(market_id, Decimal::from(model.order_price));
             let size_decimal =
                 scaling_cache.scale_volume(market_id, Decimal::from(model.order_size));
-            (price_decimal, size_decimal)
+            let filled_decimal =
+                scaling_cache.scale_volume(market_id, Decimal::from(model.order_filled_size));
+            (price_decimal, size_decimal, filled_decimal)
         } else {
             (
                 Decimal::from(model.order_price),
                 Decimal::from(model.order_size),
+                Decimal::from(model.order_filled_size),
             )
         };
 
@@ -196,6 +200,7 @@ impl OrderStore {
             market_id: model.market_id,
             price,
             size,
+            filled,
             side,
             timestamp: model.order_timestamp,
             time_in_force: model.order_time_in_force,
@@ -700,8 +705,7 @@ impl OrderStore {
 
     /// Parse order hash from Redis into OrderModel
     /// Redis keys from Kafka sink: orders:{order_id}
-    /// Fields are flattened from protobuf with `order_` prefix for nested Order struct:
-    ///   market_id, order_order_id, order_user_id, order_price, order_size,
+    /// Fields: market_id, order_order_id, order_user_id, order_price, order_size, order_filled_size,
     ///   order_side, order_time_in_force, order_status, order_timestamp
     fn parse_order_hash(hash: HashMap<String, String>) -> Option<OrderModel> {
         // Parse with order_ prefix (from Kafka Flatten transform)
@@ -709,6 +713,10 @@ impl OrderStore {
         let order_user_id = hash.get("order_user_id")?.parse::<i64>().ok()?;
         let order_price = hash.get("order_price")?.parse::<i64>().ok()?;
         let order_size = hash.get("order_size")?.parse::<i64>().ok()?;
+        let order_filled_size = hash
+            .get("order_filled_size")
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
         let order_side = hash.get("order_side")?.clone();
         let order_timestamp = hash.get("order_timestamp")?.parse::<i64>().ok()?;
         let market_id = hash.get("market_id")?.parse::<i32>().ok()?;
@@ -722,6 +730,7 @@ impl OrderStore {
             order_user_id,
             order_price,
             order_size,
+            order_filled_size,
             order_side,
             order_time_in_force,
             order_status,

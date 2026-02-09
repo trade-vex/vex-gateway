@@ -356,6 +356,7 @@ impl TradingRepository for PostgresTradingRepository {
             order_user_id: Set(order.order_user_id),
             order_price: Set(order.order_price),
             order_size: Set(order.order_size),
+            order_filled_size: Set(order.order_filled_size),
             order_side: Set(order.order_side.to_string()),
             order_time_in_force: Set(order.order_time_in_force),
             order_status: Set(order.order_status),

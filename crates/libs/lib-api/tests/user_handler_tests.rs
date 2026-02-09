@@ -236,12 +236,12 @@ async fn insert_test_order(
 ) -> Result<(), sea_orm::DbErr> {
     let timestamp = Utc::now().timestamp();
 
-    // Note: created_at is optional, so we'll omit it to avoid type mismatch issues
+    // Note: created_at is optional; order_filled_size defaults to 0 for open/history tests
     let sql = format!(
         r#"
         INSERT INTO trading.orders_events 
-        (market_id, order_order_id, order_user_id, order_price, order_size, order_side, order_time_in_force, order_status, order_timestamp, created_at)
-        VALUES ({}, {}, {}, {}, {}, '{}', 'GTC', '{}', {}, NULL)
+        (market_id, order_order_id, order_user_id, order_price, order_size, order_filled_size, order_side, order_time_in_force, order_status, order_timestamp, created_at)
+        VALUES ({}, {}, {}, {}, {}, 0, '{}', 'GTC', '{}', {}, NULL)
         "#,
         market_id, order_id, user_id, price, size, side, status, timestamp
     );

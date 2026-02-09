@@ -285,6 +285,7 @@ pub async fn get_open_orders(
 ///       "market_id": 65538,
 ///       "price": 5000000,
 ///       "size": 100,
+///       "filled": 100,
 ///       "side": "Bid",
 ///       "timestamp": 1697452800000000,
 ///       "time_in_force": "GTC",

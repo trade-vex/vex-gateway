@@ -40,6 +40,7 @@ impl std::str::FromStr for Side {
 }
 
 // API Response DTOs
+/// Open order response: size = remaining (original - filled)
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OrderResponse {
     #[serde(serialize_with = "serialize_i64_as_string", deserialize_with = "deserialize_i64_from_string")]
@@ -48,6 +49,7 @@ pub struct OrderResponse {
     pub user_id: i64,
     pub market_id: i32,
     pub price: Decimal,
+    /// Remaining size (order_size - order_filled_size)
     pub size: Decimal,
     pub side: Side,
     pub timestamp: i64,
@@ -72,6 +74,7 @@ where
 }
 
 /// Enhanced order response for order history with status
+/// size = original order size, filled = filled amount
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OrderHistoryResponse {
     #[serde(serialize_with = "serialize_i64_as_string", deserialize_with = "deserialize_i64_from_string")]
@@ -80,7 +83,10 @@ pub struct OrderHistoryResponse {
     pub user_id: i64,
     pub market_id: i32,
     pub price: Decimal,
+    /// Original order size
     pub size: Decimal,
+    /// Filled amount
+    pub filled: Decimal,
     pub side: Side,
     pub timestamp: i64,
     pub time_in_force: String,

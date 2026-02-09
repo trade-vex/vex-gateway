@@ -22,6 +22,8 @@ pub struct Model {
     pub order_price: i64,
     #[sea_orm(column_type = "BigInteger")]
     pub order_size: i64,
+    #[sea_orm(column_type = "BigInteger")]
+    pub order_filled_size: i64,
     pub order_side: String,
     pub order_time_in_force: String,
     pub order_status: String,

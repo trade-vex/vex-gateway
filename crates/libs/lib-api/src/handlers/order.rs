@@ -269,6 +269,7 @@ pub async fn place_order(
         user_id,
         price: command_price,
         size: volume,
+        original_size: volume,
         side,
         time_in_force,
         timestamp: std::time::SystemTime::now()
@@ -343,6 +344,7 @@ pub async fn place_order(
                             order_user_id: user_id as i64,
                             order_price: price as i64,
                             order_size: volume as i64,
+                            order_filled_size: 0,
                             order_side: format!("{:?}", side),
                             order_time_in_force: format!("{:?}", time_in_force),
                             order_status: status_str.clone(),
@@ -512,6 +514,7 @@ pub async fn cancel_order(
         user_id,
         price: 0,
         size: 0,
+        original_size: 0,
         side: Side::Bid,
         time_in_force: TimeInForce::Gtc,
         timestamp: std::time::SystemTime::now()

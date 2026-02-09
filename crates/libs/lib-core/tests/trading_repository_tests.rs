@@ -374,6 +374,7 @@ fn create_test_order(
         order_user_id: user_id,
         order_price: price,
         order_size: size,
+        order_filled_size: 0,
         order_side: side.to_string(),
         order_time_in_force: "GTC".to_string(),
         order_status: status.to_string(),
