@@ -242,18 +242,18 @@ impl TradingRepository for PostgresTradingRepository {
 
     async fn get_open_orders(&self, user_id: u64) -> Result<Vec<OrderModel>> {
         // Filter for "open" orders: Placed, Pending, PartiallyFilled (non-IOC), Processing
-        // Exclude: Filled, Cancelled, Rejected, and PartiallyFilled IOC
+        // Exclude: Filled, Cancelled, Rejected, and PartiallyFilled IOC (no exception: IOC is immediate-or-cancel, so partially filled = done).
+        let part_filled_not_ioc = Condition::all()
+            .add(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
+            .add(OrderColumn::OrderTimeInForce.ne("Ioc"))
+            .add(OrderColumn::OrderTimeInForce.ne("IOC"))
+            .add(OrderColumn::OrderTimeInForce.ne("ioc"))
+            .add(OrderColumn::OrderTimeInForce.ne("TIF_IOC"))
+            .add(OrderColumn::OrderTimeInForce.ne("TifIoc"));
         let open_status_condition = Condition::any()
             .add(OrderColumn::OrderStatus.eq("STATUS_PLACED"))
             .add(OrderColumn::OrderStatus.eq("STATUS_PENDING"))
-            .add(
-                Condition::all()
-                    .add(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
-                    .add(OrderColumn::OrderTimeInForce.ne("Ioc"))
-                    .add(OrderColumn::OrderTimeInForce.ne("IOC"))
-                    .add(OrderColumn::OrderTimeInForce.ne("ioc"))
-                    .add(OrderColumn::OrderTimeInForce.ne("TIF_IOC")),
-            )
+            .add(part_filled_not_ioc)
             .add(OrderColumn::OrderStatus.eq("STATUS_PROCESSING"));
 
         let orders = OrderEntity::find()
@@ -275,18 +275,18 @@ impl TradingRepository for PostgresTradingRepository {
         market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>> {
         // Filter for "open" orders: Placed, Pending, PartiallyFilled (non-IOC), Processing
-        // Exclude: Filled, Cancelled, Rejected, and PartiallyFilled IOC
+        // Exclude: Filled, Cancelled, Rejected, and PartiallyFilled IOC (no exception).
+        let part_filled_not_ioc = Condition::all()
+            .add(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
+            .add(OrderColumn::OrderTimeInForce.ne("Ioc"))
+            .add(OrderColumn::OrderTimeInForce.ne("IOC"))
+            .add(OrderColumn::OrderTimeInForce.ne("ioc"))
+            .add(OrderColumn::OrderTimeInForce.ne("TIF_IOC"))
+            .add(OrderColumn::OrderTimeInForce.ne("TifIoc"));
         let open_status_condition = Condition::any()
             .add(OrderColumn::OrderStatus.eq("STATUS_PLACED"))
             .add(OrderColumn::OrderStatus.eq("STATUS_PENDING"))
-            .add(
-                Condition::all()
-                    .add(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
-                    .add(OrderColumn::OrderTimeInForce.ne("Ioc"))
-                    .add(OrderColumn::OrderTimeInForce.ne("IOC"))
-                    .add(OrderColumn::OrderTimeInForce.ne("ioc"))
-                    .add(OrderColumn::OrderTimeInForce.ne("TIF_IOC")),
-            )
+            .add(part_filled_not_ioc)
             .add(OrderColumn::OrderStatus.eq("STATUS_PROCESSING"));
 
         let mut query = OrderEntity::find()
@@ -310,18 +310,18 @@ impl TradingRepository for PostgresTradingRepository {
 
     async fn count_open_orders(&self, user_id: u64, market_id: Option<u32>) -> Result<u64> {
         // Count only "open" orders: Placed, Pending, PartiallyFilled (non-IOC), Processing
-        // Exclude: Filled, Cancelled, Rejected, and PartiallyFilled IOC
+        // Exclude: Filled, Cancelled, Rejected, and PartiallyFilled IOC (no exception).
+        let part_filled_not_ioc = Condition::all()
+            .add(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
+            .add(OrderColumn::OrderTimeInForce.ne("Ioc"))
+            .add(OrderColumn::OrderTimeInForce.ne("IOC"))
+            .add(OrderColumn::OrderTimeInForce.ne("ioc"))
+            .add(OrderColumn::OrderTimeInForce.ne("TIF_IOC"))
+            .add(OrderColumn::OrderTimeInForce.ne("TifIoc"));
         let open_status_condition = Condition::any()
             .add(OrderColumn::OrderStatus.eq("STATUS_PLACED"))
             .add(OrderColumn::OrderStatus.eq("STATUS_PENDING"))
-            .add(
-                Condition::all()
-                    .add(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
-                    .add(OrderColumn::OrderTimeInForce.ne("Ioc"))
-                    .add(OrderColumn::OrderTimeInForce.ne("IOC"))
-                    .add(OrderColumn::OrderTimeInForce.ne("ioc"))
-                    .add(OrderColumn::OrderTimeInForce.ne("TIF_IOC")),
-            )
+            .add(part_filled_not_ioc)
             .add(OrderColumn::OrderStatus.eq("STATUS_PROCESSING"));
 
         let mut query = OrderEntity::find()
