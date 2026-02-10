@@ -153,25 +153,23 @@ pub async fn handle_oauth_callback(
                         .await?;
 
                     // Build redirect URL with only login_code
-                    use url::form_urlencoded;
-                    let encoded_login_code: String =
-                        form_urlencoded::byte_serialize(login_code.as_bytes()).collect();
-
                     let redirect_url = if frontend_url.contains("://")
                         && !frontend_url.starts_with("http://")
                         && !frontend_url.starts_with("https://")
                     {
-                        // Custom scheme (e.g., vex://) - manually append query params
-                        format!("{}?login_code={}", frontend_url, encoded_login_code)
+                        // Custom scheme (e.g., vex://) - UUIDs are URL-safe, no encoding needed
+                        format!("{}?login_code={}", frontend_url, login_code)
                     } else {
                         // Standard URL - use URL parsing for proper encoding
                         match Url::parse(&frontend_url) {
                             Ok(mut url) => {
+                                // query_pairs_mut() automatically handles encoding if needed
                                 url.query_pairs_mut().append_pair("login_code", &login_code);
                                 url.to_string()
                             }
                             Err(_) => {
-                                format!("{}?login_code={}", frontend_url, encoded_login_code)
+                                // Fallback - UUIDs are URL-safe
+                                format!("{}?login_code={}", frontend_url, login_code)
                             }
                         }
                     };
@@ -252,8 +250,8 @@ pub async fn exchange_oauth_login_code(
         return Err(AuthError::InvalidRequest);
     }
 
-    // Retrieve the login_code data
-    let data = session_service.get_login_code(login_code).await?;
+    // Atomically retrieve and delete login_code data
+    let data = session_service.get_and_delete_login_code(login_code).await?;
 
     // Verify PKCE-like S256 challenge: SHA256(verifier) must equal app_challenge
     let computed = crate::utils::pkce::s256_challenge(verifier)?;
@@ -261,9 +259,6 @@ pub async fn exchange_oauth_login_code(
         // Don't reveal whether the code was valid or challenge failed
         return Err(AuthError::InvalidRequest);
     }
-
-    // One-time use: delete the login_code after successful verification
-    session_service.delete_login_code(login_code).await?;
 
     // Parse user_info JSON
     let user_info_val: serde_json::Value =

@@ -156,9 +156,6 @@ pub async fn login(
         )
         .await?;
 
-    // Get user info for cookie
-    let user_info = UserInfo::from(user.clone());
-
     // Create session cookie
     let (is_secure, cookie_ttl) = get_cookie_config();
 
@@ -170,21 +167,8 @@ pub async fn login(
         .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
         .finish();
 
-    // Create user_info cookie (JSON format)
-    let user_info_json = serde_json::to_string(&user_info)
-        .map_err(|e| AuthError::Validation(format!("Failed to serialize user info: {}", e)))?;
-
-    let user_info_cookie = actix_web::cookie::Cookie::build("user_info", user_info_json)
-        .path("/")
-        .http_only(false) // Allow client-side JavaScript access
-        .secure(is_secure)
-        .same_site(actix_web::cookie::SameSite::Strict)
-        .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
-        .finish();
-
     Ok(HttpResponse::Ok()
         .cookie(session_cookie)
-        .cookie(user_info_cookie)
         .json(json!({
             "message": "Logged in successfully"
         })))
@@ -213,7 +197,7 @@ pub async fn logout(
         tracing::warn!("Failed to blacklist token during logout: {}", e);
     }
 
-    // Create cookies to delete the session and user_info cookies
+    // Create cookie to delete the session cookie
     let (is_secure, _cookie_ttl) = get_cookie_config();
 
     let delete_session_cookie = actix_web::cookie::Cookie::build("session_id", "")
@@ -224,17 +208,8 @@ pub async fn logout(
         .max_age(actix_web::cookie::time::Duration::seconds(0))
         .finish();
 
-    let delete_user_info_cookie = actix_web::cookie::Cookie::build("user_info", "")
-        .path("/")
-        .http_only(false)
-        .secure(is_secure)
-        .same_site(actix_web::cookie::SameSite::Strict)
-        .max_age(actix_web::cookie::time::Duration::seconds(0))
-        .finish();
-
     Ok(HttpResponse::Ok()
         .cookie(delete_session_cookie)
-        .cookie(delete_user_info_cookie)
         .json(json!({
             "message": "Logged out successfully",
             "timestamp": chrono::Utc::now().to_rfc3339()
@@ -322,12 +297,6 @@ pub async fn verify_email_with_otp(
     // Update last login
     user_repo.update_last_login(user.user_id).await?;
 
-    // Get updated user info
-    let updated_user = user_repo
-        .find_by_id(user.user_id)
-        .await?
-        .ok_or(AuthError::UserNotFound)?;
-
     tracing::debug!("Creating session for user_id: {}", user.user_id);
 
     // Create session (stores user_id and tokens in Redis)
@@ -345,9 +314,6 @@ pub async fn verify_email_with_otp(
 
     tracing::debug!("Session created successfully: {}", session_id);
 
-    // Get user info for cookie
-    let user_info = UserInfo::from(updated_user);
-
     // Create session cookie
     let (is_secure, cookie_ttl) = get_cookie_config();
 
@@ -359,24 +325,11 @@ pub async fn verify_email_with_otp(
         .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
         .finish();
 
-    // Create user_info cookie (JSON format)
-    let user_info_json = serde_json::to_string(&user_info)
-        .map_err(|e| AuthError::Validation(format!("Failed to serialize user info: {}", e)))?;
-
-    let user_info_cookie = actix_web::cookie::Cookie::build("user_info", user_info_json)
-        .path("/")
-        .http_only(false) // Allow client-side JavaScript access
-        .secure(is_secure)
-        .same_site(actix_web::cookie::SameSite::Strict)
-        .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
-        .finish();
-
     tracing::debug!("Session cookie created, sending response with cookie");
 
     // Return only success message (session created with cookie)
     Ok(HttpResponse::Ok()
         .cookie(session_cookie)
-        .cookie(user_info_cookie)
         .json(json!({
             "message": "Email verified successfully"
         })))

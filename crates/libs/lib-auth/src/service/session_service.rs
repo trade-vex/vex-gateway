@@ -286,7 +286,11 @@ impl SessionService {
         Ok(login_code)
     }
 
-    /// Retrieve login_code data (does NOT delete - use delete_login_code after verification)
+    /// Atomically retrieve and delete login_code data (prevents race conditions)
+    ///
+    /// Uses Redis GETDEL command to ensure one-time use semantics and prevent replay attacks.
+    /// This is the preferred method for login_code exchange as it eliminates the race condition
+    /// where two concurrent requests could both retrieve the same code before deletion.
     ///
     /// # Arguments
     ///
@@ -295,38 +299,28 @@ impl SessionService {
     /// # Returns
     ///
     /// The LoginCodeData if found, or InvalidRequest if expired/not found
-    pub async fn get_login_code(&self, login_code: &str) -> Result<LoginCodeData, AuthError> {
+    ///
+    /// # Security
+    ///
+    /// - Atomic operation: Get and delete happen in a single Redis command
+    /// - Prevents replay attacks: Code can only be retrieved once
+    /// - Eliminates race conditions: Concurrent requests cannot both succeed
+    pub async fn get_and_delete_login_code(&self, login_code: &str) -> Result<LoginCodeData, AuthError> {
         let key = format!("oauth_login_code:{}", login_code);
 
         let mut conn = self.conn.clone();
 
-        let json: Option<String> = conn
-            .get(&key)
+        // Atomic: Get and delete in one operation (prevents race conditions)
+        let json: Option<String> = redis::cmd("GETDEL")
+            .arg(&key)
+            .query_async(&mut conn)
             .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get login_code: {}", e)))?;
+            .map_err(|e| AuthError::Redis(format!("Failed to GETDEL login_code: {}", e)))?;
 
         let json = json.ok_or(AuthError::InvalidRequest)?;
         let data: LoginCodeData = serde_json::from_str(&json)
             .map_err(|e| AuthError::Redis(format!("Failed to deserialize login_code: {}", e)))?;
 
         Ok(data)
-    }
-
-    /// Delete a login_code after successful verification (one-time use)
-    ///
-    /// # Arguments
-    ///
-    /// * `login_code` - The code to delete
-    pub async fn delete_login_code(&self, login_code: &str) -> Result<(), AuthError> {
-        let key = format!("oauth_login_code:{}", login_code);
-
-        let mut conn = self.conn.clone();
-
-        let _: () = conn
-            .del(&key)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to delete login_code: {}", e)))?;
-
-        Ok(())
     }
 }
