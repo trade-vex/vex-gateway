@@ -251,7 +251,9 @@ pub async fn exchange_oauth_login_code(
     }
 
     // Atomically retrieve and delete login_code data
-    let data = session_service.get_and_delete_login_code(login_code).await?;
+    let data = session_service
+        .get_and_delete_login_code(login_code)
+        .await?;
 
     // Verify PKCE-like S256 challenge: SHA256(verifier) must equal app_challenge
     let computed = crate::utils::pkce::s256_challenge(verifier)?;

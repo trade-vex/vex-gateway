@@ -126,14 +126,10 @@ impl OrderStore {
         let (price, size) = if let Some(scaling_cache) = &self.scaling_cache {
             let price_decimal =
                 scaling_cache.scale_price(market_id, Decimal::from(model.order_price));
-            let size_decimal =
-                scaling_cache.scale_volume(market_id, Decimal::from(remaining));
+            let size_decimal = scaling_cache.scale_volume(market_id, Decimal::from(remaining));
             (price_decimal, size_decimal)
         } else {
-            (
-                Decimal::from(model.order_price),
-                Decimal::from(remaining),
-            )
+            (Decimal::from(model.order_price), Decimal::from(remaining))
         };
 
         let side = model.order_side.parse().unwrap_or_else(|_| {

@@ -43,9 +43,15 @@ impl std::str::FromStr for Side {
 /// Open order response: size = remaining (original - filled)
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OrderResponse {
-    #[serde(serialize_with = "serialize_i64_as_string", deserialize_with = "deserialize_i64_from_string")]
+    #[serde(
+        serialize_with = "serialize_i64_as_string",
+        deserialize_with = "deserialize_i64_from_string"
+    )]
     pub order_id: i64,
-    #[serde(serialize_with = "serialize_i64_as_string", deserialize_with = "deserialize_i64_from_string")]
+    #[serde(
+        serialize_with = "serialize_i64_as_string",
+        deserialize_with = "deserialize_i64_from_string"
+    )]
     pub user_id: i64,
     pub market_id: i32,
     pub price: Decimal,
@@ -70,16 +76,23 @@ where
 {
     use serde::de::Error;
     let s = String::deserialize(deserializer)?;
-    s.parse::<i64>().map_err(|e| D::Error::custom(format!("Invalid i64: {}", e)))
+    s.parse::<i64>()
+        .map_err(|e| D::Error::custom(format!("Invalid i64: {}", e)))
 }
 
 /// Enhanced order response for order history with status
 /// size = original order size, filled = filled amount
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OrderHistoryResponse {
-    #[serde(serialize_with = "serialize_i64_as_string", deserialize_with = "deserialize_i64_from_string")]
+    #[serde(
+        serialize_with = "serialize_i64_as_string",
+        deserialize_with = "deserialize_i64_from_string"
+    )]
     pub order_id: i64,
-    #[serde(serialize_with = "serialize_i64_as_string", deserialize_with = "deserialize_i64_from_string")]
+    #[serde(
+        serialize_with = "serialize_i64_as_string",
+        deserialize_with = "deserialize_i64_from_string"
+    )]
     pub user_id: i64,
     pub market_id: i32,
     pub price: Decimal,
@@ -95,7 +108,10 @@ pub struct OrderHistoryResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserBalanceResponse {
-    #[serde(serialize_with = "serialize_i64_as_string", deserialize_with = "deserialize_i64_from_string")]
+    #[serde(
+        serialize_with = "serialize_i64_as_string",
+        deserialize_with = "deserialize_i64_from_string"
+    )]
     pub user_id: i64,
     pub asset_id: u32,
     pub available: Decimal,

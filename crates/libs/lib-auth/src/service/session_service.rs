@@ -305,7 +305,10 @@ impl SessionService {
     /// - Atomic operation: Get and delete happen in a single Redis command
     /// - Prevents replay attacks: Code can only be retrieved once
     /// - Eliminates race conditions: Concurrent requests cannot both succeed
-    pub async fn get_and_delete_login_code(&self, login_code: &str) -> Result<LoginCodeData, AuthError> {
+    pub async fn get_and_delete_login_code(
+        &self,
+        login_code: &str,
+    ) -> Result<LoginCodeData, AuthError> {
         let key = format!("oauth_login_code:{}", login_code);
 
         let mut conn = self.conn.clone();

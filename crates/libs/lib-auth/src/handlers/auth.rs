@@ -167,11 +167,9 @@ pub async fn login(
         .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
         .finish();
 
-    Ok(HttpResponse::Ok()
-        .cookie(session_cookie)
-        .json(json!({
-            "message": "Logged in successfully"
-        })))
+    Ok(HttpResponse::Ok().cookie(session_cookie).json(json!({
+        "message": "Logged in successfully"
+    })))
 }
 
 // Logout handler
@@ -328,11 +326,9 @@ pub async fn verify_email_with_otp(
     tracing::debug!("Session cookie created, sending response with cookie");
 
     // Return only success message (session created with cookie)
-    Ok(HttpResponse::Ok()
-        .cookie(session_cookie)
-        .json(json!({
-            "message": "Email verified successfully"
-        })))
+    Ok(HttpResponse::Ok().cookie(session_cookie).json(json!({
+        "message": "Email verified successfully"
+    })))
 }
 
 // Verify email handler (internal handler)
