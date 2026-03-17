@@ -100,11 +100,54 @@ impl AppState {
 
         // Initialize portfolio repository (ClickHouse)
         let portfolio_repository: Arc<dyn PortfolioRepository> = {
-            let ch_url = std::env::var("CLICKHOUSE_URL")
-                .unwrap_or_else(|_| "http://localhost:8123".to_string());
-            let sanitized = Self::sanitize_url(&ch_url);
-            info!("Connecting to ClickHouse: {}", sanitized);
-            let ch = ClickHouseClient::default().with_url(ch_url);
+            let ch = if Self::is_production_env() {
+                let ch_url = Self::required_env("CLICKHOUSE_URL")?;
+                let ch_user = Self::required_env("CLICKHOUSE_USER")?;
+                let ch_password = Self::required_env("CLICKHOUSE_PASSWORD")?;
+                let ch_database = Self::required_env("CLICKHOUSE_DATABASE")?;
+
+                let sanitized = Self::sanitize_url(&ch_url);
+                info!("Connecting to ClickHouse: {}", sanitized);
+                info!("Using ClickHouse user from environment");
+                info!("Using ClickHouse database from environment: {}", ch_database);
+
+                ClickHouseClient::default()
+                    .with_url(ch_url)
+                    .with_user(ch_user)
+                    .with_password(ch_password)
+                    .with_database(&ch_database)
+            } else {
+                let ch_url = std::env::var("CLICKHOUSE_URL")
+                    .unwrap_or_else(|_| "http://localhost:8123".to_string());
+                let sanitized = Self::sanitize_url(&ch_url);
+                info!("Connecting to ClickHouse: {}", sanitized);
+
+                let mut ch = ClickHouseClient::default().with_url(ch_url);
+
+                if let Ok(ch_user) = std::env::var("CLICKHOUSE_USER") {
+                    if !ch_user.is_empty() {
+                        info!("Using ClickHouse user from environment");
+                        ch = ch.with_user(ch_user);
+                    }
+                }
+
+                if let Ok(ch_password) = std::env::var("CLICKHOUSE_PASSWORD") {
+                    if !ch_password.is_empty() {
+                        info!("Using ClickHouse password from environment");
+                        ch = ch.with_password(ch_password);
+                    }
+                }
+
+                if let Ok(ch_database) = std::env::var("CLICKHOUSE_DATABASE") {
+                    if !ch_database.is_empty() {
+                        info!("Using ClickHouse database from environment: {}", ch_database);
+                        ch = ch.with_database(&ch_database);
+                    }
+                }
+
+                ch
+            };
+
             Arc::new(ClickHousePortfolioRepository::new(ch))
         };
 
@@ -332,6 +375,23 @@ impl AppState {
                 }
             }
             Err(_) => "<invalid-url>".to_string(),
+        }
+    }
+
+    fn is_production_env() -> bool {
+        std::env::var("APP_ENV")
+            .map(|value| value.eq_ignore_ascii_case("production"))
+            .unwrap_or(false)
+    }
+
+    fn required_env(name: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        match std::env::var(name) {
+            Ok(value) if !value.trim().is_empty() => Ok(value),
+            _ => Err(format!(
+                "Missing required environment variable in production: {}",
+                name
+            )
+            .into()),
         }
     }
 }

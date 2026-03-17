@@ -27,3 +27,11 @@ crates/libs/lib-auth/src/keys/
 *.sql
 
 docs/
+
+vex-gateway.service
+
+*.log
+
+*.md
+
+vex-gateway.env.example
