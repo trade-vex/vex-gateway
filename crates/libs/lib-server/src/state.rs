@@ -109,7 +109,10 @@ impl AppState {
                 let sanitized = Self::sanitize_url(&ch_url);
                 info!("Connecting to ClickHouse: {}", sanitized);
                 info!("Using ClickHouse user from environment");
-                info!("Using ClickHouse database from environment: {}", ch_database);
+                info!(
+                    "Using ClickHouse database from environment: {}",
+                    ch_database
+                );
 
                 ClickHouseClient::default()
                     .with_url(ch_url)
@@ -140,7 +143,10 @@ impl AppState {
 
                 if let Ok(ch_database) = std::env::var("CLICKHOUSE_DATABASE") {
                     if !ch_database.is_empty() {
-                        info!("Using ClickHouse database from environment: {}", ch_database);
+                        info!(
+                            "Using ClickHouse database from environment: {}",
+                            ch_database
+                        );
                         ch = ch.with_database(&ch_database);
                     }
                 }
