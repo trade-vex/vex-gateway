@@ -23,6 +23,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 reqwest = { version = "0.11", features = ["json"] }
 url = "2.5"
 
-vex-networking ={ git = "https://github.com/trade-vex/vex-core" , rev = "efeaeb4"}
-vex-config = { git = "https://github.com/trade-vex/vex-core" , rev = "efeaeb4"}
-common = { git = "https://github.com/trade-vex/vex-core" , rev = "efeaeb4"}
+vex-networking ={ git = "https://github.com/trade-vex/vex-core" , rev = "287da4e"}
+vex-config = { git = "https://github.com/trade-vex/vex-core" , rev = "287da4e"}
+common = { git = "https://github.com/trade-vex/vex-core" , rev = "287da4e"}
