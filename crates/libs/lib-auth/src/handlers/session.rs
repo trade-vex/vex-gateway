@@ -10,6 +10,8 @@ pub struct SessionInfo {
     pub user_id: uuid::Uuid,
     pub access_token: String,
     pub refresh_token: String,
+    pub session_expires_in: u64,
+    pub refresh_expires_in: u64,
 }
 
 /// Get session info (tokens and user_id)
@@ -17,6 +19,7 @@ pub struct SessionInfo {
 pub async fn get_session_info(
     req: HttpRequest,
     session_service: web::Data<Arc<SessionService>>,
+    token_service: web::Data<Arc<TokenService>>,
 ) -> Result<HttpResponse, AuthError> {
     // Extract session ID from cookie
     let session_id = req
@@ -33,6 +36,8 @@ pub async fn get_session_info(
         user_id: session_data.user_id,
         access_token: session_data.access_token,
         refresh_token: session_data.refresh_token,
+        session_expires_in: session_service.ttl_seconds(),
+        refresh_expires_in: token_service.refresh_token_ttl_seconds()?,
     };
 
     Ok(HttpResponse::Ok().json(response))

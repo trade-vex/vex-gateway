@@ -1,7 +1,7 @@
 use crate::dto::auth_request_dto::{
-    MobileSessionRenewRequest, OAuthCallbackQuery, OAuthExchangeRequest, OAuthInitQuery,
+    OAuthCallbackQuery, OAuthExchangeRequest, OAuthInitQuery, SessionRenewRequest,
 };
-use crate::dto::auth_response_dto::{MobileSessionRenewResponse, OAuthExchangeResponse};
+use crate::dto::auth_response_dto::{OAuthExchangeResponse, SessionRenewResponse};
 use crate::error::auth_error::AuthError;
 use crate::service::{
     oauth_service::OAuthService, session_service::SessionService, token_service::TokenService,
@@ -16,6 +16,16 @@ use serde_json;
 use std::sync::Arc;
 use tracing::error;
 use url::Url;
+
+fn build_session_cookie(session_id: String, is_secure: bool, max_age_secs: i64) -> Cookie<'static> {
+    Cookie::build("session_id", session_id)
+        .path("/")
+        .http_only(true)
+        .secure(is_secure)
+        .same_site(SameSite::Strict)
+        .max_age(Duration::seconds(max_age_secs))
+        .finish()
+}
 
 /// Initiate OAuth flow
 /// GET /oauth/{provider}?platform=app|web&app_challenge=...
@@ -287,15 +297,17 @@ pub async fn exchange_oauth_login_code(
         }))
 }
 
-/// Renew a mobile app session using a rotated refresh token
-/// POST /oauth/renew-session
+/// Renew a session using a rotated refresh token
+/// POST /session/renew
 ///
-/// This endpoint is intended for the native mobile client after its short-lived
+/// This endpoint is shared by web and mobile clients after their short-lived
 /// `session_id` has expired. The client presents the last issued refresh token,
 /// the server rotates it, creates a fresh Redis-backed session, and returns the
-/// new `session_id` plus the rotated refresh token.
-pub async fn renew_mobile_session(
-    body: web::Json<MobileSessionRenewRequest>,
+/// new `session_id` plus the rotated refresh token. A fresh `session_id` cookie
+/// is also set for browser-based clients.
+pub async fn renew_session(
+    req: HttpRequest,
+    body: web::Json<SessionRenewRequest>,
     session_service: web::Data<Arc<SessionService>>,
     token_service: web::Data<Arc<TokenService>>,
 ) -> Result<HttpResponse, AuthError> {
@@ -320,9 +332,16 @@ pub async fn renew_mobile_session(
         )
         .await?;
 
+    let session_cookie = build_session_cookie(
+        session_id.clone(),
+        req.connection_info().scheme() == "https",
+        session_service.ttl_seconds() as i64,
+    );
+
     Ok(HttpResponse::Ok()
+        .cookie(session_cookie)
         .insert_header(("Cache-Control", "no-store"))
-        .json(MobileSessionRenewResponse {
+        .json(SessionRenewResponse {
             session_id,
             refresh_token: new_tokens.refresh_token,
             session_expires_in: session_service.ttl_seconds(),

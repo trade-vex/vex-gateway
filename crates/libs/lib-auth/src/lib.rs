@@ -37,20 +37,19 @@ pub fn configure_public_auth_services(cfg: &mut web::ServiceConfig) {
                 .route(
                     "/exchange",
                     web::post().to(handlers::oauth::exchange_oauth_login_code),
-                )
-                .route(
-                    "/renew-session",
-                    web::post().to(handlers::oauth::renew_mobile_session),
                 ),
         )
         // Public auth routes
         .route("/signup", web::post().to(handlers::auth::signup))
         .route("/login", web::post().to(handlers::auth::login))
-        .route("/mobile/login", web::post().to(handlers::auth::mobile_login))
         .route("/refresh", web::post().to(handlers::auth::refresh_token))
         .route(
             "/session/refresh-tokens",
             web::post().to(handlers::session::refresh_session_tokens),
+        )
+        .route(
+            "/session/renew",
+            web::post().to(handlers::oauth::renew_session),
         )
         .route(
             "/check-email",
@@ -63,10 +62,6 @@ pub fn configure_public_auth_services(cfg: &mut web::ServiceConfig) {
         .route(
             "/verify-email",
             web::post().to(handlers::auth::verify_email_with_otp),
-        )
-        .route(
-            "/mobile/verify-email",
-            web::post().to(handlers::auth::mobile_verify_email_with_otp),
         )
         // Password reset routes
         .route(

@@ -91,18 +91,18 @@ pub struct OAuthExchangeResponse {
     pub user_info: serde_json::Value,
 }
 
-/// Response for mobile session renewal
+/// Response for generic session renewal
 #[derive(Debug, Clone, Serialize)]
-pub struct MobileSessionRenewResponse {
+pub struct SessionRenewResponse {
     pub session_id: String,
     pub refresh_token: String,
     pub session_expires_in: u64,
     pub refresh_expires_in: u64,
 }
 
-/// Response for mobile email/password login or signup completion
+/// Response for generic session-bearing auth success
 #[derive(Debug, Clone, Serialize)]
-pub struct MobileSessionAuthResponse {
+pub struct SessionAuthResponse {
     pub session_id: String,
     pub refresh_token: String,
     pub session_expires_in: u64,

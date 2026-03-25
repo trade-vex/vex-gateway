@@ -11,7 +11,7 @@ use crate::dto::auth_request_dto::{
     VerifyResetOtpRequest,
 };
 use crate::dto::auth_response_dto::{
-    MobileSessionAuthResponse, RefreshTokenResponse, SignupResponse, UserInfo, UserProfile,
+    RefreshTokenResponse, SessionAuthResponse, SignupResponse, UserInfo, UserProfile,
 };
 use crate::error::auth_error::AuthError;
 use crate::middleware::jwt_auth::AuthenticatedUser;
@@ -32,11 +32,11 @@ fn get_cookie_config() -> (bool, i64) {
     (is_secure, cookie_ttl)
 }
 
-async fn create_mobile_session_response(
+async fn create_session_auth_response(
     user_info: UserInfo,
     token_service: &Arc<TokenService>,
     session_service: &Arc<SessionService>,
-) -> Result<MobileSessionAuthResponse, AuthError> {
+) -> Result<SessionAuthResponse, AuthError> {
     let tokens = token_service.mint_tokens(user_info.user_id).await?;
     let session_id = session_service
         .create_session(
@@ -46,7 +46,7 @@ async fn create_mobile_session_response(
         )
         .await?;
 
-    Ok(MobileSessionAuthResponse {
+    Ok(SessionAuthResponse {
         session_id,
         refresh_token: tokens.refresh_token,
         session_expires_in: session_service.ttl_seconds(),
@@ -164,27 +164,19 @@ pub async fn login(
         return Err(AuthError::InvalidCredentials);
     }
 
-    let user_id = user.user_id;
+    user_repo.update_last_login(user.user_id).await?;
 
-    // Generate tokens
-    let tokens = token_service.mint_tokens(user_id).await?;
-
-    // Update last login
-    user_repo.update_last_login(user_id).await?;
-
-    // Create session (store user_id and tokens in Redis)
-    let session_id = session_service
-        .create_session(
-            user_id,
-            tokens.access_token.clone(),
-            tokens.refresh_token.clone(),
-        )
-        .await?;
+    let response = create_session_auth_response(
+        UserInfo::from(user),
+        token_service.get_ref(),
+        session_service.get_ref(),
+    )
+    .await?;
 
     // Create session cookie
     let (is_secure, cookie_ttl) = get_cookie_config();
 
-    let session_cookie = actix_web::cookie::Cookie::build("session_id", session_id)
+    let session_cookie = actix_web::cookie::Cookie::build("session_id", response.session_id.clone())
         .path("/")
         .http_only(true)
         .secure(is_secure)
@@ -192,59 +184,8 @@ pub async fn login(
         .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
         .finish();
 
-    Ok(HttpResponse::Ok().cookie(session_cookie).json(json!({
-        "message": "Logged in successfully"
-    })))
-}
-
-// Mobile login handler
-pub async fn mobile_login(
-    req: web::Json<LoginRequest>,
-    user_repo: web::Data<Arc<dyn UserRepository>>,
-    token_service: web::Data<Arc<TokenService>>,
-    session_service: web::Data<Arc<SessionService>>,
-) -> Result<HttpResponse, AuthError> {
-    req.validate()
-        .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
-
-    tracing::debug!("Mobile login request");
-
-    let user = user_repo
-        .find_by_email(&req.email)
-        .await?
-        .ok_or(AuthError::InvalidCredentials)?;
-
-    if !user.can_login() {
-        return Err(AuthError::EmailNotVerified);
-    }
-
-    let password_hash = user
-        .password_hash
-        .clone()
-        .ok_or(AuthError::InvalidCredentials)?;
-
-    if !tokio::task::spawn_blocking({
-        let p = req.password.clone();
-        let h = password_hash.clone();
-        move || verify(&p, &h)
-    })
-    .await
-    .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
-    .map_err(|e| AuthError::Validation(format!("Password verification failed: {}", e)))?
-    {
-        return Err(AuthError::InvalidCredentials);
-    }
-
-    user_repo.update_last_login(user.user_id).await?;
-
-    let response = create_mobile_session_response(
-        UserInfo::from(user),
-        token_service.get_ref(),
-        session_service.get_ref(),
-    )
-    .await?;
-
     Ok(HttpResponse::Ok()
+        .cookie(session_cookie)
         .insert_header(("Cache-Control", "no-store"))
         .json(response))
 }
@@ -366,33 +307,23 @@ pub async fn verify_email_with_otp(
     // Update user status to verified
     user_repo.verify_email(user.user_id).await?;
 
-    // Generate tokens now that email is verified
-    let tokens = token_service.mint_tokens(user.user_id).await?;
-
-    // Update last login
     user_repo.update_last_login(user.user_id).await?;
 
-    tracing::debug!("Creating session for user_id: {}", user.user_id);
+    let mut user = user;
+    user.email_verified = true;
+    user.status = UserStatus::Active;
 
-    // Create session (stores user_id and tokens in Redis)
-    let session_id = session_service
-        .create_session(
-            user.user_id,
-            tokens.access_token.clone(),
-            tokens.refresh_token.clone(),
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to create session: {}", e);
-            AuthError::Redis(format!("Failed to create session: {}", e))
-        })?;
-
-    tracing::debug!("Session created successfully: {}", session_id);
+    let response = create_session_auth_response(
+        UserInfo::from(user),
+        token_service.get_ref(),
+        session_service.get_ref(),
+    )
+    .await?;
 
     // Create session cookie
     let (is_secure, cookie_ttl) = get_cookie_config();
 
-    let session_cookie = actix_web::cookie::Cookie::build("session_id", session_id)
+    let session_cookie = actix_web::cookie::Cookie::build("session_id", response.session_id.clone())
         .path("/")
         .http_only(true)
         .secure(is_secure)
@@ -400,52 +331,8 @@ pub async fn verify_email_with_otp(
         .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
         .finish();
 
-    tracing::debug!("Session cookie created, sending response with cookie");
-
-    // Return only success message (session created with cookie)
-    Ok(HttpResponse::Ok().cookie(session_cookie).json(json!({
-        "message": "Email verified successfully"
-    })))
-}
-
-// Mobile verify-email-with-OTP handler
-pub async fn mobile_verify_email_with_otp(
-    req: web::Json<VerifyEmailRequest>,
-    user_repo: web::Data<Arc<dyn UserRepository>>,
-    email_service: web::Data<Arc<EmailService>>,
-    token_service: web::Data<Arc<TokenService>>,
-    session_service: web::Data<Arc<SessionService>>,
-) -> Result<HttpResponse, AuthError> {
-    req.validate()
-        .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
-
-    tracing::debug!("Mobile email verification request with OTP");
-
-    let user = user_repo
-        .find_by_email(&req.email)
-        .await?
-        .ok_or(AuthError::UserNotFound)?;
-
-    if user.email_verified {
-        return Err(AuthError::Validation("Email already verified".to_string()));
-    }
-
-    email_service.verify_otp(&req.email, &req.otp).await?;
-    user_repo.verify_email(user.user_id).await?;
-    user_repo.update_last_login(user.user_id).await?;
-
-    let mut user = user;
-    user.email_verified = true;
-    user.status = UserStatus::Active;
-
-    let response = create_mobile_session_response(
-        UserInfo::from(user),
-        token_service.get_ref(),
-        session_service.get_ref(),
-    )
-    .await?;
-
     Ok(HttpResponse::Ok()
+        .cookie(session_cookie)
         .insert_header(("Cache-Control", "no-store"))
         .json(response))
 }
