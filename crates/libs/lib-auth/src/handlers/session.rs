@@ -1,6 +1,7 @@
 use crate::error::auth_error::AuthError;
 use crate::service::session_service::SessionService;
 use crate::service::token_service::TokenService;
+use crate::utils::response_headers::set_auth_response_headers;
 use actix_web::{HttpRequest, HttpResponse, web};
 use serde::Serialize;
 use std::sync::Arc;
@@ -9,9 +10,6 @@ use std::sync::Arc;
 pub struct SessionInfo {
     pub user_id: uuid::Uuid,
     pub access_token: String,
-    pub refresh_token: String,
-    pub session_expires_in: u64,
-    pub refresh_expires_in: u64,
 }
 
 /// Get session info (tokens and user_id)
@@ -35,12 +33,21 @@ pub async fn get_session_info(
     let response = SessionInfo {
         user_id: session_data.user_id,
         access_token: session_data.access_token,
-        refresh_token: session_data.refresh_token,
-        session_expires_in: session_service.ttl_seconds(),
-        refresh_expires_in: token_service.refresh_token_ttl_seconds()?,
     };
 
-    Ok(HttpResponse::Ok().json(response))
+    let session_expires_in = session_service.ttl_seconds();
+    let refresh_expires_in = token_service.refresh_token_ttl_seconds()?;
+    let mut response_builder = HttpResponse::Ok();
+    response_builder.insert_header(("Cache-Control", "no-store"));
+    set_auth_response_headers(
+        &mut response_builder,
+        Some(&session_id),
+        &session_data.refresh_token,
+        session_expires_in,
+        refresh_expires_in,
+    );
+
+    Ok(response_builder.json(response))
 }
 
 /// Refresh session TTL

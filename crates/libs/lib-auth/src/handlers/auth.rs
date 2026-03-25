@@ -10,14 +10,13 @@ use crate::dto::auth_request_dto::{
     RefreshTokenRequest, ResetPasswordRequest, SignupRequest, VerifyEmailRequest,
     VerifyResetOtpRequest,
 };
-use crate::dto::auth_response_dto::{
-    RefreshTokenResponse, SessionAuthResponse, SignupResponse, UserInfo, UserProfile,
-};
+use crate::dto::auth_response_dto::{RefreshTokenResponse, SignupResponse, UserInfo, UserProfile};
 use crate::error::auth_error::AuthError;
 use crate::middleware::jwt_auth::AuthenticatedUser;
 use crate::models::user::{Model, UserStatus};
 use crate::repository::UserRepository;
 use crate::service::{EmailService, SessionService, TokenService};
+use crate::utils::response_headers::set_auth_response_headers;
 use std::sync::Arc;
 
 /// Helper function to get cookie security configuration based on FRONTEND_URL
@@ -32,11 +31,19 @@ fn get_cookie_config() -> (bool, i64) {
     (is_secure, cookie_ttl)
 }
 
+struct SessionAuthState {
+    session_id: String,
+    refresh_token: String,
+    session_expires_in: u64,
+    refresh_expires_in: u64,
+    user_info: UserInfo,
+}
+
 async fn create_session_auth_response(
     user_info: UserInfo,
     token_service: &Arc<TokenService>,
     session_service: &Arc<SessionService>,
-) -> Result<SessionAuthResponse, AuthError> {
+) -> Result<SessionAuthState, AuthError> {
     let tokens = token_service.mint_tokens(user_info.user_id).await?;
     let session_id = session_service
         .create_session(
@@ -46,7 +53,7 @@ async fn create_session_auth_response(
         )
         .await?;
 
-    Ok(SessionAuthResponse {
+    Ok(SessionAuthState {
         session_id,
         refresh_token: tokens.refresh_token,
         session_expires_in: session_service.ttl_seconds(),
@@ -184,10 +191,21 @@ pub async fn login(
         .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
         .finish();
 
-    Ok(HttpResponse::Ok()
+    let mut response_builder = HttpResponse::Ok();
+    response_builder
         .cookie(session_cookie)
-        .insert_header(("Cache-Control", "no-store"))
-        .json(response))
+        .insert_header(("Cache-Control", "no-store"));
+    set_auth_response_headers(
+        &mut response_builder,
+        Some(&response.session_id),
+        &response.refresh_token,
+        response.session_expires_in,
+        response.refresh_expires_in,
+    );
+
+    Ok(response_builder.json(json!({
+        "user_info": response.user_info
+    })))
 }
 
 // Logout handler
@@ -331,10 +349,21 @@ pub async fn verify_email_with_otp(
         .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
         .finish();
 
-    Ok(HttpResponse::Ok()
+    let mut response_builder = HttpResponse::Ok();
+    response_builder
         .cookie(session_cookie)
-        .insert_header(("Cache-Control", "no-store"))
-        .json(response))
+        .insert_header(("Cache-Control", "no-store"));
+    set_auth_response_headers(
+        &mut response_builder,
+        Some(&response.session_id),
+        &response.refresh_token,
+        response.session_expires_in,
+        response.refresh_expires_in,
+    );
+
+    Ok(response_builder.json(json!({
+        "user_info": response.user_info
+    })))
 }
 
 // Verify email handler (internal handler)

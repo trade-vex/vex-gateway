@@ -81,35 +81,6 @@ pub struct OAuthUserInfo {
     pub email_verified: bool,
 }
 
-/// Response for mobile OAuth login code exchange
-#[derive(Debug, Clone, Serialize)]
-pub struct OAuthExchangeResponse {
-    pub session_id: String,
-    pub refresh_token: String,
-    pub session_expires_in: u64,
-    pub refresh_expires_in: u64,
-    pub user_info: serde_json::Value,
-}
-
-/// Response for generic session renewal
-#[derive(Debug, Clone, Serialize)]
-pub struct SessionRenewResponse {
-    pub session_id: String,
-    pub refresh_token: String,
-    pub session_expires_in: u64,
-    pub refresh_expires_in: u64,
-}
-
-/// Response for generic session-bearing auth success
-#[derive(Debug, Clone, Serialize)]
-pub struct SessionAuthResponse {
-    pub session_id: String,
-    pub refresh_token: String,
-    pub session_expires_in: u64,
-    pub refresh_expires_in: u64,
-    pub user_info: UserInfo,
-}
-
 // Conversion from User model to UserInfo DTO
 impl From<crate::models::user::Model> for UserInfo {
     fn from(user: crate::models::user::Model) -> Self {

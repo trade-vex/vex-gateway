@@ -1,11 +1,11 @@
 use crate::dto::auth_request_dto::{
     OAuthCallbackQuery, OAuthExchangeRequest, OAuthInitQuery, SessionRenewRequest,
 };
-use crate::dto::auth_response_dto::{OAuthExchangeResponse, SessionRenewResponse};
 use crate::error::auth_error::AuthError;
 use crate::service::{
     oauth_service::OAuthService, session_service::SessionService, token_service::TokenService,
 };
+use crate::utils::response_headers::set_auth_response_headers;
 
 use actix_web::{
     HttpRequest, HttpResponse,
@@ -286,15 +286,21 @@ pub async fn exchange_oauth_login_code(
     let user_info_val: serde_json::Value =
         serde_json::from_str(&data.user_info_json).map_err(|_| AuthError::InvalidRequest)?;
 
-    Ok(HttpResponse::Ok()
-        .insert_header(("Cache-Control", "no-store"))
-        .json(OAuthExchangeResponse {
-            session_id: data.session_id,
-            refresh_token: data.refresh_token,
-            session_expires_in: session_service.ttl_seconds(),
-            refresh_expires_in: token_service.refresh_token_ttl_seconds()?,
-            user_info: user_info_val,
-        }))
+    let session_expires_in = session_service.ttl_seconds();
+    let refresh_expires_in = token_service.refresh_token_ttl_seconds()?;
+    let mut response_builder = HttpResponse::Ok();
+    response_builder.insert_header(("Cache-Control", "no-store"));
+    set_auth_response_headers(
+        &mut response_builder,
+        Some(&data.session_id),
+        &data.refresh_token,
+        session_expires_in,
+        refresh_expires_in,
+    );
+
+    Ok(response_builder.json(serde_json::json!({
+        "user_info": user_info_val
+    })))
 }
 
 /// Renew a session using a rotated refresh token
@@ -338,13 +344,21 @@ pub async fn renew_session(
         session_service.ttl_seconds() as i64,
     );
 
-    Ok(HttpResponse::Ok()
+    let session_expires_in = session_service.ttl_seconds();
+    let refresh_expires_in = token_service.refresh_token_ttl_seconds()?;
+    let mut response_builder = HttpResponse::Ok();
+    response_builder
         .cookie(session_cookie)
-        .insert_header(("Cache-Control", "no-store"))
-        .json(SessionRenewResponse {
-            session_id,
-            refresh_token: new_tokens.refresh_token,
-            session_expires_in: session_service.ttl_seconds(),
-            refresh_expires_in: token_service.refresh_token_ttl_seconds()?,
-        }))
+        .insert_header(("Cache-Control", "no-store"));
+    set_auth_response_headers(
+        &mut response_builder,
+        Some(&session_id),
+        &new_tokens.refresh_token,
+        session_expires_in,
+        refresh_expires_in,
+    );
+
+    Ok(response_builder.json(serde_json::json!({
+        "message": "Session renewed successfully"
+    })))
 }
