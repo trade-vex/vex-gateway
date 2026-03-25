@@ -18,6 +18,8 @@ pub struct SessionData {
 pub struct LoginCodeData {
     /// The session_id to return after successful verification
     pub session_id: String,
+    /// Rotating refresh token for seamless mobile session renewal
+    pub refresh_token: String,
     /// Serialized user info JSON
     pub user_info_json: String,
     /// App challenge (SHA256 hash) that must match S256(verifier)
@@ -260,6 +262,7 @@ impl SessionService {
     pub async fn create_login_code(
         &self,
         session_id: String,
+        refresh_token: String,
         user_info_json: String,
         app_challenge: String,
     ) -> Result<String, AuthError> {
@@ -268,6 +271,7 @@ impl SessionService {
 
         let data = LoginCodeData {
             session_id,
+            refresh_token,
             user_info_json,
             app_challenge,
         };

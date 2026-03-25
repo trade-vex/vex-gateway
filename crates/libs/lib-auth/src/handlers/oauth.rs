@@ -1,7 +1,11 @@
-use crate::dto::auth_request_dto::{OAuthCallbackQuery, OAuthExchangeRequest, OAuthInitQuery};
-use crate::dto::auth_response_dto::OAuthExchangeResponse;
+use crate::dto::auth_request_dto::{
+    MobileSessionRenewRequest, OAuthCallbackQuery, OAuthExchangeRequest, OAuthInitQuery,
+};
+use crate::dto::auth_response_dto::{MobileSessionRenewResponse, OAuthExchangeResponse};
 use crate::error::auth_error::AuthError;
-use crate::service::{oauth_service::OAuthService, session_service::SessionService};
+use crate::service::{
+    oauth_service::OAuthService, session_service::SessionService, token_service::TokenService,
+};
 
 use actix_web::{
     HttpRequest, HttpResponse,
@@ -149,7 +153,12 @@ pub async fn handle_oauth_callback(
                     // Instead, create a short-lived one-time login_code bound to the app_challenge
                     let app_challenge = meta.app_challenge.ok_or(AuthError::InvalidRequest)?;
                     let login_code = session_service
-                        .create_login_code(session_id, user_info_json, app_challenge)
+                        .create_login_code(
+                            session_id,
+                            response.refresh_token.clone(),
+                            user_info_json,
+                            app_challenge,
+                        )
                         .await?;
 
                     // Build redirect URL with only login_code
@@ -242,6 +251,7 @@ pub async fn get_oauth_providers(
 pub async fn exchange_oauth_login_code(
     body: web::Json<OAuthExchangeRequest>,
     session_service: web::Data<Arc<SessionService>>,
+    token_service: web::Data<Arc<TokenService>>,
 ) -> Result<HttpResponse, AuthError> {
     let login_code = body.login_code.trim();
     let verifier = body.verifier.trim();
@@ -270,6 +280,52 @@ pub async fn exchange_oauth_login_code(
         .insert_header(("Cache-Control", "no-store"))
         .json(OAuthExchangeResponse {
             session_id: data.session_id,
+            refresh_token: data.refresh_token,
+            session_expires_in: session_service.ttl_seconds(),
+            refresh_expires_in: token_service.refresh_token_ttl_seconds()?,
             user_info: user_info_val,
+        }))
+}
+
+/// Renew a mobile app session using a rotated refresh token
+/// POST /oauth/renew-session
+///
+/// This endpoint is intended for the native mobile client after its short-lived
+/// `session_id` has expired. The client presents the last issued refresh token,
+/// the server rotates it, creates a fresh Redis-backed session, and returns the
+/// new `session_id` plus the rotated refresh token.
+pub async fn renew_mobile_session(
+    body: web::Json<MobileSessionRenewRequest>,
+    session_service: web::Data<Arc<SessionService>>,
+    token_service: web::Data<Arc<TokenService>>,
+) -> Result<HttpResponse, AuthError> {
+    let refresh_token = body.refresh_token.trim();
+
+    if refresh_token.is_empty() {
+        return Err(AuthError::InvalidRequest);
+    }
+
+    let new_tokens = token_service.refresh_tokens(refresh_token).await?;
+    let claims = token_service.validate_jwt(&new_tokens.access_token)?;
+    let user_id =
+        uuid::Uuid::parse_str(&claims.sub).map_err(|_| AuthError::InternalError(
+            "Minted access token contains invalid subject".to_string(),
+        ))?;
+
+    let session_id = session_service
+        .create_session(
+            user_id,
+            new_tokens.access_token,
+            new_tokens.refresh_token.clone(),
+        )
+        .await?;
+
+    Ok(HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store"))
+        .json(MobileSessionRenewResponse {
+            session_id,
+            refresh_token: new_tokens.refresh_token,
+            session_expires_in: session_service.ttl_seconds(),
+            refresh_expires_in: token_service.refresh_token_ttl_seconds()?,
         }))
 }

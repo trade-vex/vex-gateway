@@ -37,6 +37,10 @@ pub fn configure_public_auth_services(cfg: &mut web::ServiceConfig) {
                 .route(
                     "/exchange",
                     web::post().to(handlers::oauth::exchange_oauth_login_code),
+                )
+                .route(
+                    "/renew-session",
+                    web::post().to(handlers::oauth::renew_mobile_session),
                 ),
         )
         // Public auth routes

@@ -92,3 +92,10 @@ pub struct OAuthExchangeRequest {
     /// The original verifier that was hashed to create app_challenge
     pub verifier: String,
 }
+
+/// Request body for mobile session renewal using a rotated refresh token
+#[derive(Debug, Clone, Deserialize)]
+pub struct MobileSessionRenewRequest {
+    /// Rotating refresh token issued during mobile OAuth exchange or renewal
+    pub refresh_token: String,
+}

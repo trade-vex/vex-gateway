@@ -84,6 +84,13 @@ impl TokenService {
         })
     }
 
+    pub fn refresh_token_ttl_seconds(&self) -> Result<u64, AuthError> {
+        let refresh_ttl_secs = self.jwt_config.refresh_token_ttl_days * 24 * 3600;
+        refresh_ttl_secs
+            .try_into()
+            .map_err(|_| AuthError::Validation("Refresh token TTL is too large".to_string()))
+    }
+
     // Fixed refresh_tokens method
     pub async fn refresh_tokens(
         &self,
