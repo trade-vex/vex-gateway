@@ -100,6 +100,16 @@ pub struct MobileSessionRenewResponse {
     pub refresh_expires_in: u64,
 }
 
+/// Response for mobile email/password login or signup completion
+#[derive(Debug, Clone, Serialize)]
+pub struct MobileSessionAuthResponse {
+    pub session_id: String,
+    pub refresh_token: String,
+    pub session_expires_in: u64,
+    pub refresh_expires_in: u64,
+    pub user_info: UserInfo,
+}
+
 // Conversion from User model to UserInfo DTO
 impl From<crate::models::user::Model> for UserInfo {
     fn from(user: crate::models::user::Model) -> Self {
