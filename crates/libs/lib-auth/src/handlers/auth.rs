@@ -34,14 +34,18 @@ fn get_cookie_config() -> (bool, i64) {
 fn build_auth_cookie(
     name: &str,
     value: String,
-    _is_secure: bool,
+    is_secure: bool,
     max_age_secs: i64,
 ) -> actix_web::cookie::Cookie<'static> {
     actix_web::cookie::Cookie::build(name.to_string(), value)
         .path("/")
         .http_only(true)
-        .secure(false)
-        .same_site(actix_web::cookie::SameSite::None)
+        .secure(is_secure)
+        .same_site(if is_secure {
+            actix_web::cookie::SameSite::None
+        } else {
+            actix_web::cookie::SameSite::Lax
+        })
         .max_age(actix_web::cookie::time::Duration::seconds(max_age_secs))
         .finish()
 }
@@ -201,8 +205,12 @@ pub async fn login(
     let session_cookie = actix_web::cookie::Cookie::build("session_id", response.session_id.clone())
         .path("/")
         .http_only(true)
-        .secure(false)
-        .same_site(actix_web::cookie::SameSite::None)
+        .secure(is_secure)
+        .same_site(if is_secure {
+            actix_web::cookie::SameSite::None
+        } else {
+            actix_web::cookie::SameSite::Lax
+        })
         .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
         .finish();
     let refresh_cookie = build_auth_cookie(
@@ -254,20 +262,28 @@ pub async fn logout(
     }
 
     // Create cookie to delete the session cookie
-    let (_is_secure, _cookie_ttl) = get_cookie_config();
+    let (is_secure, _cookie_ttl) = get_cookie_config();
 
     let delete_session_cookie = actix_web::cookie::Cookie::build("session_id", "")
         .path("/")
         .http_only(true)
-        .secure(false)
-        .same_site(actix_web::cookie::SameSite::None)
+        .secure(is_secure)
+        .same_site(if is_secure {
+            actix_web::cookie::SameSite::None
+        } else {
+            actix_web::cookie::SameSite::Lax
+        })
         .max_age(actix_web::cookie::time::Duration::seconds(0))
         .finish();
     let delete_refresh_cookie = actix_web::cookie::Cookie::build("refresh_token", "")
         .path("/")
         .http_only(true)
-        .secure(false)
-        .same_site(actix_web::cookie::SameSite::None)
+        .secure(is_secure)
+        .same_site(if is_secure {
+            actix_web::cookie::SameSite::None
+        } else {
+            actix_web::cookie::SameSite::Lax
+        })
         .max_age(actix_web::cookie::time::Duration::seconds(0))
         .finish();
 
@@ -374,8 +390,12 @@ pub async fn verify_email_with_otp(
     let session_cookie = actix_web::cookie::Cookie::build("session_id", response.session_id.clone())
         .path("/")
         .http_only(true)
-        .secure(false)
-        .same_site(actix_web::cookie::SameSite::None)
+        .secure(is_secure)
+        .same_site(if is_secure {
+            actix_web::cookie::SameSite::None
+        } else {
+            actix_web::cookie::SameSite::Lax
+        })
         .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
         .finish();
     let refresh_cookie = build_auth_cookie(
