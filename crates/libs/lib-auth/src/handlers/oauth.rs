@@ -21,15 +21,15 @@ use url::Url;
 fn build_cookie(
     name: &str,
     value: String,
-    is_secure: bool,
+    _is_secure: bool,
     max_age_secs: i64,
     http_only: bool,
 ) -> Cookie<'static> {
     Cookie::build(name.to_string(), value)
         .path("/")
         .http_only(http_only)
-        .secure(is_secure)
-        .same_site(SameSite::Strict)
+        .secure(false)
+        .same_site(SameSite::None)
         .max_age(Duration::seconds(max_age_secs))
         .finish()
 }
@@ -72,7 +72,7 @@ pub async fn initiate_oauth(
                 let state_cookie = Cookie::build(cookie_name, state)
                     .path(format!("/api/oauth/{}/callback", provider.as_str()))
                     .http_only(true)
-                    .secure(is_secure)
+                    .secure(false)
                     .same_site(SameSite::Lax) // Must be Lax for OAuth redirect
                     .max_age(Duration::seconds(600))
                     .finish();
@@ -240,7 +240,7 @@ pub async fn handle_oauth_callback(
                     let clear_state_cookie = Cookie::build(cookie_name, "")
                         .path(format!("/api/oauth/{}/callback", provider.as_str()))
                         .http_only(true)
-                        .secure(is_secure)
+                        .secure(false)
                         .same_site(SameSite::Lax)
                         .max_age(Duration::seconds(0))
                         .finish();
