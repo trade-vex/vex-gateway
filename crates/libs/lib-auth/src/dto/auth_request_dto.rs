@@ -96,6 +96,7 @@ pub struct OAuthExchangeRequest {
 /// Request body for session renewal using a rotated refresh token
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionRenewRequest {
-    /// Rotating refresh token issued during login, verification, or renewal
-    pub refresh_token: String,
+    /// Rotating refresh token issued during login, verification, or renewal.
+    /// Optional so web clients can rely on the refresh_token cookie instead.
+    pub refresh_token: Option<String>,
 }

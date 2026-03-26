@@ -6,6 +6,7 @@ use crate::service::{
     oauth_service::OAuthService, session_service::SessionService, token_service::TokenService,
 };
 use crate::utils::response_headers::set_auth_response_headers;
+use chrono::Utc;
 
 use actix_web::{
     HttpRequest, HttpResponse,
@@ -17,10 +18,16 @@ use std::sync::Arc;
 use tracing::error;
 use url::Url;
 
-fn build_session_cookie(session_id: String, is_secure: bool, max_age_secs: i64) -> Cookie<'static> {
-    Cookie::build("session_id", session_id)
+fn build_cookie(
+    name: &str,
+    value: String,
+    is_secure: bool,
+    max_age_secs: i64,
+    http_only: bool,
+) -> Cookie<'static> {
+    Cookie::build(name.to_string(), value)
         .path("/")
-        .http_only(true)
+        .http_only(http_only)
         .secure(is_secure)
         .same_site(SameSite::Strict)
         .max_age(Duration::seconds(max_age_secs))
@@ -92,6 +99,7 @@ pub async fn handle_oauth_callback(
     query: web::Query<OAuthCallbackQuery>,
     oauth_service: web::Data<Arc<OAuthService>>,
     session_service: web::Data<Arc<SessionService>>,
+    token_service: web::Data<Arc<TokenService>>,
 ) -> Result<HttpResponse, AuthError> {
     // Validate that the OAuth code is present and non-empty
     let code = query
@@ -199,16 +207,34 @@ pub async fn handle_oauth_callback(
                         .finish())
                 }
                 _ => {
-                    // For web: session cookie only; frontend can call /profile to fetch user info
-                    // Removed user_info cookie - it was XSS-sensitive (not HttpOnly)
-                    // Use SessionService TTL for cookie max_age to align client/server state
-                    let session_cookie = Cookie::build("session_id", session_id.clone())
-                        .path("/")
-                        .http_only(true)
-                        .secure(is_secure)
-                        .same_site(SameSite::Strict)
-                        .max_age(Duration::seconds(session_service.ttl_seconds() as i64))
-                        .finish();
+                    let session_ttl = session_service.ttl_seconds() as i64;
+                    let refresh_ttl = token_service.refresh_token_ttl_seconds()? as i64;
+                    let session_expires_at = (Utc::now().timestamp() + session_ttl).to_string();
+                    let refresh_expires_at = (Utc::now().timestamp() + refresh_ttl).to_string();
+
+                    let session_cookie =
+                        build_cookie("session_id", session_id.clone(), is_secure, session_ttl, true);
+                    let refresh_cookie = build_cookie(
+                        "refresh_token",
+                        response.refresh_token,
+                        is_secure,
+                        refresh_ttl,
+                        true,
+                    );
+                    let session_expires_at_cookie = build_cookie(
+                        "session_expires_at",
+                        session_expires_at,
+                        is_secure,
+                        session_ttl,
+                        false,
+                    );
+                    let refresh_expires_at_cookie = build_cookie(
+                        "refresh_expires_at",
+                        refresh_expires_at,
+                        is_secure,
+                        refresh_ttl,
+                        false,
+                    );
 
                     // Clear the oauth_state cookie on success
                     let clear_state_cookie = Cookie::build(cookie_name, "")
@@ -221,6 +247,9 @@ pub async fn handle_oauth_callback(
 
                     Ok(HttpResponse::Found()
                         .cookie(session_cookie)
+                        .cookie(refresh_cookie)
+                        .cookie(session_expires_at_cookie)
+                        .cookie(refresh_expires_at_cookie)
                         .cookie(clear_state_cookie)
                         .insert_header(("Cache-Control", "no-store"))
                         .append_header(("Location", frontend_url))
@@ -317,13 +346,24 @@ pub async fn renew_session(
     session_service: web::Data<Arc<SessionService>>,
     token_service: web::Data<Arc<TokenService>>,
 ) -> Result<HttpResponse, AuthError> {
-    let refresh_token = body.refresh_token.trim();
+    let refresh_token = body
+        .refresh_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            req.cookie("refresh_token")
+                .map(|cookie| cookie.value().trim().to_string())
+                .filter(|token| !token.is_empty())
+        })
+        .ok_or(AuthError::InvalidRequest)?;
 
     if refresh_token.is_empty() {
         return Err(AuthError::InvalidRequest);
     }
 
-    let new_tokens = token_service.refresh_tokens(refresh_token).await?;
+    let new_tokens = token_service.refresh_tokens(&refresh_token).await?;
     let claims = token_service.validate_jwt(&new_tokens.access_token)?;
     let user_id =
         uuid::Uuid::parse_str(&claims.sub).map_err(|_| AuthError::InternalError(
@@ -338,10 +378,36 @@ pub async fn renew_session(
         )
         .await?;
 
-    let session_cookie = build_session_cookie(
+    let is_secure = req.connection_info().scheme() == "https";
+    let session_ttl = session_service.ttl_seconds() as i64;
+    let refresh_ttl = token_service.refresh_token_ttl_seconds()? as i64;
+    let session_cookie = build_cookie(
+        "session_id",
         session_id.clone(),
-        req.connection_info().scheme() == "https",
-        session_service.ttl_seconds() as i64,
+        is_secure,
+        session_ttl,
+        true,
+    );
+    let refresh_cookie = build_cookie(
+        "refresh_token",
+        new_tokens.refresh_token.clone(),
+        is_secure,
+        refresh_ttl,
+        true,
+    );
+    let session_expires_at_cookie = build_cookie(
+        "session_expires_at",
+        (Utc::now().timestamp() + session_ttl).to_string(),
+        is_secure,
+        session_ttl,
+        false,
+    );
+    let refresh_expires_at_cookie = build_cookie(
+        "refresh_expires_at",
+        (Utc::now().timestamp() + refresh_ttl).to_string(),
+        is_secure,
+        refresh_ttl,
+        false,
     );
 
     let session_expires_in = session_service.ttl_seconds();
@@ -349,6 +415,9 @@ pub async fn renew_session(
     let mut response_builder = HttpResponse::Ok();
     response_builder
         .cookie(session_cookie)
+        .cookie(refresh_cookie)
+        .cookie(session_expires_at_cookie)
+        .cookie(refresh_expires_at_cookie)
         .insert_header(("Cache-Control", "no-store"));
     set_auth_response_headers(
         &mut response_builder,

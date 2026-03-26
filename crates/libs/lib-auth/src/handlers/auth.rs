@@ -31,6 +31,21 @@ fn get_cookie_config() -> (bool, i64) {
     (is_secure, cookie_ttl)
 }
 
+fn build_auth_cookie(
+    name: &str,
+    value: String,
+    is_secure: bool,
+    max_age_secs: i64,
+) -> actix_web::cookie::Cookie<'static> {
+    actix_web::cookie::Cookie::build(name.to_string(), value)
+        .path("/")
+        .http_only(true)
+        .secure(is_secure)
+        .same_site(actix_web::cookie::SameSite::Strict)
+        .max_age(actix_web::cookie::time::Duration::seconds(max_age_secs))
+        .finish()
+}
+
 struct SessionAuthState {
     session_id: String,
     refresh_token: String,
@@ -190,10 +205,17 @@ pub async fn login(
         .same_site(actix_web::cookie::SameSite::Strict)
         .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
         .finish();
+    let refresh_cookie = build_auth_cookie(
+        "refresh_token",
+        response.refresh_token.clone(),
+        is_secure,
+        response.refresh_expires_in as i64,
+    );
 
     let mut response_builder = HttpResponse::Ok();
     response_builder
         .cookie(session_cookie)
+        .cookie(refresh_cookie)
         .insert_header(("Cache-Control", "no-store"));
     set_auth_response_headers(
         &mut response_builder,
@@ -241,9 +263,17 @@ pub async fn logout(
         .same_site(actix_web::cookie::SameSite::Strict)
         .max_age(actix_web::cookie::time::Duration::seconds(0))
         .finish();
+    let delete_refresh_cookie = actix_web::cookie::Cookie::build("refresh_token", "")
+        .path("/")
+        .http_only(true)
+        .secure(is_secure)
+        .same_site(actix_web::cookie::SameSite::Strict)
+        .max_age(actix_web::cookie::time::Duration::seconds(0))
+        .finish();
 
     Ok(HttpResponse::Ok()
         .cookie(delete_session_cookie)
+        .cookie(delete_refresh_cookie)
         .json(json!({
             "message": "Logged out successfully",
             "timestamp": chrono::Utc::now().to_rfc3339()
@@ -348,10 +378,17 @@ pub async fn verify_email_with_otp(
         .same_site(actix_web::cookie::SameSite::Strict)
         .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
         .finish();
+    let refresh_cookie = build_auth_cookie(
+        "refresh_token",
+        response.refresh_token.clone(),
+        is_secure,
+        response.refresh_expires_in as i64,
+    );
 
     let mut response_builder = HttpResponse::Ok();
     response_builder
         .cookie(session_cookie)
+        .cookie(refresh_cookie)
         .insert_header(("Cache-Control", "no-store"));
     set_auth_response_headers(
         &mut response_builder,
