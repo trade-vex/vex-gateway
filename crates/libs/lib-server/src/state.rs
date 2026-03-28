@@ -200,7 +200,7 @@ impl AppState {
 
         // Initialize balance store with Redis cache, trading repository, and scaling cache
         let balance_store = UserBalanceStore::with_redis_cache(
-            UserBalanceCacheConfig { enabled: true },
+            UserBalanceCacheConfig { enabled: false },
             config.redis.url.clone(),
             Some(trading_repo.clone()),
         )
