@@ -16,39 +16,9 @@ use crate::middleware::jwt_auth::AuthenticatedUser;
 use crate::models::user::{Model, UserStatus};
 use crate::repository::UserRepository;
 use crate::service::{EmailService, SessionService, TokenService};
+use crate::utils::cookie_policy::CookiePolicy;
 use crate::utils::response_headers::set_auth_response_headers;
 use std::sync::Arc;
-
-/// Helper function to get cookie security configuration based on FRONTEND_URL
-/// Returns (is_secure, cookie_ttl) where:
-/// - is_secure: true if FRONTEND_URL starts with "https://", false otherwise
-/// - cookie_ttl: cookie time-to-live in seconds (24 hours)
-fn get_cookie_config() -> (bool, i64) {
-    let is_secure = std::env::var("FRONTEND_URL")
-        .unwrap_or_else(|_| "http://localhost:8081".to_string())
-        .starts_with("https://");
-    let cookie_ttl = 24 * 3600;
-    (is_secure, cookie_ttl)
-}
-
-fn build_auth_cookie(
-    name: &str,
-    value: String,
-    is_secure: bool,
-    max_age_secs: i64,
-) -> actix_web::cookie::Cookie<'static> {
-    actix_web::cookie::Cookie::build(name.to_string(), value)
-        .path("/")
-        .http_only(true)
-        .secure(is_secure)
-        .same_site(if is_secure {
-            actix_web::cookie::SameSite::None
-        } else {
-            actix_web::cookie::SameSite::Lax
-        })
-        .max_age(actix_web::cookie::time::Duration::seconds(max_age_secs))
-        .finish()
-}
 
 struct SessionAuthState {
     session_id: String,
@@ -150,20 +120,21 @@ pub async fn signup(
 
 // Login handler
 pub async fn login(
-    req: web::Json<LoginRequest>,
+    req: HttpRequest,
+    body: web::Json<LoginRequest>,
     user_repo: web::Data<Arc<dyn UserRepository>>,
     token_service: web::Data<Arc<TokenService>>,
     session_service: web::Data<Arc<SessionService>>,
 ) -> Result<HttpResponse, AuthError> {
     // Validate the request
-    req.validate()
+    body.validate()
         .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
 
     tracing::debug!("Login request");
 
     // Find user by email
     let user = user_repo
-        .find_by_email(&req.email)
+        .find_by_email(&body.email)
         .await?
         .ok_or(AuthError::InvalidCredentials)?;
 
@@ -179,7 +150,7 @@ pub async fn login(
         .ok_or(AuthError::InvalidCredentials)?;
 
     if !tokio::task::spawn_blocking({
-        let p = req.password.clone();
+        let p = body.password.clone();
         let h = password_hash.clone();
         move || verify(&p, &h)
     })
@@ -200,30 +171,39 @@ pub async fn login(
     .await?;
 
     // Create session cookie
-    let (is_secure, cookie_ttl) = get_cookie_config();
+    let cookie_policy = CookiePolicy::from_request(&req);
+    let cookie_ttl = 24 * 3600;
+    let session_expires_at = (Utc::now().timestamp() + response.session_expires_in as i64).to_string();
+    let refresh_expires_at =
+        (Utc::now().timestamp() + response.refresh_expires_in as i64).to_string();
 
-    let session_cookie = actix_web::cookie::Cookie::build("session_id", response.session_id.clone())
-        .path("/")
-        .http_only(true)
-        .secure(is_secure)
-        .same_site(if is_secure {
-            actix_web::cookie::SameSite::None
-        } else {
-            actix_web::cookie::SameSite::Lax
-        })
-        .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
-        .finish();
-    let refresh_cookie = build_auth_cookie(
+    let session_cookie =
+        cookie_policy.build_cookie("session_id", response.session_id.clone(), cookie_ttl, true);
+    let refresh_cookie = cookie_policy.build_cookie(
         "refresh_token",
         response.refresh_token.clone(),
-        is_secure,
         response.refresh_expires_in as i64,
+        true,
+    );
+    let session_expires_at_cookie = cookie_policy.build_cookie(
+        "session_expires_at",
+        session_expires_at,
+        response.session_expires_in as i64,
+        false,
+    );
+    let refresh_expires_at_cookie = cookie_policy.build_cookie(
+        "refresh_expires_at",
+        refresh_expires_at,
+        response.refresh_expires_in as i64,
+        false,
     );
 
     let mut response_builder = HttpResponse::Ok();
     response_builder
         .cookie(session_cookie)
         .cookie(refresh_cookie)
+        .cookie(session_expires_at_cookie)
+        .cookie(refresh_expires_at_cookie)
         .insert_header(("Cache-Control", "no-store"));
     set_auth_response_headers(
         &mut response_builder,
@@ -262,34 +242,54 @@ pub async fn logout(
     }
 
     // Create cookie to delete the session cookie
-    let (is_secure, _cookie_ttl) = get_cookie_config();
+    let cookie_policy = CookiePolicy::from_request(&req);
 
-    let delete_session_cookie = actix_web::cookie::Cookie::build("session_id", "")
-        .path("/")
-        .http_only(true)
-        .secure(is_secure)
-        .same_site(if is_secure {
+    let delete_session_cookie = cookie_policy.build_expired_cookie(
+        "session_id",
+        "/",
+        true,
+        if cookie_policy.secure() {
             actix_web::cookie::SameSite::None
         } else {
             actix_web::cookie::SameSite::Lax
-        })
-        .max_age(actix_web::cookie::time::Duration::seconds(0))
-        .finish();
-    let delete_refresh_cookie = actix_web::cookie::Cookie::build("refresh_token", "")
-        .path("/")
-        .http_only(true)
-        .secure(is_secure)
-        .same_site(if is_secure {
+        },
+    );
+    let delete_refresh_cookie = cookie_policy.build_expired_cookie(
+        "refresh_token",
+        "/",
+        true,
+        if cookie_policy.secure() {
             actix_web::cookie::SameSite::None
         } else {
             actix_web::cookie::SameSite::Lax
-        })
-        .max_age(actix_web::cookie::time::Duration::seconds(0))
-        .finish();
+        },
+    );
+    let delete_session_expires_at_cookie = cookie_policy.build_expired_cookie(
+        "session_expires_at",
+        "/",
+        false,
+        if cookie_policy.secure() {
+            actix_web::cookie::SameSite::None
+        } else {
+            actix_web::cookie::SameSite::Lax
+        },
+    );
+    let delete_refresh_expires_at_cookie = cookie_policy.build_expired_cookie(
+        "refresh_expires_at",
+        "/",
+        false,
+        if cookie_policy.secure() {
+            actix_web::cookie::SameSite::None
+        } else {
+            actix_web::cookie::SameSite::Lax
+        },
+    );
 
     Ok(HttpResponse::Ok()
         .cookie(delete_session_cookie)
         .cookie(delete_refresh_cookie)
+        .cookie(delete_session_expires_at_cookie)
+        .cookie(delete_refresh_expires_at_cookie)
         .json(json!({
             "message": "Logged out successfully",
             "timestamp": chrono::Utc::now().to_rfc3339()
@@ -342,21 +342,22 @@ pub async fn refresh_token(
 
 // Verify email with OTP handler (public endpoint)
 pub async fn verify_email_with_otp(
-    req: web::Json<VerifyEmailRequest>,
+    req: HttpRequest,
+    body: web::Json<VerifyEmailRequest>,
     user_repo: web::Data<Arc<dyn UserRepository>>,
     email_service: web::Data<Arc<EmailService>>,
     token_service: web::Data<Arc<TokenService>>,
     session_service: web::Data<Arc<SessionService>>,
 ) -> Result<HttpResponse, AuthError> {
     // Validate the request
-    req.validate()
+    body.validate()
         .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
 
     tracing::debug!("Email verification request with OTP");
 
     // Find user by email
     let user = user_repo
-        .find_by_email(&req.email)
+        .find_by_email(&body.email)
         .await?
         .ok_or(AuthError::UserNotFound)?;
 
@@ -366,7 +367,7 @@ pub async fn verify_email_with_otp(
     }
 
     // Verify OTP
-    email_service.verify_otp(&req.email, &req.otp).await?;
+    email_service.verify_otp(&body.email, &body.otp).await?;
 
     // Update user status to verified
     user_repo.verify_email(user.user_id).await?;
@@ -385,30 +386,39 @@ pub async fn verify_email_with_otp(
     .await?;
 
     // Create session cookie
-    let (is_secure, cookie_ttl) = get_cookie_config();
+    let cookie_policy = CookiePolicy::from_request(&req);
+    let cookie_ttl = 24 * 3600;
+    let session_expires_at = (Utc::now().timestamp() + response.session_expires_in as i64).to_string();
+    let refresh_expires_at =
+        (Utc::now().timestamp() + response.refresh_expires_in as i64).to_string();
 
-    let session_cookie = actix_web::cookie::Cookie::build("session_id", response.session_id.clone())
-        .path("/")
-        .http_only(true)
-        .secure(is_secure)
-        .same_site(if is_secure {
-            actix_web::cookie::SameSite::None
-        } else {
-            actix_web::cookie::SameSite::Lax
-        })
-        .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
-        .finish();
-    let refresh_cookie = build_auth_cookie(
+    let session_cookie =
+        cookie_policy.build_cookie("session_id", response.session_id.clone(), cookie_ttl, true);
+    let refresh_cookie = cookie_policy.build_cookie(
         "refresh_token",
         response.refresh_token.clone(),
-        is_secure,
         response.refresh_expires_in as i64,
+        true,
+    );
+    let session_expires_at_cookie = cookie_policy.build_cookie(
+        "session_expires_at",
+        session_expires_at,
+        response.session_expires_in as i64,
+        false,
+    );
+    let refresh_expires_at_cookie = cookie_policy.build_cookie(
+        "refresh_expires_at",
+        refresh_expires_at,
+        response.refresh_expires_in as i64,
+        false,
     );
 
     let mut response_builder = HttpResponse::Ok();
     response_builder
         .cookie(session_cookie)
         .cookie(refresh_cookie)
+        .cookie(session_expires_at_cookie)
+        .cookie(refresh_expires_at_cookie)
         .insert_header(("Cache-Control", "no-store"));
     set_auth_response_headers(
         &mut response_builder,

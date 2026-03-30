@@ -3,6 +3,7 @@ resolver = "2"
 members = [ "crates/bin" , "crates/tests" , "crates/libs/lib-api", "crates/libs/lib-server", "crates/libs/lib-config", "crates/libs/lib-auth", "crates/libs/lib-db", "crates/libs/lib-middleware", "crates/libs/lib-utils", "crates/libs/lib-core"]
 
 [workspace.dependencies]
+actix-cors = "0.7"
 actix-web = "4.11.0"
 tokio = {version = "1.45" , features = ["full"]}
 serde = { version = "1.0", features = ["derive"] }

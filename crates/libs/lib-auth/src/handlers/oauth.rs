@@ -5,38 +5,19 @@ use crate::error::auth_error::AuthError;
 use crate::service::{
     oauth_service::OAuthService, session_service::SessionService, token_service::TokenService,
 };
+use crate::utils::cookie_policy::CookiePolicy;
 use crate::utils::response_headers::set_auth_response_headers;
 use chrono::Utc;
 
 use actix_web::{
     HttpRequest, HttpResponse,
-    cookie::{Cookie, SameSite, time::Duration},
+    cookie::SameSite,
     web,
 };
 use serde_json;
 use std::sync::Arc;
 use tracing::error;
 use url::Url;
-
-fn build_cookie(
-    name: &str,
-    value: String,
-    is_secure: bool,
-    max_age_secs: i64,
-    http_only: bool,
-) -> Cookie<'static> {
-    Cookie::build(name.to_string(), value)
-        .path("/")
-        .http_only(http_only)
-        .secure(is_secure)
-        .same_site(if is_secure {
-            SameSite::None
-        } else {
-            SameSite::Lax
-        })
-        .max_age(Duration::seconds(max_age_secs))
-        .finish()
-}
 
 /// Initiate OAuth flow
 /// GET /oauth/{provider}?platform=app|web&app_challenge=...
@@ -71,15 +52,16 @@ pub async fn initiate_oauth(
             // This prevents login CSRF / session swapping attacks
             // Mobile apps don't use cookies, they use app_challenge instead
             if platform != Some("app") {
-                let is_secure = req.connection_info().scheme() == "https";
+                let cookie_policy = CookiePolicy::from_request(&req);
                 let cookie_name = format!("oauth_state_{}", provider.as_str());
-                let state_cookie = Cookie::build(cookie_name, state)
-                    .path(format!("/api/oauth/{}/callback", provider.as_str()))
-                    .http_only(true)
-                    .secure(is_secure)
-                    .same_site(SameSite::Lax) // Must be Lax for OAuth redirect
-                    .max_age(Duration::seconds(600))
-                    .finish();
+                let state_cookie = cookie_policy.build_cookie_with_path(
+                    &cookie_name,
+                    state,
+                    &format!("/api/oauth/{}/callback", provider.as_str()),
+                    600,
+                    true,
+                    SameSite::Lax,
+                );
                 response.cookie(state_cookie);
             }
 
@@ -161,7 +143,7 @@ pub async fn handle_oauth_callback(
                     .or_else(|_| std::env::var("OAUTH_FRONTEND_URL_WEB"))
                     .unwrap_or_else(|_| oauth_service.get_frontend_url().to_string()),
             };
-            let is_secure = req.connection_info().scheme() == "https";
+            let cookie_policy = CookiePolicy::from_request(&req);
 
             // Serialize user_info to JSON
             let user_info_json = serde_json::to_string(&user_info).map_err(|e| {
@@ -216,38 +198,38 @@ pub async fn handle_oauth_callback(
                     let session_expires_at = (Utc::now().timestamp() + session_ttl).to_string();
                     let refresh_expires_at = (Utc::now().timestamp() + refresh_ttl).to_string();
 
-                    let session_cookie =
-                        build_cookie("session_id", session_id.clone(), is_secure, session_ttl, true);
-                    let refresh_cookie = build_cookie(
+                    let session_cookie = cookie_policy.build_cookie(
+                        "session_id",
+                        session_id.clone(),
+                        session_ttl,
+                        true,
+                    );
+                    let refresh_cookie = cookie_policy.build_cookie(
                         "refresh_token",
                         response.refresh_token,
-                        is_secure,
                         refresh_ttl,
                         true,
                     );
-                    let session_expires_at_cookie = build_cookie(
+                    let session_expires_at_cookie = cookie_policy.build_cookie(
                         "session_expires_at",
                         session_expires_at,
-                        is_secure,
                         session_ttl,
                         false,
                     );
-                    let refresh_expires_at_cookie = build_cookie(
+                    let refresh_expires_at_cookie = cookie_policy.build_cookie(
                         "refresh_expires_at",
                         refresh_expires_at,
-                        is_secure,
                         refresh_ttl,
                         false,
                     );
 
                     // Clear the oauth_state cookie on success
-                    let clear_state_cookie = Cookie::build(cookie_name, "")
-                        .path(format!("/api/oauth/{}/callback", provider.as_str()))
-                        .http_only(true)
-                        .secure(is_secure)
-                        .same_site(SameSite::Lax)
-                        .max_age(Duration::seconds(0))
-                        .finish();
+                    let clear_state_cookie = cookie_policy.build_expired_cookie(
+                        &cookie_name,
+                        &format!("/api/oauth/{}/callback", provider.as_str()),
+                        true,
+                        SameSite::Lax,
+                    );
 
                     Ok(HttpResponse::Found()
                         .cookie(session_cookie)
@@ -382,34 +364,30 @@ pub async fn renew_session(
         )
         .await?;
 
-    let is_secure = req.connection_info().scheme() == "https";
     let session_ttl = session_service.ttl_seconds() as i64;
     let refresh_ttl = token_service.refresh_token_ttl_seconds()? as i64;
-    let session_cookie = build_cookie(
+    let cookie_policy = CookiePolicy::from_request(&req);
+    let session_cookie = cookie_policy.build_cookie(
         "session_id",
         session_id.clone(),
-        is_secure,
         session_ttl,
         true,
     );
-    let refresh_cookie = build_cookie(
+    let refresh_cookie = cookie_policy.build_cookie(
         "refresh_token",
         new_tokens.refresh_token.clone(),
-        is_secure,
         refresh_ttl,
         true,
     );
-    let session_expires_at_cookie = build_cookie(
+    let session_expires_at_cookie = cookie_policy.build_cookie(
         "session_expires_at",
         (Utc::now().timestamp() + session_ttl).to_string(),
-        is_secure,
         session_ttl,
         false,
     );
-    let refresh_expires_at_cookie = build_cookie(
+    let refresh_expires_at_cookie = cookie_policy.build_cookie(
         "refresh_expires_at",
         (Utc::now().timestamp() + refresh_ttl).to_string(),
-        is_secure,
         refresh_ttl,
         false,
     );

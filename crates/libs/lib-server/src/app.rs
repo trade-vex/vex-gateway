@@ -2,10 +2,12 @@
 //!
 //! Application factory for creating the Actix-web application
 
+use actix_cors::Cors;
 use actix_web::{App, web};
 use lib_api::routes;
 use lib_auth::middleware::jwt_auth::JwtAuthentication;
 use std::sync::Arc;
+use tracing::warn;
 
 use crate::combined_auth::CombinedAuthMiddleware;
 use crate::state::AppState;
@@ -17,11 +19,15 @@ pub fn create_app(
     impl actix_web::dev::ServiceFactory<
         actix_web::dev::ServiceRequest,
         Config = (),
-        Response = actix_web::dev::ServiceResponse,
+        Response = actix_web::dev::ServiceResponse<
+            actix_web::body::EitherBody<actix_web::body::BoxBody>,
+        >,
         Error = actix_web::Error,
         InitError = (),
     >,
 > {
+    let cors = build_cors();
+
     // Create JWT middleware with auto-refresh enabled
     let jwt_middleware = JwtAuthentication::with_auto_refresh(
         app_state.decoding_key.clone(),
@@ -40,6 +46,7 @@ pub fn create_app(
     );
 
     App::new()
+        .wrap(cors)
         .app_data(web::Data::new(app_state.clone()))
         .app_data(web::Data::new(app_state.user_repo.clone()))
         .app_data(web::Data::new(app_state.db.clone()))
@@ -90,4 +97,40 @@ pub fn create_app(
                         ),
                 ),
         )
+}
+
+fn build_cors() -> Cors {
+    let origins = configured_web_origins();
+    let mut cors = Cors::default()
+        .allow_any_method()
+        .allow_any_header()
+        .supports_credentials()
+        .max_age(3600);
+
+    if origins.is_empty() {
+        warn!("No web CORS origins configured; browser credentialed requests may fail");
+        return cors;
+    }
+
+    for origin in origins {
+        cors = cors.allowed_origin(&origin);
+    }
+
+    cors
+}
+
+fn configured_web_origins() -> Vec<String> {
+    let mut origins = Vec::new();
+
+    for key in ["CORS_ALLOWED_ORIGINS", "FRONTEND_URL_WEB", "FRONTEND_URL"] {
+        if let Ok(value) = std::env::var(key) {
+            for origin in value.split(',').map(str::trim).filter(|item| !item.is_empty()) {
+                if !origins.iter().any(|existing| existing == origin) {
+                    origins.push(origin.to_string());
+                }
+            }
+        }
+    }
+
+    origins
 }
