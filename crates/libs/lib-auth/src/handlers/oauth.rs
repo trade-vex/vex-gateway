@@ -60,7 +60,7 @@ pub async fn initiate_oauth(
                     &format!("/api/oauth/{}/callback", provider.as_str()),
                     600,
                     true,
-                    SameSite::Lax,
+                    SameSite::None,
                 );
                 response.cookie(state_cookie);
             }
@@ -228,7 +228,7 @@ pub async fn handle_oauth_callback(
                         &cookie_name,
                         &format!("/api/oauth/{}/callback", provider.as_str()),
                         true,
-                        SameSite::Lax,
+                        SameSite::None,
                     );
 
                     Ok(HttpResponse::Found()
