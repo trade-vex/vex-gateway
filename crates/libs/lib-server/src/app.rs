@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tracing::warn;
 
 use crate::combined_auth::CombinedAuthMiddleware;
+use crate::docs;
 use crate::state::AppState;
 
 /// Application factory that creates the Actix-web application with all routes and middleware
@@ -47,6 +48,7 @@ pub fn create_app(
 
     App::new()
         .wrap(cors)
+        .configure(docs::configure)
         .app_data(web::Data::new(app_state.clone()))
         .app_data(web::Data::new(app_state.user_repo.clone()))
         .app_data(web::Data::new(app_state.db.clone()))

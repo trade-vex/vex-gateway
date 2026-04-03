@@ -11,6 +11,7 @@ use tracing::info;
 mod app;
 mod combined_auth;
 mod correlation_handler;
+mod docs;
 mod state;
 
 pub use app::create_app;

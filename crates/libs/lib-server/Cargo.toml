@@ -8,6 +8,7 @@ tokio = {workspace = true}
 actix-cors = {workspace = true}
 actix-web = {workspace = true}
 chrono = {workspace = true}
+serde = {workspace = true}
 serde_json = {workspace = true}
 tracing = {workspace = true}
 sea-orm = {workspace = true}
@@ -22,6 +23,7 @@ thiserror = {workspace = true}
 num_cpus = "1.16"
 async-trait = "0.1"
 clickhouse = "0.12"
+utoipa = "5.4"
 
 #  Internal crate dependencies
 lib-api = {path = "../lib-api"}
