@@ -25,6 +25,7 @@ use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
+use tokio::time::{Duration, interval};
 use tracing::{debug, info};
 use url::Url;
 
@@ -197,6 +198,20 @@ impl AppState {
             .await
             .map_err(|e| format!("Failed to load scaling cache: {}", e))?;
         info!("Scaling cache initialized and loaded");
+
+        // Keep scaling values up-to-date by refreshing cache every minute.
+        let scaling_cache_refresh = scaling_cache.clone();
+        tokio::spawn(async move {
+            let mut refresh_interval = interval(Duration::from_secs(60));
+            loop {
+                refresh_interval.tick().await;
+                if let Err(e) = scaling_cache_refresh.refresh().await {
+                    tracing::warn!("Failed to refresh scaling cache: {}", e);
+                } else {
+                    debug!("Scaling cache refreshed");
+                }
+            }
+        });
 
         // Initialize balance store with Redis cache, trading repository, and scaling cache
         let balance_store = UserBalanceStore::with_redis_cache(

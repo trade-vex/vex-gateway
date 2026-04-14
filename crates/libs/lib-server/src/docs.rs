@@ -11,7 +11,7 @@ const DOCS_HTML: &str = r#"<!doctype html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>VEX Gateway API Docs</title>
+    <title>Verifiable Exchange API Docs</title>
     <style>
       body { margin: 0; padding: 0; }
       .fallback {
@@ -180,9 +180,9 @@ struct SecurityAddon;
 impl Modify for SecurityAddon {
     fn modify(&self, openapi: &mut OpenApiDocument) {
         let description = r#"
-# VEX Gateway API
+# Verifiable Exchange API
 
-This OpenAPI document is generated from the service and is intended to be the canonical reference for the mounted HTTP API.
+This OpenAPI document is generated from the service and is intended to be the canonical reference for the main HTTP API.
 
 ## Authentication
 
@@ -194,14 +194,14 @@ Protected endpoints accept one of these authentication modes:
 
 ## Signed API key requests
 
-When a protected endpoint is called with an API key, the request must also satisfy the gateway signature rules:
+When a protected endpoint is called with an API key, the request must also satisfy the request signature rules:
 
 - include `X-MBX-APIKEY`
 - include `timestamp`
 - include `signature`
 - optionally include `recvWindow`
 
-The gateway validates signatures using the same sorted-parameter payload rules implemented by the middleware. For JSON bodies, the raw JSON payload is used during verification.
+The service validates signatures using the same sorted-parameter payload rules implemented by the middleware. For JSON bodies, the raw JSON payload is used during verification.
 
 ## Notes
 
@@ -210,7 +210,11 @@ The gateway validates signatures using the same sorted-parameter payload rules i
 - Session-oriented endpoints also set or clear cookies and emit auth metadata headers.
 "#;
 
+        openapi.info.title = "Verifiable Exchange API".to_string();
         openapi.info.description = Some(description.to_string());
+        openapi.servers = Some(vec![utoipa::openapi::Server::new(
+            "https://api.verifiable.exchange",
+        )]);
 
         let components = openapi.components.get_or_insert_with(Default::default);
 
@@ -636,6 +640,8 @@ struct ResolutionQueryParams {
     get,
     path = "/api/health",
     tag = "System",
+    operation_id = "healthCheck",
+    summary = "Health check",
     responses((status = 200, description = "Service is healthy"))
 )]
 fn health_check_doc() {}
@@ -644,6 +650,8 @@ fn health_check_doc() {}
     post,
     path = "/api/signup",
     tag = "Auth",
+    operation_id = "signup",
+    summary = "Create account",
     request_body = SignupRequest,
     responses(
         (status = 201, description = "User created and verification initiated", body = SignupResponse),
@@ -657,6 +665,8 @@ fn signup_doc() {}
     post,
     path = "/api/login",
     tag = "Auth",
+    operation_id = "login",
+    summary = "Login with email and password",
     request_body = LoginRequest,
     responses(
         (status = 200, description = "Login succeeded. Session cookies and auth headers are also set.", body = LoginResponse),
@@ -670,6 +680,8 @@ fn login_doc() {}
     post,
     path = "/api/refresh",
     tag = "Auth",
+    operation_id = "refreshToken",
+    summary = "Refresh access token",
     request_body = RefreshTokenRequest,
     responses(
         (status = 200, description = "Access token refreshed", body = RefreshTokenResponse),
@@ -682,6 +694,8 @@ fn refresh_token_doc() {}
     post,
     path = "/api/session/refresh-tokens",
     tag = "Auth",
+    operation_id = "refreshSessionTokens",
+    summary = "Rotate session tokens",
     responses(
         (status = 200, description = "Session tokens rotated using the session cookie", body = MessageResponse),
         (status = 400, description = "Session cookie missing", body = ErrorResponse),
@@ -694,6 +708,8 @@ fn refresh_session_tokens_doc() {}
     post,
     path = "/api/session/renew",
     tag = "Auth",
+    operation_id = "renewSession",
+    summary = "Renew session",
     request_body = SessionRenewRequest,
     responses(
         (status = 200, description = "Session renewed. Fresh cookies and auth headers are also set.", body = MessageResponse),
@@ -707,6 +723,8 @@ fn renew_session_doc() {}
     post,
     path = "/api/check-email",
     tag = "Auth",
+    operation_id = "checkEmail",
+    summary = "Check whether an email exists",
     request_body = CheckEmailRequest,
     responses(
         (status = 200, description = "Email existence check completed", body = CheckEmailResponse),
@@ -719,6 +737,8 @@ fn check_email_doc() {}
     post,
     path = "/api/resend-verification",
     tag = "Auth",
+    operation_id = "resendVerificationEmail",
+    summary = "Resend verification email",
     request_body = CheckEmailRequest,
     responses(
         (status = 200, description = "Verification email sent or resent", body = ResendVerificationResponse),
@@ -732,6 +752,8 @@ fn resend_verification_doc() {}
     post,
     path = "/api/verify-email",
     tag = "Auth",
+    operation_id = "verifyEmailWithOtp",
+    summary = "Verify email with OTP",
     request_body = VerifyEmailRequest,
     responses(
         (status = 200, description = "Email verified and authenticated session established", body = LoginResponse),
@@ -745,6 +767,8 @@ fn verify_email_with_otp_doc() {}
     post,
     path = "/api/forgot-password",
     tag = "Auth",
+    operation_id = "forgotPassword",
+    summary = "Start password reset",
     request_body = ForgotPasswordRequest,
     responses(
         (status = 200, description = "Reset email flow initiated", body = TimestampedMessageResponse),
@@ -757,6 +781,8 @@ fn forgot_password_doc() {}
     post,
     path = "/api/verify-reset-otp",
     tag = "Auth",
+    operation_id = "verifyResetOtp",
+    summary = "Verify password reset OTP",
     request_body = VerifyResetOtpRequest,
     responses(
         (status = 200, description = "Password reset OTP verified", body = VerifyResetOtpResponse),
@@ -770,6 +796,8 @@ fn verify_reset_otp_doc() {}
     post,
     path = "/api/reset-password",
     tag = "Auth",
+    operation_id = "resetPassword",
+    summary = "Reset password",
     request_body = ResetPasswordRequest,
     responses(
         (status = 200, description = "Password reset completed", body = TimestampedMessageResponse),
@@ -783,6 +811,8 @@ fn reset_password_doc() {}
     get,
     path = "/api/oauth/providers",
     tag = "OAuth",
+    operation_id = "listOauthProviders",
+    summary = "List OAuth providers",
     responses((status = 200, description = "Available OAuth providers", body = OAuthProvidersResponse))
 )]
 fn oauth_providers_doc() {}
@@ -791,6 +821,8 @@ fn oauth_providers_doc() {}
     get,
     path = "/api/oauth/{provider}",
     tag = "OAuth",
+    operation_id = "startOauthLogin",
+    summary = "Start OAuth login",
     params(
         ("provider" = String, Path, description = "OAuth provider identifier"),
         ("platform" = Option<String>, Query, description = "Client platform: `web` or `app`"),
@@ -807,6 +839,8 @@ fn oauth_initiate_doc() {}
     get,
     path = "/api/oauth/{provider}/callback",
     tag = "OAuth",
+    operation_id = "completeOauthLogin",
+    summary = "Complete OAuth login",
     params(
         ("provider" = String, Path, description = "OAuth provider identifier"),
         ("code" = Option<String>, Query, description = "Authorization code returned by the provider"),
@@ -826,6 +860,8 @@ fn oauth_callback_doc() {}
     post,
     path = "/api/oauth/exchange",
     tag = "OAuth",
+    operation_id = "exchangeOauthLoginCode",
+    summary = "Exchange mobile login code",
     request_body = OAuthExchangeRequest,
     responses(
         (status = 200, description = "Mobile login code exchanged for session credentials", body = LoginResponse),
@@ -838,6 +874,8 @@ fn oauth_exchange_doc() {}
     post,
     path = "/api/logout",
     tag = "Auth",
+    operation_id = "logout",
+    summary = "Logout",
     security(("bearer_auth" = []), ("session_cookie" = []), ("api_key_header" = [])),
     responses(
         (status = 200, description = "Logged out and cookies cleared", body = TimestampedMessageResponse),
@@ -850,6 +888,8 @@ fn logout_doc() {}
     get,
     path = "/api/profile",
     tag = "Auth",
+    operation_id = "getProfile",
+    summary = "Get profile",
     security(("bearer_auth" = []), ("session_cookie" = []), ("api_key_header" = [])),
     responses(
         (status = 200, description = "Authenticated user profile", body = UserProfileResponse),
@@ -863,6 +903,8 @@ fn profile_doc() {}
     post,
     path = "/api/change-password",
     tag = "Auth",
+    operation_id = "changePassword",
+    summary = "Change password",
     security(("bearer_auth" = []), ("session_cookie" = []), ("api_key_header" = [])),
     request_body = ChangePasswordRequest,
     responses(
@@ -878,6 +920,8 @@ fn change_password_doc() {}
     post,
     path = "/api/session/refresh",
     tag = "Auth",
+    operation_id = "refreshSession",
+    summary = "Refresh session TTL",
     security(("bearer_auth" = []), ("session_cookie" = []), ("api_key_header" = [])),
     responses(
         (status = 200, description = "Session TTL refreshed", body = MessageResponse),
@@ -891,6 +935,8 @@ fn refresh_session_doc() {}
     get,
     path = "/api/session-check",
     tag = "Auth",
+    operation_id = "sessionCheck",
+    summary = "Check authentication status",
     security(("bearer_auth" = []), ("session_cookie" = []), ("api_key_header" = [])),
     responses(
         (status = 200, description = "Authentication succeeded", body = AuthenticationStatusResponse),
@@ -903,6 +949,8 @@ fn session_check_doc() {}
     post,
     path = "/api/api-key",
     tag = "API Keys",
+    operation_id = "createApiKey",
+    summary = "Create API key",
     security(("bearer_auth" = []), ("session_cookie" = []), ("api_key_header" = [])),
     request_body = CreateApiKeyRequest,
     responses(
@@ -917,6 +965,8 @@ fn create_api_key_doc() {}
     get,
     path = "/api/api-key",
     tag = "API Keys",
+    operation_id = "listApiKeys",
+    summary = "List API keys",
     security(("bearer_auth" = []), ("session_cookie" = []), ("api_key_header" = [])),
     responses(
         (status = 200, description = "Current user's API keys", body = ApiKeyListResponse),
@@ -929,6 +979,8 @@ fn list_api_keys_doc() {}
     get,
     path = "/api/api-key/{id}",
     tag = "API Keys",
+    operation_id = "getApiKey",
+    summary = "Get API key",
     security(("bearer_auth" = []), ("session_cookie" = []), ("api_key_header" = [])),
     params(("id" = String, Path, description = "API key UUID")),
     responses(
@@ -944,6 +996,8 @@ fn get_api_key_doc() {}
     put,
     path = "/api/api-key/{id}",
     tag = "API Keys",
+    operation_id = "updateApiKey",
+    summary = "Update API key",
     security(("bearer_auth" = []), ("session_cookie" = []), ("api_key_header" = [])),
     params(("id" = String, Path, description = "API key UUID")),
     request_body = UpdateApiKeyRequest,
@@ -961,6 +1015,8 @@ fn update_api_key_doc() {}
     delete,
     path = "/api/api-key/{id}",
     tag = "API Keys",
+    operation_id = "deleteApiKey",
+    summary = "Delete API key",
     security(("bearer_auth" = []), ("session_cookie" = []), ("api_key_header" = [])),
     params(("id" = String, Path, description = "API key UUID")),
     responses(
@@ -976,6 +1032,8 @@ fn delete_api_key_doc() {}
     patch,
     path = "/api/api-key/{id}/toggle",
     tag = "API Keys",
+    operation_id = "toggleApiKey",
+    summary = "Enable or disable API key",
     security(("bearer_auth" = []), ("session_cookie" = []), ("api_key_header" = [])),
     params(("id" = String, Path, description = "API key UUID")),
     responses(
@@ -991,6 +1049,8 @@ fn toggle_api_key_doc() {}
     post,
     path = "/api/order",
     tag = "Orders",
+    operation_id = "placeOrder",
+    summary = "Place order",
     security(("bearer_auth" = []), ("session_cookie" = []), ("api_key_header" = [])),
     request_body = PlaceOrderRequest,
     responses(
@@ -1007,6 +1067,8 @@ fn place_order_doc() {}
     post,
     path = "/api/cancel",
     tag = "Orders",
+    operation_id = "cancelOrder",
+    summary = "Cancel order",
     security(("bearer_auth" = []), ("session_cookie" = []), ("api_key_header" = [])),
     request_body = CancelOrderRequest,
     responses(
@@ -1023,6 +1085,8 @@ fn cancel_order_doc() {}
     get,
     path = "/api/balances",
     tag = "Account",
+    operation_id = "getBalances",
+    summary = "Get balances",
     security(("bearer_auth" = []), ("session_cookie" = []), ("api_key_header" = [])),
     responses(
         (status = 200, description = "Current balances", body = BalancesListResponse),
@@ -1036,6 +1100,8 @@ fn balances_doc() {}
     get,
     path = "/api/orders/open",
     tag = "Account",
+    operation_id = "getOpenOrders",
+    summary = "Get open orders",
     security(("bearer_auth" = []), ("session_cookie" = []), ("api_key_header" = [])),
     params(OrdersQueryParams),
     responses(
@@ -1050,6 +1116,8 @@ fn open_orders_doc() {}
     get,
     path = "/api/orders/history",
     tag = "Account",
+    operation_id = "getOrderHistory",
+    summary = "Get order history",
     security(("bearer_auth" = []), ("session_cookie" = []), ("api_key_header" = [])),
     params(OrdersQueryParams),
     responses(
@@ -1064,6 +1132,8 @@ fn order_history_doc() {}
     get,
     path = "/api/portfolio",
     tag = "Account",
+    operation_id = "getPortfolio",
+    summary = "Get portfolio overview",
     security(("bearer_auth" = []), ("session_cookie" = []), ("api_key_header" = [])),
     responses(
         (status = 200, description = "Portfolio metrics snapshot", body = PortfolioMetricsResponse),
@@ -1077,6 +1147,8 @@ fn portfolio_doc() {}
     get,
     path = "/api/balance-chart",
     tag = "Account",
+    operation_id = "getBalanceChart",
+    summary = "Get balance chart",
     security(("bearer_auth" = []), ("session_cookie" = []), ("api_key_header" = [])),
     params(ResolutionQueryParams),
     responses(
@@ -1091,6 +1163,8 @@ fn balance_chart_doc() {}
     get,
     path = "/api/pnl-chart",
     tag = "Account",
+    operation_id = "getPnlChart",
+    summary = "Get PnL chart",
     security(("bearer_auth" = []), ("session_cookie" = []), ("api_key_header" = [])),
     params(ResolutionQueryParams),
     responses(
@@ -1105,6 +1179,8 @@ fn pnl_chart_doc() {}
     get,
     path = "/api/favorites",
     tag = "Account",
+    operation_id = "getFavoriteMarkets",
+    summary = "Get favorite markets",
     security(("bearer_auth" = []), ("session_cookie" = []), ("api_key_header" = [])),
     responses(
         (status = 200, description = "Favorite market identifiers", body = FavoriteMarketsListResponse),
@@ -1118,6 +1194,8 @@ fn favorite_markets_doc() {}
     post,
     path = "/api/favorites",
     tag = "Account",
+    operation_id = "toggleFavoriteMarket",
+    summary = "Toggle favorite market",
     security(("bearer_auth" = []), ("session_cookie" = []), ("api_key_header" = [])),
     request_body = ToggleFavoriteMarketRequest,
     responses(

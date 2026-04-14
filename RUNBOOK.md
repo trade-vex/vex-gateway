@@ -69,7 +69,7 @@ JWT_ISSUER=vex-gateway-prod
 JWT_AUDIENCE=vex-api-prod
 
 # VEX Core
-CONTEXT_DIR=/dev/shm/aeron
+CONTEXT_DIR=/run/vex-gateway/aeron
 CORE_ADDRESS=aeron-media-driver-core
 CORE_PORT=40123
 CORE_CONTROL_PORT=40123

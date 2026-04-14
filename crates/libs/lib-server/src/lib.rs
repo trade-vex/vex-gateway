@@ -7,6 +7,7 @@ use actix_web::dev::Server;
 use lib_config::Config;
 use std::net::TcpListener;
 use tracing::info;
+use utoipa::OpenApi;
 
 mod app;
 mod combined_auth;
@@ -21,6 +22,10 @@ pub use lib_core::{
     CorrelationService, ResponseError, generate_client_order_id, wait_for_response,
 };
 pub use state::AppState;
+
+pub fn openapi_document() -> utoipa::openapi::OpenApi {
+    docs::ApiDoc::openapi()
+}
 
 /// Initialize the HTTP server with proper configuration
 pub async fn initialize_server(

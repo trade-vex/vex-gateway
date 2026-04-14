@@ -35,3 +35,5 @@ vex-gateway.service
 *.md
 
 vex-gateway.env.example
+
+RUNBOOK.md

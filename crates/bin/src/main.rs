@@ -66,7 +66,7 @@ async fn main() -> std::io::Result<()> {
     // Load gateway networking configuration from environment variables
     let mut gateway_config = GatewayNetworkingConfig::development_defaults();
     gateway_config.context_dir =
-        std::env::var("CONTEXT_DIR").unwrap_or_else(|_| "/dev/shm/aeron".to_string());
+        std::env::var("CONTEXT_DIR").unwrap_or_else(|_| "/run/vex-gateway/aeron".to_string());
     gateway_config.core_address =
         std::env::var("CORE_ADDRESS").unwrap_or_else(|_| "aeron-media-driver-core".to_string());
     gateway_config.local_address =
