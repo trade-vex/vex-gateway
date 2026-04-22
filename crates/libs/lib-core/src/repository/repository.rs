@@ -218,43 +218,26 @@ impl PostgresTradingRepository {
     }
 }
 
-// Row shape for the paginated-with-total queries: every OrderModel column plus
-// the window-function total so pagination metadata comes back in the same pass.
+// Scalar COUNT(*) result for the paginated count queries.
 #[derive(Debug, FromQueryResult)]
-struct OrderRowWithTotal {
-    id: i64,
-    market_id: i32,
-    order_order_id: i64,
-    order_user_id: i64,
-    order_price: i64,
-    order_size: i64,
-    order_filled_size: i64,
-    order_side: String,
-    order_time_in_force: String,
-    order_status: String,
-    order_timestamp: i64,
-    created_at: Option<DateTime>,
-    total_count: i64,
+struct CountRow {
+    n: i64,
 }
 
-impl OrderRowWithTotal {
-    fn into_model(self) -> OrderModel {
-        OrderModel {
-            id: self.id,
-            market_id: self.market_id,
-            order_order_id: self.order_order_id,
-            order_user_id: self.order_user_id,
-            order_price: self.order_price,
-            order_size: self.order_size,
-            order_filled_size: self.order_filled_size,
-            order_side: self.order_side,
-            order_time_in_force: self.order_time_in_force,
-            order_status: self.order_status,
-            order_timestamp: self.order_timestamp,
-            created_at: self.created_at,
-        }
-    }
-}
+// SQL predicate for "open" orders against trading.orders_current. Matches the
+// WHERE clause of the partial index idx_orders_current_user_open_ts so
+// Postgres can serve both the page fetch AND the COUNT(*) as index-only scans.
+const OPEN_PREDICATE_SQL: &str = r#"(
+    order_status IN ('STATUS_PLACED','STATUS_PENDING','STATUS_PROCESSING')
+    OR (
+        order_status = 'STATUS_PARTIALLY_FILLED'
+        AND order_time_in_force <> 'TIF_IOC'
+    )
+)"#;
+
+// SQL predicate for "history" orders. Matches idx_orders_current_user_history_ts.
+const HISTORY_PREDICATE_SQL: &str =
+    "order_status IN ('STATUS_CANCELLED','STATUS_PARTIALLY_FILLED','STATUS_FILLED')";
 
 #[async_trait]
 impl TradingRepository for PostgresTradingRepository {
@@ -345,59 +328,66 @@ impl TradingRepository for PostgresTradingRepository {
         limit: u64,
         market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>> {
-        // Filter for "open" orders: Placed, Pending, PartiallyFilled (non-IOC), Processing
-        // Exclude: Filled, Cancelled, Rejected, and PartiallyFilled IOC (no exception).
-        let part_filled_not_ioc = Condition::all()
-            .add(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
-            .add(OrderColumn::OrderTimeInForce.ne("TIF_IOC"));
-        let open_status_condition = Condition::any()
-            .add(OrderColumn::OrderStatus.eq("STATUS_PLACED"))
-            .add(OrderColumn::OrderStatus.eq("STATUS_PENDING"))
-            .add(part_filled_not_ioc)
-            .add(OrderColumn::OrderStatus.eq("STATUS_PROCESSING"));
-
-        let mut query = OrderEntity::find()
-            .filter(OrderColumn::OrderUserId.eq(user_id as i64))
-            .filter(open_status_condition);
-
-        if let Some(market_id) = market_id {
-            query = query.filter(OrderColumn::MarketId.eq(market_id as i32));
-        }
-
-        let orders = query
-            .order_by_desc(OrderColumn::OrderTimestamp)
-            .offset(offset)
-            .limit(limit)
+        // Reads the current-state projection (trading.orders_current). WHERE
+        // shape matches the partial index idx_orders_current_user_open_ts so
+        // Postgres serves the page via a narrow B-tree range scan.
+        let sql = format!(
+            r#"
+            SELECT
+                id, market_id, order_order_id, order_user_id,
+                order_price, order_size, order_filled_size,
+                order_side, order_time_in_force, order_status,
+                order_timestamp, created_at
+            FROM trading.orders_current
+            WHERE order_user_id = $1
+              AND {predicate}
+              AND ($2::int IS NULL OR market_id = $2::int)
+            ORDER BY order_timestamp DESC
+            LIMIT $3 OFFSET $4
+            "#,
+            predicate = OPEN_PREDICATE_SQL,
+        );
+        let stmt = Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            sql,
+            [
+                (user_id as i64).into(),
+                market_id.map(|m| m as i32).into(),
+                (limit as i64).into(),
+                (offset as i64).into(),
+            ],
+        );
+        OrderEntity::find()
+            .from_raw_sql(stmt)
             .all(&*self.db)
             .await
-            .map_err(TradingError::from)?;
-
-        Ok(orders)
+            .map_err(Into::into)
     }
 
     async fn count_open_orders(&self, user_id: u64, market_id: Option<u32>) -> Result<u64> {
-        // Count only "open" orders: Placed, Pending, PartiallyFilled (non-IOC), Processing
-        // Exclude: Filled, Cancelled, Rejected, and PartiallyFilled IOC (no exception).
-        let part_filled_not_ioc = Condition::all()
-            .add(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
-            .add(OrderColumn::OrderTimeInForce.ne("TIF_IOC"));
-        let open_status_condition = Condition::any()
-            .add(OrderColumn::OrderStatus.eq("STATUS_PLACED"))
-            .add(OrderColumn::OrderStatus.eq("STATUS_PENDING"))
-            .add(part_filled_not_ioc)
-            .add(OrderColumn::OrderStatus.eq("STATUS_PROCESSING"));
-
-        let mut query = OrderEntity::find()
-            .filter(OrderColumn::OrderUserId.eq(user_id as i64))
-            .filter(open_status_condition);
-
-        if let Some(market_id) = market_id {
-            query = query.filter(OrderColumn::MarketId.eq(market_id as i32));
-        }
-
-        let count = query.count(&*self.db).await.map_err(TradingError::from)?;
-
-        Ok(count)
+        // Plain COUNT(*). Runs as an index-only scan against
+        // idx_orders_current_user_open_ts (or ..._market_open_ts when a market
+        // filter is supplied).
+        let sql = format!(
+            r#"
+            SELECT COUNT(*) AS n
+            FROM trading.orders_current
+            WHERE order_user_id = $1
+              AND {predicate}
+              AND ($2::int IS NULL OR market_id = $2::int)
+            "#,
+            predicate = OPEN_PREDICATE_SQL,
+        );
+        let stmt = Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            sql,
+            [
+                (user_id as i64).into(),
+                market_id.map(|m| m as i32).into(),
+            ],
+        );
+        let row = CountRow::find_by_statement(stmt).one(&*self.db).await?;
+        Ok(row.map(|r| r.n as u64).unwrap_or(0))
     }
 
     async fn get_order_by_id(&self, order_id: u64, user_id: u64) -> Result<Option<OrderModel>> {
@@ -462,136 +452,74 @@ impl TradingRepository for PostgresTradingRepository {
         limit: u64,
         market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>> {
-        // Only return Cancelled, PartiallyFilled, and Filled orders for history
-        let mut query = OrderEntity::find()
-            .filter(OrderColumn::OrderUserId.eq(user_id as i64))
-            .filter(
-                OrderColumn::OrderStatus
-                    .eq("STATUS_CANCELLED")
-                    .or(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
-                    .or(OrderColumn::OrderStatus.eq("STATUS_FILLED")),
-            );
-
-        if let Some(market_id) = market_id {
-            query = query.filter(OrderColumn::MarketId.eq(market_id as i32));
-        }
-
-        let orders = query
-            .order_by_desc(OrderColumn::OrderTimestamp)
-            .offset(offset)
-            .limit(limit)
+        // Reads trading.orders_current. WHERE matches
+        // idx_orders_current_user_history_ts (partial index on terminal
+        // statuses) so the page is a narrow range scan.
+        let sql = format!(
+            r#"
+            SELECT
+                id, market_id, order_order_id, order_user_id,
+                order_price, order_size, order_filled_size,
+                order_side, order_time_in_force, order_status,
+                order_timestamp, created_at
+            FROM trading.orders_current
+            WHERE order_user_id = $1
+              AND {predicate}
+              AND ($2::int IS NULL OR market_id = $2::int)
+            ORDER BY order_timestamp DESC
+            LIMIT $3 OFFSET $4
+            "#,
+            predicate = HISTORY_PREDICATE_SQL,
+        );
+        let stmt = Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            sql,
+            [
+                (user_id as i64).into(),
+                market_id.map(|m| m as i32).into(),
+                (limit as i64).into(),
+                (offset as i64).into(),
+            ],
+        );
+        OrderEntity::find()
+            .from_raw_sql(stmt)
             .all(&*self.db)
             .await
-            .map_err(TradingError::from)?;
-
-        Ok(orders)
+            .map_err(Into::into)
     }
 
     async fn count_order_history(&self, user_id: u64, market_id: Option<u32>) -> Result<u64> {
-        // Count only Cancelled, PartiallyFilled, and Filled orders for history
-        let mut query = OrderEntity::find()
-            .filter(OrderColumn::OrderUserId.eq(user_id as i64))
-            .filter(
-                OrderColumn::OrderStatus
-                    .eq("STATUS_CANCELLED")
-                    .or(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
-                    .or(OrderColumn::OrderStatus.eq("STATUS_FILLED")),
-            );
-
-        if let Some(market_id) = market_id {
-            query = query.filter(OrderColumn::MarketId.eq(market_id as i32));
-        }
-
-        let count = query.count(&*self.db).await?;
-        Ok(count)
-    }
-
-    async fn get_open_orders_with_total(
-        &self,
-        user_id: u64,
-        offset: u64,
-        limit: u64,
-        market_id: Option<u32>,
-    ) -> Result<(Vec<OrderModel>, u64)> {
-        // Reads the current-state projection (trading.orders_current) maintained
-        // by trigger off trading.orders_events. Indexed lookup by
-        // (order_user_id, order_status, order_timestamp DESC); no per-user
-        // history scan, no DISTINCT ON.
-        let sql = r#"
-            SELECT
-                id, market_id, order_order_id, order_user_id,
-                order_price, order_size, order_filled_size,
-                order_side, order_time_in_force, order_status,
-                order_timestamp, created_at,
-                COUNT(*) OVER () AS total_count
+        // Plain COUNT(*). Index-only scan against
+        // idx_orders_current_user_history_ts (or ..._market_history_ts).
+        let sql = format!(
+            r#"
+            SELECT COUNT(*) AS n
             FROM trading.orders_current
             WHERE order_user_id = $1
-              AND (
-                    order_status IN ('STATUS_PLACED','STATUS_PENDING','STATUS_PROCESSING')
-                    OR (
-                        order_status = 'STATUS_PARTIALLY_FILLED'
-                        AND order_time_in_force <> 'TIF_IOC'
-                    )
-                  )
+              AND {predicate}
               AND ($2::int IS NULL OR market_id = $2::int)
-            ORDER BY order_timestamp DESC
-            LIMIT $3 OFFSET $4
-        "#;
+            "#,
+            predicate = HISTORY_PREDICATE_SQL,
+        );
         let stmt = Statement::from_sql_and_values(
             sea_orm::DatabaseBackend::Postgres,
             sql,
             [
                 (user_id as i64).into(),
                 market_id.map(|m| m as i32).into(),
-                (limit as i64).into(),
-                (offset as i64).into(),
             ],
         );
-        let rows = OrderRowWithTotal::find_by_statement(stmt)
-            .all(&*self.db)
-            .await?;
-        let total = rows.first().map(|r| r.total_count as u64).unwrap_or(0);
-        Ok((rows.into_iter().map(OrderRowWithTotal::into_model).collect(), total))
+        let row = CountRow::find_by_statement(stmt).one(&*self.db).await?;
+        Ok(row.map(|r| r.n as u64).unwrap_or(0))
     }
 
-    async fn get_order_history_with_total(
-        &self,
-        user_id: u64,
-        offset: u64,
-        limit: u64,
-        market_id: Option<u32>,
-    ) -> Result<(Vec<OrderModel>, u64)> {
-        // Same projection-read pattern as open orders — see above.
-        let sql = r#"
-            SELECT
-                id, market_id, order_order_id, order_user_id,
-                order_price, order_size, order_filled_size,
-                order_side, order_time_in_force, order_status,
-                order_timestamp, created_at,
-                COUNT(*) OVER () AS total_count
-            FROM trading.orders_current
-            WHERE order_user_id = $1
-              AND order_status IN ('STATUS_CANCELLED','STATUS_PARTIALLY_FILLED','STATUS_FILLED')
-              AND ($2::int IS NULL OR market_id = $2::int)
-            ORDER BY order_timestamp DESC
-            LIMIT $3 OFFSET $4
-        "#;
-        let stmt = Statement::from_sql_and_values(
-            sea_orm::DatabaseBackend::Postgres,
-            sql,
-            [
-                (user_id as i64).into(),
-                market_id.map(|m| m as i32).into(),
-                (limit as i64).into(),
-                (offset as i64).into(),
-            ],
-        );
-        let rows = OrderRowWithTotal::find_by_statement(stmt)
-            .all(&*self.db)
-            .await?;
-        let total = rows.first().map(|r| r.total_count as u64).unwrap_or(0);
-        Ok((rows.into_iter().map(OrderRowWithTotal::into_model).collect(), total))
-    }
+    // `get_open_orders_with_total` / `get_order_history_with_total` use the
+    // trait default — runs paginated + count in parallel via tokio::try_join!
+    // so each query can use its own partial index on trading.orders_current
+    // (open: idx_orders_current_user_open_ts; history:
+    // idx_orders_current_user_history_ts). COUNT(*) OVER () is avoided
+    // because it forces a non-index-only plan that scans the whole filtered
+    // heap for the whale cases.
 
     async fn get_user_favorite_markets(
         &self,
