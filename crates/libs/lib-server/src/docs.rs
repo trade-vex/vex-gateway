@@ -539,10 +539,12 @@ struct OpenOrderResponse {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 struct OrdersListResponse {
     orders: Vec<OpenOrderResponse>,
-    total: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    total: Option<usize>,
     page: usize,
     limit: usize,
-    total_pages: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    total_pages: Option<usize>,
     has_next: bool,
     has_prev: bool,
 }
@@ -564,10 +566,12 @@ struct OrderHistoryResponse {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 struct OrdersHistoryListResponse {
     orders: Vec<OrderHistoryResponse>,
-    total: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    total: Option<usize>,
     page: usize,
     limit: usize,
-    total_pages: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    total_pages: Option<usize>,
     has_next: bool,
     has_prev: bool,
 }

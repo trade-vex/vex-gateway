@@ -328,7 +328,7 @@ impl AppState {
         let sanitized_url = Self::sanitize_url(&config.url);
         info!("Connecting to database: {}", sanitized_url);
         let mut opt = ConnectOptions::new(config.url.clone());
-        opt.max_connections(100)
+        opt.max_connections(120)
             .min_connections(20)
             .acquire_timeout(Duration::from_millis(2500))
             .idle_timeout(Duration::from_secs(60))

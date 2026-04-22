@@ -318,10 +318,10 @@ async fn test_get_open_orders(
             let total = orders.len();
             Ok(HttpResponse::Ok().json(OrdersListResponse {
                 orders: vec![],
-                total,
+                total: Some(total),
                 page: 1,
                 limit: 100,
-                total_pages: 1,
+                total_pages: Some(1),
                 has_next: false,
                 has_prev: false,
             }))
@@ -549,17 +549,18 @@ async fn test_high_frequency_stress_test() {
             .await
             .expect("Failed");
         let orders_data: OrdersListResponse = orders_resp.json().await.expect("Failed");
+        let orders_total = orders_data.total.unwrap_or(orders_data.orders.len());
 
-        total_before_cancel += orders_data.total;
+        total_before_cancel += orders_total;
 
-        if orders_data.total > 0 {
+        if orders_total > 0 {
             println!(
                 "User {}: {} open orders (cancelling half)",
-                user_id, orders_data.total
+                user_id, orders_total
             );
 
             // Cancel half of this user's UNFILLED orders
-            let cancel_count = (orders_data.total / 2).max(1); // Cancel at least 1
+            let cancel_count = (orders_total / 2).max(1); // Cancel at least 1
             for i in 0..cancel_count.min(orders_data.orders.len()) {
                 let order = &orders_data.orders[i];
                 let order_id: u64 = order.order_id.try_into().unwrap_or(0); // Convert Decimal to u64
@@ -626,10 +627,11 @@ async fn test_high_frequency_stress_test() {
             .await
             .expect("Failed");
         let orders_data: OrdersListResponse = orders_resp.json().await.expect("Failed");
+        let orders_total = orders_data.total.unwrap_or(orders_data.orders.len());
 
         println!(
             "User {}: {} assets, {} open orders",
-            user_id, balance_data.total_assets, orders_data.total
+            user_id, balance_data.total_assets, orders_total
         );
 
         // Each user must have both assets
@@ -649,7 +651,7 @@ async fn test_high_frequency_stress_test() {
             }
         }
 
-        total_open_orders += orders_data.total;
+        total_open_orders += orders_total;
     }
 
     // CRITICAL: System-wide fund conservation (total across all users = initial deposits)

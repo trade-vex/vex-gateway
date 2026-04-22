@@ -1,14 +1,17 @@
 use actix_web::{
-    Error, HttpRequest,
+    Error, HttpMessage, HttpRequest,
     dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready},
 };
 use futures_util::future::{LocalBoxFuture, Ready, ready};
-use lib_auth::middleware::jwt_auth::JwtAuthentication;
+use lib_auth::middleware::jwt_auth::{AuthenticatedUser, JwtAuthentication};
 use lib_auth::service::session_service::SessionService;
+use lib_auth::utils::cookie_policy::CookiePolicy;
 use lib_middleware::api_key::middleware::ApiKeyMiddleware;
 use std::{rc::Rc, sync::Arc};
 use tokio::sync::Mutex as TokioMutex;
 use tracing::error;
+
+const SESSION_REFRESH_GRACE_SECONDS: i64 = 60;
 
 #[derive(Clone)]
 pub struct CombinedAuthMiddleware {
@@ -48,6 +51,16 @@ impl CombinedAuthMiddleware {
         }
 
         AuthType::None
+    }
+
+    fn session_refresh_due(req: &HttpRequest, session_ttl_seconds: u64) -> bool {
+        let refresh_window = ((session_ttl_seconds as i64) / 4).max(SESSION_REFRESH_GRACE_SECONDS);
+        let now = chrono::Utc::now().timestamp();
+
+        req.cookie("session_expires_at")
+            .and_then(|cookie| cookie.value().parse::<i64>().ok())
+            .map(|expires_at| expires_at - now <= refresh_window)
+            .unwrap_or(true)
     }
 }
 
@@ -100,7 +113,7 @@ where
 
     forward_ready!(service);
 
-    fn call(&self, mut req: ServiceRequest) -> Self::Future {
+    fn call(&self, req: ServiceRequest) -> Self::Future {
         let jwt_middleware = self.jwt_middleware.clone();
         let api_key_middleware = Arc::clone(&self.api_key_middleware);
         let session_service = Arc::clone(&self.session_service);
@@ -132,38 +145,47 @@ where
                     if let Some(session_id_cookie) = req.request().cookie("session_id") {
                         let session_id = session_id_cookie.value().to_string();
                         tracing::debug!("Session auth: Found session_id cookie: {}", session_id);
+                        let session_ttl_seconds = session_service.ttl_seconds();
+                        let refresh_due = CombinedAuthMiddleware::session_refresh_due(
+                            req.request(),
+                            session_ttl_seconds,
+                        );
+                        let cookie_policy =
+                            refresh_due.then(|| CookiePolicy::from_request(req.request()));
 
-                        // Get session from Redis (contains access_token and refresh_token)
-                        match session_service.get_session(&session_id).await {
+                        let session_result = if refresh_due {
+                            session_service.get_session_and_refresh(&session_id).await
+                        } else {
+                            session_service.get_session(&session_id).await
+                        };
+
+                        match session_result {
                             Ok(session_data) => {
-                                tracing::debug!(
-                                    "Session auth: Session found in Redis, extracting access_token"
-                                );
-                                // Extract access_token from session
-                                let access_token = session_data.access_token.clone();
+                                req.extensions_mut().insert(AuthenticatedUser {
+                                    user_id: session_data.user_id,
+                                });
 
-                                tracing::debug!(
-                                    "Session auth: Adding JWT token to Authorization header"
-                                );
-                                // Add Authorization header to the request with the JWT from session
-                                req.headers_mut().insert(
-                                    actix_web::http::header::AUTHORIZATION,
-                                    actix_web::http::header::HeaderValue::from_str(&format!(
-                                        "Bearer {}",
-                                        access_token
-                                    ))
-                                    .map_err(|_| {
-                                        actix_web::error::ErrorUnauthorized("Invalid token format")
-                                    })?,
-                                );
+                                let mut response = service.call(req).await?.map_into_boxed_body();
 
-                                tracing::debug!(
-                                    "Session auth: Passing request to JWT middleware for validation"
-                                );
-                                // Now pass to JWT middleware for proper validation
-                                let jwt_service =
-                                    jwt_middleware.new_transform(service.clone()).await.unwrap();
-                                jwt_service.call(req).await
+                                if let Some(cookie_policy) = cookie_policy {
+                                    let session_expires_at = (chrono::Utc::now().timestamp()
+                                        + session_ttl_seconds as i64)
+                                        .to_string();
+                                    let cookie = cookie_policy.build_cookie(
+                                        "session_expires_at",
+                                        session_expires_at,
+                                        session_ttl_seconds as i64,
+                                        false,
+                                    );
+                                    if let Err(e) = response.response_mut().add_cookie(&cookie) {
+                                        tracing::warn!(
+                                            "Session auth: Failed to update session_expires_at cookie: {}",
+                                            e
+                                        );
+                                    }
+                                }
+
+                                Ok(response)
                             }
                             Err(e) => {
                                 tracing::warn!("Session auth: Invalid session: {}", e);

@@ -100,6 +100,28 @@ impl SessionService {
         Ok(session_data)
     }
 
+    /// Get session data and extend inactivity TTL in one Redis round-trip.
+    pub async fn get_session_and_refresh(
+        &self,
+        session_id: &str,
+    ) -> Result<SessionData, AuthError> {
+        let session_key = format!("session:{}", session_id);
+
+        let mut conn = self.conn.clone();
+
+        let session_json: Option<String> = conn
+            .get_ex(&session_key, redis::Expiry::EX(self.session_ttl_seconds))
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to get session: {}", e)))?;
+
+        let session_json = session_json.ok_or(AuthError::InvalidRequest)?;
+
+        let session_data: SessionData = serde_json::from_str(&session_json)
+            .map_err(|e| AuthError::Redis(format!("Failed to deserialize session: {}", e)))?;
+
+        Ok(session_data)
+    }
+
     /// Delete a session
     pub async fn delete_session(&self, session_id: &str) -> Result<(), AuthError> {
         let session_key = format!("session:{}", session_id);
@@ -114,27 +136,24 @@ impl SessionService {
         Ok(())
     }
 
-    /// Refresh/extend a session's TTL
+    /// Refresh/extend a session's TTL in a single Redis round-trip.
+    ///
+    /// EXPIRE returns 1 if the key existed (and TTL was updated), 0 if it did
+    /// not. Collapsing EXISTS + EXPIRE into just EXPIRE halves the Redis RTT
+    /// cost that every authenticated request with a session_id cookie pays.
     pub async fn refresh_session(&self, session_id: &str) -> Result<(), AuthError> {
         let session_key = format!("session:{}", session_id);
 
         let mut conn = self.conn.clone();
 
-        // Check if session exists
-        let exists: bool = conn
-            .exists(&session_key)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to check session: {}", e)))?;
-
-        if !exists {
-            return Err(AuthError::InvalidRequest);
-        }
-
-        // Extend the TTL
-        let _: () = conn
+        let updated: i64 = conn
             .expire(&session_key, self.session_ttl_seconds as i64)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to refresh session: {}", e)))?;
+
+        if updated == 0 {
+            return Err(AuthError::InvalidRequest);
+        }
 
         Ok(())
     }

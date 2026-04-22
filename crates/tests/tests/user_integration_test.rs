@@ -333,10 +333,10 @@ async fn test_get_open_orders(
 
             let response = OrdersListResponse {
                 orders: order_responses,
-                total,
+                total: Some(total),
                 page: 1,
                 limit: 100,
-                total_pages: 1,
+                total_pages: Some(1),
                 has_next: false,
                 has_prev: false,
             };
@@ -825,7 +825,7 @@ async fn test_user_balance_and_order_retrieval() {
 
     if orders_response.status().is_success() {
         let orders: OrdersListResponse = orders_response.json().await.expect("Failed to parse");
-        println!("   Total orders: {}", orders.total);
+        println!("   Total orders: {}", orders.total.unwrap_or(orders.orders.len()));
 
         let mut found_our_order = false;
         for (idx, order) in orders.orders.iter().enumerate() {

@@ -16,7 +16,7 @@ use rust_decimal::Decimal;
 use sea_orm::prelude::*;
 use sea_orm::*;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -76,39 +76,6 @@ pub trait TradingRepository: Send + Sync {
         market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>>;
     async fn count_order_history(&self, user_id: u64, market_id: Option<u32>) -> Result<u64>;
-
-    /// Latest-event-per-order open orders plus total count, in one DB round-trip.
-    /// Default impl falls back to parallel calls to the paginated + count methods
-    /// so existing implementors keep working; Postgres overrides with a single
-    /// query using DISTINCT ON + COUNT(*) OVER ().
-    async fn get_open_orders_with_total(
-        &self,
-        user_id: u64,
-        offset: u64,
-        limit: u64,
-        market_id: Option<u32>,
-    ) -> Result<(Vec<OrderModel>, u64)> {
-        let (orders, total) = tokio::try_join!(
-            self.get_open_orders_paginated(user_id, offset, limit, market_id),
-            self.count_open_orders(user_id, market_id),
-        )?;
-        Ok((orders, total))
-    }
-
-    /// Same as above for order history (Cancelled / PartiallyFilled / Filled).
-    async fn get_order_history_with_total(
-        &self,
-        user_id: u64,
-        offset: u64,
-        limit: u64,
-        market_id: Option<u32>,
-    ) -> Result<(Vec<OrderModel>, u64)> {
-        let (orders, total) = tokio::try_join!(
-            self.get_order_history_paginated(user_id, offset, limit, market_id),
-            self.count_order_history(user_id, market_id),
-        )?;
-        Ok((orders, total))
-    }
 
     // Favorite markets operations
     async fn get_user_favorite_markets(&self, user_id: u64)
@@ -198,6 +165,31 @@ pub trait PortfolioRepository: Send + Sync {
         now_ts_secs: i64,
         resolution: PnlResolution,
     ) -> Result<PortfolioMetrics>;
+
+    async fn get_portfolio_overview(
+        &self,
+        user_id: u64,
+        now_ts_secs: i64,
+    ) -> Result<PortfolioMetrics> {
+        let mut metrics = self
+            .get_portfolio(user_id, now_ts_secs, PnlResolution::Day)
+            .await?;
+        metrics.pnl_series.clear();
+        metrics.pnl_resolution = PnlResolution::Day;
+        Ok(metrics)
+    }
+
+    async fn get_pnl_chart(
+        &self,
+        user_id: u64,
+        now_ts_secs: i64,
+        resolution: PnlResolution,
+    ) -> Result<Vec<PnlPoint>> {
+        Ok(self
+            .get_portfolio(user_id, now_ts_secs, resolution)
+            .await?
+            .pnl_series)
+    }
 
     async fn get_balance_chart(
         &self,
@@ -329,34 +321,63 @@ impl TradingRepository for PostgresTradingRepository {
         market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>> {
         // Reads the current-state projection (trading.orders_current). WHERE
-        // shape matches the partial index idx_orders_current_user_open_ts so
-        // Postgres serves the page via a narrow B-tree range scan.
-        let sql = format!(
-            r#"
-            SELECT
-                id, market_id, order_order_id, order_user_id,
-                order_price, order_size, order_filled_size,
-                order_side, order_time_in_force, order_status,
-                order_timestamp, created_at
-            FROM trading.orders_current
-            WHERE order_user_id = $1
-              AND {predicate}
-              AND ($2::int IS NULL OR market_id = $2::int)
-            ORDER BY order_timestamp DESC
-            LIMIT $3 OFFSET $4
-            "#,
-            predicate = OPEN_PREDICATE_SQL,
-        );
-        let stmt = Statement::from_sql_and_values(
-            sea_orm::DatabaseBackend::Postgres,
-            sql,
-            [
-                (user_id as i64).into(),
-                market_id.map(|m| m as i32).into(),
-                (limit as i64).into(),
-                (offset as i64).into(),
-            ],
-        );
+        // shape matches the partial index idx_orders_current_user_open_ts
+        // (no market) or idx_orders_current_user_market_open_ts (with market)
+        // so Postgres serves the page via a narrow B-tree range scan.
+        //
+        // Split by market_id presence so each shape is a stable prepared
+        // statement tied to exactly one partial index — no NULL branch for
+        // the planner to guess at.
+        let stmt = match market_id {
+            Some(mid) => Statement::from_sql_and_values(
+                sea_orm::DatabaseBackend::Postgres,
+                format!(
+                    r#"
+                    SELECT
+                        id, market_id, order_order_id, order_user_id,
+                        order_price, order_size, order_filled_size,
+                        order_side, order_time_in_force, order_status,
+                        order_timestamp, created_at
+                    FROM trading.orders_current
+                    WHERE order_user_id = $1
+                      AND market_id = $2
+                      AND {predicate}
+                    ORDER BY order_timestamp DESC
+                    LIMIT $3 OFFSET $4
+                    "#,
+                    predicate = OPEN_PREDICATE_SQL,
+                ),
+                [
+                    (user_id as i64).into(),
+                    (mid as i32).into(),
+                    (limit as i64).into(),
+                    (offset as i64).into(),
+                ],
+            ),
+            None => Statement::from_sql_and_values(
+                sea_orm::DatabaseBackend::Postgres,
+                format!(
+                    r#"
+                    SELECT
+                        id, market_id, order_order_id, order_user_id,
+                        order_price, order_size, order_filled_size,
+                        order_side, order_time_in_force, order_status,
+                        order_timestamp, created_at
+                    FROM trading.orders_current
+                    WHERE order_user_id = $1
+                      AND {predicate}
+                    ORDER BY order_timestamp DESC
+                    LIMIT $2 OFFSET $3
+                    "#,
+                    predicate = OPEN_PREDICATE_SQL,
+                ),
+                [
+                    (user_id as i64).into(),
+                    (limit as i64).into(),
+                    (offset as i64).into(),
+                ],
+            ),
+        };
         OrderEntity::find()
             .from_raw_sql(stmt)
             .all(&*self.db)
@@ -365,27 +386,40 @@ impl TradingRepository for PostgresTradingRepository {
     }
 
     async fn count_open_orders(&self, user_id: u64, market_id: Option<u32>) -> Result<u64> {
-        // Plain COUNT(*). Runs as an index-only scan against
+        // Plain COUNT(*). Index-only scan against
         // idx_orders_current_user_open_ts (or ..._market_open_ts when a market
-        // filter is supplied).
-        let sql = format!(
-            r#"
-            SELECT COUNT(*) AS n
-            FROM trading.orders_current
-            WHERE order_user_id = $1
-              AND {predicate}
-              AND ($2::int IS NULL OR market_id = $2::int)
-            "#,
-            predicate = OPEN_PREDICATE_SQL,
-        );
-        let stmt = Statement::from_sql_and_values(
-            sea_orm::DatabaseBackend::Postgres,
-            sql,
-            [
-                (user_id as i64).into(),
-                market_id.map(|m| m as i32).into(),
-            ],
-        );
+        // filter is supplied). NOT called on the order-read hot path — the
+        // handler derives has_next from a LIMIT+1 probe instead so each
+        // request uses one connection, not two. Kept for out-of-band callers.
+        let stmt = match market_id {
+            Some(mid) => Statement::from_sql_and_values(
+                sea_orm::DatabaseBackend::Postgres,
+                format!(
+                    r#"
+                    SELECT COUNT(*) AS n
+                    FROM trading.orders_current
+                    WHERE order_user_id = $1
+                      AND market_id = $2
+                      AND {predicate}
+                    "#,
+                    predicate = OPEN_PREDICATE_SQL,
+                ),
+                [(user_id as i64).into(), (mid as i32).into()],
+            ),
+            None => Statement::from_sql_and_values(
+                sea_orm::DatabaseBackend::Postgres,
+                format!(
+                    r#"
+                    SELECT COUNT(*) AS n
+                    FROM trading.orders_current
+                    WHERE order_user_id = $1
+                      AND {predicate}
+                    "#,
+                    predicate = OPEN_PREDICATE_SQL,
+                ),
+                [(user_id as i64).into()],
+            ),
+        };
         let row = CountRow::find_by_statement(stmt).one(&*self.db).await?;
         Ok(row.map(|r| r.n as u64).unwrap_or(0))
     }
@@ -453,34 +487,59 @@ impl TradingRepository for PostgresTradingRepository {
         market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>> {
         // Reads trading.orders_current. WHERE matches
-        // idx_orders_current_user_history_ts (partial index on terminal
-        // statuses) so the page is a narrow range scan.
-        let sql = format!(
-            r#"
-            SELECT
-                id, market_id, order_order_id, order_user_id,
-                order_price, order_size, order_filled_size,
-                order_side, order_time_in_force, order_status,
-                order_timestamp, created_at
-            FROM trading.orders_current
-            WHERE order_user_id = $1
-              AND {predicate}
-              AND ($2::int IS NULL OR market_id = $2::int)
-            ORDER BY order_timestamp DESC
-            LIMIT $3 OFFSET $4
-            "#,
-            predicate = HISTORY_PREDICATE_SQL,
-        );
-        let stmt = Statement::from_sql_and_values(
-            sea_orm::DatabaseBackend::Postgres,
-            sql,
-            [
-                (user_id as i64).into(),
-                market_id.map(|m| m as i32).into(),
-                (limit as i64).into(),
-                (offset as i64).into(),
-            ],
-        );
+        // idx_orders_current_user_history_ts (no market) or
+        // idx_orders_current_user_market_history_ts (with market).
+        // Split by market_id presence — one prepared statement per index.
+        let stmt = match market_id {
+            Some(mid) => Statement::from_sql_and_values(
+                sea_orm::DatabaseBackend::Postgres,
+                format!(
+                    r#"
+                    SELECT
+                        id, market_id, order_order_id, order_user_id,
+                        order_price, order_size, order_filled_size,
+                        order_side, order_time_in_force, order_status,
+                        order_timestamp, created_at
+                    FROM trading.orders_current
+                    WHERE order_user_id = $1
+                      AND market_id = $2
+                      AND {predicate}
+                    ORDER BY order_timestamp DESC
+                    LIMIT $3 OFFSET $4
+                    "#,
+                    predicate = HISTORY_PREDICATE_SQL,
+                ),
+                [
+                    (user_id as i64).into(),
+                    (mid as i32).into(),
+                    (limit as i64).into(),
+                    (offset as i64).into(),
+                ],
+            ),
+            None => Statement::from_sql_and_values(
+                sea_orm::DatabaseBackend::Postgres,
+                format!(
+                    r#"
+                    SELECT
+                        id, market_id, order_order_id, order_user_id,
+                        order_price, order_size, order_filled_size,
+                        order_side, order_time_in_force, order_status,
+                        order_timestamp, created_at
+                    FROM trading.orders_current
+                    WHERE order_user_id = $1
+                      AND {predicate}
+                    ORDER BY order_timestamp DESC
+                    LIMIT $2 OFFSET $3
+                    "#,
+                    predicate = HISTORY_PREDICATE_SQL,
+                ),
+                [
+                    (user_id as i64).into(),
+                    (limit as i64).into(),
+                    (offset as i64).into(),
+                ],
+            ),
+        };
         OrderEntity::find()
             .from_raw_sql(stmt)
             .all(&*self.db)
@@ -489,37 +548,40 @@ impl TradingRepository for PostgresTradingRepository {
     }
 
     async fn count_order_history(&self, user_id: u64, market_id: Option<u32>) -> Result<u64> {
-        // Plain COUNT(*). Index-only scan against
-        // idx_orders_current_user_history_ts (or ..._market_history_ts).
-        let sql = format!(
-            r#"
-            SELECT COUNT(*) AS n
-            FROM trading.orders_current
-            WHERE order_user_id = $1
-              AND {predicate}
-              AND ($2::int IS NULL OR market_id = $2::int)
-            "#,
-            predicate = HISTORY_PREDICATE_SQL,
-        );
-        let stmt = Statement::from_sql_and_values(
-            sea_orm::DatabaseBackend::Postgres,
-            sql,
-            [
-                (user_id as i64).into(),
-                market_id.map(|m| m as i32).into(),
-            ],
-        );
+        // Plain COUNT(*). NOT called on the hot path (handler uses LIMIT+1);
+        // kept for out-of-band use.
+        let stmt = match market_id {
+            Some(mid) => Statement::from_sql_and_values(
+                sea_orm::DatabaseBackend::Postgres,
+                format!(
+                    r#"
+                    SELECT COUNT(*) AS n
+                    FROM trading.orders_current
+                    WHERE order_user_id = $1
+                      AND market_id = $2
+                      AND {predicate}
+                    "#,
+                    predicate = HISTORY_PREDICATE_SQL,
+                ),
+                [(user_id as i64).into(), (mid as i32).into()],
+            ),
+            None => Statement::from_sql_and_values(
+                sea_orm::DatabaseBackend::Postgres,
+                format!(
+                    r#"
+                    SELECT COUNT(*) AS n
+                    FROM trading.orders_current
+                    WHERE order_user_id = $1
+                      AND {predicate}
+                    "#,
+                    predicate = HISTORY_PREDICATE_SQL,
+                ),
+                [(user_id as i64).into()],
+            ),
+        };
         let row = CountRow::find_by_statement(stmt).one(&*self.db).await?;
         Ok(row.map(|r| r.n as u64).unwrap_or(0))
     }
-
-    // `get_open_orders_with_total` / `get_order_history_with_total` use the
-    // trait default — runs paginated + count in parallel via tokio::try_join!
-    // so each query can use its own partial index on trading.orders_current
-    // (open: idx_orders_current_user_open_ts; history:
-    // idx_orders_current_user_history_ts). COUNT(*) OVER () is avoided
-    // because it forces a non-index-only plan that scans the whole filtered
-    // heap for the whale cases.
 
     async fn get_user_favorite_markets(
         &self,
@@ -687,6 +749,84 @@ impl ClickHousePortfolioRepository {
     /// always values portfolios in USD.
     const QUOTE_ASSET_ID: u16 = 1;
 
+    fn step_seconds(resolution: PnlResolution) -> i64 {
+        match resolution {
+            PnlResolution::Day => 3600,    // 1 hour
+            PnlResolution::Week => 21600,  // 6 hours
+            PnlResolution::Month => 86400, // 1 day
+            PnlResolution::Year => 604800, // 1 week
+        }
+    }
+
+    async fn fetch_price_history_for_assets(
+        &self,
+        asset_ids: &BTreeSet<u16>,
+        start_ts: i64,
+        end_ts: i64,
+    ) -> Result<BTreeMap<u16, BTreeMap<i64, Decimal>>> {
+        if asset_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+
+        let asset_filter = asset_ids
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let seed_price_sql = format!(
+            "SELECT asset_id, toString(argMax(price, minute))
+             FROM {} FINAL
+             WHERE quote_asset_id = ? AND asset_id IN ({}) AND minute <= toDateTime(?)
+             GROUP BY asset_id",
+            self.table("asset_prices_last_per_min"),
+            asset_filter
+        );
+
+        let seed_price_rows: Vec<(u16, String)> = self
+            .ch
+            .query(&seed_price_sql)
+            .bind(Self::QUOTE_ASSET_ID)
+            .bind(start_ts)
+            .fetch_all()
+            .await
+            .map_err(|e| TradingError::Database(e.to_string()))?;
+
+        let delta_price_sql = format!(
+            "SELECT asset_id, CAST(toUnixTimestamp(minute) AS Int64), toString(price)
+             FROM {} FINAL
+             WHERE quote_asset_id = ? AND asset_id IN ({})
+               AND minute > toDateTime(?) AND minute <= toDateTime(?)
+             ORDER BY minute ASC",
+            self.table("asset_prices_last_per_min"),
+            asset_filter
+        );
+
+        let delta_price_rows: Vec<(u16, i64, String)> = self
+            .ch
+            .query(&delta_price_sql)
+            .bind(Self::QUOTE_ASSET_ID)
+            .bind(start_ts)
+            .bind(end_ts)
+            .fetch_all()
+            .await
+            .map_err(|e| TradingError::Database(e.to_string()))?;
+
+        let mut prices: BTreeMap<u16, BTreeMap<i64, Decimal>> = BTreeMap::new();
+
+        for (asset, val) in seed_price_rows {
+            let v = Decimal::from_str(&val).unwrap_or(Decimal::ZERO);
+            prices.entry(asset).or_default().insert(start_ts, v);
+        }
+
+        for (asset, ts, val) in delta_price_rows {
+            let v = Decimal::from_str(&val).unwrap_or(Decimal::ZERO);
+            prices.entry(asset).or_default().insert(ts, v);
+        }
+
+        Ok(prices)
+    }
+
     /// Fetch Equity Series using Rust-side forward-fill aggregation.
     ///
     /// This approach fetches raw balance and price data, then calculates equity
@@ -700,65 +840,68 @@ impl ClickHousePortfolioRepository {
         resolution: PnlResolution,
     ) -> Result<Vec<BalancePoint>> {
         let quote_asset_id = Self::QUOTE_ASSET_ID;
+        let step_seconds = Self::step_seconds(resolution);
 
-        // Determine step size in seconds for the buckets
-        let step_seconds: i64 = match resolution {
-            PnlResolution::Day => 3600,    // 1 hour
-            PnlResolution::Week => 21600,  // 6 hours
-            PnlResolution::Month => 86400, // 1 day
-            PnlResolution::Year => 604800, // 1 week
-        };
-
-        // 1. Fetch ALL balance updates for this user up to end_ts
-        let balance_sql = format!(
-            "SELECT asset_id, CAST(toUnixTimestamp(minute) AS Int64) as ts, toString(total)
+        // Seed the window with the last known balance per asset at or before
+        // start_ts, then fetch only updates inside the requested window.
+        let seed_balance_sql = format!(
+            "SELECT asset_id, toString(argMax(total, minute))
              FROM {} FINAL
              WHERE user_id = ? AND minute <= toDateTime(?)
+             GROUP BY asset_id",
+            self.table("balances_last_per_min")
+        );
+
+        let seed_balance_rows: Vec<(u16, String)> = self
+            .ch
+            .query(&seed_balance_sql)
+            .bind(user_id)
+            .bind(start_ts)
+            .fetch_all()
+            .await
+            .map_err(|e| TradingError::Database(e.to_string()))?;
+
+        let delta_balance_sql = format!(
+            "SELECT asset_id, CAST(toUnixTimestamp(minute) AS Int64), toString(total)
+             FROM {} FINAL
+             WHERE user_id = ? AND minute > toDateTime(?) AND minute <= toDateTime(?)
              ORDER BY minute ASC",
             self.table("balances_last_per_min")
         );
 
-        let balance_rows: Vec<(u16, i64, String)> = self
+        let delta_balance_rows: Vec<(u16, i64, String)> = self
             .ch
-            .query(&balance_sql)
+            .query(&delta_balance_sql)
             .bind(user_id)
+            .bind(start_ts)
             .bind(end_ts)
             .fetch_all()
             .await
             .map_err(|e| TradingError::Database(e.to_string()))?;
 
-        // 2. Fetch ALL price updates up to end_ts
-        let price_sql = format!(
-            "SELECT asset_id, CAST(toUnixTimestamp(minute) AS Int64) as ts, toString(price)
-             FROM {} FINAL
-             WHERE quote_asset_id = ? AND minute <= toDateTime(?)
-             ORDER BY minute ASC",
-            self.table("asset_prices_last_per_min")
-        );
-
-        let price_rows: Vec<(u16, i64, String)> = self
-            .ch
-            .query(&price_sql)
-            .bind(quote_asset_id)
-            .bind(end_ts)
-            .fetch_all()
-            .await
-            .map_err(|e| TradingError::Database(e.to_string()))?;
-
-        // 3. Build history maps: asset_id -> (timestamp -> value)
         let mut balances: BTreeMap<u16, BTreeMap<i64, Decimal>> = BTreeMap::new();
-        for (asset, ts, val) in balance_rows {
+
+        for (asset, val) in seed_balance_rows {
+            let v = Decimal::from_str(&val).unwrap_or(Decimal::ZERO);
+            balances.entry(asset).or_default().insert(start_ts, v);
+        }
+
+        for (asset, ts, val) in delta_balance_rows {
             let v = Decimal::from_str(&val).unwrap_or(Decimal::ZERO);
             balances.entry(asset).or_default().insert(ts, v);
         }
 
-        let mut prices: BTreeMap<u16, BTreeMap<i64, Decimal>> = BTreeMap::new();
-        for (asset, ts, val) in price_rows {
-            let v = Decimal::from_str(&val).unwrap_or(Decimal::ZERO);
-            prices.entry(asset).or_default().insert(ts, v);
-        }
+        let tracked_assets = balances
+            .keys()
+            .copied()
+            .filter(|asset_id| *asset_id != quote_asset_id)
+            .collect::<BTreeSet<_>>();
 
-        // 4. Generate time buckets and calculate equity at each
+        let prices = self
+            .fetch_price_history_for_assets(&tracked_assets, start_ts, end_ts)
+            .await?;
+
+        // Generate time buckets and calculate equity at each.
         let mut series = Vec::new();
         let mut current_ts = start_ts;
 
@@ -849,34 +992,17 @@ impl ClickHousePortfolioRepository {
             .await
             .map_err(|e| TradingError::Database(e.to_string()))?;
 
-        // 2. Fetch Price History to value these flows
-        // Include ALL prices (including genesis at timestamp 0) so cashflow valuation
-        // matches equity valuation.
-        let price_sql = format!(
-            "SELECT asset_id, CAST(toUnixTimestamp(minute) AS Int64), toString(price)
-             FROM {} FINAL
-             WHERE quote_asset_id = ? AND minute <= toDateTime(?)
-             ORDER BY minute ASC",
-            self.table("asset_prices_last_per_min")
-        );
+        let tracked_assets = flow_rows
+            .iter()
+            .map(|(_, asset_id, _)| *asset_id)
+            .filter(|asset_id| *asset_id != quote_asset_id)
+            .collect::<BTreeSet<_>>();
 
-        let price_rows: Vec<(u16, i64, String)> = self
-            .ch
-            .query(&price_sql)
-            .bind(quote_asset_id)
-            .bind(end_ts)
-            .fetch_all()
-            .await
-            .map_err(|e| TradingError::Database(e.to_string()))?;
+        let prices = self
+            .fetch_price_history_for_assets(&tracked_assets, start_ts, end_ts)
+            .await?;
 
-        // 3. Build Price Map
-        let mut prices: BTreeMap<u16, BTreeMap<i64, Decimal>> = BTreeMap::new();
-        for (asset, ts, val) in price_rows {
-            let v = Decimal::from_str(&val).unwrap_or(Decimal::ZERO);
-            prices.entry(asset).or_default().insert(ts, v);
-        }
-
-        // 4. Calculate Cumulative Cost Basis
+        // 3. Calculate cumulative net cashflow inside the requested window.
         let mut cumulative_map = BTreeMap::new();
         let mut running_total = Decimal::ZERO;
 
@@ -915,80 +1041,94 @@ impl ClickHousePortfolioRepository {
 
         Ok(cumulative_map)
     }
-}
 
-#[async_trait]
-impl PortfolioRepository for ClickHousePortfolioRepository {
-    async fn get_portfolio(
-        &self,
-        user_id: u64,
-        now_ts_secs: i64,
-        resolution: PnlResolution,
-    ) -> Result<PortfolioMetrics> {
-        let cutoff_24h = now_ts_secs - 24 * 60 * 60;
-        let cutoff_7d = now_ts_secs - 7 * 24 * 60 * 60;
-        let cutoff_1m = now_ts_secs - 30 * 24 * 60 * 60;
+    fn series_value_at_or_before(series: &[BalancePoint], ts: i64) -> Decimal {
+        series
+            .iter()
+            .rev()
+            .find(|point| point.timestamp <= ts)
+            .map(|point| point.balance)
+            .unwrap_or(Decimal::ZERO)
+    }
 
-        // 1. Fetch Equity Series
-        // We fetch enough for drawdown calculation (30d)
-        let full_series = self
-            .fetch_total_equity_series(user_id, cutoff_1m, now_ts_secs, PnlResolution::Day)
-            .await?;
-
-        // Helper to get value from series
-        let get_val = |ts: i64| -> Decimal {
-            full_series
-                .iter()
-                .rev()
-                .find(|p| p.timestamp <= ts)
-                .map(|p| p.balance)
-                .unwrap_or(Decimal::ZERO)
-        };
-
-        let balance_now = get_val(now_ts_secs);
-        let balance_24h_ago = get_val(cutoff_24h);
-        let balance_7d_ago = get_val(cutoff_7d);
-
-        // 2. Calculate Cashflow (Dynamic)
-        // Fetch ALL cashflows from beginning to get correct cumulative totals
-        // PnL = (Equity_Now - Equity_Start) - Net_Cashflow
-        let cashflow_map = self
-            .fetch_cashflow_series(user_id, 0, now_ts_secs, resolution)
-            .await?;
-
-        // Get cumulative cashflow at 7d ago and now
-        let cf_at_7d_ago = cashflow_map
-            .range(..=cutoff_7d)
-            .next_back()
-            .map(|(_, v)| *v)
-            .unwrap_or(Decimal::ZERO);
-        let cf_at_now = cashflow_map
-            .range(..=now_ts_secs)
-            .next_back()
-            .map(|(_, v)| *v)
-            .unwrap_or(Decimal::ZERO);
-        // Net cashflow in the 7d window
-        let net_cashflow_7d = cf_at_now - cf_at_7d_ago;
-
-        let pnl_7d = (balance_now - balance_7d_ago) - net_cashflow_7d;
-
-        // 3. Calculate Drawdown
+    fn compute_max_drawdown(series: &[BalancePoint], cutoff_ts: i64) -> Decimal {
         let mut peak = Decimal::MIN;
         let mut max_drawdown = Decimal::ZERO;
-        for point in &full_series {
-            if point.timestamp < cutoff_1m {
+
+        for point in series {
+            if point.timestamp < cutoff_ts {
                 continue;
             }
             if point.balance > peak {
                 peak = point.balance;
             }
-            let dd = peak - point.balance;
-            if dd > max_drawdown {
-                max_drawdown = dd;
+            let drawdown = peak - point.balance;
+            if drawdown > max_drawdown {
+                max_drawdown = drawdown;
             }
         }
 
-        // 4. Volume (Still simple SQL is fine)
+        max_drawdown
+    }
+
+    fn build_pnl_series(
+        equity_series: Vec<BalancePoint>,
+        cashflow_map: &BTreeMap<i64, Decimal>,
+    ) -> Vec<PnlPoint> {
+        let baseline_equity = equity_series
+            .first()
+            .map(|point| point.balance)
+            .unwrap_or(Decimal::ZERO);
+
+        equity_series
+            .into_iter()
+            .map(|point| {
+                let current_cf = cashflow_map
+                    .range(..=point.timestamp)
+                    .next_back()
+                    .map(|(_, value)| *value)
+                    .unwrap_or(Decimal::ZERO);
+
+                PnlPoint {
+                    timestamp: point.timestamp,
+                    pnl: (point.balance - baseline_equity) - current_cf,
+                }
+            })
+            .collect()
+    }
+}
+
+#[async_trait]
+impl PortfolioRepository for ClickHousePortfolioRepository {
+    async fn get_portfolio_overview(
+        &self,
+        user_id: u64,
+        now_ts_secs: i64,
+    ) -> Result<PortfolioMetrics> {
+        let cutoff_24h = now_ts_secs - 24 * 60 * 60;
+        let cutoff_7d = now_ts_secs - 7 * 24 * 60 * 60;
+        let cutoff_1m = now_ts_secs - 30 * 24 * 60 * 60;
+
+        let equity_series = self
+            .fetch_total_equity_series(user_id, cutoff_1m, now_ts_secs, PnlResolution::Day)
+            .await?;
+
+        let balance = Self::series_value_at_or_before(&equity_series, now_ts_secs);
+        let balance_24h_ago = Self::series_value_at_or_before(&equity_series, cutoff_24h);
+        let balance_7d_ago = Self::series_value_at_or_before(&equity_series, cutoff_7d);
+
+        let cashflow_map = self
+            .fetch_cashflow_series(user_id, cutoff_7d, now_ts_secs, PnlResolution::Day)
+            .await?;
+        let net_cashflow_7d = cashflow_map
+            .range(..=now_ts_secs)
+            .next_back()
+            .map(|(_, value)| *value)
+            .unwrap_or(Decimal::ZERO);
+        let pnl_7d = (balance - balance_7d_ago) - net_cashflow_7d;
+
+        let max_drawdown_1m = Self::compute_max_drawdown(&equity_series, cutoff_1m);
+
         let volume_query = format!(
             "SELECT toString(toDecimal128(coalesce(sum(CAST(price * size_base AS Decimal(38, 12))), 0), 12)) 
              FROM {} WHERE ts >= toDateTime(?) AND ts <= toDateTime(?) 
@@ -1007,58 +1147,45 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
             .map_err(|e| TradingError::Database(e.to_string()))?;
         let volume_24h = Decimal::from_str(&vol_str).unwrap_or(Decimal::ZERO);
 
-        // 5. Build PnL Series for Chart
-        // We need the specific resolution requested by the user (e.g. 1w or 1m)
-        let window_start = now_ts_secs - resolution.window_seconds();
-        let chart_series_equity = self
-            .fetch_total_equity_series(user_id, window_start, now_ts_secs, resolution)
-            .await?;
-
-        // Fetch ALL cashflows from the beginning (timestamp 0) to now
-        // This ensures we capture the full cumulative history to calculate correct baseline
-        let chart_cashflows = self
-            .fetch_cashflow_series(user_id, 0, now_ts_secs, resolution)
-            .await?;
-
-        // Baseline for chart is the start of the window
-        let baseline_equity = chart_series_equity
-            .first()
-            .map(|x| x.balance)
-            .unwrap_or(Decimal::ZERO);
-
-        // Baseline cashflow is the cumulative cashflow AT or BEFORE window_start
-        // This includes all historical deposits/withdrawals before the chart window
-        let baseline_cf = chart_cashflows
-            .range(..=window_start)
-            .next_back()
-            .map(|(_, v)| *v)
-            .unwrap_or(Decimal::ZERO);
-
-        let mut pnl_series = Vec::new();
-        for point in chart_series_equity {
-            let current_cf = chart_cashflows
-                .range(..=point.timestamp)
-                .next_back()
-                .map(|(_, v)| *v)
-                .unwrap_or(Decimal::ZERO);
-            // PnL = (CurrentEquity - BaselineEquity) - (CurrentCashflow - BaselineCashflow)
-            // This gives: change in equity minus new money added/removed
-            let pnl = (point.balance - baseline_equity) - (current_cf - baseline_cf);
-            pnl_series.push(PnlPoint {
-                timestamp: point.timestamp,
-                pnl,
-            });
-        }
-
         Ok(PortfolioMetrics {
-            balance: balance_now,
+            balance,
             balance_24h_ago,
             volume_24h,
             pnl_7d,
-            max_drawdown_1m: max_drawdown,
-            pnl_series,
-            pnl_resolution: resolution,
+            max_drawdown_1m,
+            pnl_series: Vec::new(),
+            pnl_resolution: PnlResolution::Day,
         })
+    }
+
+    async fn get_pnl_chart(
+        &self,
+        user_id: u64,
+        now_ts_secs: i64,
+        resolution: PnlResolution,
+    ) -> Result<Vec<PnlPoint>> {
+        let window_start = now_ts_secs - resolution.window_seconds();
+        let equity_series = self
+            .fetch_total_equity_series(user_id, window_start, now_ts_secs, resolution)
+            .await?;
+        let cashflow_map = self
+            .fetch_cashflow_series(user_id, window_start, now_ts_secs, resolution)
+            .await?;
+
+        Ok(Self::build_pnl_series(equity_series, &cashflow_map))
+    }
+
+    async fn get_portfolio(
+        &self,
+        user_id: u64,
+        now_ts_secs: i64,
+        resolution: PnlResolution,
+    ) -> Result<PortfolioMetrics> {
+        let mut metrics = self.get_portfolio_overview(user_id, now_ts_secs).await?;
+        metrics.pnl_series = self.get_pnl_chart(user_id, now_ts_secs, resolution).await?;
+        metrics.pnl_resolution = resolution;
+
+        Ok(metrics)
     }
 
     async fn get_balance_chart(

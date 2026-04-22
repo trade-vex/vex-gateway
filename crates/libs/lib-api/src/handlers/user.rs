@@ -196,27 +196,30 @@ pub async fn get_open_orders(
     let offset = ((page - 1) * limit) as u64;
     let limit_u64 = limit as u64;
 
+    // Fetch limit+1 rows to derive has_next without a separate COUNT(*).
+    // This keeps each request to one DB connection and avoids an index scan
+    // proportional to the user's full open-order set (whales).
     match trading_repo
-        .get_open_orders_with_total(user_id, offset, limit_u64, query.market_id)
+        .get_open_orders_paginated(user_id, offset, limit_u64 + 1, query.market_id)
         .await
     {
-        Ok((orders, total)) => {
-            let total_count = total as usize;
+        Ok(mut orders) => {
+            let has_next = orders.len() > limit;
+            if has_next {
+                orders.truncate(limit);
+            }
             let order_responses: Vec<OrderResponse> = orders
                 .into_iter()
                 .map(|order| order_store.to_response(order))
                 .collect();
-
-            let total_pages = total_count.div_ceil(limit);
-            let has_next = page < total_pages;
             let has_prev = page > 1;
 
             let response = OrdersListResponse {
                 orders: order_responses,
-                total: total_count,
+                total: None,
                 page,
                 limit,
-                total_pages,
+                total_pages: None,
                 has_next,
                 has_prev,
             };
@@ -318,27 +321,30 @@ pub async fn get_order_history(
     let offset = ((page - 1) * limit) as u64;
     let limit_u64 = limit as u64;
 
+    // Fetch limit+1 rows to derive has_next without a separate COUNT(*).
+    // Whales can have hundreds of thousands of history rows — a per-request
+    // count scan (even index-only) is pool-pressure we can't afford.
     match trading_repo
-        .get_order_history_with_total(user_id, offset, limit_u64, query.market_id)
+        .get_order_history_paginated(user_id, offset, limit_u64 + 1, query.market_id)
         .await
     {
-        Ok((orders, total)) => {
-            let total_count = total as usize;
+        Ok(mut orders) => {
+            let has_next = orders.len() > limit;
+            if has_next {
+                orders.truncate(limit);
+            }
             let order_responses: Vec<OrderHistoryResponse> = orders
                 .into_iter()
                 .map(|order| order_store.to_history_response(order))
                 .collect();
-
-            let total_pages = total_count.div_ceil(limit);
-            let has_next = page < total_pages;
             let has_prev = page > 1;
 
             let response = OrdersHistoryListResponse {
                 orders: order_responses,
-                total: total_count,
+                total: None,
                 page,
                 limit,
-                total_pages,
+                total_pages: None,
                 has_next,
                 has_prev,
             };
@@ -406,11 +412,8 @@ pub async fn get_portfolio_overview(
     let user_id = ((raw >> 64) as u64) ^ (raw as u64);
     let now_secs = chrono::Utc::now().timestamp();
 
-    // Use default resolution (Day) for metrics - resolution only affects pnl_series which we don't need here
-    let resolution = PnlResolution::Day;
-
     let metrics = portfolio_repo
-        .get_portfolio(user_id, now_secs, resolution)
+        .get_portfolio_overview(user_id, now_secs)
         .await
         .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
 
@@ -570,14 +573,13 @@ pub async fn get_pnl_chart(
         .and_then(PnlResolution::from_query)
         .unwrap_or_default();
 
-    // Get portfolio metrics to extract pnl_series
-    let metrics = portfolio_repo
-        .get_portfolio(user_id, now_secs, resolution)
+    let pnl_series = portfolio_repo
+        .get_pnl_chart(user_id, now_secs, resolution)
         .await
         .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
 
     let response = PnlChartResponse {
-        pnl_series: metrics.pnl_series,
+        pnl_series,
         resolution: resolution.as_str().to_string(),
     };
 

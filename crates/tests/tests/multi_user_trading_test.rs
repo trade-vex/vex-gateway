@@ -321,10 +321,10 @@ async fn test_get_open_orders(
 
             let response = OrdersListResponse {
                 orders: order_responses,
-                total,
+                total: Some(total),
                 page: 1,
                 limit: 100,
-                total_pages: 1,
+                total_pages: Some(1),
                 has_next: false,
                 has_prev: false,
             };
@@ -508,20 +508,21 @@ async fn check_orders(
     );
 
     let orders: OrdersListResponse = resp.json().await.expect("Failed to parse orders");
+    let orders_total = orders.total.unwrap_or(orders.orders.len());
 
     // Assert total matches actual count
     assert_eq!(
-        orders.total,
+        orders_total,
         orders.orders.len(),
         "{} order count mismatch: total={} but got {} orders",
         user_name,
-        orders.total,
+        orders_total,
         orders.orders.len()
     );
 
     println!(
         "\n📋 {} (user {}) open orders: {}",
-        user_name, user_id, orders.total
+        user_name, user_id, orders_total
     );
     for order in &orders.orders {
         println!(
@@ -1063,10 +1064,11 @@ async fn test_multi_user_trading_scenario() {
     println!("\n--- Open Orders After Building Book ---");
     let alice_orders_list = check_orders(&client, &server_address, alice_id, "Alice").await;
 
-    if alice_orders_list.total != 3 {
+    let alice_total = alice_orders_list.total.unwrap_or(alice_orders_list.orders.len());
+    if alice_total != 3 {
         println!(
             "\n❌ ASSERTION FAILURE: Alice should have 3 orders but has {}",
-            alice_orders_list.total
+            alice_total
         );
         println!("   Expected order IDs: {:?}", alice_orders);
         println!("   Run these commands to debug:");
@@ -1078,31 +1080,35 @@ async fn test_multi_user_trading_scenario() {
         println!("   Check Kafka consumer logs: docker-compose logs trading-events-consumer | grep 10001");
     }
     assert_eq!(
-        alice_orders_list.total, 3,
+        alice_total, 3,
         "Alice should have 3 SELL orders, but has {}. Orders may not have synced to Redis/DB yet.",
-        alice_orders_list.total
+        alice_total
     );
 
     let bob_orders_list = check_orders(&client, &server_address, bob_id, "Bob").await;
-    assert_eq!(bob_orders_list.total, 3, "Bob should have 3 BUY orders");
+    let bob_total = bob_orders_list.total.unwrap_or(bob_orders_list.orders.len());
+    assert_eq!(bob_total, 3, "Bob should have 3 BUY orders");
 
     let carol_orders_list = check_orders(&client, &server_address, carol_id, "Carol").await;
-    assert_eq!(carol_orders_list.total, 1, "Carol should have 1 SELL order");
+    let carol_total = carol_orders_list.total.unwrap_or(carol_orders_list.orders.len());
+    assert_eq!(carol_total, 1, "Carol should have 1 SELL order");
 
     let frank_orders_list = check_orders(&client, &server_address, frank_id, "Frank").await;
-    assert_eq!(frank_orders_list.total, 3, "Frank should have 3 BUY orders");
+    let frank_total = frank_orders_list.total.unwrap_or(frank_orders_list.orders.len());
+    assert_eq!(frank_total, 3, "Frank should have 3 BUY orders");
 
     let henry_orders_list = check_orders(&client, &server_address, henry_id, "Henry").await;
-    assert_eq!(henry_orders_list.total, 1, "Henry should have 1 BUY order");
+    let henry_total = henry_orders_list.total.unwrap_or(henry_orders_list.orders.len());
+    assert_eq!(henry_total, 1, "Henry should have 1 BUY order");
 
     println!("\n📊 Order Book Status:");
     println!(
         "   Total SELL orders: {}",
-        alice_orders_list.total + carol_orders_list.total + 1
+        alice_total + carol_total + 1
     ); // Alice + Carol + Eve
     println!(
         "   Total BUY orders: {}",
-        bob_orders_list.total + frank_orders_list.total + henry_orders_list.total + 1
+        bob_total + frank_total + henry_total + 1
     ); // Bob + Dave + Frank + Henry
 
     println!("\n✅ All orders placed and verified!");
@@ -1242,10 +1248,11 @@ async fn test_multi_user_trading_scenario() {
 
     println!("\n--- Open Orders After Trades ---");
     let grace_orders_after = check_orders(&client, &server_address, grace_id, "Grace").await;
+    let grace_total_after = grace_orders_after.total.unwrap_or(grace_orders_after.orders.len());
     assert_eq!(
-        grace_orders_after.total, 0,
+        grace_total_after, 0,
         "Grace's IOC order should not rest in book, found {} orders",
-        grace_orders_after.total
+        grace_total_after
     );
     println!("   ✅ Grace has no open orders (IOC filled and removed)");
 
@@ -1333,18 +1340,20 @@ async fn test_multi_user_trading_scenario() {
 
     println!("\n--- Open Orders After Cancellations ---");
     let dave_orders_after = check_orders(&client, &server_address, dave_id, "Dave").await;
+    let dave_total_after = dave_orders_after.total.unwrap_or(dave_orders_after.orders.len());
     assert_eq!(
-        dave_orders_after.total, 0,
+        dave_total_after, 0,
         "Dave should have 0 orders after cancellation, found {}",
-        dave_orders_after.total
+        dave_total_after
     );
     println!("   ✅ Dave's order removed from open orders");
 
     let frank_orders_after = check_orders(&client, &server_address, frank_id, "Frank").await;
+    let frank_total_after = frank_orders_after.total.unwrap_or(frank_orders_after.orders.len());
     assert_eq!(
-        frank_orders_after.total, 2,
+        frank_total_after, 2,
         "Frank should have 2 orders remaining (cancelled 1 of 3), found {}",
-        frank_orders_after.total
+        frank_total_after
     );
     println!("   ✅ Frank has 2 remaining orders (cancelled 1)");
 
@@ -1417,8 +1426,9 @@ async fn test_multi_user_trading_scenario() {
     // Alice had 3 SELL orders, some may have matched
 
     let final_bob_orders = check_orders(&client, &server_address, bob_id, "Bob").await;
+    let final_bob_total = final_bob_orders.total.unwrap_or(final_bob_orders.orders.len());
     assert_eq!(
-        final_bob_orders.total, 3,
+        final_bob_total, 3,
         "Bob should still have 3 resting BUY orders"
     );
     println!("   ✅ Bob still has 3 BUY orders");
@@ -1426,8 +1436,9 @@ async fn test_multi_user_trading_scenario() {
     let _final_carol_orders = check_orders(&client, &server_address, carol_id, "Carol").await;
 
     let final_dave_orders = check_orders(&client, &server_address, dave_id, "Dave").await;
+    let final_dave_total = final_dave_orders.total.unwrap_or(final_dave_orders.orders.len());
     assert_eq!(
-        final_dave_orders.total, 0,
+        final_dave_total, 0,
         "Dave should have 0 orders after cancel"
     );
     println!("   ✅ Dave has 0 orders (cancelled)");
@@ -1435,15 +1446,17 @@ async fn test_multi_user_trading_scenario() {
     let _final_eve_orders = check_orders(&client, &server_address, eve_id, "Eve").await;
 
     let final_frank_orders = check_orders(&client, &server_address, frank_id, "Frank").await;
+    let final_frank_total = final_frank_orders.total.unwrap_or(final_frank_orders.orders.len());
     assert_eq!(
-        final_frank_orders.total, 2,
+        final_frank_total, 2,
         "Frank should have 2 orders (cancelled 1 of 3)"
     );
     println!("   ✅ Frank has 2 remaining orders");
 
     let final_henry_orders = check_orders(&client, &server_address, henry_id, "Henry").await;
+    let final_henry_total = final_henry_orders.total.unwrap_or(final_henry_orders.orders.len());
     assert_eq!(
-        final_henry_orders.total, 2,
+        final_henry_total, 2,
         "Henry should have 2 orders (1 BUY + 1 SELL)"
     );
     println!("   ✅ Henry has 2 orders");
