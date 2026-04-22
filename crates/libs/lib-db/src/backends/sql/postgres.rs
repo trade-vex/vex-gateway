@@ -31,7 +31,7 @@ impl Default for DbConfig {
         Self {
             max_connections: 100,
             min_connections: 20,
-            acquire_timeout_ms: 800,
+            acquire_timeout_ms: 2500,
             idle_timeout_secs: 60,
             max_lifetime_secs: 1800,
         }

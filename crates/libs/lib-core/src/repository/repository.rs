@@ -259,22 +259,13 @@ impl OrderRowWithTotal {
 #[async_trait]
 impl TradingRepository for PostgresTradingRepository {
     async fn get_user_balances(&self, user_id: u64) -> Result<Vec<UserBalanceModel>> {
-        // Return only the latest balance per asset. The table is an event log
-        // (one row per balance change); without DISTINCT ON we would scan and
-        // return every historical event for the user.
-        let stmt = Statement::from_sql_and_values(
-            sea_orm::DatabaseBackend::Postgres,
-            r#"
-                SELECT DISTINCT ON (asset_id)
-                    id, user_id, asset_id, available, locked, total, timestamp, created_at
-                FROM trading.balances_events
-                WHERE user_id = $1
-                ORDER BY asset_id, timestamp DESC
-            "#,
-            [(user_id as i64).into()],
-        );
+        // trading.balances_events has UNIQUE(user_id, asset_id) and is fed by
+        // the postgres-balances-sink in upsert mode (pk.fields=user_id,asset_id),
+        // so it already holds one current-state row per (user, asset). A plain
+        // filter + sort is enough; no DISTINCT ON.
         UserBalanceEntity::find()
-            .from_raw_sql(stmt)
+            .filter(UserBalanceColumn::UserId.eq(user_id as i64))
+            .order_by_asc(UserBalanceColumn::AssetId)
             .all(&*self.db)
             .await
             .map_err(Into::into)
@@ -522,35 +513,26 @@ impl TradingRepository for PostgresTradingRepository {
         limit: u64,
         market_id: Option<u32>,
     ) -> Result<(Vec<OrderModel>, u64)> {
-        // One round-trip: DISTINCT ON picks the latest event per order_id (so an
-        // order that has transitioned to Filled no longer appears under its
-        // earlier "Placed" event), then filter to open statuses and return
-        // total count via the window function.
+        // Reads the current-state projection (trading.orders_current) maintained
+        // by trigger off trading.orders_events. Indexed lookup by
+        // (order_user_id, order_status, order_timestamp DESC); no per-user
+        // history scan, no DISTINCT ON.
         let sql = r#"
-            WITH latest AS (
-                SELECT DISTINCT ON (order_order_id)
-                    id, market_id, order_order_id, order_user_id,
-                    order_price, order_size, order_filled_size,
-                    order_side, order_time_in_force, order_status,
-                    order_timestamp, created_at
-                FROM trading.orders_events
-                WHERE order_user_id = $1
-                ORDER BY order_order_id, order_timestamp DESC
-            )
             SELECT
                 id, market_id, order_order_id, order_user_id,
                 order_price, order_size, order_filled_size,
                 order_side, order_time_in_force, order_status,
                 order_timestamp, created_at,
                 COUNT(*) OVER () AS total_count
-            FROM latest
-            WHERE (
+            FROM trading.orders_current
+            WHERE order_user_id = $1
+              AND (
                     order_status IN ('STATUS_PLACED','STATUS_PENDING','STATUS_PROCESSING')
                     OR (
                         order_status = 'STATUS_PARTIALLY_FILLED'
                         AND order_time_in_force <> 'TIF_IOC'
                     )
-                )
+                  )
               AND ($2::int IS NULL OR market_id = $2::int)
             ORDER BY order_timestamp DESC
             LIMIT $3 OFFSET $4
@@ -579,25 +561,17 @@ impl TradingRepository for PostgresTradingRepository {
         limit: u64,
         market_id: Option<u32>,
     ) -> Result<(Vec<OrderModel>, u64)> {
+        // Same projection-read pattern as open orders — see above.
         let sql = r#"
-            WITH latest AS (
-                SELECT DISTINCT ON (order_order_id)
-                    id, market_id, order_order_id, order_user_id,
-                    order_price, order_size, order_filled_size,
-                    order_side, order_time_in_force, order_status,
-                    order_timestamp, created_at
-                FROM trading.orders_events
-                WHERE order_user_id = $1
-                ORDER BY order_order_id, order_timestamp DESC
-            )
             SELECT
                 id, market_id, order_order_id, order_user_id,
                 order_price, order_size, order_filled_size,
                 order_side, order_time_in_force, order_status,
                 order_timestamp, created_at,
                 COUNT(*) OVER () AS total_count
-            FROM latest
-            WHERE order_status IN ('STATUS_CANCELLED','STATUS_PARTIALLY_FILLED','STATUS_FILLED')
+            FROM trading.orders_current
+            WHERE order_user_id = $1
+              AND order_status IN ('STATUS_CANCELLED','STATUS_PARTIALLY_FILLED','STATUS_FILLED')
               AND ($2::int IS NULL OR market_id = $2::int)
             ORDER BY order_timestamp DESC
             LIMIT $3 OFFSET $4

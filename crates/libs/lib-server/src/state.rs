@@ -330,7 +330,7 @@ impl AppState {
         let mut opt = ConnectOptions::new(config.url.clone());
         opt.max_connections(100)
             .min_connections(20)
-            .acquire_timeout(Duration::from_millis(800))
+            .acquire_timeout(Duration::from_millis(2500))
             .idle_timeout(Duration::from_secs(60))
             .max_lifetime(Duration::from_secs(1800))
             .sqlx_logging(false);
