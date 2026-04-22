@@ -346,7 +346,12 @@ pub async fn place_order(
                             order_size: volume as i64,
                             order_filled_size: 0,
                             order_side: format!("{:?}", side),
-                            order_time_in_force: format!("{:?}", time_in_force),
+                            order_time_in_force: match time_in_force {
+                                TimeInForce::Gtc => "TIF_GTC",
+                                TimeInForce::Ioc => "TIF_IOC",
+                                TimeInForce::Fok => "TIF_FOK",
+                            }
+                            .to_string(),
                             order_status: status_str.clone(),
                             order_timestamp: command.timestamp as i64, // Store nanoseconds as i64
                             created_at: None,

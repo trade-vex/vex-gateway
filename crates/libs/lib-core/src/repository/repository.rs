@@ -77,6 +77,39 @@ pub trait TradingRepository: Send + Sync {
     ) -> Result<Vec<OrderModel>>;
     async fn count_order_history(&self, user_id: u64, market_id: Option<u32>) -> Result<u64>;
 
+    /// Latest-event-per-order open orders plus total count, in one DB round-trip.
+    /// Default impl falls back to parallel calls to the paginated + count methods
+    /// so existing implementors keep working; Postgres overrides with a single
+    /// query using DISTINCT ON + COUNT(*) OVER ().
+    async fn get_open_orders_with_total(
+        &self,
+        user_id: u64,
+        offset: u64,
+        limit: u64,
+        market_id: Option<u32>,
+    ) -> Result<(Vec<OrderModel>, u64)> {
+        let (orders, total) = tokio::try_join!(
+            self.get_open_orders_paginated(user_id, offset, limit, market_id),
+            self.count_open_orders(user_id, market_id),
+        )?;
+        Ok((orders, total))
+    }
+
+    /// Same as above for order history (Cancelled / PartiallyFilled / Filled).
+    async fn get_order_history_with_total(
+        &self,
+        user_id: u64,
+        offset: u64,
+        limit: u64,
+        market_id: Option<u32>,
+    ) -> Result<(Vec<OrderModel>, u64)> {
+        let (orders, total) = tokio::try_join!(
+            self.get_order_history_paginated(user_id, offset, limit, market_id),
+            self.count_order_history(user_id, market_id),
+        )?;
+        Ok((orders, total))
+    }
+
     // Favorite markets operations
     async fn get_user_favorite_markets(&self, user_id: u64)
         -> Result<Vec<UserFavoriteMarketModel>>;
@@ -185,12 +218,63 @@ impl PostgresTradingRepository {
     }
 }
 
+// Row shape for the paginated-with-total queries: every OrderModel column plus
+// the window-function total so pagination metadata comes back in the same pass.
+#[derive(Debug, FromQueryResult)]
+struct OrderRowWithTotal {
+    id: i64,
+    market_id: i32,
+    order_order_id: i64,
+    order_user_id: i64,
+    order_price: i64,
+    order_size: i64,
+    order_filled_size: i64,
+    order_side: String,
+    order_time_in_force: String,
+    order_status: String,
+    order_timestamp: i64,
+    created_at: Option<DateTime>,
+    total_count: i64,
+}
+
+impl OrderRowWithTotal {
+    fn into_model(self) -> OrderModel {
+        OrderModel {
+            id: self.id,
+            market_id: self.market_id,
+            order_order_id: self.order_order_id,
+            order_user_id: self.order_user_id,
+            order_price: self.order_price,
+            order_size: self.order_size,
+            order_filled_size: self.order_filled_size,
+            order_side: self.order_side,
+            order_time_in_force: self.order_time_in_force,
+            order_status: self.order_status,
+            order_timestamp: self.order_timestamp,
+            created_at: self.created_at,
+        }
+    }
+}
+
 #[async_trait]
 impl TradingRepository for PostgresTradingRepository {
     async fn get_user_balances(&self, user_id: u64) -> Result<Vec<UserBalanceModel>> {
+        // Return only the latest balance per asset. The table is an event log
+        // (one row per balance change); without DISTINCT ON we would scan and
+        // return every historical event for the user.
+        let stmt = Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            r#"
+                SELECT DISTINCT ON (asset_id)
+                    id, user_id, asset_id, available, locked, total, timestamp, created_at
+                FROM trading.balances_events
+                WHERE user_id = $1
+                ORDER BY asset_id, timestamp DESC
+            "#,
+            [(user_id as i64).into()],
+        );
         UserBalanceEntity::find()
-            .filter(UserBalanceColumn::UserId.eq(user_id as i64))
-            .order_by_desc(UserBalanceColumn::Timestamp)
+            .from_raw_sql(stmt)
             .all(&*self.db)
             .await
             .map_err(Into::into)
@@ -245,11 +329,7 @@ impl TradingRepository for PostgresTradingRepository {
         // Exclude: Filled, Cancelled, Rejected, and PartiallyFilled IOC (no exception: IOC is immediate-or-cancel, so partially filled = done).
         let part_filled_not_ioc = Condition::all()
             .add(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
-            .add(OrderColumn::OrderTimeInForce.ne("Ioc"))
-            .add(OrderColumn::OrderTimeInForce.ne("IOC"))
-            .add(OrderColumn::OrderTimeInForce.ne("ioc"))
-            .add(OrderColumn::OrderTimeInForce.ne("TIF_IOC"))
-            .add(OrderColumn::OrderTimeInForce.ne("TifIoc"));
+            .add(OrderColumn::OrderTimeInForce.ne("TIF_IOC"));
         let open_status_condition = Condition::any()
             .add(OrderColumn::OrderStatus.eq("STATUS_PLACED"))
             .add(OrderColumn::OrderStatus.eq("STATUS_PENDING"))
@@ -278,11 +358,7 @@ impl TradingRepository for PostgresTradingRepository {
         // Exclude: Filled, Cancelled, Rejected, and PartiallyFilled IOC (no exception).
         let part_filled_not_ioc = Condition::all()
             .add(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
-            .add(OrderColumn::OrderTimeInForce.ne("Ioc"))
-            .add(OrderColumn::OrderTimeInForce.ne("IOC"))
-            .add(OrderColumn::OrderTimeInForce.ne("ioc"))
-            .add(OrderColumn::OrderTimeInForce.ne("TIF_IOC"))
-            .add(OrderColumn::OrderTimeInForce.ne("TifIoc"));
+            .add(OrderColumn::OrderTimeInForce.ne("TIF_IOC"));
         let open_status_condition = Condition::any()
             .add(OrderColumn::OrderStatus.eq("STATUS_PLACED"))
             .add(OrderColumn::OrderStatus.eq("STATUS_PENDING"))
@@ -313,11 +389,7 @@ impl TradingRepository for PostgresTradingRepository {
         // Exclude: Filled, Cancelled, Rejected, and PartiallyFilled IOC (no exception).
         let part_filled_not_ioc = Condition::all()
             .add(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
-            .add(OrderColumn::OrderTimeInForce.ne("Ioc"))
-            .add(OrderColumn::OrderTimeInForce.ne("IOC"))
-            .add(OrderColumn::OrderTimeInForce.ne("ioc"))
-            .add(OrderColumn::OrderTimeInForce.ne("TIF_IOC"))
-            .add(OrderColumn::OrderTimeInForce.ne("TifIoc"));
+            .add(OrderColumn::OrderTimeInForce.ne("TIF_IOC"));
         let open_status_condition = Condition::any()
             .add(OrderColumn::OrderStatus.eq("STATUS_PLACED"))
             .add(OrderColumn::OrderStatus.eq("STATUS_PENDING"))
@@ -441,6 +513,110 @@ impl TradingRepository for PostgresTradingRepository {
 
         let count = query.count(&*self.db).await?;
         Ok(count)
+    }
+
+    async fn get_open_orders_with_total(
+        &self,
+        user_id: u64,
+        offset: u64,
+        limit: u64,
+        market_id: Option<u32>,
+    ) -> Result<(Vec<OrderModel>, u64)> {
+        // One round-trip: DISTINCT ON picks the latest event per order_id (so an
+        // order that has transitioned to Filled no longer appears under its
+        // earlier "Placed" event), then filter to open statuses and return
+        // total count via the window function.
+        let sql = r#"
+            WITH latest AS (
+                SELECT DISTINCT ON (order_order_id)
+                    id, market_id, order_order_id, order_user_id,
+                    order_price, order_size, order_filled_size,
+                    order_side, order_time_in_force, order_status,
+                    order_timestamp, created_at
+                FROM trading.orders_events
+                WHERE order_user_id = $1
+                ORDER BY order_order_id, order_timestamp DESC
+            )
+            SELECT
+                id, market_id, order_order_id, order_user_id,
+                order_price, order_size, order_filled_size,
+                order_side, order_time_in_force, order_status,
+                order_timestamp, created_at,
+                COUNT(*) OVER () AS total_count
+            FROM latest
+            WHERE (
+                    order_status IN ('STATUS_PLACED','STATUS_PENDING','STATUS_PROCESSING')
+                    OR (
+                        order_status = 'STATUS_PARTIALLY_FILLED'
+                        AND order_time_in_force <> 'TIF_IOC'
+                    )
+                )
+              AND ($2::int IS NULL OR market_id = $2::int)
+            ORDER BY order_timestamp DESC
+            LIMIT $3 OFFSET $4
+        "#;
+        let stmt = Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            sql,
+            [
+                (user_id as i64).into(),
+                market_id.map(|m| m as i32).into(),
+                (limit as i64).into(),
+                (offset as i64).into(),
+            ],
+        );
+        let rows = OrderRowWithTotal::find_by_statement(stmt)
+            .all(&*self.db)
+            .await?;
+        let total = rows.first().map(|r| r.total_count as u64).unwrap_or(0);
+        Ok((rows.into_iter().map(OrderRowWithTotal::into_model).collect(), total))
+    }
+
+    async fn get_order_history_with_total(
+        &self,
+        user_id: u64,
+        offset: u64,
+        limit: u64,
+        market_id: Option<u32>,
+    ) -> Result<(Vec<OrderModel>, u64)> {
+        let sql = r#"
+            WITH latest AS (
+                SELECT DISTINCT ON (order_order_id)
+                    id, market_id, order_order_id, order_user_id,
+                    order_price, order_size, order_filled_size,
+                    order_side, order_time_in_force, order_status,
+                    order_timestamp, created_at
+                FROM trading.orders_events
+                WHERE order_user_id = $1
+                ORDER BY order_order_id, order_timestamp DESC
+            )
+            SELECT
+                id, market_id, order_order_id, order_user_id,
+                order_price, order_size, order_filled_size,
+                order_side, order_time_in_force, order_status,
+                order_timestamp, created_at,
+                COUNT(*) OVER () AS total_count
+            FROM latest
+            WHERE order_status IN ('STATUS_CANCELLED','STATUS_PARTIALLY_FILLED','STATUS_FILLED')
+              AND ($2::int IS NULL OR market_id = $2::int)
+            ORDER BY order_timestamp DESC
+            LIMIT $3 OFFSET $4
+        "#;
+        let stmt = Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            sql,
+            [
+                (user_id as i64).into(),
+                market_id.map(|m| m as i32).into(),
+                (limit as i64).into(),
+                (offset as i64).into(),
+            ],
+        );
+        let rows = OrderRowWithTotal::find_by_statement(stmt)
+            .all(&*self.db)
+            .await?;
+        let total = rows.first().map(|r| r.total_count as u64).unwrap_or(0);
+        Ok((rows.into_iter().map(OrderRowWithTotal::into_model).collect(), total))
     }
 
     async fn get_user_favorite_markets(

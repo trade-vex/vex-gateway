@@ -442,10 +442,7 @@ impl OrderStore {
                                         // Skip PartiallyFilled IOC orders (no exception).
                                         if status_lower == "partiallyfilled" {
                                             if let Some(tif) = hash.get("order_time_in_force") {
-                                                let tif_lower = tif.to_lowercase();
-                                                if tif_lower == "ioc"
-                                                    || tif_lower == "tif_ioc"
-                                                    || tif_lower == "tifioc"
+                                                if tif == "TIF_IOC"
                                                 {
                                                     continue;
                                                 }
@@ -566,10 +563,7 @@ impl OrderStore {
                                         // Skip PartiallyFilled IOC orders (no exception).
                                         if status_lower == "partiallyfilled" {
                                             if let Some(tif) = hash.get("order_time_in_force") {
-                                                let tif_lower = tif.to_lowercase();
-                                                if tif_lower == "ioc"
-                                                    || tif_lower == "tif_ioc"
-                                                    || tif_lower == "tifioc"
+                                                if tif == "TIF_IOC"
                                                 {
                                                     continue;
                                                 }

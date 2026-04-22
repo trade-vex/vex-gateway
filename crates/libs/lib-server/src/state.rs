@@ -323,10 +323,18 @@ impl AppState {
     async fn init_database(
         config: &lib_auth::config::DatabaseConfig,
     ) -> Result<DatabaseConnection, Box<dyn std::error::Error + Send + Sync>> {
-        use sea_orm::Database;
+        use sea_orm::{ConnectOptions, Database};
+        use std::time::Duration;
         let sanitized_url = Self::sanitize_url(&config.url);
         info!("Connecting to database: {}", sanitized_url);
-        Database::connect(&config.url)
+        let mut opt = ConnectOptions::new(config.url.clone());
+        opt.max_connections(100)
+            .min_connections(20)
+            .acquire_timeout(Duration::from_millis(800))
+            .idle_timeout(Duration::from_secs(60))
+            .max_lifetime(Duration::from_secs(1800))
+            .sqlx_logging(false);
+        Database::connect(opt)
             .await
             .map_err(|e| format!("Failed to connect to database: {}", e).into())
     }

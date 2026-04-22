@@ -29,11 +29,11 @@ pub struct DbConfig {
 impl Default for DbConfig {
     fn default() -> Self {
         Self {
-            max_connections: 50,
-            min_connections: 5,
-            acquire_timeout_ms: 5000, // 5 seconds - allows for CI/container startup latency
-            idle_timeout_secs: 300,   // 5 minutes
-            max_lifetime_secs: 1800,  // 30 minutes
+            max_connections: 100,
+            min_connections: 20,
+            acquire_timeout_ms: 800,
+            idle_timeout_secs: 60,
+            max_lifetime_secs: 1800,
         }
     }
 }

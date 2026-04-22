@@ -196,28 +196,12 @@ pub async fn get_open_orders(
     let offset = ((page - 1) * limit) as u64;
     let limit_u64 = limit as u64;
 
-    // Get total count for pagination metadata
-    let total_count = match trading_repo
-        .count_open_orders(user_id, query.market_id)
-        .await
-    {
-        Ok(count) => count as usize,
-        Err(e) => {
-            tracing::error!("failed to count open orders for user_id {}: {}", user_id, e);
-            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "failed to retrieve open orders",
-                "message": "An internal error occurred. Please try again later."
-            })));
-        }
-    };
-
-    // Use trading_repo for paginated orders to ensure consistency with count
     match trading_repo
-        .get_open_orders_paginated(user_id, offset, limit_u64, query.market_id)
+        .get_open_orders_with_total(user_id, offset, limit_u64, query.market_id)
         .await
     {
-        Ok(orders) => {
-            // Use order_store.to_response for scaling
+        Ok((orders, total)) => {
+            let total_count = total as usize;
             let order_responses: Vec<OrderResponse> = orders
                 .into_iter()
                 .map(|order| order_store.to_response(order))
@@ -334,32 +318,12 @@ pub async fn get_order_history(
     let offset = ((page - 1) * limit) as u64;
     let limit_u64 = limit as u64;
 
-    // Get total count for pagination metadata
-    let total_count = match trading_repo
-        .count_order_history(user_id, query.market_id)
-        .await
-    {
-        Ok(count) => count as usize,
-        Err(e) => {
-            tracing::error!(
-                "failed to count order history for user_id {}: {}",
-                user_id,
-                e
-            );
-            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "failed to retrieve order history",
-                "message": "An internal error occurred. Please try again later."
-            })));
-        }
-    };
-
-    // Use trading_repo (not order_store cache) for consistency with count_order_history
     match trading_repo
-        .get_order_history_paginated(user_id, offset, limit_u64, query.market_id)
+        .get_order_history_with_total(user_id, offset, limit_u64, query.market_id)
         .await
     {
-        Ok(orders) => {
-            // Use order_store.to_history_response for scaling
+        Ok((orders, total)) => {
+            let total_count = total as usize;
             let order_responses: Vec<OrderHistoryResponse> = orders
                 .into_iter()
                 .map(|order| order_store.to_history_response(order))
