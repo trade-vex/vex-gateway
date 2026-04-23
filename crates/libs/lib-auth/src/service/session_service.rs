@@ -1,8 +1,17 @@
 use crate::error::auth_error::AuthError;
+use crate::redis_pool::RedisPool;
+use dashmap::DashMap;
 use redis::AsyncCommands;
-use redis::aio::ConnectionManager;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use uuid::Uuid;
+
+/// Soft cap on the refresh-throttle cache. Enforced probabilistically on
+/// insert by sweeping entries that haven't been refreshed within the session
+/// TTL (those sessions are either gone from Redis or we haven't seen traffic
+/// for them long enough that one extra EXPIRE RTT is acceptable).
+const REFRESH_CACHE_SOFT_CAP: usize = 100_000;
 
 /// Session data stored in Redis - only tokens and user_id
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,21 +38,32 @@ pub struct LoginCodeData {
 /// Service for managing user sessions in Redis
 #[derive(Clone)]
 pub struct SessionService {
-    conn: ConnectionManager,
+    pool: RedisPool,
     session_ttl_seconds: u64,
+    /// In-proc throttle: session_id -> last-refresh unix timestamp. `refresh_session`
+    /// is a no-op while the last refresh is recent enough, which removes one Redis
+    /// RTT from every authenticated request in the steady state.
+    refresh_cache: Arc<DashMap<String, AtomicI64>>,
+    /// Minimum seconds between Redis EXPIRE calls for the same session.
+    refresh_throttle_seconds: i64,
 }
 
 impl SessionService {
-    pub fn new(conn: ConnectionManager, session_ttl_seconds: i64) -> Self {
+    pub fn new(pool: RedisPool, session_ttl_seconds: i64) -> Self {
         if session_ttl_seconds <= 0 {
             panic!(
                 "session_ttl_seconds must be greater than 0, got: {}",
                 session_ttl_seconds
             );
         }
+        // Refresh at most once every ttl/4, bounded to [30s, 300s]. For a 1800s
+        // TTL this works out to 300s.
+        let throttle = ((session_ttl_seconds / 4).max(30)).min(300);
         Self {
-            conn,
+            pool,
             session_ttl_seconds: session_ttl_seconds as u64,
+            refresh_cache: Arc::new(DashMap::new()),
+            refresh_throttle_seconds: throttle,
         }
     }
 
@@ -71,12 +91,17 @@ impl SessionService {
         let session_json = serde_json::to_string(&session_data)
             .map_err(|e| AuthError::Redis(format!("Failed to serialize session: {}", e)))?;
 
-        let mut conn = self.conn.clone();
+        let mut conn = self.pool.get();
 
         let _: () = conn
             .set_ex(&session_key, session_json, self.session_ttl_seconds)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to store session: {}", e)))?;
+
+        // Seed so the first authenticated request doesn't immediately re-EXPIRE
+        // a key we just wrote with the full TTL.
+        self.refresh_cache
+            .insert(session_id.clone(), AtomicI64::new(chrono::Utc::now().timestamp()));
 
         Ok(session_id)
     }
@@ -85,7 +110,7 @@ impl SessionService {
     pub async fn get_session(&self, session_id: &str) -> Result<SessionData, AuthError> {
         let session_key = format!("session:{}", session_id);
 
-        let mut conn = self.conn.clone();
+        let mut conn = self.pool.get();
 
         let session_json: Option<String> = conn
             .get(&session_key)
@@ -107,7 +132,7 @@ impl SessionService {
     ) -> Result<SessionData, AuthError> {
         let session_key = format!("session:{}", session_id);
 
-        let mut conn = self.conn.clone();
+        let mut conn = self.pool.get();
 
         let session_json: Option<String> = conn
             .get_ex(&session_key, redis::Expiry::EX(self.session_ttl_seconds))
@@ -119,6 +144,12 @@ impl SessionService {
         let session_data: SessionData = serde_json::from_str(&session_json)
             .map_err(|e| AuthError::Redis(format!("Failed to deserialize session: {}", e)))?;
 
+        // GETEX also refreshed the TTL — record so the throttle gate skips.
+        self.refresh_cache
+            .entry(session_id.to_string())
+            .or_insert_with(|| AtomicI64::new(0))
+            .store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
+
         Ok(session_data)
     }
 
@@ -126,25 +157,40 @@ impl SessionService {
     pub async fn delete_session(&self, session_id: &str) -> Result<(), AuthError> {
         let session_key = format!("session:{}", session_id);
 
-        let mut conn = self.conn.clone();
+        let mut conn = self.pool.get();
 
         let _: () = conn
             .del(&session_key)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to delete session: {}", e)))?;
 
+        self.refresh_cache.remove(session_id);
+
         Ok(())
     }
 
     /// Refresh/extend a session's TTL in a single Redis round-trip.
     ///
-    /// EXPIRE returns 1 if the key existed (and TTL was updated), 0 if it did
-    /// not. Collapsing EXISTS + EXPIRE into just EXPIRE halves the Redis RTT
-    /// cost that every authenticated request with a session_id cookie pays.
+    /// Throttled: if the same session was refreshed within
+    /// `refresh_throttle_seconds`, this returns Ok(()) without touching Redis.
+    /// Under sustained load this cuts the auth hot path from 2 Redis RTTs
+    /// (blacklist EXISTS + session EXPIRE) down to 1 in the steady state.
+    ///
+    /// EXPIRE returns 1 if the key existed, 0 if it did not — we return
+    /// `AuthError::InvalidRequest` on 0 so callers treat it as idle-expired.
     pub async fn refresh_session(&self, session_id: &str) -> Result<(), AuthError> {
+        let now = chrono::Utc::now().timestamp();
+
+        if let Some(entry) = self.refresh_cache.get(session_id) {
+            let last = entry.load(Ordering::Relaxed);
+            if now - last < self.refresh_throttle_seconds {
+                return Ok(());
+            }
+        }
+
         let session_key = format!("session:{}", session_id);
 
-        let mut conn = self.conn.clone();
+        let mut conn = self.pool.get();
 
         let updated: i64 = conn
             .expire(&session_key, self.session_ttl_seconds as i64)
@@ -152,8 +198,25 @@ impl SessionService {
             .map_err(|e| AuthError::Redis(format!("Failed to refresh session: {}", e)))?;
 
         if updated == 0 {
+            self.refresh_cache.remove(session_id);
             return Err(AuthError::InvalidRequest);
         }
+
+        // Before inserting a new tracking entry, cap memory by sweeping
+        // entries that are definitely stale (older than the Redis session TTL
+        // — those sessions have either idle-expired or been explicitly
+        // deleted; in either case Redis is authoritative and dropping our
+        // local timestamp just costs one extra EXPIRE on the next request).
+        if self.refresh_cache.len() >= REFRESH_CACHE_SOFT_CAP {
+            let cutoff = now - self.session_ttl_seconds as i64;
+            self.refresh_cache
+                .retain(|_, ts| ts.load(Ordering::Relaxed) > cutoff);
+        }
+
+        self.refresh_cache
+            .entry(session_id.to_string())
+            .or_insert_with(|| AtomicI64::new(0))
+            .store(now, Ordering::Relaxed);
 
         Ok(())
     }
@@ -181,13 +244,18 @@ impl SessionService {
         let updated_json = serde_json::to_string(&updated_session)
             .map_err(|e| AuthError::Redis(format!("Failed to serialize session: {}", e)))?;
 
-        let mut conn = self.conn.clone();
+        let mut conn = self.pool.get();
 
         // Update the session with new tokens
         let _: () = conn
             .set_ex(&session_key, updated_json, self.session_ttl_seconds)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to update session: {}", e)))?;
+
+        self.refresh_cache
+            .entry(session_id.to_string())
+            .or_insert_with(|| AtomicI64::new(0))
+            .store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
 
         Ok(())
     }
@@ -198,7 +266,7 @@ impl SessionService {
         user_id: Uuid,
         keep_session_id: &str,
     ) -> Result<usize, AuthError> {
-        let mut conn = self.conn.clone();
+        let mut conn = self.pool.get();
 
         // Find all sessions
         let pattern = "session:*".to_string();
@@ -219,9 +287,10 @@ impl SessionService {
                 if let Some(session_id) = key.strip_prefix("session:") {
                     // Delete if it's not the session we want to keep
                     if session_id != keep_session_id {
-                        let _: () = conn.del(key).await.map_err(|e| {
+                        let _: () = conn.del(&key).await.map_err(|e| {
                             AuthError::Redis(format!("Failed to delete session: {}", e))
                         })?;
+                        self.refresh_cache.remove(session_id);
                         revoked_count += 1;
                     }
                 }
@@ -233,7 +302,7 @@ impl SessionService {
 
     /// Revoke all sessions for a user
     pub async fn revoke_all_user_sessions(&self, user_id: Uuid) -> Result<usize, AuthError> {
-        let mut conn = self.conn.clone();
+        let mut conn = self.pool.get();
 
         // Find all sessions
         let pattern = "session:*".to_string();
@@ -251,9 +320,12 @@ impl SessionService {
                 && session_data.user_id == user_id
             {
                 let _: () = conn
-                    .del(key)
+                    .del(&key)
                     .await
                     .map_err(|e| AuthError::Redis(format!("Failed to delete session: {}", e)))?;
+                if let Some(session_id) = key.strip_prefix("session:") {
+                    self.refresh_cache.remove(session_id);
+                }
                 revoked_count += 1;
             }
         }
@@ -298,7 +370,7 @@ impl SessionService {
         let json = serde_json::to_string(&data)
             .map_err(|e| AuthError::Redis(format!("Failed to serialize login_code data: {}", e)))?;
 
-        let mut conn = self.conn.clone();
+        let mut conn = self.pool.get();
 
         // Very short TTL (120 seconds) - just enough for the app to exchange
         let _: () = conn
@@ -334,7 +406,7 @@ impl SessionService {
     ) -> Result<LoginCodeData, AuthError> {
         let key = format!("oauth_login_code:{}", login_code);
 
-        let mut conn = self.conn.clone();
+        let mut conn = self.pool.get();
 
         // Atomic: Get and delete in one operation (prevents race conditions)
         let json: Option<String> = redis::cmd("GETDEL")

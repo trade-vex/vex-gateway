@@ -8,6 +8,7 @@ serde = {workspace = true}
 config = {workspace = true}
 thiserror = {workspace = true}
 tracing = {workspace = true}
+num_cpus = "1.16"
 
 lib-auth = {path = "../lib-auth"}
 [dev-dependencies]

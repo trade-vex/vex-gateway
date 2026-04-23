@@ -4,11 +4,11 @@ use lettre::{
 };
 use rand::Rng;
 use redis::AsyncCommands;
-use redis::aio::ConnectionManager;
 use uuid::Uuid;
 
 use crate::config::EmailConfig;
 use crate::error::auth_error::AuthError;
+use crate::redis_pool::RedisPool;
 use secrecy::ExposeSecret;
 
 const OTP_KEY_PREFIX: &str = "otp:verification:";
@@ -20,7 +20,7 @@ const RATE_LIMIT_OTP_VERIFY_PREFIX: &str = "rate_limit:otp_verify:";
 #[derive(Clone)]
 pub struct EmailService {
     smtp_transport: AsyncSmtpTransport<Tokio1Executor>,
-    conn: ConnectionManager,
+    pool: RedisPool,
     from_email: String,
     otp_length: usize,
     otp_expiry_minutes: i64,
@@ -29,7 +29,7 @@ pub struct EmailService {
 impl EmailService {
     pub fn new(
         email_config: &EmailConfig,
-        conn: ConnectionManager,
+        pool: RedisPool,
         otp_length: usize,
         otp_expiry_minutes: i64,
     ) -> Result<Self, AuthError> {
@@ -81,7 +81,7 @@ impl EmailService {
         tracing::info!("EmailService initialized successfully");
         Ok(Self {
             smtp_transport,
-            conn,
+            pool,
             from_email: email_config.from_email.clone(),
             otp_length,
             otp_expiry_minutes,
@@ -114,7 +114,7 @@ impl EmailService {
         }
 
         tracing::debug!("Getting Redis connection from pool");
-        let mut conn = self.conn.clone();
+        let mut conn = self.pool.get();
 
         let key = format!("{}{}", OTP_KEY_PREFIX, email);
         let expiry_seconds = self.otp_expiry_minutes * 60;
@@ -358,7 +358,7 @@ The Team"#,
 
     /// Verify OTP
     pub async fn verify_otp(&self, email: &str, submitted_otp: &str) -> Result<(), AuthError> {
-        let mut conn = self.conn.clone();
+        let mut conn = self.pool.get();
 
         let key = format!("{}{}", OTP_KEY_PREFIX, email);
 
@@ -383,7 +383,7 @@ The Team"#,
 
     /// checking if OTP exists and is not expired
     pub async fn has_valid_otp(&self, email: &str) -> Result<bool, AuthError> {
-        let mut conn = self.conn.clone();
+        let mut conn = self.pool.get();
 
         let key = format!("{}{}", OTP_KEY_PREFIX, email);
 
@@ -405,7 +405,7 @@ The Team"#,
         tracing::info!("Recipient: {} <{}>", recipient_name, recipient_email);
 
         // checking if there's already a valid OTP and get it
-        let mut conn = self.conn.clone();
+        let mut conn = self.pool.get();
 
         let key = format!("{}{}", OTP_KEY_PREFIX, recipient_email);
         let existing_otp: Option<String> = conn
@@ -529,7 +529,7 @@ The Team"#,
     /// Check rate limit for password reset requests
     /// Returns true if rate limit is exceeded
     pub async fn check_password_reset_rate_limit(&self, email: &str) -> Result<bool, AuthError> {
-        let mut conn = self.conn.clone();
+        let mut conn = self.pool.get();
 
         let key = format!("{}{}", RATE_LIMIT_PASSWORD_RESET_PREFIX, email);
         let count: Option<u64> = conn
@@ -563,7 +563,7 @@ The Team"#,
     /// Check rate limit for OTP verification attempts
     /// Returns true if rate limit is exceeded
     async fn check_otp_verify_rate_limit(&self, email: &str) -> Result<bool, AuthError> {
-        let mut conn = self.conn.clone();
+        let mut conn = self.pool.get();
 
         let key = format!("{}{}", RATE_LIMIT_OTP_VERIFY_PREFIX, email);
         let count: Option<u64> = conn
@@ -596,7 +596,7 @@ The Team"#,
 
     /// Store password reset OTP in Redis
     async fn store_password_reset_otp(&self, email: &str, otp: &str) -> Result<(), AuthError> {
-        let mut conn = self.conn.clone();
+        let mut conn = self.pool.get();
 
         let key = format!("{}{}", PASSWORD_RESET_OTP_PREFIX, email);
         // Password reset OTP expires in 15 min
@@ -726,7 +726,7 @@ The Team"#,
             ));
         }
 
-        let mut conn = self.conn.clone();
+        let mut conn = self.pool.get();
 
         let key = format!("{}{}", PASSWORD_RESET_OTP_PREFIX, email);
 
@@ -769,7 +769,7 @@ The Team"#,
     /// Validate and consume password reset token
     /// Returns user_id if token is valid
     pub async fn validate_reset_token(&self, reset_token: &str) -> Result<Uuid, AuthError> {
-        let mut conn = self.conn.clone();
+        let mut conn = self.pool.get();
 
         let token_key = format!("{}{}", PASSWORD_RESET_TOKEN_PREFIX, reset_token);
 
@@ -805,7 +805,7 @@ The Team"#,
         reset_token: &str,
         user_id: Uuid,
     ) -> Result<(), AuthError> {
-        let mut conn = self.conn.clone();
+        let mut conn = self.pool.get();
 
         let token_key = format!("{}{}", PASSWORD_RESET_TOKEN_PREFIX, reset_token);
 

@@ -37,3 +37,4 @@ vex-gateway.service
 vex-gateway.env.example
 
 RUNBOOK.md
+crates/lib-server/assets/redoc.standalone.js

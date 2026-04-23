@@ -1,13 +1,14 @@
+use crate::redis_pool::RedisPool;
 use actix_web::http::header::{AUTHORIZATION, HeaderValue};
 use actix_web::{
     Error, HttpMessage, HttpResponse,
     body::{BoxBody, MessageBody},
     dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready},
 };
+use dashmap::DashMap;
 use futures_util::future::LocalBoxFuture;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, errors::ErrorKind};
 use redis::AsyncCommands;
-use redis::aio::ConnectionManager;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::future::{Ready, ready};
@@ -15,12 +16,75 @@ use std::rc::Rc;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// Capacity of the verified-claims cache. Keyed by raw JWT string; entries are
+/// dropped lazily once their `exp` has passed. When the cache reaches capacity,
+/// `insert` sweeps expired entries and, if that doesn't reclaim enough room,
+/// evicts a deterministic slice to keep memory strictly bounded.
+const CLAIMS_CACHE_CAPACITY: usize = 100_000;
+
+/// How many entries to force-evict when a capacity sweep finds no expired
+/// entries. Keeps the cache from growing past CLAIMS_CACHE_CAPACITY under a
+/// workload of many long-lived tokens.
+const CLAIMS_CACHE_FORCE_EVICT: usize = 1_024;
+
+/// In-proc cache of verified JWT claims, keyed by the raw token string. Skips
+/// the ~300-500μs RS256 verify per request when the same bearer token comes in
+/// repeatedly (the common case under sustained load). Entries self-invalidate
+/// when `exp` passes.
+#[derive(Clone, Default)]
+pub struct JwtClaimsCache {
+    inner: Arc<DashMap<String, JwtClaims>>,
+}
+
+impl JwtClaimsCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn now_secs() -> i64 {
+        chrono::Utc::now().timestamp()
+    }
+
+    fn get(&self, token: &str) -> Option<JwtClaims> {
+        let entry = self.inner.get(token)?;
+        if (entry.exp as i64) <= Self::now_secs() {
+            drop(entry);
+            self.inner.remove(token);
+            return None;
+        }
+        Some(entry.clone())
+    }
+
+    fn insert(&self, token: String, claims: JwtClaims) {
+        if self.inner.len() >= CLAIMS_CACHE_CAPACITY {
+            let now = Self::now_secs();
+            // Pass 1: drop anything already past its `exp`.
+            self.inner.retain(|_, c| (c.exp as i64) > now);
+
+            // Pass 2: if the sweep didn't free any room (all tokens still
+            // valid), force-evict a fixed slice so we never breach the cap.
+            if self.inner.len() >= CLAIMS_CACHE_CAPACITY {
+                let victims: Vec<String> = self
+                    .inner
+                    .iter()
+                    .take(CLAIMS_CACHE_FORCE_EVICT)
+                    .map(|e| e.key().clone())
+                    .collect();
+                for k in victims {
+                    self.inner.remove(&k);
+                }
+            }
+        }
+        self.inner.insert(token, claims);
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AuthenticatedUser {
     pub user_id: Uuid,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JwtClaims {
     pub sub: String, // user_id
     exp: usize,
@@ -37,7 +101,8 @@ pub struct JwtAuthentication {
     issuer: String,
     audience: String,
     algorithm: Algorithm,
-    redis_conn: ConnectionManager,
+    redis_pool: RedisPool,
+    claims_cache: JwtClaimsCache,
     token_service: Option<Arc<crate::service::token_service::TokenService>>,
     session_service: Option<Arc<crate::service::session_service::SessionService>>,
 }
@@ -47,14 +112,15 @@ impl JwtAuthentication {
         decoding_key: DecodingKey,
         issuer: String,
         audience: String,
-        redis_conn: ConnectionManager,
+        redis_pool: RedisPool,
     ) -> Self {
         Self {
             decoding_key,
             issuer,
             audience,
             algorithm: Algorithm::RS256,
-            redis_conn,
+            redis_pool,
+            claims_cache: JwtClaimsCache::new(),
             token_service: None,
             session_service: None,
         }
@@ -64,7 +130,7 @@ impl JwtAuthentication {
         decoding_key: DecodingKey,
         issuer: String,
         audience: String,
-        redis_conn: ConnectionManager,
+        redis_pool: RedisPool,
         token_service: Arc<crate::service::token_service::TokenService>,
         session_service: Arc<crate::service::session_service::SessionService>,
     ) -> Self {
@@ -73,7 +139,8 @@ impl JwtAuthentication {
             issuer,
             audience,
             algorithm: Algorithm::RS256,
-            redis_conn,
+            redis_pool,
+            claims_cache: JwtClaimsCache::new(),
             token_service: Some(token_service),
             session_service: Some(session_service),
         }
@@ -85,14 +152,15 @@ impl JwtAuthentication {
         issuer: String,
         audience: String,
         algorithm: Algorithm,
-        redis_conn: ConnectionManager,
+        redis_pool: RedisPool,
     ) -> Self {
         Self {
             decoding_key,
             issuer,
             audience,
             algorithm,
-            redis_conn,
+            redis_pool,
+            claims_cache: JwtClaimsCache::new(),
             token_service: None,
             session_service: None,
         }
@@ -118,7 +186,8 @@ where
             issuer: self.issuer.clone(),
             audience: self.audience.clone(),
             algorithm: self.algorithm,
-            redis_conn: self.redis_conn.clone(),
+            redis_pool: self.redis_pool.clone(),
+            claims_cache: self.claims_cache.clone(),
             token_service: self.token_service.clone(),
             session_service: self.session_service.clone(),
         }))
@@ -131,7 +200,8 @@ pub struct JwtAuthenticationMiddleware<S> {
     issuer: String,
     audience: String,
     algorithm: Algorithm,
-    redis_conn: ConnectionManager,
+    redis_pool: RedisPool,
+    claims_cache: JwtClaimsCache,
     token_service: Option<Arc<crate::service::token_service::TokenService>>,
     session_service: Option<Arc<crate::service::session_service::SessionService>>,
 }
@@ -154,7 +224,8 @@ where
         let issuer = self.issuer.clone();
         let audience = self.audience.clone();
         let algorithm = self.algorithm;
-        let redis_conn = self.redis_conn.clone();
+        let redis_pool = self.redis_pool.clone();
+        let claims_cache = self.claims_cache.clone();
 
         // Check Authorization header
         let auth_header = req.headers().get("authorization");
@@ -175,18 +246,29 @@ where
             let parts: Vec<&str> = auth_str.split_whitespace().collect();
             let token = parts[1];
 
-            // Validate JWT
+            // Validate JWT — cache hit skips the RS256 verify entirely.
             tracing::debug!("JWT middleware: Starting JWT validation");
-            let mut validation = Validation::new(algorithm);
-            validation.set_issuer(&[issuer]);
-            validation.set_audience(&[audience]);
+            let cached = claims_cache.get(token);
+            let decode_result: Result<JwtClaims, _> = if let Some(c) = cached {
+                Ok(c)
+            } else {
+                let mut validation = Validation::new(algorithm);
+                validation.set_issuer(&[issuer]);
+                validation.set_audience(&[audience]);
+                let result = decode::<JwtClaims>(token, &decoding_key, &validation)
+                    .map(|d| d.claims);
+                if let Ok(ref claims) = result {
+                    claims_cache.insert(token.to_string(), claims.clone());
+                }
+                result
+            };
 
-            match decode::<JwtClaims>(token, &decoding_key, &validation) {
-                Ok(token_data) => {
+            match decode_result {
+                Ok(claims) => {
                     tracing::debug!("JWT middleware: JWT validation successful");
-                    if let Ok(user_id) = Uuid::parse_str(&token_data.claims.sub) {
-                        let jti = token_data.claims.jti.clone();
-                        let token_exp = token_data.claims.exp as i64;
+                    if let Ok(user_id) = Uuid::parse_str(&claims.sub) {
+                        let jti = claims.jti.clone();
+                        let token_exp = claims.exp as i64;
                         let authenticated_user: AuthenticatedUser = AuthenticatedUser { user_id };
 
                         // Store the authenticated user for later
@@ -199,26 +281,36 @@ where
 
                         return Box::pin(async move {
                             tracing::debug!("JWT middleware: Checking blacklist for JTI: {}", jti);
-                            // Check if token is blacklisted BEFORE calling the inner service
-                            let blacklist_result = {
-                                let mut conn = redis_conn.clone();
+                            // Prefer TokenService's cached blacklist check (negative
+                            // cache elides the Redis RTT for the common path);
+                            // fall back to a direct EXISTS when no TokenService is wired.
+                            let blacklist_result: Result<bool, &'static str> = if let Some(ts) =
+                                token_service_opt.as_ref()
+                            {
+                                match ts.is_token_blacklisted(&jti).await {
+                                    Ok(b) => Ok(b),
+                                    Err(e) => {
+                                        tracing::error!("Failed to check token blacklist: {}", e);
+                                        Err("Redis blacklist check failed")
+                                    }
+                                }
+                            } else {
+                                let mut conn = redis_pool.get();
                                 let blacklist_key = format!("blacklist:{}", jti);
                                 match conn.exists::<_, bool>(&blacklist_key).await {
-                                    Ok(exists) => {
-                                        if exists {
-                                            tracing::warn!(
-                                                "Attempted use of blacklisted token with JTI: {}",
-                                                jti
-                                            );
-                                        }
-                                        Ok(exists)
-                                    }
+                                    Ok(exists) => Ok(exists),
                                     Err(e) => {
                                         tracing::error!("Failed to check token blacklist: {}", e);
                                         Err("Redis blacklist check failed")
                                     }
                                 }
                             };
+                            if let Ok(true) = blacklist_result {
+                                tracing::warn!(
+                                    "Attempted use of blacklisted token with JTI: {}",
+                                    jti
+                                );
+                            }
 
                             match blacklist_result {
                                 Ok(true) => {
@@ -270,7 +362,7 @@ where
                                                             );
                                                         }
                                                     } else {
-                                                        let mut conn = redis_conn.clone();
+                                                        let mut conn = redis_pool.get();
                                                         let _: Result<(), _> = conn
                                                             .set_ex(
                                                                 format!("blacklist:{}", jti),
@@ -329,7 +421,8 @@ where
                         let issuer = self.issuer.clone();
                         let audience = self.audience.clone();
                         let algorithm = self.algorithm;
-                        let redis_conn = self.redis_conn.clone();
+                        let redis_pool = self.redis_pool.clone();
+                        let claims_cache = self.claims_cache.clone();
 
                         return Box::pin(async move {
                             let mut req = req;
@@ -385,6 +478,13 @@ where
                                                         Uuid::parse_str(&token_data.claims.sub)
                                                     {
                                                         let jti = token_data.claims.jti.clone();
+                                                        // Warm the claims cache so subsequent
+                                                        // requests bearing this freshly-minted
+                                                        // token skip the RS256 verify.
+                                                        claims_cache.insert(
+                                                            new_tokens.access_token.clone(),
+                                                            token_data.claims.clone(),
+                                                        );
                                                         let authenticated_user =
                                                             AuthenticatedUser { user_id };
                                                         req.extensions_mut()
@@ -392,7 +492,7 @@ where
 
                                                         // Check if new token is blacklisted (shouldn't be, but check anyway)
                                                         {
-                                                            let mut conn = redis_conn.clone();
+                                                            let mut conn = redis_pool.get();
                                                             let blacklist_key =
                                                                 format!("blacklist:{}", jti);
                                                             if let Ok(exists) = conn
@@ -540,15 +640,13 @@ mod tests {
     use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    // Helper function to create a test Redis connection manager
-    async fn create_test_redis_conn() -> ConnectionManager {
-        // Use environment variable for Redis URL, fallback to localhost for local testing
+    // Helper function to create a test Redis pool (single connection).
+    async fn create_test_redis_conn() -> RedisPool {
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
-        let client = redis::Client::open(redis_url).expect("Failed to create test Redis client");
-        ConnectionManager::new(client)
+        RedisPool::single(&redis_url)
             .await
-            .expect("Failed to create test Redis connection manager")
+            .expect("Failed to create test Redis pool")
     }
 
     // Test handler that requires authentication
@@ -612,7 +710,7 @@ mod tests {
 
         // Clean up any existing blacklist entry
         {
-            let mut conn = redis_conn.clone();
+            let mut conn = redis_conn.get();
             let _: Result<(), _> = conn.del("blacklist:test-jti-valid").await;
         }
 
@@ -801,7 +899,7 @@ mod tests {
 
         // Add a JTI to the blacklist
         {
-            let mut conn = redis_conn.clone();
+            let mut conn = redis_conn.get();
             let _: () = conn
                 .set_ex("blacklist:test-jti-blacklisted", "1", 3600)
                 .await
@@ -854,7 +952,7 @@ mod tests {
 
         // Add a JTI to the blacklist
         {
-            let mut conn = redis_conn.clone();
+            let mut conn = redis_conn.get();
             let _: () = conn
                 .set_ex("blacklist:test-jti-no-exec", "1", 3600)
                 .await
@@ -915,7 +1013,7 @@ mod tests {
 
         // Clean up any existing blacklist entry
         {
-            let mut conn = redis_conn.clone();
+            let mut conn = redis_conn.get();
             let _: Result<(), _> = conn.del("blacklist:test-jti-exec").await;
         }
 

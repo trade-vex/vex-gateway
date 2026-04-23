@@ -9,8 +9,30 @@ use lib_core::{
 };
 use lib_core::{PnlResolution, PortfolioRepository, TradingRepository};
 use lib_utils::auth_extractors::AuthenticatedUserId;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de};
+use std::str::FromStr;
 use std::sync::Arc;
+
+/// Parse an optional query-string value, treating missing *and* empty
+/// (`?market_id=`) inputs as `None`. serde_urlencoded surfaces an empty value
+/// as `Some("")`, which the default `Option<T: FromStr>` impl then rejects
+/// with a 400 — not what clients with "clear filter" UIs expect. Applies to
+/// any `FromStr` target so we can reuse it for `page`, `limit`, `market_id`.
+fn deserialize_empty_string_as_none<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: FromStr,
+    T::Err: std::fmt::Display,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    match opt {
+        None => Ok(None),
+        Some(s) if s.trim().is_empty() => Ok(None),
+        Some(s) => T::from_str(s.trim())
+            .map(Some)
+            .map_err(de::Error::custom),
+    }
+}
 
 /// Get user balances for all assets
 ///
@@ -176,8 +198,11 @@ pub async fn get_balances(
 /// - Rejected - Orders rejected by matching engine
 #[derive(Debug, Deserialize)]
 pub struct OrdersQuery {
+    #[serde(default, deserialize_with = "deserialize_empty_string_as_none")]
     pub page: Option<usize>,
+    #[serde(default, deserialize_with = "deserialize_empty_string_as_none")]
     pub limit: Option<usize>,
+    #[serde(default, deserialize_with = "deserialize_empty_string_as_none")]
     pub market_id: Option<u32>,
 }
 

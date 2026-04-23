@@ -100,7 +100,7 @@ pub struct BalancePoint {
     pub balance: Decimal,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum PnlResolution {
     #[default]
     Day,
@@ -783,15 +783,6 @@ impl ClickHousePortfolioRepository {
             asset_filter
         );
 
-        let seed_price_rows: Vec<(u16, String)> = self
-            .ch
-            .query(&seed_price_sql)
-            .bind(Self::QUOTE_ASSET_ID)
-            .bind(start_ts)
-            .fetch_all()
-            .await
-            .map_err(|e| TradingError::Database(e.to_string()))?;
-
         let delta_price_sql = format!(
             "SELECT asset_id, CAST(toUnixTimestamp(minute) AS Int64), toString(price)
              FROM {} FINAL
@@ -802,14 +793,24 @@ impl ClickHousePortfolioRepository {
             asset_filter
         );
 
-        let delta_price_rows: Vec<(u16, i64, String)> = self
+        // Seed + delta are independent reads — fire them in parallel so the
+        // fetch is bound by the slower query rather than their sum.
+        let seed_fut = self
+            .ch
+            .query(&seed_price_sql)
+            .bind(Self::QUOTE_ASSET_ID)
+            .bind(start_ts)
+            .fetch_all::<(u16, String)>();
+
+        let delta_fut = self
             .ch
             .query(&delta_price_sql)
             .bind(Self::QUOTE_ASSET_ID)
             .bind(start_ts)
             .bind(end_ts)
-            .fetch_all()
-            .await
+            .fetch_all::<(u16, i64, String)>();
+
+        let (seed_price_rows, delta_price_rows) = tokio::try_join!(seed_fut, delta_fut)
             .map_err(|e| TradingError::Database(e.to_string()))?;
 
         let mut prices: BTreeMap<u16, BTreeMap<i64, Decimal>> = BTreeMap::new();
@@ -852,15 +853,6 @@ impl ClickHousePortfolioRepository {
             self.table("balances_last_per_min")
         );
 
-        let seed_balance_rows: Vec<(u16, String)> = self
-            .ch
-            .query(&seed_balance_sql)
-            .bind(user_id)
-            .bind(start_ts)
-            .fetch_all()
-            .await
-            .map_err(|e| TradingError::Database(e.to_string()))?;
-
         let delta_balance_sql = format!(
             "SELECT asset_id, CAST(toUnixTimestamp(minute) AS Int64), toString(total)
              FROM {} FINAL
@@ -869,15 +861,24 @@ impl ClickHousePortfolioRepository {
             self.table("balances_last_per_min")
         );
 
-        let delta_balance_rows: Vec<(u16, i64, String)> = self
+        // Seed + delta are independent reads — parallelize.
+        let seed_fut = self
+            .ch
+            .query(&seed_balance_sql)
+            .bind(user_id)
+            .bind(start_ts)
+            .fetch_all::<(u16, String)>();
+
+        let delta_fut = self
             .ch
             .query(&delta_balance_sql)
             .bind(user_id)
             .bind(start_ts)
             .bind(end_ts)
-            .fetch_all()
-            .await
-            .map_err(|e| TradingError::Database(e.to_string()))?;
+            .fetch_all::<(u16, i64, String)>();
+
+        let (seed_balance_rows, delta_balance_rows) =
+            tokio::try_join!(seed_fut, delta_fut).map_err(|e| TradingError::Database(e.to_string()))?;
 
         let mut balances: BTreeMap<u16, BTreeMap<i64, Decimal>> = BTreeMap::new();
 
@@ -1098,40 +1099,14 @@ impl ClickHousePortfolioRepository {
     }
 }
 
-#[async_trait]
-impl PortfolioRepository for ClickHousePortfolioRepository {
-    async fn get_portfolio_overview(
-        &self,
-        user_id: u64,
-        now_ts_secs: i64,
-    ) -> Result<PortfolioMetrics> {
+impl ClickHousePortfolioRepository {
+    /// Fetch the 24h trading volume scalar. Broken out so the overview can
+    /// launch it in parallel with the equity/cashflow series.
+    async fn fetch_volume_24h(&self, user_id: u64, now_ts_secs: i64) -> Result<Decimal> {
         let cutoff_24h = now_ts_secs - 24 * 60 * 60;
-        let cutoff_7d = now_ts_secs - 7 * 24 * 60 * 60;
-        let cutoff_1m = now_ts_secs - 30 * 24 * 60 * 60;
-
-        let equity_series = self
-            .fetch_total_equity_series(user_id, cutoff_1m, now_ts_secs, PnlResolution::Day)
-            .await?;
-
-        let balance = Self::series_value_at_or_before(&equity_series, now_ts_secs);
-        let balance_24h_ago = Self::series_value_at_or_before(&equity_series, cutoff_24h);
-        let balance_7d_ago = Self::series_value_at_or_before(&equity_series, cutoff_7d);
-
-        let cashflow_map = self
-            .fetch_cashflow_series(user_id, cutoff_7d, now_ts_secs, PnlResolution::Day)
-            .await?;
-        let net_cashflow_7d = cashflow_map
-            .range(..=now_ts_secs)
-            .next_back()
-            .map(|(_, value)| *value)
-            .unwrap_or(Decimal::ZERO);
-        let pnl_7d = (balance - balance_7d_ago) - net_cashflow_7d;
-
-        let max_drawdown_1m = Self::compute_max_drawdown(&equity_series, cutoff_1m);
-
         let volume_query = format!(
-            "SELECT toString(toDecimal128(coalesce(sum(CAST(price * size_base AS Decimal(38, 12))), 0), 12)) 
-             FROM {} WHERE ts >= toDateTime(?) AND ts <= toDateTime(?) 
+            "SELECT toString(toDecimal128(coalesce(sum(CAST(price * size_base AS Decimal(38, 12))), 0), 12))
+             FROM {} WHERE ts >= toDateTime(?) AND ts <= toDateTime(?)
                AND (maker_user_id = ? OR taker_user_id = ?)",
             self.table("trade_events")
         );
@@ -1145,7 +1120,44 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
             .fetch_one()
             .await
             .map_err(|e| TradingError::Database(e.to_string()))?;
-        let volume_24h = Decimal::from_str(&vol_str).unwrap_or(Decimal::ZERO);
+        Ok(Decimal::from_str(&vol_str).unwrap_or(Decimal::ZERO))
+    }
+}
+
+#[async_trait]
+impl PortfolioRepository for ClickHousePortfolioRepository {
+    async fn get_portfolio_overview(
+        &self,
+        user_id: u64,
+        now_ts_secs: i64,
+    ) -> Result<PortfolioMetrics> {
+        let cutoff_24h = now_ts_secs - 24 * 60 * 60;
+        let cutoff_7d = now_ts_secs - 7 * 24 * 60 * 60;
+        let cutoff_1m = now_ts_secs - 30 * 24 * 60 * 60;
+
+        // Equity series, cashflow map, and volume scalar are independent CH
+        // reads — fan them out in parallel so wall-clock = max(three) instead
+        // of sum(three).
+        let equity_fut =
+            self.fetch_total_equity_series(user_id, cutoff_1m, now_ts_secs, PnlResolution::Day);
+        let cashflow_fut = self.fetch_cashflow_series(user_id, cutoff_7d, now_ts_secs, PnlResolution::Day);
+        let volume_fut = self.fetch_volume_24h(user_id, now_ts_secs);
+
+        let (equity_series, cashflow_map, volume_24h) =
+            tokio::try_join!(equity_fut, cashflow_fut, volume_fut)?;
+
+        let balance = Self::series_value_at_or_before(&equity_series, now_ts_secs);
+        let balance_24h_ago = Self::series_value_at_or_before(&equity_series, cutoff_24h);
+        let balance_7d_ago = Self::series_value_at_or_before(&equity_series, cutoff_7d);
+
+        let net_cashflow_7d = cashflow_map
+            .range(..=now_ts_secs)
+            .next_back()
+            .map(|(_, value)| *value)
+            .unwrap_or(Decimal::ZERO);
+        let pnl_7d = (balance - balance_7d_ago) - net_cashflow_7d;
+
+        let max_drawdown_1m = Self::compute_max_drawdown(&equity_series, cutoff_1m);
 
         Ok(PortfolioMetrics {
             balance,
@@ -1165,12 +1177,13 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
         resolution: PnlResolution,
     ) -> Result<Vec<PnlPoint>> {
         let window_start = now_ts_secs - resolution.window_seconds();
-        let equity_series = self
-            .fetch_total_equity_series(user_id, window_start, now_ts_secs, resolution)
-            .await?;
-        let cashflow_map = self
-            .fetch_cashflow_series(user_id, window_start, now_ts_secs, resolution)
-            .await?;
+        // Equity and cashflow are independent reads over the same window —
+        // fan out.
+        let equity_fut =
+            self.fetch_total_equity_series(user_id, window_start, now_ts_secs, resolution);
+        let cashflow_fut =
+            self.fetch_cashflow_series(user_id, window_start, now_ts_secs, resolution);
+        let (equity_series, cashflow_map) = tokio::try_join!(equity_fut, cashflow_fut)?;
 
         Ok(Self::build_pnl_series(equity_series, &cashflow_map))
     }
@@ -1181,10 +1194,16 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
         now_ts_secs: i64,
         resolution: PnlResolution,
     ) -> Result<PortfolioMetrics> {
-        let mut metrics = self.get_portfolio_overview(user_id, now_ts_secs).await?;
-        metrics.pnl_series = self.get_pnl_chart(user_id, now_ts_secs, resolution).await?;
-        metrics.pnl_resolution = resolution;
+        // Fire overview + pnl chart concurrently. The two calls share no Rust
+        // state, but their CH fetches overlap heavily (same balances, same
+        // prices for the overlapping window) — running them in parallel lets
+        // ClickHouse serve them out of the same page cache.
+        let overview_fut = self.get_portfolio_overview(user_id, now_ts_secs);
+        let chart_fut = self.get_pnl_chart(user_id, now_ts_secs, resolution);
+        let (mut metrics, pnl_series) = tokio::try_join!(overview_fut, chart_fut)?;
 
+        metrics.pnl_series = pnl_series;
+        metrics.pnl_resolution = resolution;
         Ok(metrics)
     }
 

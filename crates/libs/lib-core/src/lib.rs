@@ -19,6 +19,8 @@ pub use cache::user_store::{UserBalanceCacheConfig, UserBalanceStore};
 
 pub use cache::order_store::{OrderCacheConfig, OrderStore};
 
+pub use cache::portfolio_cache::CachingPortfolioRepository;
+
 pub use correlation::{
     generate_client_order_id, wait_for_response, CorrelationService, ResponseError,
 };

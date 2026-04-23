@@ -2373,6 +2373,7 @@ dependencies = [
  "bcrypt",
  "chrono",
  "config",
+ "dashmap 6.1.0",
  "dotenvy",
  "futures-util",
  "jsonwebtoken",
@@ -2401,6 +2402,7 @@ version = "0.1.0"
 dependencies = [
  "config",
  "lib-auth",
+ "num_cpus",
  "serde",
  "tempfile",
  "thiserror 1.0.69",
@@ -2421,6 +2423,7 @@ dependencies = [
  "lib-db",
  "lru",
  "num_cpus",
+ "parking_lot",
  "redis",
  "rust_decimal",
  "sea-orm",

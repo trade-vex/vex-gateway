@@ -6,6 +6,7 @@ use actix_web::HttpServer;
 use actix_web::dev::Server;
 use lib_config::Config;
 use std::net::TcpListener;
+use std::time::Duration;
 use tracing::info;
 use utoipa::OpenApi;
 
@@ -43,8 +44,25 @@ pub async fn initialize_server(
     let listener = TcpListener::bind(config.server_address()?)?;
     info!("Server listening on {}", listener.local_addr().unwrap());
 
-    // Create the HTTP server
+    // Pin the worker count explicitly. Actix otherwise spawns one worker per
+    // logical CPU, which on a 32-core host over-subscribes with the Aeron
+    // client, Kafka consumer, and sea-orm pool threads we already run. See
+    // `ServerConfig::effective_workers` for the resolution rules.
+    let workers = config.server.effective_workers();
+    // Clamp the slow-client deadline so a stuck TCP peer can't occupy a
+    // worker indefinitely. This complements the Tokio-level timeouts we
+    // apply to downstream calls (Redis, Postgres, ClickHouse).
+    let client_request_timeout =
+        Duration::from_secs(config.server.client_request_timeout_secs.max(1));
+    info!(
+        "HTTP server: workers={}, client_request_timeout={}s",
+        workers,
+        client_request_timeout.as_secs()
+    );
+
     let server = HttpServer::new(move || create_app(app_state.clone()))
+        .workers(workers)
+        .client_request_timeout(client_request_timeout)
         .listen(listener)?
         .run();
 

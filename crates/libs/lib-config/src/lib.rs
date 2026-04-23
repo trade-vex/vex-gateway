@@ -236,6 +236,8 @@ impl Config {
             server: ServerConfig::from_env().unwrap_or_else(|_| ServerConfig {
                 host: "127.0.0.1".to_string(),
                 port: 8081,
+                workers: None,
+                client_request_timeout_secs: 10,
             }),
             logging: LoggingConfig {
                 level: "debug".to_string(),
@@ -436,12 +438,16 @@ mod tests {
         let valid_config = ServerConfig {
             host: "127.0.0.1".to_string(),
             port: 8081,
+            workers: None,
+            client_request_timeout_secs: 10,
         };
         assert!(valid_config.validate().is_ok());
 
         let invalid_config = ServerConfig {
             host: "".to_string(),
             port: 8081,
+            workers: None,
+            client_request_timeout_secs: 10,
         };
         assert!(invalid_config.validate().is_err());
     }

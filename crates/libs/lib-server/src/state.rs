@@ -4,6 +4,7 @@
 
 use clickhouse::Client as ClickHouseClient;
 use jsonwebtoken::{DecodingKey, EncodingKey};
+use lib_auth::RedisPool;
 use lib_auth::config::{AuthConfig, JwtConfig, OAuthProviderConfig, RedisConfig};
 use lib_auth::repository::{PostgresUserRepository, UserRepository};
 use lib_auth::service::{EmailService, OAuthService, SessionService, TokenService};
@@ -11,15 +12,14 @@ use lib_core::CorrelationService;
 use lib_core::Publisher;
 use lib_core::repository::repository::{ClickHousePortfolioRepository, PortfolioRepository};
 use lib_core::{
-    OrderCacheConfig, OrderStore, PostgresTradingRepository, TradingRepository,
-    UserBalanceCacheConfig, UserBalanceStore, cache::scaling_cache::ScalingCache,
+    CachingPortfolioRepository, OrderCacheConfig, OrderStore, PostgresTradingRepository,
+    TradingRepository, UserBalanceCacheConfig, UserBalanceStore, cache::scaling_cache::ScalingCache,
 };
 use lib_middleware::api_key::middleware::CacheConfig;
 use lib_middleware::{
     ApiKeyMiddleware, SecurityType,
     repository::api_key_repository::{ApiKeyRepository, PostgresApiKeyRepository},
 };
-use redis::aio::ConnectionManager;
 use reqwest::Client;
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
@@ -37,7 +37,7 @@ use url::Url;
 pub struct AppState {
     // Database and infrastructure
     pub db: Arc<DatabaseConnection>,
-    pub redis_conn: ConnectionManager,
+    pub redis_pool: RedisPool,
     pub http_client: Client,
 
     // DB Repository
@@ -83,8 +83,8 @@ impl AppState {
         // Initialize database connection
         let db = Arc::new(Self::init_database(&config.database).await?);
 
-        // Initialize Redis connection
-        let redis_conn = Self::init_redis(&config.redis).await?;
+        // Initialize Redis connection pool (fan-out over N TCP sockets)
+        let redis_pool = Self::init_redis(&config.redis).await?;
 
         // Initialize HTTP client
         let http_client = Self::init_http_client()?;
@@ -155,7 +155,13 @@ impl AppState {
                 ch
             };
 
-            Arc::new(ClickHousePortfolioRepository::new(ch))
+            // Wrap the raw ClickHouse repo in the SWR cache so the portfolio
+            // hot path reads from memory and the 1s background sweeper eats
+            // the ClickHouse latency. Idle (user, method) slots are dropped
+            // after 60s with no traffic.
+            let raw: Arc<dyn PortfolioRepository> =
+                Arc::new(ClickHousePortfolioRepository::new(ch));
+            CachingPortfolioRepository::new(raw) as Arc<dyn PortfolioRepository>
         };
 
         // Initialize API key middleware with database repository
@@ -164,13 +170,13 @@ impl AppState {
         // Initialize services
         let token_service = TokenService::new(
             Arc::new(config.jwt.clone()),
-            redis_conn.clone(),
+            redis_pool.clone(),
             Arc::new(encoding_key.clone()),
             Arc::new(decoding_key.clone()),
         );
 
         let oauth_service = OAuthService::new(
-            redis_conn.clone(),
+            redis_pool.clone(),
             http_client.clone(),
             config.oauth.providers.clone(),
             Arc::new(token_service.clone()),
@@ -182,7 +188,7 @@ impl AppState {
 
         let email_service = EmailService::new(
             &config.email,
-            redis_conn.clone(),
+            redis_pool.clone(),
             config.otp.otp_length,
             config.otp.email_verification_expiry_minutes,
         )?;
@@ -232,13 +238,13 @@ impl AppState {
         .with_scaling_cache(scaling_cache);
 
         // Initialize session service with 30-minute inactivity TTL
-        let session_service = SessionService::new(redis_conn.clone(), 30 * 60);
+        let session_service = SessionService::new(redis_pool.clone(), 30 * 60);
 
         tracing::info!("AppState initialization completed successfully");
 
         Ok(Arc::new(Self {
             db,
-            redis_conn,
+            redis_pool,
             http_client,
             user_repo,
             jwt_config: config.jwt.clone(),
@@ -339,17 +345,24 @@ impl AppState {
             .map_err(|e| format!("Failed to connect to database: {}", e).into())
     }
 
-    /// Initialize Redis connection manager
+    /// Initialize a fan-out Redis pool. Every authenticated request takes 1-2
+    /// Redis RTTs, so running them all through a single multiplexed socket
+    /// (the previous `ConnectionManager` behaviour) became the hot-path
+    /// bottleneck at high VU counts. Opening 32 real TCP connections gives
+    /// Tokio tasks somewhere to go when one socket's write buffer is busy.
     async fn init_redis(
-        config: &RedisConfig,
-    ) -> Result<ConnectionManager, Box<dyn std::error::Error + Send + Sync>> {
-        let sanitized_url = Self::sanitize_url(&config.url);
+        _config: &RedisConfig,
+    ) -> Result<RedisPool, Box<dyn std::error::Error + Send + Sync>> {
+        let sanitized_url = Self::sanitize_url(&_config.url);
         info!("Connecting to Redis: {}", sanitized_url);
-        let client = redis::Client::open(config.url.as_str())
-            .map_err(|e| format!("Failed to create Redis client: {}", e))?;
-        ConnectionManager::new(client)
+        // Pool size tuned for ~1000 VU. Each connection is a MultiplexedConnection
+        // (pipelines internally), so 32 sockets easily absorb thousands of concurrent ops.
+        const REDIS_POOL_SIZE: usize = 32;
+        let pool = RedisPool::new(&_config.url, REDIS_POOL_SIZE)
             .await
-            .map_err(|e| format!("Failed to create Redis connection manager: {}", e).into())
+            .map_err(|e| format!("Failed to create Redis pool: {}", e))?;
+        info!("Redis pool ready with {} connections", pool.size());
+        Ok(pool)
     }
 
     /// Initialize HTTP client for Oauth service

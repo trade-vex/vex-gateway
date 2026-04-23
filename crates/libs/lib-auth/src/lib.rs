@@ -4,11 +4,14 @@ pub mod error;
 pub mod handlers;
 pub mod middleware;
 pub mod models;
+pub mod redis_pool;
 pub mod repository;
 pub mod service;
 #[cfg(test)]
 pub mod tests;
 pub mod utils;
+
+pub use redis_pool::RedisPool;
 
 use actix_web::web;
 
