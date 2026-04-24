@@ -1,4 +1,7 @@
-use crate::cache::local_swr::{LocalSwrCache, LocalSwrConfig};
+use crate::cache::local_swr::{
+    LocalSwrCache, LocalSwrConfig, log_cold_fill, log_evicted, log_hit, log_hot_boost,
+    log_refresh_failed, log_refresh_success,
+};
 use crate::cache::scaling_cache::ScalingCache;
 use crate::model::user_balances::Model as UserBalanceModel;
 use crate::repository::repository::{TradingError, TradingRepository};
@@ -91,9 +94,11 @@ impl UserBalanceStore {
         let balances = self
             .local_cache
             .get_or_fill(user_id, || async move {
+                log_cold_fill("balances", user_id);
                 this.fetch_user_balances_source(user_id).await
             })
             .await?;
+        log_hit("balances", user_id);
         Ok((*balances).clone())
     }
 
@@ -193,6 +198,7 @@ impl UserBalanceStore {
 
     pub fn boost_user_activity(&self, user_id: u64) {
         self.local_cache.boost_where(|key| *key == user_id);
+        log_hot_boost("balances", user_id);
     }
 
     pub async fn warm_user_balances(&self, user_id: u64) {
@@ -271,7 +277,12 @@ impl UserBalanceStore {
 
             loop {
                 ticker.tick().await;
+                let before_len = this.local_cache.len();
                 let due = this.local_cache.due_slots();
+                let evicted = before_len.saturating_sub(this.local_cache.len());
+                if evicted > 0 {
+                    log_evicted("balances", evicted);
+                }
                 if due.is_empty() {
                     continue;
                 }
@@ -286,12 +297,11 @@ impl UserBalanceStore {
                             return;
                         };
                         match this.fetch_user_balances_source(user_id).await {
-                            Ok(fresh) => slot.store(fresh),
-                            Err(e) => debug!(
-                                user_id = user_id,
-                                error = %e,
-                                "balance local SWR refresh failed; serving previous snapshot"
-                            ),
+                            Ok(fresh) => {
+                                slot.store(fresh);
+                                log_refresh_success("balances", user_id);
+                            }
+                            Err(e) => log_refresh_failed("balances", user_id, &e),
                         }
                     }));
                 }

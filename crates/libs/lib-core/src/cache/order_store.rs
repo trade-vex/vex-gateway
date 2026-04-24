@@ -1,4 +1,7 @@
-use crate::cache::local_swr::{LocalSwrCache, LocalSwrConfig};
+use crate::cache::local_swr::{
+    LocalSwrCache, LocalSwrConfig, log_cold_fill, log_evicted, log_hit, log_hot_boost,
+    log_refresh_failed, log_refresh_success,
+};
 use crate::cache::scaling_cache::ScalingCache;
 use crate::model::orders::Model as OrderModel;
 use crate::repository::repository::{TradingError, TradingRepository};
@@ -296,10 +299,12 @@ impl OrderStore {
         let orders = self
             .order_history_cache
             .get_or_fill(key, || async move {
+                log_cold_fill("order_history", user_id);
                 this.fetch_user_order_history_paginated_source(user_id, offset, limit, market_id)
                     .await
             })
             .await?;
+        log_hit("order_history", user_id);
         Ok((*orders).clone())
     }
 
@@ -310,70 +315,9 @@ impl OrderStore {
         limit: u64,
         market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>, TradingError> {
-        // Try Redis first if cache enabled
-        if self.config.enabled {
-            if let Some(cache) = &self.cache {
-                let set_key = format!("user:{}:orders", user_id);
-                debug!("Redis: Querying orders from SET: {}", set_key);
-
-                match cache.smembers_string(&set_key).await {
-                    Ok(order_ids) if !order_ids.is_empty() => {
-                        let mut orders = Vec::new();
-                        for order_id_str in &order_ids {
-                            let order_key = format!("order:{}", order_id_str);
-                            if let Ok(hash) = cache.hgetall_string(&order_key).await {
-                                if !hash.is_empty() {
-                                    // Only include Cancelled, PartiallyFilled, Filled
-                                    if let Some(status) = hash.get("order_status") {
-                                        let status_lower = status.to_lowercase();
-                                        if status_lower == "cancelled"
-                                            || status_lower == "partiallyfilled"
-                                            || status_lower == "filled"
-                                        {
-                                            if let Some(order) = Self::parse_order_hash(hash) {
-                                                // Filter by market_id if provided
-                                                if let Some(filter_market_id) = market_id {
-                                                    if order.market_id as u32 != filter_market_id {
-                                                        continue;
-                                                    }
-                                                }
-                                                orders.push(order);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Sort by timestamp descending and apply pagination
-                        orders.sort_by(|a, b| b.order_timestamp.cmp(&a.order_timestamp));
-                        let start = offset as usize;
-                        let end = (offset + limit) as usize;
-                        let paginated_orders: Vec<_> = orders
-                            .into_iter()
-                            .skip(start)
-                            .take((end - start).min(limit as usize))
-                            .collect();
-
-                        if !paginated_orders.is_empty() {
-                            debug!(
-                                "Redis cache hit: {} history orders (paginated)",
-                                paginated_orders.len()
-                            );
-                            return Ok(paginated_orders);
-                        }
-                    }
-                    Ok(_) => {
-                        debug!("Redis cache miss for user orders: {}", user_id);
-                    }
-                    Err(e) => {
-                        warn!("Redis error for user {}: {}", user_id, e);
-                    }
-                }
-            }
-        }
-
-        // Database fallback
+        // Local SWR is the cache layer for the paginated read APIs. Go straight
+        // to the indexed current-state projection instead of probing Redis and
+        // paying an avoidable miss on every refresh.
         if let Some(repo) = &self.trading_repo {
             let orders = repo
                 .get_order_history_paginated(user_id, offset, limit, market_id)
@@ -472,10 +416,12 @@ impl OrderStore {
         let orders = self
             .open_orders_cache
             .get_or_fill(key, || async move {
+                log_cold_fill("open_orders", user_id);
                 this.fetch_user_orders_paginated_source(user_id, offset, limit, market_id)
                     .await
             })
             .await?;
+        log_hit("open_orders", user_id);
         Ok((*orders).clone())
     }
 
@@ -486,89 +432,9 @@ impl OrderStore {
         limit: u64,
         market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>, TradingError> {
-        // Cache: Query user:{user_id}:orders SET, then fetch each order hash
-        if self.config.enabled {
-            if let Some(cache) = &self.cache {
-                let set_key = format!("user:{}:orders", user_id);
-
-                match cache.smembers_string(&set_key).await {
-                    Ok(order_ids) if !order_ids.is_empty() => {
-                        let mut orders = Vec::new();
-                        // Fetch each order hash
-                        for order_id_str in order_ids {
-                            let order_key = format!("order:{}", order_id_str);
-                            match cache.hgetall_string(&order_key).await {
-                                Ok(hash) if !hash.is_empty() => {
-                                    // Filter orders by status - only include "open" orders
-                                    if let Some(status) = hash.get("order_status") {
-                                        let status_lower = status.to_lowercase();
-
-                                        // Skip orders that are in terminal states (not open)
-                                        if status_lower == "cancelled"
-                                            || status_lower == "filled"
-                                            || status_lower == "rejected"
-                                        {
-                                            continue;
-                                        }
-
-                                        // Skip PartiallyFilled IOC orders (no exception).
-                                        if status_lower == "partiallyfilled" {
-                                            if let Some(tif) = hash.get("order_time_in_force") {
-                                                if tif == "TIF_IOC" {
-                                                    continue;
-                                                }
-                                            }
-                                        }
-
-                                        // Only include: Placed, Pending, PartiallyFilled, Processing
-                                        if status_lower != "placed"
-                                            && status_lower != "pending"
-                                            && status_lower != "partiallyfilled"
-                                            && status_lower != "processing"
-                                        {
-                                            continue;
-                                        }
-                                    }
-
-                                    if let Some(order) = Self::parse_order_hash(hash) {
-                                        // Filter by market_id if provided
-                                        if let Some(filter_market_id) = market_id {
-                                            if order.market_id as u32 != filter_market_id {
-                                                continue;
-                                            }
-                                        }
-                                        orders.push(order);
-                                    }
-                                }
-                                _ => continue,
-                            }
-                        }
-
-                        // Sort by timestamp descending and apply pagination
-                        orders.sort_by(|a, b| b.order_timestamp.cmp(&a.order_timestamp));
-                        let start = offset as usize;
-                        let end = (offset + limit) as usize;
-                        let paginated_orders: Vec<_> = orders
-                            .into_iter()
-                            .skip(start)
-                            .take((end - start).min(limit as usize))
-                            .collect();
-
-                        if !paginated_orders.is_empty() {
-                            return Ok(paginated_orders);
-                        }
-                    }
-                    Ok(_) => {
-                        debug!("User orders cache miss for user: {}", user_id);
-                    }
-                    Err(e) => {
-                        warn!("User orders cache error for user {}: {}", user_id, e);
-                    }
-                }
-            }
-        }
-
-        // Database fallback
+        // Local SWR is the cache layer for the paginated read APIs. Go straight
+        // to the indexed current-state projection instead of probing Redis and
+        // paying an avoidable miss on every refresh.
         if let Some(repo) = &self.trading_repo {
             match repo
                 .get_open_orders_paginated(user_id, offset, limit, market_id)
@@ -772,6 +638,8 @@ impl OrderStore {
             .boost_where(|key| key.user_id == user_id);
         self.order_history_cache
             .boost_where(|key| key.user_id == user_id);
+        log_hot_boost("open_orders", user_id);
+        log_hot_boost("order_history", user_id);
     }
 
     pub async fn warm_user_activity(&self, user_id: u64) {
@@ -844,12 +712,23 @@ impl OrderStore {
             loop {
                 ticker.tick().await;
 
+                let open_before_len = this.open_orders_cache.len();
+                let history_before_len = this.order_history_cache.len();
                 let mut refreshes = Vec::new();
                 for (key, slot) in this.open_orders_cache.due_slots() {
                     refreshes.push((true, key, slot));
                 }
                 for (key, slot) in this.order_history_cache.due_slots() {
                     refreshes.push((false, key, slot));
+                }
+                let open_evicted = open_before_len.saturating_sub(this.open_orders_cache.len());
+                let history_evicted =
+                    history_before_len.saturating_sub(this.order_history_cache.len());
+                if open_evicted > 0 {
+                    log_evicted("open_orders", open_evicted);
+                }
+                if history_evicted > 0 {
+                    log_evicted("order_history", history_evicted);
                 }
                 if refreshes.is_empty() {
                     continue;
@@ -884,15 +763,25 @@ impl OrderStore {
                         };
 
                         match result {
-                            Ok(fresh) => slot.store(fresh),
-                            Err(e) => debug!(
-                                user_id = key.user_id,
-                                offset = key.offset,
-                                limit = key.limit,
-                                market_id = ?key.market_id,
-                                cache = if is_open_orders { "open_orders" } else { "order_history" },
-                                error = %e,
-                                "order local SWR refresh failed; serving previous snapshot"
+                            Ok(fresh) => {
+                                slot.store(fresh);
+                                log_refresh_success(
+                                    if is_open_orders {
+                                        "open_orders"
+                                    } else {
+                                        "order_history"
+                                    },
+                                    key.user_id,
+                                );
+                            }
+                            Err(e) => log_refresh_failed(
+                                if is_open_orders {
+                                    "open_orders"
+                                } else {
+                                    "order_history"
+                                },
+                                key.user_id,
+                                &e,
                             ),
                         }
                     }));

@@ -13,6 +13,7 @@ use std::time::Duration;
 use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
 use tokio::sync::Mutex as AsyncMutex;
+use tracing::{debug, trace};
 
 use crate::repository::repository::{Result, TradingError};
 
@@ -158,6 +159,10 @@ where
             .collect()
     }
 
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
     pub fn boost_where<P>(&self, predicate: P)
     where
         P: Fn(&K) -> bool,
@@ -188,4 +193,33 @@ pub fn now_millis() -> i64 {
 
 fn duration_millis(duration: Duration) -> i64 {
     duration.as_millis() as i64
+}
+
+pub fn log_hit(endpoint: &str, user_id: u64) {
+    trace!(endpoint = endpoint, user_id = user_id, "swr_hit");
+}
+
+pub fn log_cold_fill(endpoint: &str, user_id: u64) {
+    debug!(endpoint = endpoint, user_id = user_id, "swr_cold_fill");
+}
+
+pub fn log_refresh_success(endpoint: &str, user_id: u64) {
+    trace!(endpoint = endpoint, user_id = user_id, "swr_refresh_success");
+}
+
+pub fn log_refresh_failed(endpoint: &str, user_id: u64, error: &dyn std::fmt::Display) {
+    debug!(
+        endpoint = endpoint,
+        user_id = user_id,
+        error = %error,
+        "swr_refresh_failed"
+    );
+}
+
+pub fn log_evicted(endpoint: &str, count: usize) {
+    debug!(endpoint = endpoint, count = count, "swr_evicted");
+}
+
+pub fn log_hot_boost(endpoint: &str, user_id: u64) {
+    debug!(endpoint = endpoint, user_id = user_id, "swr_hot_boost");
 }
