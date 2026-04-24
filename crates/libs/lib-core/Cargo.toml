@@ -23,6 +23,7 @@ num_cpus = "1.16"
 clickhouse = "0.12"
 rust_decimal = "1.40"
 parking_lot = "0.12"
+arc-swap = "1.7"
 
 [dev-dependencies]
 actix-web = "4.4"

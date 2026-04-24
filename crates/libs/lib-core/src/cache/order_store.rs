@@ -1,3 +1,4 @@
+use crate::cache::local_swr::{LocalSwrCache, LocalSwrConfig};
 use crate::cache::scaling_cache::ScalingCache;
 use crate::model::orders::Model as OrderModel;
 use crate::repository::repository::{TradingError, TradingRepository};
@@ -5,7 +6,18 @@ use lib_db::backends::kv::redis::RedisDb;
 use lib_db::traits::BasicKvStore;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tracing::{debug, warn};
+
+const ORDER_REFRESH_CONCURRENCY: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct OrdersPageKey {
+    user_id: u64,
+    offset: u64,
+    limit: u64,
+    market_id: Option<u32>,
+}
 
 #[derive(Clone)]
 pub struct OrderStore {
@@ -13,6 +25,8 @@ pub struct OrderStore {
     trading_repo: Option<Arc<dyn TradingRepository>>,
     config: OrderCacheConfig,
     scaling_cache: Option<Arc<ScalingCache>>,
+    open_orders_cache: LocalSwrCache<OrdersPageKey, Vec<OrderModel>>,
+    order_history_cache: LocalSwrCache<OrdersPageKey, Vec<OrderModel>>,
 }
 
 #[derive(Clone, Default)]
@@ -27,6 +41,8 @@ impl OrderStore {
             trading_repo: None,
             config,
             scaling_cache: None,
+            open_orders_cache: LocalSwrCache::new(LocalSwrConfig::trading_ui()),
+            order_history_cache: LocalSwrCache::new(LocalSwrConfig::trading_ui()),
         }
     }
 
@@ -34,12 +50,16 @@ impl OrderStore {
         config: OrderCacheConfig,
         trading_repo: Arc<dyn TradingRepository>,
     ) -> Self {
-        Self {
+        let store = Self {
             cache: None,
             trading_repo: Some(trading_repo),
             config,
             scaling_cache: None,
-        }
+            open_orders_cache: LocalSwrCache::new(LocalSwrConfig::trading_ui()),
+            order_history_cache: LocalSwrCache::new(LocalSwrConfig::trading_ui()),
+        };
+        store.spawn_local_refresh_loop();
+        store
     }
 
     pub async fn with_redis_cache(
@@ -56,12 +76,16 @@ impl OrderStore {
             None
         };
 
-        Ok(Self {
+        let store = Self {
             cache,
             trading_repo,
             config,
             scaling_cache: None,
-        })
+            open_orders_cache: LocalSwrCache::new(LocalSwrConfig::trading_ui()),
+            order_history_cache: LocalSwrCache::new(LocalSwrConfig::trading_ui()),
+        };
+        store.spawn_local_refresh_loop();
+        Ok(store)
     }
 
     pub fn with_scaling_cache(mut self, scaling_cache: Arc<ScalingCache>) -> Self {
@@ -262,6 +286,30 @@ impl OrderStore {
         limit: u64,
         market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>, TradingError> {
+        let key = OrdersPageKey {
+            user_id,
+            offset,
+            limit,
+            market_id,
+        };
+        let this = self.clone();
+        let orders = self
+            .order_history_cache
+            .get_or_fill(key, || async move {
+                this.fetch_user_order_history_paginated_source(user_id, offset, limit, market_id)
+                    .await
+            })
+            .await?;
+        Ok((*orders).clone())
+    }
+
+    async fn fetch_user_order_history_paginated_source(
+        &self,
+        user_id: u64,
+        offset: u64,
+        limit: u64,
+        market_id: Option<u32>,
+    ) -> Result<Vec<OrderModel>, TradingError> {
         // Try Redis first if cache enabled
         if self.config.enabled {
             if let Some(cache) = &self.cache {
@@ -414,6 +462,30 @@ impl OrderStore {
         limit: u64,
         market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>, TradingError> {
+        let key = OrdersPageKey {
+            user_id,
+            offset,
+            limit,
+            market_id,
+        };
+        let this = self.clone();
+        let orders = self
+            .open_orders_cache
+            .get_or_fill(key, || async move {
+                this.fetch_user_orders_paginated_source(user_id, offset, limit, market_id)
+                    .await
+            })
+            .await?;
+        Ok((*orders).clone())
+    }
+
+    async fn fetch_user_orders_paginated_source(
+        &self,
+        user_id: u64,
+        offset: u64,
+        limit: u64,
+        market_id: Option<u32>,
+    ) -> Result<Vec<OrderModel>, TradingError> {
         // Cache: Query user:{user_id}:orders SET, then fetch each order hash
         if self.config.enabled {
             if let Some(cache) = &self.cache {
@@ -442,8 +514,7 @@ impl OrderStore {
                                         // Skip PartiallyFilled IOC orders (no exception).
                                         if status_lower == "partiallyfilled" {
                                             if let Some(tif) = hash.get("order_time_in_force") {
-                                                if tif == "TIF_IOC"
-                                                {
+                                                if tif == "TIF_IOC" {
                                                     continue;
                                                 }
                                             }
@@ -563,8 +634,7 @@ impl OrderStore {
                                         // Skip PartiallyFilled IOC orders (no exception).
                                         if status_lower == "partiallyfilled" {
                                             if let Some(tif) = hash.get("order_time_in_force") {
-                                                if tif == "TIF_IOC"
-                                                {
+                                                if tif == "TIF_IOC" {
                                                     continue;
                                                 }
                                             }
@@ -626,6 +696,8 @@ impl OrderStore {
     }
 
     pub async fn invalidate_order(&self, order_id: u64, user_id: u64) {
+        self.invalidate_local_user_orders(user_id);
+
         if !self.config.enabled {
             return;
         }
@@ -657,6 +729,8 @@ impl OrderStore {
     }
 
     pub async fn invalidate_user_orders(&self, user_id: u64) {
+        self.invalidate_local_user_orders(user_id);
+
         if !self.config.enabled {
             return;
         }
@@ -693,6 +767,29 @@ impl OrderStore {
         }
     }
 
+    pub fn boost_user_activity(&self, user_id: u64) {
+        self.open_orders_cache
+            .boost_where(|key| key.user_id == user_id);
+        self.order_history_cache
+            .boost_where(|key| key.user_id == user_id);
+    }
+
+    pub async fn warm_user_activity(&self, user_id: u64) {
+        self.boost_user_activity(user_id);
+        let _ = self.get_user_orders_paginated(user_id, 0, 21, None).await;
+        let _ = self
+            .get_user_order_history_paginated(user_id, 0, 21, None)
+            .await;
+        self.boost_user_activity(user_id);
+    }
+
+    fn invalidate_local_user_orders(&self, user_id: u64) {
+        self.open_orders_cache
+            .invalidate_where(|key| key.user_id == user_id);
+        self.order_history_cache
+            .invalidate_where(|key| key.user_id == user_id);
+    }
+
     /// Parse order hash from Redis into OrderModel
     /// Redis keys from Kafka sink: orders:{order_id}
     /// Fields: market_id, order_order_id, order_user_id, order_price, order_size, order_filled_size,
@@ -727,5 +824,84 @@ impl OrderStore {
             order_timestamp,
             created_at: None,
         })
+    }
+
+    fn spawn_local_refresh_loop(&self) {
+        if self.trading_repo.is_none() && self.cache.is_none() {
+            return;
+        }
+
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+
+        let this = self.clone();
+        handle.spawn(async move {
+            let mut ticker = tokio::time::interval(LocalSwrConfig::trading_ui().hot_refresh);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ticker.tick().await;
+
+            loop {
+                ticker.tick().await;
+
+                let mut refreshes = Vec::new();
+                for (key, slot) in this.open_orders_cache.due_slots() {
+                    refreshes.push((true, key, slot));
+                }
+                for (key, slot) in this.order_history_cache.due_slots() {
+                    refreshes.push((false, key, slot));
+                }
+                if refreshes.is_empty() {
+                    continue;
+                }
+
+                let sem = Arc::new(Semaphore::new(ORDER_REFRESH_CONCURRENCY));
+                let mut handles = Vec::with_capacity(refreshes.len());
+                for (is_open_orders, key, slot) in refreshes {
+                    let this = this.clone();
+                    let sem = sem.clone();
+                    handles.push(tokio::spawn(async move {
+                        let Ok(_permit) = sem.acquire_owned().await else {
+                            return;
+                        };
+
+                        let result = if is_open_orders {
+                            this.fetch_user_orders_paginated_source(
+                                key.user_id,
+                                key.offset,
+                                key.limit,
+                                key.market_id,
+                            )
+                            .await
+                        } else {
+                            this.fetch_user_order_history_paginated_source(
+                                key.user_id,
+                                key.offset,
+                                key.limit,
+                                key.market_id,
+                            )
+                            .await
+                        };
+
+                        match result {
+                            Ok(fresh) => slot.store(fresh),
+                            Err(e) => debug!(
+                                user_id = key.user_id,
+                                offset = key.offset,
+                                limit = key.limit,
+                                market_id = ?key.market_id,
+                                cache = if is_open_orders { "open_orders" } else { "order_history" },
+                                error = %e,
+                                "order local SWR refresh failed; serving previous snapshot"
+                            ),
+                        }
+                    }));
+                }
+
+                for handle in handles {
+                    let _ = handle.await;
+                }
+            }
+        });
     }
 }

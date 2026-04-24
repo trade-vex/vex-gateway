@@ -3,8 +3,8 @@
 use actix_web::{HttpResponse, web};
 use common::{OrderCommand, OrderCommandType, Side, Status, TimeInForce, UserBalance};
 use lib_core::{
-    CorrelationService, Publisher, ResponseError, TradingRepository, generate_client_order_id,
-    model::orders::Model as OrderModel, wait_for_response,
+    CorrelationService, OrderStore, Publisher, ResponseError, TradingRepository, UserBalanceStore,
+    generate_client_order_id, model::orders::Model as OrderModel, wait_for_response,
 };
 use lib_utils::AuthenticatedUserId;
 use serde::{Deserialize, Serialize};
@@ -212,6 +212,8 @@ pub async fn place_order(
     publisher: web::Data<Arc<tokio::sync::Mutex<Publisher>>>,
     correlation_service: web::Data<Arc<CorrelationService>>,
     trading_repo: web::Data<Arc<dyn TradingRepository>>,
+    balance_store: web::Data<Arc<UserBalanceStore>>,
+    order_store: web::Data<Arc<OrderStore>>,
 ) -> HttpResponse {
     let start = Instant::now();
 
@@ -380,6 +382,12 @@ pub async fn place_order(
                 }
             }
 
+            boost_trading_read_caches(
+                user_id,
+                balance_store.get_ref().clone(),
+                order_store.get_ref().clone(),
+            );
+
             HttpResponse::Ok().json(OrderResponse {
                 order_id: response.order_id,
                 client_order_id: response.client_order_id,
@@ -481,6 +489,8 @@ pub async fn cancel_order(
     auth_user: AuthenticatedUserId,
     publisher: web::Data<Arc<tokio::sync::Mutex<Publisher>>>,
     correlation_service: web::Data<Arc<CorrelationService>>,
+    balance_store: web::Data<Arc<UserBalanceStore>>,
+    order_store: web::Data<Arc<OrderStore>>,
 ) -> HttpResponse {
     let start = Instant::now();
 
@@ -562,6 +572,12 @@ pub async fn cancel_order(
                 "Cancel processed successfully"
             );
 
+            boost_trading_read_caches(
+                user_id,
+                balance_store.get_ref().clone(),
+                order_store.get_ref().clone(),
+            );
+
             HttpResponse::Ok().json(OrderResponse {
                 order_id: response.order_id,
                 client_order_id: response.client_order_id,
@@ -585,4 +601,24 @@ pub async fn cancel_order(
             message: "Internal error".to_string(),
         }),
     }
+}
+
+fn boost_trading_read_caches(
+    user_id: u64,
+    balance_store: Arc<UserBalanceStore>,
+    order_store: Arc<OrderStore>,
+) {
+    balance_store.boost_user_activity(user_id);
+    order_store.boost_user_activity(user_id);
+
+    tokio::spawn(async move {
+        let ((), ()) = tokio::join!(
+            async {
+                balance_store.warm_user_balances(user_id).await;
+            },
+            async {
+                order_store.warm_user_activity(user_id).await;
+            }
+        );
+    });
 }

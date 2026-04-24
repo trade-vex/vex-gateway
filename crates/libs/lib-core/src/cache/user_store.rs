@@ -1,3 +1,4 @@
+use crate::cache::local_swr::{LocalSwrCache, LocalSwrConfig};
 use crate::cache::scaling_cache::ScalingCache;
 use crate::model::user_balances::Model as UserBalanceModel;
 use crate::repository::repository::{TradingError, TradingRepository};
@@ -5,7 +6,10 @@ use lib_db::backends::kv::redis::RedisDb;
 use lib_db::traits::BasicKvStore;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tracing::{debug, warn};
+
+const BALANCE_REFRESH_CONCURRENCY: usize = 64;
 
 #[derive(Clone)]
 pub struct UserBalanceStore {
@@ -13,6 +17,7 @@ pub struct UserBalanceStore {
     trading_repo: Option<Arc<dyn TradingRepository>>,
     config: UserBalanceCacheConfig,
     scaling_cache: Option<Arc<ScalingCache>>,
+    local_cache: LocalSwrCache<u64, Vec<UserBalanceModel>>,
 }
 
 #[derive(Clone, Default)]
@@ -28,6 +33,7 @@ impl UserBalanceStore {
             trading_repo: None,
             config,
             scaling_cache: None,
+            local_cache: LocalSwrCache::new(LocalSwrConfig::trading_ui()),
         }
     }
 
@@ -35,12 +41,15 @@ impl UserBalanceStore {
         config: UserBalanceCacheConfig,
         trading_repo: Arc<dyn TradingRepository>,
     ) -> Self {
-        Self {
+        let store = Self {
             cache: None,
             trading_repo: Some(trading_repo),
             config,
             scaling_cache: None,
-        }
+            local_cache: LocalSwrCache::new(LocalSwrConfig::trading_ui()),
+        };
+        store.spawn_local_refresh_loop();
+        store
     }
 
     pub async fn with_redis_cache(
@@ -57,12 +66,15 @@ impl UserBalanceStore {
             None
         };
 
-        Ok(Self {
+        let store = Self {
             cache,
             trading_repo,
             config,
             scaling_cache: None,
-        })
+            local_cache: LocalSwrCache::new(LocalSwrConfig::trading_ui()),
+        };
+        store.spawn_local_refresh_loop();
+        Ok(store)
     }
 
     pub fn with_scaling_cache(mut self, scaling_cache: Arc<ScalingCache>) -> Self {
@@ -72,6 +84,20 @@ impl UserBalanceStore {
 
     /// Get user balances from cache: user:{user_id}:asset:{asset_id}:balance hashes
     pub async fn get_user_balances(
+        &self,
+        user_id: u64,
+    ) -> Result<Vec<UserBalanceModel>, TradingError> {
+        let this = self.clone();
+        let balances = self
+            .local_cache
+            .get_or_fill(user_id, || async move {
+                this.fetch_user_balances_source(user_id).await
+            })
+            .await?;
+        Ok((*balances).clone())
+    }
+
+    async fn fetch_user_balances_source(
         &self,
         user_id: u64,
     ) -> Result<Vec<UserBalanceModel>, TradingError> {
@@ -134,6 +160,8 @@ impl UserBalanceStore {
     }
 
     pub async fn invalidate_user_balances(&self, user_id: u64) {
+        self.local_cache.invalidate_where(|key| *key == user_id);
+
         if !self.config.enabled {
             return;
         }
@@ -161,6 +189,15 @@ impl UserBalanceStore {
                 }
             }
         }
+    }
+
+    pub fn boost_user_activity(&self, user_id: u64) {
+        self.local_cache.boost_where(|key| *key == user_id);
+    }
+
+    pub async fn warm_user_balances(&self, user_id: u64) {
+        let _ = self.get_user_balances(user_id).await;
+        self.boost_user_activity(user_id);
     }
 
     /// Convert UserBalanceModel to UserBalanceResponse with scaling applied
@@ -215,5 +252,54 @@ impl UserBalanceStore {
             timestamp,
             created_at: None,
         })
+    }
+
+    fn spawn_local_refresh_loop(&self) {
+        if self.trading_repo.is_none() && self.cache.is_none() {
+            return;
+        }
+
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+
+        let this = self.clone();
+        handle.spawn(async move {
+            let mut ticker = tokio::time::interval(LocalSwrConfig::trading_ui().hot_refresh);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ticker.tick().await;
+
+            loop {
+                ticker.tick().await;
+                let due = this.local_cache.due_slots();
+                if due.is_empty() {
+                    continue;
+                }
+
+                let sem = Arc::new(Semaphore::new(BALANCE_REFRESH_CONCURRENCY));
+                let mut handles = Vec::with_capacity(due.len());
+                for (user_id, slot) in due {
+                    let this = this.clone();
+                    let sem = sem.clone();
+                    handles.push(tokio::spawn(async move {
+                        let Ok(_permit) = sem.acquire_owned().await else {
+                            return;
+                        };
+                        match this.fetch_user_balances_source(user_id).await {
+                            Ok(fresh) => slot.store(fresh),
+                            Err(e) => debug!(
+                                user_id = user_id,
+                                error = %e,
+                                "balance local SWR refresh failed; serving previous snapshot"
+                            ),
+                        }
+                    }));
+                }
+
+                for handle in handles {
+                    let _ = handle.await;
+                }
+            }
+        });
     }
 }

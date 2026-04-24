@@ -1,3 +1,4 @@
+pub mod local_swr;
 pub mod order_store;
 pub mod portfolio_cache;
 pub mod scaling_cache;

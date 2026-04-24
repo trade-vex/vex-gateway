@@ -210,7 +210,7 @@ pub async fn get_open_orders(
     user: AuthenticatedUserId,
     query: web::Query<OrdersQuery>,
     order_store: web::Data<Arc<OrderStore>>,
-    trading_repo: web::Data<Arc<dyn TradingRepository>>,
+    _trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
     let raw = user.0.as_u128();
     let user_id = ((raw >> 64) as u64) ^ (raw as u64);
@@ -224,8 +224,8 @@ pub async fn get_open_orders(
     // Fetch limit+1 rows to derive has_next without a separate COUNT(*).
     // This keeps each request to one DB connection and avoids an index scan
     // proportional to the user's full open-order set (whales).
-    match trading_repo
-        .get_open_orders_paginated(user_id, offset, limit_u64 + 1, query.market_id)
+    match order_store
+        .get_user_orders_paginated(user_id, offset, limit_u64 + 1, query.market_id)
         .await
     {
         Ok(mut orders) => {
@@ -335,7 +335,7 @@ pub async fn get_order_history(
     user: AuthenticatedUserId,
     query: web::Query<OrdersQuery>,
     order_store: web::Data<Arc<OrderStore>>,
-    trading_repo: web::Data<Arc<dyn TradingRepository>>,
+    _trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
     let raw = user.0.as_u128();
     let user_id = ((raw >> 64) as u64) ^ (raw as u64);
@@ -349,8 +349,8 @@ pub async fn get_order_history(
     // Fetch limit+1 rows to derive has_next without a separate COUNT(*).
     // Whales can have hundreds of thousands of history rows — a per-request
     // count scan (even index-only) is pool-pressure we can't afford.
-    match trading_repo
-        .get_order_history_paginated(user_id, offset, limit_u64 + 1, query.market_id)
+    match order_store
+        .get_user_order_history_paginated(user_id, offset, limit_u64 + 1, query.market_id)
         .await
     {
         Ok(mut orders) => {
