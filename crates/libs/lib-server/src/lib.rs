@@ -5,10 +5,11 @@
 use actix_web::HttpServer;
 use actix_web::dev::Server;
 use lib_config::Config;
-use std::net::TcpListener;
 use std::time::Duration;
 use tracing::info;
 use utoipa::OpenApi;
+
+const SERVER_BACKLOG: u32 = 8192;
 
 mod app;
 mod combined_auth;
@@ -40,9 +41,8 @@ pub async fn initialize_server(
     // Initialize AppState with all dependencies
     let app_state = AppState::new(&auth_config, gateway_publisher, correlation_service).await?;
 
-    // Create TCP listener
-    let listener = TcpListener::bind(config.server_address()?)?;
-    info!("Server listening on {}", listener.local_addr().unwrap());
+    let server_addr = config.server_address()?;
+    info!("Server listening on {}", server_addr);
 
     // Pin the worker count explicitly. Actix otherwise spawns one worker per
     // logical CPU, which on a 32-core host over-subscribes with the Aeron
@@ -55,15 +55,17 @@ pub async fn initialize_server(
     let client_request_timeout =
         Duration::from_secs(config.server.client_request_timeout_secs.max(1));
     info!(
-        "HTTP server: workers={}, client_request_timeout={}s",
+        "HTTP server: workers={}, backlog={}, client_request_timeout={}s",
         workers,
+        SERVER_BACKLOG,
         client_request_timeout.as_secs()
     );
 
     let server = HttpServer::new(move || create_app(app_state.clone()))
         .workers(workers)
+        .backlog(SERVER_BACKLOG)
         .client_request_timeout(client_request_timeout)
-        .listen(listener)?
+        .bind(server_addr)?
         .run();
 
     Ok(server)
