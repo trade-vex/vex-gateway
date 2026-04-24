@@ -238,6 +238,7 @@ impl Config {
                 port: 8081,
                 workers: None,
                 client_request_timeout_secs: 10,
+                keep_alive_secs: 75,
             }),
             logging: LoggingConfig {
                 level: "debug".to_string(),
@@ -440,6 +441,7 @@ mod tests {
             port: 8081,
             workers: None,
             client_request_timeout_secs: 10,
+            keep_alive_secs: 75,
         };
         assert!(valid_config.validate().is_ok());
 
@@ -448,6 +450,7 @@ mod tests {
             port: 8081,
             workers: None,
             client_request_timeout_secs: 10,
+            keep_alive_secs: 75,
         };
         assert!(invalid_config.validate().is_err());
     }

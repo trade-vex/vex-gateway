@@ -17,6 +17,9 @@ const DEFAULT_WORKERS: Option<usize> = None;
 /// default is 5s; we bump it modestly to tolerate transient client hiccups
 /// under load without inviting slowloris-style holding of worker threads.
 const DEFAULT_CLIENT_REQUEST_TIMEOUT_SECS: u64 = 10;
+/// Backend keep-alive must be longer than the ALB idle timeout. If the target
+/// closes first, ALB can reuse a stale upstream connection and return 502.
+const DEFAULT_KEEP_ALIVE_SECS: u64 = 75;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServerConfig {
@@ -35,10 +38,17 @@ pub struct ServerConfig {
     /// impact of slow / stuck clients on a pinned worker pool.
     #[serde(default = "default_client_request_timeout_secs")]
     pub client_request_timeout_secs: u64,
+    /// Time (seconds) to keep idle HTTP connections open for ALB reuse.
+    #[serde(default = "default_keep_alive_secs")]
+    pub keep_alive_secs: u64,
 }
 
 fn default_client_request_timeout_secs() -> u64 {
     DEFAULT_CLIENT_REQUEST_TIMEOUT_SECS
+}
+
+fn default_keep_alive_secs() -> u64 {
+    DEFAULT_KEEP_ALIVE_SECS
 }
 
 impl ServerConfig {
@@ -70,6 +80,18 @@ impl ServerConfig {
                 })
                 .transpose()?
                 .unwrap_or(DEFAULT_CLIENT_REQUEST_TIMEOUT_SECS),
+            keep_alive_secs: env::var("APP_SERVER_KEEP_ALIVE_SECS")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .map(|v| {
+                    v.parse().map_err(|_| {
+                        ConfigError::ValidationError(
+                            "Invalid APP_SERVER_KEEP_ALIVE_SECS value".to_string(),
+                        )
+                    })
+                })
+                .transpose()?
+                .unwrap_or(DEFAULT_KEEP_ALIVE_SECS),
         })
     }
 

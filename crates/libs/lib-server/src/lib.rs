@@ -54,17 +54,20 @@ pub async fn initialize_server(
     // apply to downstream calls (Redis, Postgres, ClickHouse).
     let client_request_timeout =
         Duration::from_secs(config.server.client_request_timeout_secs.max(1));
+    let keep_alive = Duration::from_secs(config.server.keep_alive_secs.max(1));
     info!(
-        "HTTP server: workers={}, backlog={}, client_request_timeout={}s",
+        "HTTP server: workers={}, backlog={}, client_request_timeout={}s, keep_alive={}s",
         workers,
         SERVER_BACKLOG,
-        client_request_timeout.as_secs()
+        client_request_timeout.as_secs(),
+        keep_alive.as_secs()
     );
 
     let server = HttpServer::new(move || create_app(app_state.clone()))
         .workers(workers)
         .backlog(SERVER_BACKLOG)
         .client_request_timeout(client_request_timeout)
+        .keep_alive(keep_alive)
         .bind(server_addr)?
         .run();
 
