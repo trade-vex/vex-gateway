@@ -18,7 +18,49 @@ use crate::repository::UserRepository;
 use crate::service::{EmailService, SessionService, TokenService};
 use crate::utils::cookie_policy::CookiePolicy;
 use crate::utils::response_headers::set_auth_response_headers;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+use tokio::sync::Semaphore;
+
+const BCRYPT_CONCURRENCY: usize = 16;
+const BCRYPT_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+
+static BCRYPT_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+fn bcrypt_semaphore() -> Arc<Semaphore> {
+    BCRYPT_SEMAPHORE
+        .get_or_init(|| Arc::new(Semaphore::new(BCRYPT_CONCURRENCY)))
+        .clone()
+}
+
+fn bcrypt_cost() -> u32 {
+    DEFAULT_COST
+}
+
+async fn hash_password(password: String) -> Result<String, AuthError> {
+    let _permit = tokio::time::timeout(BCRYPT_WAIT_TIMEOUT, bcrypt_semaphore().acquire_owned())
+        .await
+        .map_err(|_| AuthError::Overloaded)?
+        .map_err(|_| AuthError::Overloaded)?;
+    let cost = bcrypt_cost();
+
+    tokio::task::spawn_blocking(move || hash(&password, cost))
+        .await
+        .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
+        .map_err(|e| AuthError::Validation(format!("Password hashing failed: {}", e)))
+}
+
+async fn verify_password(password: String, password_hash: String) -> Result<bool, AuthError> {
+    let _permit = tokio::time::timeout(BCRYPT_WAIT_TIMEOUT, bcrypt_semaphore().acquire_owned())
+        .await
+        .map_err(|_| AuthError::Overloaded)?
+        .map_err(|_| AuthError::Overloaded)?;
+
+    tokio::task::spawn_blocking(move || verify(&password, &password_hash))
+        .await
+        .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
+        .map_err(|e| AuthError::Validation(format!("Password verification failed: {}", e)))
+}
 
 struct SessionAuthState {
     session_id: String,
@@ -69,13 +111,7 @@ pub async fn signup(
     }
 
     // Hash the password
-    let password_hash = tokio::task::spawn_blocking({
-        let pwd = req.password.clone();
-        move || hash(&pwd, DEFAULT_COST)
-    })
-    .await
-    .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
-    .map_err(|e| AuthError::Validation(format!("Password hashing failed: {}", e)))?;
+    let password_hash = hash_password(req.password.clone()).await?;
 
     // Create new user
     let now = Utc::now();
@@ -149,15 +185,7 @@ pub async fn login(
         .clone()
         .ok_or(AuthError::InvalidCredentials)?;
 
-    if !tokio::task::spawn_blocking({
-        let p = body.password.clone();
-        let h = password_hash.clone();
-        move || verify(&p, &h)
-    })
-    .await
-    .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
-    .map_err(|e| AuthError::Validation(format!("Password verification failed: {}", e)))?
-    {
+    if !verify_password(body.password.clone(), password_hash).await? {
         return Err(AuthError::InvalidCredentials);
     }
 
@@ -173,7 +201,8 @@ pub async fn login(
     // Create session cookie
     let cookie_policy = CookiePolicy::from_request(&req);
     let cookie_ttl = 24 * 3600;
-    let session_expires_at = (Utc::now().timestamp() + response.session_expires_in as i64).to_string();
+    let session_expires_at =
+        (Utc::now().timestamp() + response.session_expires_in as i64).to_string();
     let refresh_expires_at =
         (Utc::now().timestamp() + response.refresh_expires_in as i64).to_string();
 
@@ -388,7 +417,8 @@ pub async fn verify_email_with_otp(
     // Create session cookie
     let cookie_policy = CookiePolicy::from_request(&req);
     let cookie_ttl = 24 * 3600;
-    let session_expires_at = (Utc::now().timestamp() + response.session_expires_in as i64).to_string();
+    let session_expires_at =
+        (Utc::now().timestamp() + response.session_expires_in as i64).to_string();
     let refresh_expires_at =
         (Utc::now().timestamp() + response.refresh_expires_in as i64).to_string();
 
@@ -469,15 +499,7 @@ pub async fn change_password(
 
     // Verify old password
     if let Some(password_hash) = &user_record.password_hash {
-        if !tokio::task::spawn_blocking({
-            let p = body.old_password.clone();
-            let h = password_hash.clone();
-            move || verify(&p, &h)
-        })
-        .await
-        .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
-        .map_err(|e| AuthError::Validation(format!("Password verification failed: {}", e)))?
-        {
+        if !verify_password(body.old_password.clone(), password_hash.clone()).await? {
             return Err(AuthError::InvalidCredentials);
         }
     } else {
@@ -485,13 +507,7 @@ pub async fn change_password(
     }
 
     // Hash new password
-    let new_password_hash = tokio::task::spawn_blocking({
-        let p = body.new_password.clone();
-        move || hash(&p, DEFAULT_COST)
-    })
-    .await
-    .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
-    .map_err(|e| AuthError::Validation(format!("Password hashing failed: {}", e)))?;
+    let new_password_hash = hash_password(body.new_password.clone()).await?;
 
     // Update password in database
     user_repo
@@ -776,13 +792,7 @@ pub async fn reset_password(
     }
 
     // Hash new password
-    let new_password_hash = tokio::task::spawn_blocking({
-        let p = req.new_password.clone();
-        move || hash(&p, DEFAULT_COST)
-    })
-    .await
-    .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
-    .map_err(|e| AuthError::Validation(format!("Password hashing failed: {}", e)))?;
+    let new_password_hash = hash_password(req.new_password.clone()).await?;
 
     // Update password in database
     user_repo

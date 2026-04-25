@@ -13,7 +13,8 @@ use lib_core::Publisher;
 use lib_core::repository::repository::{ClickHousePortfolioRepository, PortfolioRepository};
 use lib_core::{
     CachingPortfolioRepository, OrderCacheConfig, OrderStore, PostgresTradingRepository,
-    TradingRepository, UserBalanceCacheConfig, UserBalanceStore, cache::scaling_cache::ScalingCache,
+    TradingRepository, UserBalanceCacheConfig, UserBalanceStore,
+    cache::scaling_cache::ScalingCache,
 };
 use lib_middleware::api_key::middleware::CacheConfig;
 use lib_middleware::{

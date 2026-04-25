@@ -15,6 +15,7 @@ mod app;
 mod combined_auth;
 mod correlation_handler;
 mod docs;
+mod request_guard;
 mod state;
 
 pub use app::create_app;
@@ -49,6 +50,7 @@ pub async fn initialize_server(
     // client, Kafka consumer, and sea-orm pool threads we already run. See
     // `ServerConfig::effective_workers` for the resolution rules.
     let workers = config.server.effective_workers();
+    let request_limits = request_guard::RequestLimits::default_limits();
     // Clamp the slow-client deadline so a stuck TCP peer can't occupy a
     // worker indefinitely. This complements the Tokio-level timeouts we
     // apply to downstream calls (Redis, Postgres, ClickHouse).
@@ -63,7 +65,7 @@ pub async fn initialize_server(
         keep_alive.as_secs()
     );
 
-    let server = HttpServer::new(move || create_app(app_state.clone()))
+    let server = HttpServer::new(move || create_app(app_state.clone(), request_limits.clone()))
         .workers(workers)
         .backlog(SERVER_BACKLOG)
         .client_request_timeout(client_request_timeout)

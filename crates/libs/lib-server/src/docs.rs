@@ -2,8 +2,8 @@
 
 use actix_web::{HttpResponse, web};
 use serde::{Deserialize, Serialize};
-use utoipa::openapi::security::{ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::openapi::OpenApi as OpenApiDocument;
+use utoipa::openapi::security::{ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::{IntoParams, Modify, OpenApi, ToSchema};
 
 const DOCS_HTML: &str = r#"<!doctype html>

@@ -11,11 +11,13 @@ use tracing::warn;
 
 use crate::combined_auth::CombinedAuthMiddleware;
 use crate::docs;
+use crate::request_guard::{RequestGuard, RequestLimits};
 use crate::state::AppState;
 
 /// Application factory that creates the Actix-web application with all routes and middleware
 pub fn create_app(
     app_state: Arc<AppState>,
+    request_limits: RequestLimits,
 ) -> App<
     impl actix_web::dev::ServiceFactory<
         actix_web::dev::ServiceRequest,
@@ -63,6 +65,7 @@ pub fn create_app(
         // Configure all routes under a single /api scope
         .service(
             web::scope("/api")
+                .wrap(RequestGuard::new(request_limits))
                 // Register required data for auth handlers
                 .app_data(web::Data::new(app_state.user_repo.clone()))
                 .app_data(web::Data::new(Arc::new(app_state.email_service.clone())))
@@ -126,7 +129,11 @@ fn configured_web_origins() -> Vec<String> {
 
     for key in ["CORS_ALLOWED_ORIGINS", "FRONTEND_URL_WEB", "FRONTEND_URL"] {
         if let Ok(value) = std::env::var(key) {
-            for origin in value.split(',').map(str::trim).filter(|item| !item.is_empty()) {
+            for origin in value
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+            {
                 if !origins.iter().any(|existing| existing == origin) {
                     origins.push(origin.to_string());
                 }

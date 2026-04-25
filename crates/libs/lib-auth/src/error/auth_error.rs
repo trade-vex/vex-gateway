@@ -85,6 +85,9 @@ pub enum AuthError {
     #[error("Invalid request")]
     InvalidRequest,
 
+    #[error("Server is busy")]
+    Overloaded,
+
     #[error("Invalid OTP")]
     InvalidOtp,
 
@@ -181,6 +184,11 @@ impl ResponseError for AuthError {
             AuthError::InvalidRequest => {
                 (400, "INVALID_REQUEST", "Invalid request format".to_string())
             }
+            AuthError::Overloaded => (
+                429,
+                "REQUEST_OVERLOADED",
+                "Server is busy, retry shortly".to_string(),
+            ),
             AuthError::InvalidOtp => (400, "INVALID_OTP", "Invalid verification code".to_string()),
             AuthError::OtpExpired => (
                 400,
