@@ -49,6 +49,7 @@ pub fn create_app(
     );
 
     App::new()
+        .wrap(RequestGuard::new(request_limits))
         .wrap(cors)
         .configure(docs::configure)
         .app_data(web::Data::new(app_state.clone()))
@@ -65,7 +66,6 @@ pub fn create_app(
         // Configure all routes under a single /api scope
         .service(
             web::scope("/api")
-                .wrap(RequestGuard::new(request_limits))
                 // Register required data for auth handlers
                 .app_data(web::Data::new(app_state.user_repo.clone()))
                 .app_data(web::Data::new(Arc::new(app_state.email_service.clone())))

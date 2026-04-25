@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::Semaphore;
-use tracing::{debug, warn};
+use tracing::{info, warn};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 const AUTH_LIMIT: usize = 128;
@@ -162,7 +162,7 @@ where
         let started = Instant::now();
 
         Box::pin(async move {
-            debug!(request_class = ?class, method = %method, path = %path, "request_start");
+            info!(request_class = ?class, method = %method, path = %path, "request_start");
 
             let _permit = match limits.semaphore_for(class) {
                 Some(semaphore) => match semaphore.try_acquire_owned() {
@@ -188,7 +188,7 @@ where
 
             match tokio::time::timeout(limits.timeout(), service.call(req)).await {
                 Ok(Ok(response)) => {
-                    debug!(
+                    info!(
                         request_class = ?class,
                         method = %method,
                         path = %path,
