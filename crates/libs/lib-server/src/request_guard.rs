@@ -186,7 +186,6 @@ where
                 None => None,
             };
 
-            let http_req = req.request().clone();
             match tokio::time::timeout(limits.timeout(), service.call(req)).await {
                 Ok(Ok(response)) => {
                     debug!(
@@ -207,15 +206,9 @@ where
                         timeout_ms = limits.timeout().as_millis() as u64,
                         "request_timed_out"
                     );
-                    Ok(ServiceResponse::new(
-                        http_req,
-                        error_response(
-                            StatusCode::GATEWAY_TIMEOUT,
-                            "REQUEST_TIMEOUT",
-                            "Request exceeded server deadline",
-                        ),
-                    )
-                    .map_into_boxed_body())
+                    Err(actix_web::error::ErrorGatewayTimeout(
+                        "Request exceeded server deadline",
+                    ))
                 }
             }
         })
