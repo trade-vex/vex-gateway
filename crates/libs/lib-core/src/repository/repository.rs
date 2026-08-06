@@ -189,7 +189,7 @@ impl PostgresTradingRepository {
 impl TradingRepository for PostgresTradingRepository {
     async fn get_user_balances(&self, user_id: u64) -> Result<Vec<UserBalanceModel>> {
         UserBalanceEntity::find()
-            .filter(UserBalanceColumn::UserId.eq(Decimal::from(user_id)))
+            .filter(UserBalanceColumn::UserId.eq(user_id as i64))
             .order_by_desc(UserBalanceColumn::Timestamp)
             .all(&*self.db)
             .await
@@ -198,7 +198,7 @@ impl TradingRepository for PostgresTradingRepository {
 
     async fn get_user_balance(&self, user_id: u64) -> Result<Option<UserBalanceModel>> {
         UserBalanceEntity::find()
-            .filter(UserBalanceColumn::UserId.eq(Decimal::from(user_id)))
+            .filter(UserBalanceColumn::UserId.eq(user_id as i64))
             .order_by_desc(UserBalanceColumn::Timestamp)
             .one(&*self.db)
             .await
@@ -206,15 +206,15 @@ impl TradingRepository for PostgresTradingRepository {
     }
 
     async fn update_user_balance(&self, user_id: u64, available: u64, locked: u64) -> Result<()> {
-        let total = Decimal::from(available) + Decimal::from(locked);
+        let total = available + locked;
 
         // Insert new balance event (this is an event log table, not mutable state)
         let balance = UserBalanceActiveModel {
-            user_id: Set(Decimal::from(user_id)),
+            user_id: Set(user_id as i64),
             asset_id: Set(0), // Default asset, adjust as needed
-            available: Set(Decimal::from(available)),
-            locked: Set(Decimal::from(locked)),
-            total: Set(total),
+            available: Set(available as i64),
+            locked: Set(locked as i64),
+            total: Set(total as i64),
             timestamp: Set(chrono::Utc::now().timestamp()),
             ..Default::default()
         };
@@ -224,14 +224,14 @@ impl TradingRepository for PostgresTradingRepository {
     }
 
     async fn create_user_balance(&self, user_id: u64, available: u64, locked: u64) -> Result<()> {
-        let total = Decimal::from(available) + Decimal::from(locked);
+        let total = available + locked;
 
         let balance = UserBalanceActiveModel {
-            user_id: Set(Decimal::from(user_id)),
+            user_id: Set(user_id as i64),
             asset_id: Set(0), // Default asset, adjust as needed
-            available: Set(Decimal::from(available)),
-            locked: Set(Decimal::from(locked)),
-            total: Set(total),
+            available: Set(available as i64),
+            locked: Set(locked as i64),
+            total: Set(total as i64),
             timestamp: Set(chrono::Utc::now().timestamp()),
             ..Default::default()
         };
@@ -241,16 +241,23 @@ impl TradingRepository for PostgresTradingRepository {
     }
 
     async fn get_open_orders(&self, user_id: u64) -> Result<Vec<OrderModel>> {
-        // Filter for "open" orders: Placed, Pending, PartiallyFilled, Processing
-        // Exclude: Filled, Cancelled, Rejected
+        // Filter for "open" orders: Placed, Pending, PartiallyFilled (non-IOC), Processing
+        // Exclude: Filled, Cancelled, Rejected, and PartiallyFilled IOC (no exception: IOC is immediate-or-cancel, so partially filled = done).
+        let part_filled_not_ioc = Condition::all()
+            .add(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
+            .add(OrderColumn::OrderTimeInForce.ne("Ioc"))
+            .add(OrderColumn::OrderTimeInForce.ne("IOC"))
+            .add(OrderColumn::OrderTimeInForce.ne("ioc"))
+            .add(OrderColumn::OrderTimeInForce.ne("TIF_IOC"))
+            .add(OrderColumn::OrderTimeInForce.ne("TifIoc"));
         let open_status_condition = Condition::any()
-            .add(OrderColumn::Status.eq("Placed"))
-            .add(OrderColumn::Status.eq("Pending"))
-            .add(OrderColumn::Status.eq("PartiallyFilled"))
-            .add(OrderColumn::Status.eq("Processing"));
+            .add(OrderColumn::OrderStatus.eq("STATUS_PLACED"))
+            .add(OrderColumn::OrderStatus.eq("STATUS_PENDING"))
+            .add(part_filled_not_ioc)
+            .add(OrderColumn::OrderStatus.eq("STATUS_PROCESSING"));
 
         let orders = OrderEntity::find()
-            .filter(OrderColumn::OrderUserId.eq(Decimal::from(user_id)))
+            .filter(OrderColumn::OrderUserId.eq(user_id as i64))
             .filter(open_status_condition)
             .order_by_desc(OrderColumn::OrderTimestamp)
             .all(&*self.db)
@@ -267,16 +274,23 @@ impl TradingRepository for PostgresTradingRepository {
         limit: u64,
         market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>> {
-        // Filter for "open" orders: Placed, Pending, PartiallyFilled, Processing
-        // Exclude: Filled, Cancelled, Rejected
+        // Filter for "open" orders: Placed, Pending, PartiallyFilled (non-IOC), Processing
+        // Exclude: Filled, Cancelled, Rejected, and PartiallyFilled IOC (no exception).
+        let part_filled_not_ioc = Condition::all()
+            .add(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
+            .add(OrderColumn::OrderTimeInForce.ne("Ioc"))
+            .add(OrderColumn::OrderTimeInForce.ne("IOC"))
+            .add(OrderColumn::OrderTimeInForce.ne("ioc"))
+            .add(OrderColumn::OrderTimeInForce.ne("TIF_IOC"))
+            .add(OrderColumn::OrderTimeInForce.ne("TifIoc"));
         let open_status_condition = Condition::any()
-            .add(OrderColumn::Status.eq("Placed"))
-            .add(OrderColumn::Status.eq("Pending"))
-            .add(OrderColumn::Status.eq("PartiallyFilled"))
-            .add(OrderColumn::Status.eq("Processing"));
+            .add(OrderColumn::OrderStatus.eq("STATUS_PLACED"))
+            .add(OrderColumn::OrderStatus.eq("STATUS_PENDING"))
+            .add(part_filled_not_ioc)
+            .add(OrderColumn::OrderStatus.eq("STATUS_PROCESSING"));
 
         let mut query = OrderEntity::find()
-            .filter(OrderColumn::OrderUserId.eq(Decimal::from(user_id)))
+            .filter(OrderColumn::OrderUserId.eq(user_id as i64))
             .filter(open_status_condition);
 
         if let Some(market_id) = market_id {
@@ -295,16 +309,23 @@ impl TradingRepository for PostgresTradingRepository {
     }
 
     async fn count_open_orders(&self, user_id: u64, market_id: Option<u32>) -> Result<u64> {
-        // Count only "open" orders: Placed, Pending, PartiallyFilled, Processing
-        // Exclude: Filled, Cancelled, Rejected
+        // Count only "open" orders: Placed, Pending, PartiallyFilled (non-IOC), Processing
+        // Exclude: Filled, Cancelled, Rejected, and PartiallyFilled IOC (no exception).
+        let part_filled_not_ioc = Condition::all()
+            .add(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
+            .add(OrderColumn::OrderTimeInForce.ne("Ioc"))
+            .add(OrderColumn::OrderTimeInForce.ne("IOC"))
+            .add(OrderColumn::OrderTimeInForce.ne("ioc"))
+            .add(OrderColumn::OrderTimeInForce.ne("TIF_IOC"))
+            .add(OrderColumn::OrderTimeInForce.ne("TifIoc"));
         let open_status_condition = Condition::any()
-            .add(OrderColumn::Status.eq("Placed"))
-            .add(OrderColumn::Status.eq("Pending"))
-            .add(OrderColumn::Status.eq("PartiallyFilled"))
-            .add(OrderColumn::Status.eq("Processing"));
+            .add(OrderColumn::OrderStatus.eq("STATUS_PLACED"))
+            .add(OrderColumn::OrderStatus.eq("STATUS_PENDING"))
+            .add(part_filled_not_ioc)
+            .add(OrderColumn::OrderStatus.eq("STATUS_PROCESSING"));
 
         let mut query = OrderEntity::find()
-            .filter(OrderColumn::OrderUserId.eq(Decimal::from(user_id)))
+            .filter(OrderColumn::OrderUserId.eq(user_id as i64))
             .filter(open_status_condition);
 
         if let Some(market_id) = market_id {
@@ -320,8 +341,8 @@ impl TradingRepository for PostgresTradingRepository {
         OrderEntity::find()
             .filter(
                 OrderColumn::OrderOrderId
-                    .eq(Decimal::from(order_id))
-                    .and(OrderColumn::OrderUserId.eq(Decimal::from(user_id))),
+                    .eq(order_id as i64)
+                    .and(OrderColumn::OrderUserId.eq(user_id as i64)),
             )
             .one(&*self.db)
             .await
@@ -330,29 +351,26 @@ impl TradingRepository for PostgresTradingRepository {
 
     async fn create_order(&self, order: OrderModel) -> Result<u64> {
         let active_model = OrderActiveModel {
+            market_id: Set(order.market_id),
             order_order_id: Set(order.order_order_id),
             order_user_id: Set(order.order_user_id),
             order_price: Set(order.order_price),
             order_size: Set(order.order_size),
+            order_filled_size: Set(order.order_filled_size),
             order_side: Set(order.order_side.to_string()),
+            order_time_in_force: Set(order.order_time_in_force),
+            order_status: Set(order.order_status),
             order_timestamp: Set(order.order_timestamp),
-            market_id: Set(order.market_id),
-            time_in_force: Set(order.time_in_force),
-            status: Set(order.status),
             ..Default::default()
         };
 
         let result = active_model.insert(&*self.db).await?;
-        result
-            .order_order_id
-            .to_string()
-            .parse::<u64>()
-            .map_err(|e| TradingError::Database(format!("Failed to parse order_order_id: {}", e)))
+        Ok(result.order_order_id as u64)
     }
 
     async fn count_user_orders(&self, user_id: u64) -> Result<u64> {
         let count = OrderEntity::find()
-            .filter(OrderColumn::OrderUserId.eq(Decimal::from(user_id)))
+            .filter(OrderColumn::OrderUserId.eq(user_id as i64))
             .count(&*self.db)
             .await?;
         Ok(count)
@@ -361,12 +379,12 @@ impl TradingRepository for PostgresTradingRepository {
     async fn get_order_history(&self, user_id: u64) -> Result<Vec<OrderModel>> {
         // Only return Cancelled, PartiallyFilled, and Filled orders for history
         OrderEntity::find()
-            .filter(OrderColumn::OrderUserId.eq(Decimal::from(user_id)))
+            .filter(OrderColumn::OrderUserId.eq(user_id as i64))
             .filter(
-                OrderColumn::Status
-                    .eq("Cancelled")
-                    .or(OrderColumn::Status.eq("PartiallyFilled"))
-                    .or(OrderColumn::Status.eq("Filled")),
+                OrderColumn::OrderStatus
+                    .eq("STATUS_CANCELLED")
+                    .or(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
+                    .or(OrderColumn::OrderStatus.eq("STATUS_FILLED")),
             )
             .order_by_desc(OrderColumn::OrderTimestamp)
             .all(&*self.db)
@@ -383,12 +401,12 @@ impl TradingRepository for PostgresTradingRepository {
     ) -> Result<Vec<OrderModel>> {
         // Only return Cancelled, PartiallyFilled, and Filled orders for history
         let mut query = OrderEntity::find()
-            .filter(OrderColumn::OrderUserId.eq(Decimal::from(user_id)))
+            .filter(OrderColumn::OrderUserId.eq(user_id as i64))
             .filter(
-                OrderColumn::Status
-                    .eq("Cancelled")
-                    .or(OrderColumn::Status.eq("PartiallyFilled"))
-                    .or(OrderColumn::Status.eq("Filled")),
+                OrderColumn::OrderStatus
+                    .eq("STATUS_CANCELLED")
+                    .or(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
+                    .or(OrderColumn::OrderStatus.eq("STATUS_FILLED")),
             );
 
         if let Some(market_id) = market_id {
@@ -409,12 +427,12 @@ impl TradingRepository for PostgresTradingRepository {
     async fn count_order_history(&self, user_id: u64, market_id: Option<u32>) -> Result<u64> {
         // Count only Cancelled, PartiallyFilled, and Filled orders for history
         let mut query = OrderEntity::find()
-            .filter(OrderColumn::OrderUserId.eq(Decimal::from(user_id)))
+            .filter(OrderColumn::OrderUserId.eq(user_id as i64))
             .filter(
-                OrderColumn::Status
-                    .eq("Cancelled")
-                    .or(OrderColumn::Status.eq("PartiallyFilled"))
-                    .or(OrderColumn::Status.eq("Filled")),
+                OrderColumn::OrderStatus
+                    .eq("STATUS_CANCELLED")
+                    .or(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
+                    .or(OrderColumn::OrderStatus.eq("STATUS_FILLED")),
             );
 
         if let Some(market_id) = market_id {

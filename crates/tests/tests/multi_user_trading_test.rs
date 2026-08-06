@@ -93,6 +93,7 @@ async fn test_deposit_funds(
         user_id: deposit_data.user_id,
         price: 0,
         size: deposit_data.amount,
+        original_size: deposit_data.amount,
         side: Side::Bid,
         time_in_force: TimeInForce::Gtc,
         timestamp: std::time::SystemTime::now()
@@ -159,6 +160,7 @@ async fn test_place_order(
         user_id: order_data.user_id,
         price: order_data.price,
         size: order_data.volume,
+        original_size: order_data.volume,
         side: order_data.side,
         time_in_force: order_data.time_in_force,
         timestamp: std::time::SystemTime::now()
@@ -220,6 +222,7 @@ async fn test_cancel_order(
         user_id: cancel_data.user_id,
         price: 0,
         size: 0,
+        original_size: 0,
         side: Side::Bid,
         time_in_force: TimeInForce::Gtc,
         timestamp: std::time::SystemTime::now()
@@ -273,8 +276,10 @@ async fn test_get_balances(
     match balance_store.get_user_balances(user_id).await {
         Ok(balances) => {
             let total_assets = balances.len();
-            let balance_responses: Vec<_> =
-                balances.into_iter().map(|balance| balance.into()).collect();
+            let balance_responses: Vec<_> = balances
+                .into_iter()
+                .map(|balance| balance_store.to_response(balance))
+                .collect();
 
             let response = BalancesListResponse {
                 balances: balance_responses,
@@ -309,7 +314,10 @@ async fn test_get_open_orders(
             }
 
             let total = orders.len();
-            let order_responses: Vec<_> = orders.into_iter().map(|order| order.into()).collect();
+            let order_responses: Vec<_> = orders
+                .into_iter()
+                .map(|order| order_store.to_response(order))
+                .collect();
 
             let response = OrdersListResponse {
                 orders: order_responses,
@@ -523,12 +531,9 @@ async fn check_orders(
 
         // Assert order belongs to this user
         assert_eq!(
-            order.user_id,
-            Decimal::from(user_id),
+            order.user_id, user_id as i64,
             "Order {} belongs to user {} but queried for user {}",
-            order.order_id,
-            order.user_id,
-            user_id
+            order.order_id, order.user_id, user_id
         );
     }
 

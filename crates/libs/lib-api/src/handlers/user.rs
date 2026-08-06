@@ -79,8 +79,10 @@ pub async fn get_balances(
     match balance_store.get_user_balances(user_id).await {
         Ok(balances) => {
             let total_assets = balances.len();
-            let balance_responses: Vec<UserBalanceResponse> =
-                balances.into_iter().map(|balance| balance.into()).collect();
+            let balance_responses: Vec<UserBalanceResponse> = balances
+                .into_iter()
+                .map(|balance| balance_store.to_response(balance))
+                .collect();
 
             let response = BalancesListResponse {
                 balances: balance_responses,
@@ -182,7 +184,7 @@ pub struct OrdersQuery {
 pub async fn get_open_orders(
     user: AuthenticatedUserId,
     query: web::Query<OrdersQuery>,
-    _order_store: web::Data<Arc<OrderStore>>,
+    order_store: web::Data<Arc<OrderStore>>,
     trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
     let raw = user.0.as_u128();
@@ -215,8 +217,11 @@ pub async fn get_open_orders(
         .await
     {
         Ok(orders) => {
-            let order_responses: Vec<OrderResponse> =
-                orders.into_iter().map(|order| order.into()).collect();
+            // Use order_store.to_response for scaling
+            let order_responses: Vec<OrderResponse> = orders
+                .into_iter()
+                .map(|order| order_store.to_response(order))
+                .collect();
 
             let total_pages = total_count.div_ceil(limit);
             let has_next = page < total_pages;
@@ -277,13 +282,14 @@ pub async fn get_open_orders(
 ///     {
 ///       "order_id": 123456789,
 ///       "user_id": 123456,
-///       "market_id": 1,
+///       "market_id": 65538,
 ///       "price": 5000000,
 ///       "size": 100,
+///       "filled": 100,
 ///       "side": "Bid",
 ///       "timestamp": 1697452800000000,
-///       "status": "Filled",
-///       "filled_size": 100
+///       "time_in_force": "GTC",
+///       "status": "Filled"
 ///     }
 ///   ],
 ///   "total": 3,
@@ -313,14 +319,10 @@ pub async fn get_open_orders(
 /// - PartiallyFilled - Order partially executed
 /// - Filled - Completely executed orders
 /// - Cancelled - User-cancelled orders
-///
-/// # Fill Information
-/// - `filled_size`: Amount of the order that has been executed
-/// - `status`: Current status of the order (PartiallyFilled, Filled, Cancelled)
 pub async fn get_order_history(
     user: AuthenticatedUserId,
     query: web::Query<OrdersQuery>,
-    _order_store: web::Data<Arc<OrderStore>>,
+    order_store: web::Data<Arc<OrderStore>>,
     trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
     let raw = user.0.as_u128();
@@ -357,8 +359,11 @@ pub async fn get_order_history(
         .await
     {
         Ok(orders) => {
-            let order_responses: Vec<OrderHistoryResponse> =
-                orders.into_iter().map(|order| order.into()).collect();
+            // Use order_store.to_history_response for scaling
+            let order_responses: Vec<OrderHistoryResponse> = orders
+                .into_iter()
+                .map(|order| order_store.to_history_response(order))
+                .collect();
 
             let total_pages = total_count.div_ceil(limit);
             let has_next = page < total_pages;

@@ -21,7 +21,6 @@ use lib_core::model::user_favorite_markets::Model as UserFavoriteMarketModel;
 use lib_core::repository::repository::{
     PostgresTradingRepository, TradingError, TradingRepository,
 };
-use rust_decimal::Decimal;
 use sea_orm::{Database, DbErr};
 use std::sync::Arc;
 
@@ -80,7 +79,7 @@ impl TradingRepository for MockTradingRepository {
         Ok(self
             .balances
             .iter()
-            .filter(|b| b.user_id == Decimal::from(user_id))
+            .filter(|b| b.user_id == user_id as i64)
             .cloned()
             .collect())
     }
@@ -92,7 +91,7 @@ impl TradingRepository for MockTradingRepository {
         Ok(self
             .balances
             .iter()
-            .find(|b| b.user_id == Decimal::from(user_id))
+            .find(|b| b.user_id == user_id as i64)
             .cloned())
     }
 
@@ -128,11 +127,11 @@ impl TradingRepository for MockTradingRepository {
             .orders
             .iter()
             .filter(|o| {
-                o.order_user_id == Decimal::from(user_id)
-                    && (o.status.to_lowercase() == "placed"
-                        || o.status.to_lowercase() == "pending"
-                        || o.status.to_lowercase() == "partiallyfilled"
-                        || o.status.to_lowercase() == "processing")
+                o.order_user_id == user_id as i64
+                    && (o.order_status.to_lowercase() == "placed"
+                        || o.order_status.to_lowercase() == "pending"
+                        || o.order_status.to_lowercase() == "partiallyfilled"
+                        || o.order_status.to_lowercase() == "processing")
             })
             .cloned()
             .collect();
@@ -144,7 +143,7 @@ impl TradingRepository for MockTradingRepository {
         user_id: u64,
         offset: u64,
         limit: u64,
-        _market_id: Option<u32>,
+        market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>> {
         if self.should_error {
             return Err(TradingError::Database("Mock database error".to_string()));
@@ -153,11 +152,12 @@ impl TradingRepository for MockTradingRepository {
             .orders
             .iter()
             .filter(|o| {
-                o.order_user_id == Decimal::from(user_id)
-                    && (o.status.to_lowercase() == "placed"
-                        || o.status.to_lowercase() == "pending"
-                        || o.status.to_lowercase() == "partiallyfilled"
-                        || o.status.to_lowercase() == "processing")
+                o.order_user_id == user_id as i64
+                    && (o.order_status.to_lowercase() == "placed"
+                        || o.order_status.to_lowercase() == "pending"
+                        || o.order_status.to_lowercase() == "partiallyfilled"
+                        || o.order_status.to_lowercase() == "processing")
+                    && market_id.is_none_or(|mid| o.market_id == mid as i32)
             })
             .cloned()
             .collect();
@@ -173,7 +173,7 @@ impl TradingRepository for MockTradingRepository {
             .collect())
     }
 
-    async fn count_open_orders(&self, user_id: u64, _market_id: Option<u32>) -> Result<u64> {
+    async fn count_open_orders(&self, user_id: u64, market_id: Option<u32>) -> Result<u64> {
         if self.should_error {
             return Err(TradingError::Database("Mock database error".to_string()));
         }
@@ -181,11 +181,12 @@ impl TradingRepository for MockTradingRepository {
             .orders
             .iter()
             .filter(|o| {
-                o.order_user_id == Decimal::from(user_id)
-                    && (o.status.to_lowercase() == "placed"
-                        || o.status.to_lowercase() == "pending"
-                        || o.status.to_lowercase() == "partiallyfilled"
-                        || o.status.to_lowercase() == "processing")
+                o.order_user_id == user_id as i64
+                    && (o.order_status.to_lowercase() == "placed"
+                        || o.order_status.to_lowercase() == "pending"
+                        || o.order_status.to_lowercase() == "partiallyfilled"
+                        || o.order_status.to_lowercase() == "processing")
+                    && market_id.is_none_or(|mid| o.market_id == mid as i32)
             })
             .count();
         Ok(count as u64)
@@ -198,10 +199,7 @@ impl TradingRepository for MockTradingRepository {
         Ok(self
             .orders
             .iter()
-            .find(|o| {
-                o.order_order_id == Decimal::from(order_id)
-                    && o.order_user_id == Decimal::from(user_id)
-            })
+            .find(|o| o.order_order_id == order_id as i64 && o.order_user_id == user_id as i64)
             .cloned())
     }
 
@@ -219,7 +217,7 @@ impl TradingRepository for MockTradingRepository {
         Ok(self
             .orders
             .iter()
-            .filter(|o| o.order_user_id == Decimal::from(user_id))
+            .filter(|o| o.order_user_id == user_id as i64)
             .count() as u64)
     }
 
@@ -231,10 +229,10 @@ impl TradingRepository for MockTradingRepository {
             .orders
             .iter()
             .filter(|o| {
-                o.order_user_id == Decimal::from(user_id)
-                    && (o.status.to_lowercase() == "cancelled"
-                        || o.status.to_lowercase() == "partiallyfilled"
-                        || o.status.to_lowercase() == "filled")
+                o.order_user_id == user_id as i64
+                    && (o.order_status.to_lowercase() == "cancelled"
+                        || o.order_status.to_lowercase() == "partiallyfilled"
+                        || o.order_status.to_lowercase() == "filled")
             })
             .cloned()
             .collect())
@@ -245,7 +243,7 @@ impl TradingRepository for MockTradingRepository {
         user_id: u64,
         offset: u64,
         limit: u64,
-        _market_id: Option<u32>,
+        market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>> {
         if self.should_error {
             return Err(TradingError::Database("Mock database error".to_string()));
@@ -254,10 +252,11 @@ impl TradingRepository for MockTradingRepository {
             .orders
             .iter()
             .filter(|o| {
-                o.order_user_id == Decimal::from(user_id)
-                    && (o.status.to_lowercase() == "cancelled"
-                        || o.status.to_lowercase() == "partiallyfilled"
-                        || o.status.to_lowercase() == "filled")
+                o.order_user_id == user_id as i64
+                    && (o.order_status.to_lowercase() == "cancelled"
+                        || o.order_status.to_lowercase() == "partiallyfilled"
+                        || o.order_status.to_lowercase() == "filled")
+                    && market_id.is_none_or(|mid| o.market_id == mid as i32)
             })
             .cloned()
             .collect();
@@ -273,7 +272,7 @@ impl TradingRepository for MockTradingRepository {
             .collect())
     }
 
-    async fn count_order_history(&self, user_id: u64, _market_id: Option<u32>) -> Result<u64> {
+    async fn count_order_history(&self, user_id: u64, market_id: Option<u32>) -> Result<u64> {
         if self.should_error {
             return Err(TradingError::Database("Mock database error".to_string()));
         }
@@ -281,10 +280,11 @@ impl TradingRepository for MockTradingRepository {
             .orders
             .iter()
             .filter(|o| {
-                o.order_user_id == Decimal::from(user_id)
-                    && (o.status.to_lowercase() == "cancelled"
-                        || o.status.to_lowercase() == "partiallyfilled"
-                        || o.status.to_lowercase() == "filled")
+                o.order_user_id == user_id as i64
+                    && (o.order_status.to_lowercase() == "cancelled"
+                        || o.order_status.to_lowercase() == "partiallyfilled"
+                        || o.order_status.to_lowercase() == "filled")
+                    && market_id.is_none_or(|mid| o.market_id == mid as i32)
             })
             .count();
         Ok(count as u64)
@@ -349,11 +349,11 @@ fn create_test_balance(
 ) -> UserBalanceModel {
     UserBalanceModel {
         id: 1,
-        user_id: Decimal::from(user_id),
+        user_id,
         asset_id,
-        available: Decimal::from(available),
-        locked: Decimal::from(locked),
-        total: Decimal::from(available) + Decimal::from(locked),
+        available,
+        locked,
+        total: available + locked,
         timestamp: Utc::now().timestamp(),
         created_at: Some(Utc::now().naive_utc()),
     }
@@ -369,16 +369,16 @@ fn create_test_order(
 ) -> OrderModel {
     OrderModel {
         id: order_id,
-        order_order_id: Decimal::from(order_id),
-        order_user_id: Decimal::from(user_id),
-        order_price: Decimal::from(price),
-        order_size: Decimal::from(size),
-        filled_size: Decimal::ZERO,
-        order_side: side.to_string(),
-        order_timestamp: Utc::now().timestamp(),
         market_id: 1,
-        time_in_force: "GTC".to_string(),
-        status: status.to_string(),
+        order_order_id: order_id,
+        order_user_id: user_id,
+        order_price: price,
+        order_size: size,
+        order_filled_size: 0,
+        order_side: side.to_string(),
+        order_time_in_force: "GTC".to_string(),
+        order_status: status.to_string(),
+        order_timestamp: Utc::now().timestamp(),
         created_at: Some(Utc::now().naive_utc()),
     }
 }
@@ -412,7 +412,7 @@ async fn test_get_user_balances_success() {
     assert_eq!(result.len(), 2);
     assert!(result.iter().any(|b| b.asset_id == 0));
     assert!(result.iter().any(|b| b.asset_id == 1));
-    assert!(result.iter().all(|b| b.user_id == Decimal::from(100)));
+    assert!(result.iter().all(|b| b.user_id == 100));
 }
 
 #[tokio::test]
@@ -441,9 +441,9 @@ async fn test_get_user_balance_success() {
     let result = repo.get_user_balance(100).await.unwrap();
     assert!(result.is_some());
     let balance = result.unwrap();
-    assert_eq!(balance.user_id, Decimal::from(100));
-    assert_eq!(balance.available, Decimal::from(1000000));
-    assert_eq!(balance.locked, Decimal::from(500000));
+    assert_eq!(balance.user_id, 100);
+    assert_eq!(balance.available, 1000000);
+    assert_eq!(balance.locked, 500000);
 }
 
 #[tokio::test]
@@ -485,11 +485,11 @@ async fn test_get_open_orders_filters_by_status() {
 
     let result = repo.get_open_orders(100).await.unwrap();
     assert_eq!(result.len(), 3);
-    assert!(result.iter().any(|o| o.status == "Pending"));
-    assert!(result.iter().any(|o| o.status == "Processing"));
-    assert!(result.iter().any(|o| o.status == "PartiallyFilled"));
-    assert!(!result.iter().any(|o| o.status == "Filled"));
-    assert!(!result.iter().any(|o| o.status == "Cancelled"));
+    assert!(result.iter().any(|o| o.order_status == "Pending"));
+    assert!(result.iter().any(|o| o.order_status == "Processing"));
+    assert!(result.iter().any(|o| o.order_status == "PartiallyFilled"));
+    assert!(!result.iter().any(|o| o.order_status == "Filled"));
+    assert!(!result.iter().any(|o| o.order_status == "Cancelled"));
 }
 
 #[tokio::test]
@@ -501,7 +501,7 @@ async fn test_get_open_orders_filters_by_user() {
 
     let result = repo.get_open_orders(100).await.unwrap();
     assert_eq!(result.len(), 1);
-    assert_eq!(result[0].order_user_id, Decimal::from(100));
+    assert_eq!(result[0].order_user_id, 100);
 }
 
 #[tokio::test]
@@ -512,8 +512,8 @@ async fn test_get_order_by_id_success() {
     let result = repo.get_order_by_id(1, 100).await.unwrap();
     assert!(result.is_some());
     let order = result.unwrap();
-    assert_eq!(order.order_order_id, Decimal::from(1));
-    assert_eq!(order.order_user_id, Decimal::from(100));
+    assert_eq!(order.order_order_id, 1);
+    assert_eq!(order.order_user_id, 100);
 }
 
 #[tokio::test]
@@ -734,7 +734,7 @@ async fn test_get_open_orders_case_insensitive_status() {
 #[tokio::test]
 async fn test_balance_total_calculation() {
     let balance = create_test_balance(100, 0, 1000000, 500000);
-    assert_eq!(balance.total, Decimal::from(1500000));
+    assert_eq!(balance.total, 1500000);
     assert_eq!(balance.total, balance.available + balance.locked);
 }
 

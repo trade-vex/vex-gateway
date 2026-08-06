@@ -12,7 +12,7 @@ use lib_core::Publisher;
 use lib_core::repository::repository::{ClickHousePortfolioRepository, PortfolioRepository};
 use lib_core::{
     OrderCacheConfig, OrderStore, PostgresTradingRepository, TradingRepository,
-    UserBalanceCacheConfig, UserBalanceStore,
+    UserBalanceCacheConfig, UserBalanceStore, cache::scaling_cache::ScalingCache,
 };
 use lib_middleware::api_key::middleware::CacheConfig;
 use lib_middleware::{
@@ -141,21 +141,31 @@ impl AppState {
         let trading_repo: Arc<dyn TradingRepository> =
             Arc::new(PostgresTradingRepository::new(db.clone()));
 
-        // Initialize balance store with Redis cache and trading repository
+        // Initialize scaling cache and load scaling factors from database
+        let scaling_cache = Arc::new(ScalingCache::new(db.clone()));
+        scaling_cache
+            .load_all()
+            .await
+            .map_err(|e| format!("Failed to load scaling cache: {}", e))?;
+        info!("Scaling cache initialized and loaded");
+
+        // Initialize balance store with Redis cache, trading repository, and scaling cache
         let balance_store = UserBalanceStore::with_redis_cache(
             UserBalanceCacheConfig { enabled: true },
             config.redis.url.clone(),
             Some(trading_repo.clone()),
         )
-        .await?;
+        .await?
+        .with_scaling_cache(scaling_cache.clone());
 
-        // Initialize order store with Redis cache and trading repository
+        // Initialize order store with Redis cache, trading repository, and scaling cache
         let order_store = OrderStore::with_redis_cache(
             OrderCacheConfig { enabled: true },
             config.redis.url.clone(),
             Some(trading_repo.clone()),
         )
-        .await?;
+        .await?
+        .with_scaling_cache(scaling_cache);
 
         // Initialize session service with 30-minute inactivity TTL
         let session_service = SessionService::new(redis_conn.clone(), 30 * 60);

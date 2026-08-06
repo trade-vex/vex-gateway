@@ -7,7 +7,6 @@ use lib_core::{
     model::orders::Model as OrderModel, wait_for_response,
 };
 use lib_utils::AuthenticatedUserId;
-use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -91,16 +90,18 @@ pub struct CancelOrderRequest {
 /// Returns the status and details of an order placement or cancellation request.
 ///
 /// # Fields
-/// * `order_id` - Unique order identifier assigned by the matching engine (0 if failed)
+/// * `order_id` - Unique order identifier assigned by the matching engine ("0" if failed)
 /// * `client_order_id` - Client-side correlation ID for request tracking
 /// * `status` - Order status (Processing, Filled, Cancelled, Rejected, etc.)
 /// * `message` - Human-readable status message
 ///
+/// Note: `order_id` and `client_order_id` are serialized as strings to support JavaScript BigInt.
+///
 /// # Example Success Response
 /// ```json
 /// {
-///   "order_id": 123456789,
-///   "client_order_id": 987654321,
+///   "order_id": "123456789",
+///   "client_order_id": "987654321",
 ///   "status": "Processing",
 ///   "message": "Order processed successfully"
 /// }
@@ -109,18 +110,20 @@ pub struct CancelOrderRequest {
 /// # Example Error Response
 /// ```json
 /// {
-///   "order_id": 0,
-///   "client_order_id": 987654321,
+///   "order_id": "0",
+///   "client_order_id": "987654321",
 ///   "status": "error",
 ///   "message": "Insufficient balance"
 /// }
 /// ```
 #[derive(Debug, Serialize)]
 pub struct OrderResponse {
-    /// Order ID assigned by the matching engine
+    /// Order ID assigned by the matching engine (serialized as string for JavaScript BigInt support)
+    #[serde(serialize_with = "serialize_u64_as_string")]
     pub order_id: u64,
 
-    /// Client order ID for correlation tracking
+    /// Client order ID for correlation tracking (serialized as string for JavaScript BigInt support)
+    #[serde(serialize_with = "serialize_u64_as_string")]
     pub client_order_id: u64,
 
     /// Order status string
@@ -128,6 +131,13 @@ pub struct OrderResponse {
 
     /// Human-readable message describing the result
     pub message: String,
+}
+
+fn serialize_u64_as_string<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&value.to_string())
 }
 
 // API Handlers
@@ -170,8 +180,8 @@ pub struct OrderResponse {
 /// # Example Success Response (200 OK)
 /// ```json
 /// {
-///   "order_id": 123456789,
-///   "client_order_id": 987654321,
+///   "order_id": "123456789",
+///   "client_order_id": "987654321",
 ///   "status": "Processing",
 ///   "message": "Order processed successfully"
 /// }
@@ -180,8 +190,8 @@ pub struct OrderResponse {
 /// # Example Timeout Response (408)
 /// ```json
 /// {
-///   "order_id": 0,
-///   "client_order_id": 987654321,
+///   "order_id": "0",
+///   "client_order_id": "987654321",
 ///   "status": "timeout",
 ///   "message": "Order processing timeout"
 /// }
@@ -190,8 +200,8 @@ pub struct OrderResponse {
 /// # Example Error Response (500)
 /// ```json
 /// {
-///   "order_id": 0,
-///   "client_order_id": 987654321,
+///   "order_id": "0",
+///   "client_order_id": "987654321",
 ///   "status": "error",
 ///   "message": "Failed to send order: connection refused"
 /// }
@@ -259,6 +269,7 @@ pub async fn place_order(
         user_id,
         price: command_price,
         size: volume,
+        original_size: volume,
         side,
         time_in_force,
         timestamp: std::time::SystemTime::now()
@@ -328,16 +339,16 @@ pub async fn place_order(
                         // Order doesn't exist, create it
                         let order_model = OrderModel {
                             id: 0, // Will be auto-generated
-                            order_order_id: Decimal::from(response.order_id),
-                            order_user_id: Decimal::from(user_id),
-                            order_price: Decimal::from(price),
-                            order_size: Decimal::from(volume),
-                            filled_size: Decimal::from(0),
-                            order_side: format!("{:?}", side),
-                            order_timestamp: command.timestamp as i64, // Store nanoseconds as i64
                             market_id: market_id as i32,
-                            time_in_force: format!("{:?}", time_in_force),
-                            status: status_str.clone(),
+                            order_order_id: response.order_id as i64,
+                            order_user_id: user_id as i64,
+                            order_price: price as i64,
+                            order_size: volume as i64,
+                            order_filled_size: 0,
+                            order_side: format!("{:?}", side),
+                            order_time_in_force: format!("{:?}", time_in_force),
+                            order_status: status_str.clone(),
+                            order_timestamp: command.timestamp as i64, // Store nanoseconds as i64
                             created_at: None,
                         };
 
@@ -434,8 +445,8 @@ pub async fn place_order(
 /// # Example Success Response (200 OK)
 /// ```json
 /// {
-///   "order_id": 123456789,
-///   "client_order_id": 987654321,
+///   "order_id": "123456789",
+///   "client_order_id": "987654321",
 ///   "status": "Cancelled",
 ///   "message": "Cancel processed successfully"
 /// }
@@ -444,8 +455,8 @@ pub async fn place_order(
 /// # Example Timeout Response (408)
 /// ```json
 /// {
-///   "order_id": 123456789,
-///   "client_order_id": 987654321,
+///   "order_id": "123456789",
+///   "client_order_id": "987654321",
 ///   "status": "timeout",
 ///   "message": "Cancel timeout"
 /// }
@@ -454,8 +465,8 @@ pub async fn place_order(
 /// # Example Error Response (500)
 /// ```json
 /// {
-///   "order_id": 123456789,
-///   "client_order_id": 987654321,
+///   "order_id": "123456789",
+///   "client_order_id": "987654321",
 ///   "status": "error",
 ///   "message": "Failed to send cancel: connection refused"
 /// }
@@ -503,6 +514,7 @@ pub async fn cancel_order(
         user_id,
         price: 0,
         size: 0,
+        original_size: 0,
         side: Side::Bid,
         time_in_force: TimeInForce::Gtc,
         timestamp: std::time::SystemTime::now()

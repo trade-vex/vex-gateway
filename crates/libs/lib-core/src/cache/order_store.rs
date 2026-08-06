@@ -1,10 +1,9 @@
+use crate::cache::scaling_cache::ScalingCache;
 use crate::model::orders::Model as OrderModel;
 use crate::repository::repository::{TradingError, TradingRepository};
 use lib_db::backends::kv::redis::RedisDb;
 use lib_db::traits::BasicKvStore;
-use rust_decimal::Decimal;
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -13,6 +12,7 @@ pub struct OrderStore {
     cache: Option<RedisDb>,
     trading_repo: Option<Arc<dyn TradingRepository>>,
     config: OrderCacheConfig,
+    scaling_cache: Option<Arc<ScalingCache>>,
 }
 
 #[derive(Clone, Default)]
@@ -26,6 +26,7 @@ impl OrderStore {
             cache: None,
             trading_repo: None,
             config,
+            scaling_cache: None,
         }
     }
 
@@ -37,6 +38,7 @@ impl OrderStore {
             cache: None,
             trading_repo: Some(trading_repo),
             config,
+            scaling_cache: None,
         }
     }
 
@@ -58,7 +60,148 @@ impl OrderStore {
             cache,
             trading_repo,
             config,
+            scaling_cache: None,
         })
+    }
+
+    pub fn with_scaling_cache(mut self, scaling_cache: Arc<ScalingCache>) -> Self {
+        self.scaling_cache = Some(scaling_cache);
+        self
+    }
+
+    /// Convert status from database format (STATUS_*) to user-friendly format
+    fn normalize_status(status: &str) -> String {
+        match status {
+            "STATUS_FILLED" => "Filled".to_string(),
+            "STATUS_CANCELLED" => "Cancelled".to_string(),
+            "STATUS_PARTIALLY_FILLED" => "PartiallyFilled".to_string(),
+            "STATUS_PLACED" => "Placed".to_string(),
+            "STATUS_PENDING" => "Pending".to_string(),
+            "STATUS_PROCESSING" => "Processing".to_string(),
+            "STATUS_REJECTED" => "Rejected".to_string(),
+            // Handle lowercase variants (from Redis cache)
+            "filled" => "Filled".to_string(),
+            "cancelled" => "Cancelled".to_string(),
+            "partiallyfilled" => "PartiallyFilled".to_string(),
+            "placed" => "Placed".to_string(),
+            "pending" => "Pending".to_string(),
+            "processing" => "Processing".to_string(),
+            "rejected" => "Rejected".to_string(),
+            // Return as-is if already in correct format or unknown
+            _ => {
+                // If it doesn't start with STATUS_, assume it's already normalized
+                if status.starts_with("STATUS_") {
+                    // Convert STATUS_XYZ to Xyz format
+                    let without_prefix = status.strip_prefix("STATUS_").unwrap_or(status);
+                    // Convert to PascalCase
+                    let mut result = String::new();
+                    let mut capitalize_next = true;
+                    for ch in without_prefix.chars() {
+                        if ch == '_' {
+                            capitalize_next = true;
+                        } else if capitalize_next {
+                            result.push(ch.to_uppercase().next().unwrap_or(ch));
+                            capitalize_next = false;
+                        } else {
+                            result.push(ch.to_lowercase().next().unwrap_or(ch));
+                        }
+                    }
+                    result
+                } else {
+                    status.to_string()
+                }
+            }
+        }
+    }
+
+    /// Convert OrderModel to OrderResponse with scaling applied (open orders: size = remaining)
+    pub fn to_response(&self, model: OrderModel) -> crate::dto::trading::OrderResponse {
+        use crate::dto::trading::{OrderResponse, Side};
+        use rust_decimal::Decimal;
+
+        let market_id = model.market_id as u32;
+        let remaining = (model.order_size - model.order_filled_size).max(0);
+
+        // Apply scaling if scaling cache is available
+        let (price, size) = if let Some(scaling_cache) = &self.scaling_cache {
+            let price_decimal =
+                scaling_cache.scale_price(market_id, Decimal::from(model.order_price));
+            let size_decimal = scaling_cache.scale_volume(market_id, Decimal::from(remaining));
+            (price_decimal, size_decimal)
+        } else {
+            (Decimal::from(model.order_price), Decimal::from(remaining))
+        };
+
+        let side = model.order_side.parse().unwrap_or_else(|_| {
+            warn!(
+                order_id = model.order_order_id,
+                order_side = %model.order_side,
+                "Invalid order_side value, defaulting to Bid"
+            );
+            Side::Bid
+        });
+
+        OrderResponse {
+            order_id: model.order_order_id,
+            user_id: model.order_user_id,
+            market_id: model.market_id,
+            price,
+            size,
+            side,
+            timestamp: model.order_timestamp,
+            time_in_force: model.order_time_in_force,
+            status: Self::normalize_status(&model.order_status),
+        }
+    }
+
+    /// Convert OrderModel to OrderHistoryResponse with scaling applied (size = original, filled = filled amount)
+    pub fn to_history_response(
+        &self,
+        model: OrderModel,
+    ) -> crate::dto::trading::OrderHistoryResponse {
+        use crate::dto::trading::{OrderHistoryResponse, Side};
+        use rust_decimal::Decimal;
+
+        let market_id = model.market_id as u32;
+
+        // Apply scaling if scaling cache is available (size = original, filled = order_filled_size)
+        let (price, size, filled) = if let Some(scaling_cache) = &self.scaling_cache {
+            let price_decimal =
+                scaling_cache.scale_price(market_id, Decimal::from(model.order_price));
+            let size_decimal =
+                scaling_cache.scale_volume(market_id, Decimal::from(model.order_size));
+            let filled_decimal =
+                scaling_cache.scale_volume(market_id, Decimal::from(model.order_filled_size));
+            (price_decimal, size_decimal, filled_decimal)
+        } else {
+            (
+                Decimal::from(model.order_price),
+                Decimal::from(model.order_size),
+                Decimal::from(model.order_filled_size),
+            )
+        };
+
+        let side = model.order_side.parse().unwrap_or_else(|_| {
+            warn!(
+                order_id = model.order_order_id,
+                order_side = %model.order_side,
+                "Invalid order_side value, defaulting to Bid"
+            );
+            Side::Bid
+        });
+
+        OrderHistoryResponse {
+            order_id: model.order_order_id,
+            user_id: model.order_user_id,
+            market_id: model.market_id,
+            price,
+            size,
+            filled,
+            side,
+            timestamp: model.order_timestamp,
+            time_in_force: model.order_time_in_force,
+            status: Self::normalize_status(&model.order_status),
+        }
     }
 
     pub async fn get_order_by_id(
@@ -110,7 +253,7 @@ impl OrderStore {
         Ok(None)
     }
 
-    /// Get user's order history with filled_size from orders table only (paginated)
+    /// Get user's order history from orders table (paginated)
     /// Returns Cancelled, PartiallyFilled, and Filled orders
     pub async fn get_user_order_history_paginated(
         &self,
@@ -133,7 +276,7 @@ impl OrderStore {
                             if let Ok(hash) = cache.hgetall_string(&order_key).await {
                                 if !hash.is_empty() {
                                     // Only include Cancelled, PartiallyFilled, Filled
-                                    if let Some(status) = hash.get("status") {
+                                    if let Some(status) = hash.get("order_status") {
                                         let status_lower = status.to_lowercase();
                                         if status_lower == "cancelled"
                                             || status_lower == "partiallyfilled"
@@ -198,7 +341,7 @@ impl OrderStore {
         Ok(vec![])
     }
 
-    /// Get user's order history with filled_size from orders table only
+    /// Get user's order history from orders table
     /// Returns Cancelled, PartiallyFilled, and Filled orders
     pub async fn get_user_order_history(
         &self,
@@ -218,7 +361,7 @@ impl OrderStore {
                             if let Ok(hash) = cache.hgetall_string(&order_key).await {
                                 if !hash.is_empty() {
                                     // Only include Cancelled, PartiallyFilled, Filled
-                                    if let Some(status) = hash.get("status") {
+                                    if let Some(status) = hash.get("order_status") {
                                         let status_lower = status.to_lowercase();
                                         if status_lower == "cancelled"
                                             || status_lower == "partiallyfilled"
@@ -234,10 +377,7 @@ impl OrderStore {
                         }
 
                         if !orders.is_empty() {
-                            debug!(
-                                "Redis cache hit: {} history orders (includes filled_size)",
-                                orders.len()
-                            );
+                            debug!("Redis cache hit: {} history orders", orders.len());
                             return Ok(orders);
                         }
                     }
@@ -251,13 +391,10 @@ impl OrderStore {
             }
         }
 
-        // Database fallback - Query orders_events table only (filled_size is already there)
+        // Database fallback - Query orders_events table
         if let Some(repo) = &self.trading_repo {
             let orders = repo.get_order_history(user_id).await?;
-            debug!(
-                "Postgres: Got {} history orders (includes filled_size)",
-                orders.len()
-            );
+            debug!("Postgres: Got {} history orders", orders.len());
             return Ok(orders);
         }
 
@@ -291,7 +428,7 @@ impl OrderStore {
                             match cache.hgetall_string(&order_key).await {
                                 Ok(hash) if !hash.is_empty() => {
                                     // Filter orders by status - only include "open" orders
-                                    if let Some(status) = hash.get("status") {
+                                    if let Some(status) = hash.get("order_status") {
                                         let status_lower = status.to_lowercase();
 
                                         // Skip orders that are in terminal states (not open)
@@ -300,6 +437,19 @@ impl OrderStore {
                                             || status_lower == "rejected"
                                         {
                                             continue;
+                                        }
+
+                                        // Skip PartiallyFilled IOC orders (no exception).
+                                        if status_lower == "partiallyfilled" {
+                                            if let Some(tif) = hash.get("order_time_in_force") {
+                                                let tif_lower = tif.to_lowercase();
+                                                if tif_lower == "ioc"
+                                                    || tif_lower == "tif_ioc"
+                                                    || tif_lower == "tifioc"
+                                                {
+                                                    continue;
+                                                }
+                                            }
                                         }
 
                                         // Only include: Placed, Pending, PartiallyFilled, Processing
@@ -402,7 +552,7 @@ impl OrderStore {
                                     // Filter orders by status - only include "open" orders
                                     // Open orders: Placed, Pending, PartiallyFilled, Processing
                                     // Exclude: Filled, Cancelled, Rejected
-                                    if let Some(status) = hash.get("status") {
+                                    if let Some(status) = hash.get("order_status") {
                                         let status_lower = status.to_lowercase();
 
                                         // Skip orders that are in terminal states (not open)
@@ -411,6 +561,19 @@ impl OrderStore {
                                             || status_lower == "rejected"
                                         {
                                             continue;
+                                        }
+
+                                        // Skip PartiallyFilled IOC orders (no exception).
+                                        if status_lower == "partiallyfilled" {
+                                            if let Some(tif) = hash.get("order_time_in_force") {
+                                                let tif_lower = tif.to_lowercase();
+                                                if tif_lower == "ioc"
+                                                    || tif_lower == "tif_ioc"
+                                                    || tif_lower == "tifioc"
+                                                {
+                                                    continue;
+                                                }
+                                            }
                                         }
 
                                         // Only include: Placed, Pending, PartiallyFilled, Processing
@@ -536,34 +699,38 @@ impl OrderStore {
         }
     }
 
-    // Helper: Parse order hash from Redis into OrderModel
-    // Kafka writes: order_id, user_id, price, size, filled_size, side, timestamp, market_id, time_in_force, status
-    // Parse all values as Decimal to handle full u64 range without overflow
+    /// Parse order hash from Redis into OrderModel
+    /// Redis keys from Kafka sink: orders:{order_id}
+    /// Fields: market_id, order_order_id, order_user_id, order_price, order_size, order_filled_size,
+    ///   order_side, order_time_in_force, order_status, order_timestamp
     fn parse_order_hash(hash: HashMap<String, String>) -> Option<OrderModel> {
-        let order_order_id = Decimal::from_str(hash.get("order_id")?).ok()?;
-        let order_user_id = Decimal::from_str(hash.get("user_id")?).ok()?;
-        let order_price = Decimal::from_str(hash.get("price")?).ok()?;
-        let order_size = Decimal::from_str(hash.get("size")?).ok()?;
-        let filled_size = Decimal::from_str(hash.get("filled_size").unwrap_or(&"0".to_string()))
-            .unwrap_or(Decimal::ZERO);
-        let order_side = hash.get("side")?.clone();
-        let order_timestamp = hash.get("timestamp")?.parse::<i64>().ok()?;
+        // Parse with order_ prefix (from Kafka Flatten transform)
+        let order_order_id = hash.get("order_order_id")?.parse::<i64>().ok()?;
+        let order_user_id = hash.get("order_user_id")?.parse::<i64>().ok()?;
+        let order_price = hash.get("order_price")?.parse::<i64>().ok()?;
+        let order_size = hash.get("order_size")?.parse::<i64>().ok()?;
+        let order_filled_size = hash
+            .get("order_filled_size")
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        let order_side = hash.get("order_side")?.clone();
+        let order_timestamp = hash.get("order_timestamp")?.parse::<i64>().ok()?;
         let market_id = hash.get("market_id")?.parse::<i32>().ok()?;
-        let time_in_force = hash.get("time_in_force")?.clone();
-        let status = hash.get("status")?.clone();
+        let order_time_in_force = hash.get("order_time_in_force")?.clone();
+        let order_status = hash.get("order_status")?.clone();
 
         Some(OrderModel {
             id: 0, // Auto-generated by DB
+            market_id,
             order_order_id,
             order_user_id,
             order_price,
             order_size,
-            filled_size,
+            order_filled_size,
             order_side,
+            order_time_in_force,
+            order_status,
             order_timestamp,
-            market_id,
-            time_in_force,
-            status,
             created_at: None,
         })
     }

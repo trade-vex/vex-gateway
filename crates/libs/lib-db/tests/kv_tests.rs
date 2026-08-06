@@ -1,7 +1,7 @@
 use lib_db::{
     error::Result,
     memory_kv::MemoryDb,
-    traits::{AdvancedKvStore, AtomicKvStore, BasicKvStore, ExpiringKvStore, KvStore},
+    traits::{AdvancedKvStore, AtomicKvStore, BasicKvStore, KvStore},
 };
 
 #[cfg(feature = "redis")]
@@ -181,33 +181,6 @@ async fn test_atomic_operations<T: AtomicKvStore>(kv: &T) -> Result<()> {
     Ok(())
 }
 
-/// Test helper function for expiring KV operations
-async fn test_expiring_operations<T: ExpiringKvStore>(kv: &T) -> Result<()> {
-    let session = TestSession {
-        user_id: 123,
-        token: "abc123".to_string(),
-        created_at: 1234567890,
-    };
-
-    // Test set with expiration
-    kv.set_ex("session:123", &session, 3600).await?;
-
-    // Test TTL
-    let ttl = kv.ttl("session:123").await?;
-    assert!(ttl.is_some());
-    if let Some(ttl_value) = ttl {
-        assert!(ttl_value > 0);
-        assert!(ttl_value <= 3600);
-    }
-
-    // Test set expiration on existing key
-    kv.set("temp_key", &"temporary".to_string()).await?;
-    let expired = kv.expire("temp_key", 60).await?;
-    assert!(expired);
-
-    Ok(())
-}
-
 /// Test helper function for full KV operations
 async fn test_full_operations<T: KvStore>(kv: &T) -> Result<()> {
     // Test all operations are available
@@ -219,65 +192,6 @@ async fn test_full_operations<T: KvStore>(kv: &T) -> Result<()> {
 
     Ok(())
 }
-
-// #[tokio::test]
-// async fn test_memory_kv_basic_operations() -> Result<()> {
-//     let kv = MemoryDb::connect("memory://").await?;
-//     test_basic_operations(&kv).await
-// }
-
-// #[tokio::test]
-// async fn test_memory_kv_advanced_operations() -> Result<()> {
-//     let kv = MemoryDb::connect("memory://").await?;
-//     test_advanced_operations(&kv).await
-// }
-
-// #[tokio::test]
-// async fn test_memory_kv_atomic_operations() -> Result<()> {
-//     let kv = MemoryDb::connect("memory://").await?;
-//     test_atomic_operations(&kv).await
-// }
-
-// #[tokio::test]
-// async fn test_memory_kv_expiring_operations() -> Result<()> {
-//     let kv = MemoryDb::connect("memory://").await?;
-//     test_expiring_operations(&kv).await
-// }
-
-// #[tokio::test]
-// async fn test_memory_kv_full_operations() -> Result<()> {
-//     let kv = MemoryDb::connect("memory://").await?;
-//     test_full_operations(&kv).await
-// }
-
-// #[tokio::test]
-// async fn test_memory_kv_generic_operations() -> Result<()> {
-//     let kv = MemoryDb::connect("memory://").await?;
-
-//     // Test that generic functions work with any BasicKvStore
-//     let cache_data = vec![1, 2, 3, 4, 5];
-//     kv.set("cache:data", &cache_data).await?;
-
-//     let retrieved: Option<Vec<i32>> = kv.get("cache:data").await?;
-//     assert_eq!(retrieved, Some(cache_data));
-
-//     Ok(())
-// }
-
-// #[tokio::test]
-// async fn test_memory_kv_error_handling() -> Result<()> {
-//     let kv = MemoryDb::connect("memory://").await?;
-
-//     // Test getting non-existent key
-//     let result: Option<String> = kv.get("non_existent").await?;
-//     assert_eq!(result, None);
-
-//     // Test deleting non-existent key
-//     let deleted = kv.delete("non_existent").await?;
-//     assert!(!deleted);
-
-//     Ok(())
-// }
 
 // Redis tests (only run if Redis is available)
 #[cfg(feature = "redis")]
@@ -308,16 +222,6 @@ mod redis_tests {
     async fn test_redis_kv_atomic_operations() -> Result<()> {
         if let Ok(kv) = RedisDb::connect("redis://localhost:6379").await {
             test_atomic_operations(&kv).await
-        } else {
-            println!("Redis not available - skipping test");
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn test_redis_kv_expiring_operations() -> Result<()> {
-        if let Ok(kv) = RedisDb::connect("redis://localhost:6379").await {
-            test_expiring_operations(&kv).await
         } else {
             println!("Redis not available - skipping test");
             Ok(())

@@ -1,10 +1,9 @@
+use crate::cache::scaling_cache::ScalingCache;
 use crate::model::user_balances::Model as UserBalanceModel;
 use crate::repository::repository::{TradingError, TradingRepository};
 use lib_db::backends::kv::redis::RedisDb;
 use lib_db::traits::BasicKvStore;
-use rust_decimal::Decimal;
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -13,6 +12,7 @@ pub struct UserBalanceStore {
     cache: Option<RedisDb>,
     trading_repo: Option<Arc<dyn TradingRepository>>,
     config: UserBalanceCacheConfig,
+    scaling_cache: Option<Arc<ScalingCache>>,
 }
 
 #[derive(Clone, Default)]
@@ -27,6 +27,7 @@ impl UserBalanceStore {
             cache: None,
             trading_repo: None,
             config,
+            scaling_cache: None,
         }
     }
 
@@ -38,6 +39,7 @@ impl UserBalanceStore {
             cache: None,
             trading_repo: Some(trading_repo),
             config,
+            scaling_cache: None,
         }
     }
 
@@ -59,7 +61,13 @@ impl UserBalanceStore {
             cache,
             trading_repo,
             config,
+            scaling_cache: None,
         })
+    }
+
+    pub fn with_scaling_cache(mut self, scaling_cache: Arc<ScalingCache>) -> Self {
+        self.scaling_cache = Some(scaling_cache);
+        self
     }
 
     /// Get user balances from cache: user:{user_id}:asset:{asset_id}:balance hashes
@@ -155,15 +163,46 @@ impl UserBalanceStore {
         }
     }
 
+    /// Convert UserBalanceModel to UserBalanceResponse with scaling applied
+    pub fn to_response(&self, model: UserBalanceModel) -> crate::dto::trading::UserBalanceResponse {
+        use crate::dto::trading::UserBalanceResponse;
+        use rust_decimal::Decimal;
+
+        let asset_id = model.asset_id as u16;
+
+        // Apply scaling if scaling cache is available
+        let (available, locked, total) = if let Some(scaling_cache) = &self.scaling_cache {
+            let available_decimal =
+                scaling_cache.scale_balance(asset_id, Decimal::from(model.available));
+            let locked_decimal = scaling_cache.scale_balance(asset_id, Decimal::from(model.locked));
+            let total_decimal = scaling_cache.scale_balance(asset_id, Decimal::from(model.total));
+            (available_decimal, locked_decimal, total_decimal)
+        } else {
+            (
+                Decimal::from(model.available),
+                Decimal::from(model.locked),
+                Decimal::from(model.total),
+            )
+        };
+
+        UserBalanceResponse {
+            user_id: model.user_id,
+            asset_id: model.asset_id as u32,
+            available,
+            locked,
+            total,
+            timestamp: model.timestamp as u64,
+        }
+    }
+
     // Helper: Parse balance hash from Redis into UserBalanceModel
     // Kafka writes: user_id, asset_id, available, locked, total, timestamp
-    // Parse all values as Decimal to handle full u64 range without overflow
     fn parse_balance_hash(hash: HashMap<String, String>) -> Option<UserBalanceModel> {
-        let user_id = Decimal::from_str(hash.get("user_id")?).ok()?;
+        let user_id = hash.get("user_id")?.parse::<i64>().ok()?;
         let asset_id = hash.get("asset_id")?.parse::<i32>().ok()?;
-        let available = Decimal::from_str(hash.get("available")?).ok()?;
-        let locked = Decimal::from_str(hash.get("locked")?).ok()?;
-        let total = Decimal::from_str(hash.get("total")?).ok()?;
+        let available = hash.get("available")?.parse::<i64>().ok()?;
+        let locked = hash.get("locked")?.parse::<i64>().ok()?;
+        let total = hash.get("total")?.parse::<i64>().ok()?;
         let timestamp = hash.get("timestamp")?.parse::<i64>().ok()?;
 
         Some(UserBalanceModel {
