@@ -2,25 +2,24 @@ use actix_web::{
     Error, HttpRequest,
     dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready},
 };
-use futures_util::future::{LocalBoxFuture, Ready, ready};
-use lib_auth::middleware::jwt_auth::JwtAuthentication;
+use futures_util::future::LocalBoxFuture;
+use lib_auth::middleware::jwt_auth::{JwtAuthentication, JwtAuthenticationMiddleware};
 use lib_auth::service::session_service::SessionService;
-use lib_middleware::api_key::middleware::ApiKeyMiddleware;
+use lib_middleware::api_key::middleware::{ApiKeyMiddleware, ApiKeyMiddlewareService};
 use std::{rc::Rc, sync::Arc};
-use tokio::sync::Mutex as TokioMutex;
 use tracing::error;
 
 #[derive(Clone)]
 pub struct CombinedAuthMiddleware {
     jwt_middleware: JwtAuthentication,
-    api_key_middleware: Arc<TokioMutex<ApiKeyMiddleware>>,
+    api_key_middleware: ApiKeyMiddleware,
     session_service: Arc<SessionService>,
 }
 
 impl CombinedAuthMiddleware {
     pub fn new(
         jwt_middleware: JwtAuthentication,
-        api_key_middleware: Arc<TokioMutex<ApiKeyMiddleware>>,
+        api_key_middleware: ApiKeyMiddleware,
         session_service: Arc<SessionService>,
     ) -> Self {
         Self {
@@ -69,22 +68,34 @@ where
     type Error = Error;
     type Transform = CombinedAuthMiddlewareService<S>;
     type InitError = ();
-    type Future = Ready<Result<Self::Transform, Self::InitError>>;
+    type Future = LocalBoxFuture<'static, Result<Self::Transform, Self::InitError>>;
 
     fn new_transform(&self, service: S) -> Self::Future {
-        ready(Ok(CombinedAuthMiddlewareService {
-            service: Rc::new(service),
-            jwt_middleware: self.jwt_middleware.clone(),
-            api_key_middleware: Arc::clone(&self.api_key_middleware),
-            session_service: Arc::clone(&self.session_service),
-        }))
+        let jwt_middleware = self.jwt_middleware.clone();
+        let api_key_middleware = self.api_key_middleware.clone();
+        let session_service = Arc::clone(&self.session_service);
+
+        Box::pin(async move {
+            let service = Rc::new(service);
+            let jwt_service = jwt_middleware.new_transform(Rc::clone(&service)).await?;
+            let api_key_service = api_key_middleware
+                .new_transform(Rc::clone(&service))
+                .await?;
+
+            Ok(CombinedAuthMiddlewareService {
+                service,
+                jwt_service: Rc::new(jwt_service),
+                api_key_service: Rc::new(api_key_service),
+                session_service,
+            })
+        })
     }
 }
 
 pub struct CombinedAuthMiddlewareService<S> {
     service: Rc<S>,
-    jwt_middleware: JwtAuthentication,
-    api_key_middleware: Arc<TokioMutex<ApiKeyMiddleware>>,
+    jwt_service: Rc<JwtAuthenticationMiddleware<Rc<S>>>,
+    api_key_service: Rc<ApiKeyMiddlewareService<Rc<S>>>,
     session_service: Arc<SessionService>,
 }
 
@@ -101,28 +112,19 @@ where
     forward_ready!(service);
 
     fn call(&self, mut req: ServiceRequest) -> Self::Future {
-        let jwt_middleware = self.jwt_middleware.clone();
-        let api_key_middleware = Arc::clone(&self.api_key_middleware);
+        let jwt_service = Rc::clone(&self.jwt_service);
+        let api_key_service = Rc::clone(&self.api_key_service);
         let session_service = Arc::clone(&self.session_service);
-        let service = Rc::clone(&self.service);
 
         Box::pin(async move {
             let auth_type = CombinedAuthMiddleware::detect_auth_type(req.request());
 
             match auth_type {
                 AuthType::Jwt => {
-                    // Use the JWT middleware's transform to handle JWT validation
-                    let jwt_service = jwt_middleware.new_transform(service.clone()).await.unwrap();
                     return jwt_service.call(req).await;
                 }
 
                 AuthType::ApiKey => {
-                    let api_key_middleware = api_key_middleware.lock().await;
-                    let api_key_service = api_key_middleware
-                        .new_transform(service.clone())
-                        .await
-                        .unwrap();
-
                     let response = api_key_service.call(req).await?;
                     Ok(response.map_into_boxed_body())
                 }
@@ -163,8 +165,6 @@ where
                                     "Session auth: Passing request to JWT middleware for validation"
                                 );
                                 // Now pass to JWT middleware for proper validation
-                                let jwt_service =
-                                    jwt_middleware.new_transform(service.clone()).await.unwrap();
                                 jwt_service.call(req).await
                             }
                             Err(e) => {
@@ -190,5 +190,74 @@ where
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::{App, HttpResponse, test, web};
+    use jsonwebtoken::DecodingKey;
+    use lib_middleware::api_key::security::{ApiKeyConfig, SecurityType};
+    use redis::aio::ConnectionManager;
+    use std::time::Duration;
+    use tokio::sync::Barrier;
+
+    #[actix_web::test]
+    async fn api_key_requests_reach_downstream_concurrently() {
+        let redis_client = redis::Client::open("redis://127.0.0.1:6379/").unwrap();
+        let redis_conn = ConnectionManager::new(redis_client).await.unwrap();
+        let jwt_middleware = JwtAuthentication::new(
+            DecodingKey::from_secret(b"unused-test-secret"),
+            "vex-gateway".to_string(),
+            "api".to_string(),
+            redis_conn.clone(),
+        );
+        let api_key_middleware = ApiKeyMiddleware::new()
+            .with_api_key(
+                ApiKeyConfig::new("concurrent-test-key".to_string())
+                    .with_permissions(vec![SecurityType::UserStream]),
+            )
+            .with_default_security(SecurityType::UserStream);
+        let session_service = Arc::new(SessionService::new(redis_conn, 30 * 60));
+        let combined_auth =
+            CombinedAuthMiddleware::new(jwt_middleware, api_key_middleware, session_service);
+        let barrier = web::Data::new(Barrier::new(2));
+
+        let app = test::init_service(
+            App::new()
+                .app_data(barrier.clone())
+                .wrap(combined_auth)
+                .route(
+                    "/test",
+                    web::get().to(|barrier: web::Data<Barrier>| async move {
+                        barrier.wait().await;
+                        HttpResponse::Ok().finish()
+                    }),
+                ),
+        )
+        .await;
+
+        let first_request = test::TestRequest::get()
+            .uri("/test")
+            .insert_header(("X-MBX-APIKEY", "concurrent-test-key"))
+            .to_request();
+        let second_request = test::TestRequest::get()
+            .uri("/test")
+            .insert_header(("X-MBX-APIKEY", "concurrent-test-key"))
+            .to_request();
+
+        let (first_response, second_response) = tokio::time::timeout(
+            Duration::from_secs(2),
+            futures_util::future::join(
+                test::call_service(&app, first_request),
+                test::call_service(&app, second_request),
+            ),
+        )
+        .await
+        .expect("both requests should enter the downstream handler before either completes");
+
+        assert!(first_response.status().is_success());
+        assert!(second_response.status().is_success());
     }
 }
