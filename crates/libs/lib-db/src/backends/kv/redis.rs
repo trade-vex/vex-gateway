@@ -432,6 +432,26 @@ impl RedisDb {
         .await
     }
 
+    /// HGETALL of every key in one pipelined round trip, in key order. A missing key yields an
+    /// empty map.
+    pub async fn hgetall_strings(
+        &self,
+        keys: &[String],
+    ) -> Result<Vec<std::collections::HashMap<String, String>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.execute_with_retry(|conn| {
+            let mut pipe = redis::pipe();
+            for key in keys {
+                pipe.hgetall(key);
+            }
+            Box::pin(async move { pipe.query_async(conn).await })
+        })
+        .await
+    }
+
     /// Get all members of a set (SMEMBERS)
     /// Returns Vec<String> for plain string data
     pub async fn smembers_string(&self, key: &str) -> Result<Vec<String>> {
@@ -463,32 +483,5 @@ impl RedisDb {
             })
             .await?;
         Ok(())
-    }
-
-    /// Scan for keys matching pattern (SCAN)
-    pub async fn scan_keys(&self, pattern: &str) -> Result<Vec<String>> {
-        let mut conn = self.conn.clone();
-        let mut cursor = 0u64;
-        let mut keys = Vec::new();
-
-        loop {
-            let (new_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg(pattern)
-                .arg("COUNT")
-                .arg(100)
-                .query_async(&mut conn)
-                .await?;
-
-            keys.extend(batch);
-            cursor = new_cursor;
-
-            if cursor == 0 {
-                break;
-            }
-        }
-
-        Ok(keys)
     }
 }

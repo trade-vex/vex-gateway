@@ -136,6 +136,31 @@ Production runs behind an AWS Application Load Balancer (ALB):
 - Keep `routing.http.xff_client_port.enabled` at `false` (the default). With it on, the ALB appends
   `ip:port`, which is not a bare IP, so every client resolves to the ALB's address.
 
+### Redis Eviction Policy
+
+Run Redis with `maxmemory-policy noeviction`. Two kinds of gateway state must never be evicted:
+
+- `token_version:<user_id>` has no TTL and is what revokes a user's outstanding access and refresh
+  tokens after logout, password change or password reset. An `allkeys-*` policy can evict it, which
+  silently makes those tokens valid again.
+- Order idempotency claims (`vex:order-idempotency:*`, 24-hour TTL) stop a retried order from being
+  published twice. A `volatile-*` or `allkeys-*` policy can evict a claim early, and the retry is
+  then accepted as a new order.
+
+With `noeviction`, a full Redis refuses writes and the affected requests fail instead.
+
+### Balance Cache
+
+The gateway only reads balances from Redis. It lists a user's assets from the set
+`user:<user_id>:balances` and then reads each `user:<user_id>:asset:<asset_id>:balance` hash.
+When the set is empty, or lists an asset without a readable hash, the gateway serves the user's
+balances from Postgres instead.
+
+The Events Handler must therefore `SADD` the asset id to that set in the same `MULTI`/`EXEC` as the
+`HSET` of the balance hash. A `SADD` that lands after the `HSET` leaves a window in which the new
+asset is missing from an otherwise complete answer. Until the writer maintains the set, every
+balance read is served from Postgres, which can lag Redis.
+
 ### Generate JWT Keys
 
 ```bash

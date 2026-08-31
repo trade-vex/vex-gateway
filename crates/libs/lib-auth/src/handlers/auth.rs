@@ -611,18 +611,6 @@ pub async fn change_password(
                 "Failed to revoke sessions; please retry".to_string(),
             ));
         }
-
-        // Also revoke refresh tokens (legacy cleanup)
-        if let Err(e) = token_service.revoke_user_sessions(user.user_id).await {
-            tracing::error!(
-                "Failed to revoke refresh tokens after password change for user {}: {}",
-                user.user_id,
-                e
-            );
-            return Err(AuthError::Redis(
-                "Failed to revoke sessions; please retry".to_string(),
-            ));
-        }
     }
 
     Ok(HttpResponse::Ok().json(json!({
@@ -864,18 +852,6 @@ pub async fn reset_password(
         ));
     }
 
-    // Also revoke refresh tokens (legacy cleanup)
-    if let Err(e) = token_service.revoke_user_sessions(user_id).await {
-        tracing::error!(
-            "Failed to revoke refresh tokens after password reset for user {}: {}",
-            user_id,
-            e
-        );
-        return Err(AuthError::Redis(
-            "Failed to revoke sessions; please retry".to_string(),
-        ));
-    }
-
     tracing::info!("Password reset successful for user_id: {}", user_id);
 
     Ok(HttpResponse::Ok().json(json!({
@@ -888,6 +864,7 @@ pub async fn reset_password(
 mod tests {
     use super::*;
     use crate::config::JwtConfig;
+    use crate::dto::jwt_response_dto::JwtTokenResponse;
     use jsonwebtoken::{DecodingKey, EncodingKey};
     use redis::AsyncCommands;
 
@@ -943,52 +920,6 @@ mod tests {
 
         let result = token_service.refresh_tokens(&refresh_token).await;
         assert!(matches!(result, Err(AuthError::TokenRevoked)));
-    }
-
-    #[tokio::test]
-    async fn revoke_user_sessions_revokes_versioned_refresh_records() {
-        let user_id = Uuid::new_v4();
-        let versioned_refresh_token = Uuid::new_v4().to_string();
-        let versioned_jti = Uuid::new_v4().to_string();
-        let redis_conn = create_test_redis_conn().await;
-        let jwt_config = Arc::new(JwtConfig {
-            private_key_path: String::new(),
-            public_key_path: String::new(),
-            access_token_ttl_minutes: 60,
-            refresh_token_ttl_days: 30,
-            issuer: "vex-gateway".to_string(),
-            audience: "vex-api".to_string(),
-        });
-        let token_service = TokenService::new(
-            jwt_config,
-            redis_conn.clone(),
-            Arc::new(EncodingKey::from_secret(b"unused")),
-            Arc::new(DecodingKey::from_secret(b"unused")),
-        );
-
-        let mut conn = redis_conn;
-        let _: () = conn
-            .set_ex(
-                format!("refresh:{}", versioned_refresh_token),
-                format!("{}:{}:1", user_id, versioned_jti),
-                3600,
-            )
-            .await
-            .unwrap();
-
-        token_service.revoke_user_sessions(user_id).await.unwrap();
-
-        let versioned_refresh_exists: bool = conn
-            .exists(format!("refresh:{}", versioned_refresh_token))
-            .await
-            .unwrap();
-        let versioned_blacklist_exists: bool = conn
-            .exists(format!("blacklist:{}", versioned_jti))
-            .await
-            .unwrap();
-
-        assert!(!versioned_refresh_exists);
-        assert!(versioned_blacklist_exists);
     }
 
     use crate::config::EmailConfig;
@@ -1691,5 +1622,204 @@ mod tests {
             .to_http_request();
 
         assert_eq!(client_ip(&request), "192.0.2.10");
+    }
+
+    /// Serves one password user and accepts its password update.
+    struct PasswordRepository {
+        user: Model,
+    }
+
+    #[async_trait]
+    impl UserRepository for PasswordRepository {
+        async fn find_by_id(&self, _user_id: Uuid) -> Result<Option<Model>, AuthError> {
+            Ok(Some(self.user.clone()))
+        }
+
+        async fn find_by_email(&self, _email: &str) -> Result<Option<Model>, AuthError> {
+            unreachable!()
+        }
+
+        async fn find_by_provider_id(
+            &self,
+            _provider: &str,
+            _provider_id: &str,
+        ) -> Result<Option<Model>, AuthError> {
+            unreachable!()
+        }
+
+        async fn create_user(&self, _user: &Model) -> Result<Model, AuthError> {
+            unreachable!()
+        }
+
+        async fn update_last_login(&self, _user_id: Uuid) -> Result<(), AuthError> {
+            unreachable!()
+        }
+
+        async fn verify_email(&self, _user_id: Uuid) -> Result<(), AuthError> {
+            unreachable!()
+        }
+
+        async fn update_password(
+            &self,
+            _user_id: Uuid,
+            _password_hash: &str,
+        ) -> Result<(), AuthError> {
+            Ok(())
+        }
+    }
+
+    /// One signed-in device: its session and the tokens minted for it.
+    async fn sign_in(
+        token_service: &TokenService,
+        session_service: &SessionService,
+        user_id: Uuid,
+    ) -> (String, JwtTokenResponse) {
+        let tokens = token_service.mint_tokens(user_id).await.unwrap();
+        let session_id = session_service
+            .create_session(
+                user_id,
+                tokens.access_token.clone(),
+                tokens.refresh_token.clone(),
+            )
+            .await
+            .unwrap();
+        (session_id, tokens)
+    }
+
+    /// Tokens minted before the version bump are refused: the refresh token by `refresh_tokens`,
+    /// the access token by the version check every JWT request passes (jwt_auth.rs).
+    async fn assert_tokens_revoked(
+        token_service: &TokenService,
+        user_id: Uuid,
+        tokens: &JwtTokenResponse,
+    ) {
+        assert!(matches!(
+            token_service.refresh_tokens(&tokens.refresh_token).await,
+            Err(AuthError::TokenRevoked)
+        ));
+        let claims = token_service.validate_jwt(&tokens.access_token).unwrap();
+        assert!(claims.token_version < token_service.get_token_version(user_id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn password_reset_revokes_every_session_and_outstanding_token() {
+        let (email_service, token_service, session_service) = test_services().await;
+        let user = login_user(
+            format!("reset-{}@example.com", Uuid::new_v4()),
+            "old-password",
+        );
+        let user_id = user.user_id;
+        let devices = [
+            sign_in(&token_service, &session_service, user_id).await,
+            sign_in(&token_service, &session_service, user_id).await,
+        ];
+        let reset_token = email_service.generate_reset_token();
+        email_service
+            .store_reset_token(&reset_token, user_id)
+            .await
+            .unwrap();
+        let user_repo: Arc<dyn UserRepository> = Arc::new(PasswordRepository { user });
+
+        let response = reset_password(
+            web::Json(ResetPasswordRequest {
+                reset_token,
+                new_password: "new-password".to_string(),
+            }),
+            web::Data::new(user_repo),
+            web::Data::new(token_service.clone()),
+            web::Data::new(session_service.clone()),
+            web::Data::new(email_service),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), actix_web::http::StatusCode::OK);
+        for (session_id, tokens) in &devices {
+            assert!(session_service.get_session(session_id).await.is_err());
+            assert_tokens_revoked(&token_service, user_id, tokens).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn password_change_without_a_session_cookie_revokes_every_session_and_token() {
+        let (_, token_service, session_service) = test_services().await;
+        let user = login_user(
+            format!("change-{}@example.com", Uuid::new_v4()),
+            "old-password",
+        );
+        let user_id = user.user_id;
+        let devices = [
+            sign_in(&token_service, &session_service, user_id).await,
+            sign_in(&token_service, &session_service, user_id).await,
+        ];
+        let user_repo: Arc<dyn UserRepository> = Arc::new(PasswordRepository { user });
+
+        let response = change_password(
+            actix_web::test::TestRequest::default().to_http_request(),
+            AuthenticatedUser { user_id },
+            web::Json(ChangePasswordRequest {
+                old_password: "old-password".to_string(),
+                new_password: "new-password".to_string(),
+            }),
+            web::Data::new(user_repo),
+            web::Data::new(token_service.clone()),
+            web::Data::new(session_service.clone()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), actix_web::http::StatusCode::OK);
+        for (session_id, tokens) in &devices {
+            assert!(session_service.get_session(session_id).await.is_err());
+            assert_tokens_revoked(&token_service, user_id, tokens).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn password_change_keeps_only_the_current_session_on_fresh_tokens() {
+        let (_, token_service, session_service) = test_services().await;
+        let user = login_user(
+            format!("change-{}@example.com", Uuid::new_v4()),
+            "old-password",
+        );
+        let user_id = user.user_id;
+        let (current_session, current_tokens) =
+            sign_in(&token_service, &session_service, user_id).await;
+        let (other_session, other_tokens) =
+            sign_in(&token_service, &session_service, user_id).await;
+        let user_repo: Arc<dyn UserRepository> = Arc::new(PasswordRepository { user });
+
+        let response = change_password(
+            actix_web::test::TestRequest::default()
+                .cookie(actix_web::cookie::Cookie::new(
+                    "session_id",
+                    current_session.clone(),
+                ))
+                .to_http_request(),
+            AuthenticatedUser { user_id },
+            web::Json(ChangePasswordRequest {
+                old_password: "old-password".to_string(),
+                new_password: "new-password".to_string(),
+            }),
+            web::Data::new(user_repo),
+            web::Data::new(token_service.clone()),
+            web::Data::new(session_service.clone()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), actix_web::http::StatusCode::OK);
+        // The device that changed the password stays signed in on tokens minted after the bump.
+        let kept = session_service.get_session(&current_session).await.unwrap();
+        assert!(
+            token_service
+                .refresh_tokens(&kept.refresh_token)
+                .await
+                .is_ok()
+        );
+        // The other device, and every token minted before the change, is revoked.
+        assert!(session_service.get_session(&other_session).await.is_err());
+        assert_tokens_revoked(&token_service, user_id, &current_tokens).await;
+        assert_tokens_revoked(&token_service, user_id, &other_tokens).await;
     }
 }

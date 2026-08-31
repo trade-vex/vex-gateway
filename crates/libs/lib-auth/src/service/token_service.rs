@@ -254,45 +254,6 @@ impl TokenService {
         self.mint_tokens_at_version_with_password_time(user_id, password_timestamp, token_version)
             .await
     }
-
-    // Revoke all sessions for a user by blacklisting all refresh tokens
-    pub async fn revoke_user_sessions(&self, user_id: Uuid) -> Result<(), AuthError> {
-        let mut conn = self.conn.clone();
-
-        // Find all refresh tokens for this user
-        let pattern = "refresh:*".to_string();
-        let keys: Vec<String> = conn
-            .keys(pattern)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to find refresh tokens: {}", e)))?;
-
-        // Check each refresh token and delete if it belongs to this user
-        for key in keys {
-            if let Ok(Some(val)) = conn.get::<String, Option<String>>(key.clone()).await {
-                let parts: Vec<&str> = val.split(':').collect();
-                if parts.len() == 3 && parts[0] == user_id.to_string() {
-                    // Delete the refresh token
-                    let _: () = conn.del(key).await.map_err(|e| {
-                        AuthError::Redis(format!("Failed to delete refresh token: {}", e))
-                    })?;
-
-                    // Blacklist the associated JTI
-                    let jti = parts[1];
-                    let blacklist_key = format!("blacklist:{}", jti);
-                    let blacklist_ttl = self.jwt_config.access_token_ttl_minutes * 60;
-                    let blacklist_ttl_u64 = blacklist_ttl.try_into().map_err(|_| {
-                        AuthError::Validation("Blacklist TTL is too large".to_string())
-                    })?;
-                    let _: () = conn
-                        .set_ex(blacklist_key, "1", blacklist_ttl_u64)
-                        .await
-                        .map_err(|e| AuthError::Redis(format!("Failed to blacklist JTI: {}", e)))?;
-                }
-            }
-        }
-
-        Ok(())
-    }
 }
 
 #[cfg(test)]
