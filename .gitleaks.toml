@@ -1,0 +1,66 @@
+title = "Vex Gateway gitleaks configuration"
+
+[extend]
+useDefault = true
+
+# Issue #47 records these pre-existing test/example-token findings. Restrict the
+# baseline to the exact rules and immutable commits that produced today's report.
+[[allowlists]]
+description = "Historical test and example tokens tracked in issue #47"
+targetRules = ["curl-auth-header", "generic-api-key"]
+commits = [
+  "20e3be9e2a96039486a3443e972b782f65ff084c",
+  "21df598c1b70e0e07aead231d88d9a9ecb3859ef",
+  "2733262e85fcc9524da87022f2090cf14a3beb97",
+  "3bc3ce9af475879776d5a8af7127abf70ab17f79",
+  "3d8452bc134840a696eef890e9f0180ca50de0bd",
+  "4870ee5f25f82dcf8ffa7c21d1b5a15902cd44cf",
+  "4ea6eafd30f559d38c60124a13825ab2098bc231",
+  "6171fd662568fd446064fdccd6d176a74ec21be1",
+  "70680cb07bd707644892ca9c6570342f7a02fa67",
+  "7e6c33d1a201ffd84a3b1deb59d318857c893ac2",
+  "bd511b4e149734813bddb2973527b92db066446a",
+  "c77df2262540d280360848dbbe5c7622e6a566fd",
+  "d0bf294737a1159a342766e4aaea4168a8885af7",
+  "eeca3e20ddb350066c92c17b3d4c1d1b09ab7237",
+  "fe59e0b5efae72231ed046f7ed4d7062b3959222",
+]
+
+# Issue #47 records the three known private-key blobs below. Each entry MUST be
+# deleted once the keys are rotated and the history purged. AND requires both
+# an exact introducing commit and an exact target path, so a new key committed
+# at either path remains blocking.
+[[allowlists]]
+description = "Historical certs JWT private-key blob tracked in issue #47"
+targetRules = ["private-key"]
+condition = "AND"
+commits = [
+  "4ea6eafd30f559d38c60124a13825ab2098bc231",
+]
+paths = [
+  '''^certs/jwt_private_key\.pem$''',
+]
+
+[[allowlists]]
+description = "Historical lib-auth original private-key blob tracked in issue #47"
+targetRules = ["private-key"]
+condition = "AND"
+commits = [
+  "4ea6eafd30f559d38c60124a13825ab2098bc231",
+]
+paths = [
+  '''^crates/libs/lib-auth/src/keys/private_key\.pem$''',
+]
+
+[[allowlists]]
+description = "Historical lib-auth replacement private-key blob tracked in issue #47"
+targetRules = ["private-key"]
+condition = "AND"
+commits = [
+  "1596b6131fed07530a7613e4180bbf0962584656",
+  "893aff4b8c1a6c0d0174c99ac2ab20fc69d52814",
+  "eeca3e20ddb350066c92c17b3d4c1d1b09ab7237",
+]
+paths = [
+  '''^crates/libs/lib-auth/src/keys/private_key\.pem$''',
+]
