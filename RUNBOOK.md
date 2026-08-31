@@ -418,6 +418,8 @@ grep -i "memory\|oom" logs/app.log
 2. **Service Impact**
    - Every JWT-authenticated request gets 503 (`service_unavailable`): the token revocation
      checks read Redis.
+   - Signed API-key requests get 503 (`Signature replay protection failed`): their signatures
+     are recorded in Redis against replay.
    - **Order placement fails**: every order's idempotency claim is kept in Redis, so nothing is
      sent to the engine. An order that gets past authentication is answered 503 (`Order was not
      sent because idempotency storage is unavailable`).

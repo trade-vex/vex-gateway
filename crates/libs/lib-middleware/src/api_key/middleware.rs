@@ -3,8 +3,10 @@ use actix_web::{
     error::PayloadError,
     web, Error, HttpMessage, HttpRequest,
 };
+use base64::{engine::general_purpose, Engine as _};
 use futures_util::future::{ready, LocalBoxFuture, Ready};
 use futures_util::stream;
+use sha2::{Digest, Sha256};
 use std::hash::{BuildHasher, RandomState};
 use std::sync::{RwLock, RwLockWriteGuard};
 use std::{
@@ -258,6 +260,65 @@ impl Drop for CacheFillGuard {
     }
 }
 
+/// Records a verified request signature in the replay store until `ttl_ms` has passed, and
+/// rejects a signature that is already recorded.
+///
+/// The store is the gateway's Redis (`auth.redis.url`), given to
+/// [`ApiKeyMiddleware::with_replay_store`]. Without one every signed request fails closed.
+async fn guard_signature(
+    replay_store: Option<&redis::aio::ConnectionManager>,
+    signature: &str,
+    key_material: &KeyMaterial,
+    ttl_ms: u64,
+) -> Result<(), ApiKeyError> {
+    let mut connection = replay_store
+        .ok_or_else(|| {
+            ApiKeyError::Internal("Replay-protection store is not configured".to_string())
+        })?
+        .clone();
+    // Verification already decoded this signature with the same algorithm, so failure here
+    // indicates an internal invariant violation rather than a normal invalid-input path.
+    let signature_bytes = match key_material {
+        KeyMaterial::HmacSecret(_) => hex::decode(signature).map_err(|error| {
+            ApiKeyError::Internal(format!(
+                "Verified HMAC signature could not be decoded: {}",
+                error
+            ))
+        })?,
+        KeyMaterial::RsaPublicKey(_) | KeyMaterial::Ed25519PublicKey(_) => {
+            general_purpose::STANDARD
+                .decode(signature)
+                .map_err(|error| {
+                    ApiKeyError::Internal(format!(
+                        "Verified base64 signature could not be decoded: {}",
+                        error
+                    ))
+                })?
+        }
+    };
+    let signature_hash = hex::encode(Sha256::digest(&signature_bytes));
+    let key = format!("api_signature:{}", signature_hash);
+    let stored: Option<String> = redis::cmd("SET")
+        .arg(key)
+        .arg("1")
+        .arg("NX")
+        .arg("PX")
+        .arg(ttl_ms)
+        .query_async(&mut connection)
+        .await
+        .map_err(|error| {
+            ApiKeyError::Internal(format!("Replay-protection store is unavailable: {}", error))
+        })?;
+
+    if stored.is_none() {
+        return Err(ApiKeyError::InvalidSignature(
+            "Signature has already been used".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 impl ApiKeyStore {
     /// Create new store
     pub fn new(config: CacheConfig) -> Self {
@@ -480,6 +541,8 @@ pub struct ApiKeyMiddleware {
     default_security: SecurityType,
     route_configs: Arc<Vec<RouteSecurityConfig>>,
     strict_timestamp_validation: bool,
+    /// Where signed requests record their signatures against replay; see [`guard_signature`].
+    replay_store: Option<redis::aio::ConnectionManager>,
 }
 
 impl Default for ApiKeyMiddleware {
@@ -489,6 +552,7 @@ impl Default for ApiKeyMiddleware {
             default_security: SecurityType::None,
             route_configs: Arc::new(vec![]),
             strict_timestamp_validation: true,
+            replay_store: None,
         }
     }
 }
@@ -535,6 +599,14 @@ impl ApiKeyMiddleware {
 
     pub fn with_strict_timestamp_validation(mut self, strict: bool) -> Self {
         self.strict_timestamp_validation = strict;
+        self
+    }
+
+    /// Record signed-request signatures in `connection`, the gateway's Redis (`auth.redis.url`),
+    /// so that a captured request cannot be replayed. Until this is set, every request to a signed
+    /// endpoint fails closed with 503.
+    pub fn with_replay_store(mut self, connection: redis::aio::ConnectionManager) -> Self {
+        self.replay_store = Some(connection);
         self
     }
 
@@ -647,6 +719,17 @@ impl ApiKeyMiddleware {
         Ok(())
     }
 
+    fn signature<'a>(
+        query_params: &'a HashMap<String, String>,
+        body_params: &'a HashMap<String, String>,
+    ) -> Result<&'a str, ApiKeyError> {
+        query_params
+            .get("signature")
+            .or_else(|| body_params.get("signature"))
+            .map(String::as_str)
+            .ok_or(ApiKeyError::MissingSignature)
+    }
+
     /// Parse query parameters from URL
     fn parse_query_params(req: &HttpRequest) -> HashMap<String, String> {
         req.uri()
@@ -736,7 +819,7 @@ impl ApiKeyMiddleware {
         body_params: &HashMap<String, String>,
         recv_window: u64,
         strict: bool,
-    ) -> Result<(), ApiKeyError> {
+    ) -> Result<u64, ApiKeyError> {
         let timestamp_str = query_params
             .get("timestamp")
             .or_else(|| body_params.get("timestamp"))
@@ -749,20 +832,19 @@ impl ApiKeyMiddleware {
             .unwrap()
             .as_millis() as u64;
 
-        // Validate using the exact Binance timing logic
-        SignatureVerifier::validate_timestamp(request_time, recv_window, server_time)?;
+        let provided_recv_window = query_params
+            .get("recvWindow")
+            .or_else(|| body_params.get("recvWindow"))
+            .map(|value| {
+                value.parse::<u64>().map_err(|_| {
+                    ApiKeyError::InvalidTimestamp("Invalid recvWindow format".to_string())
+                })
+            })
+            .transpose()?;
 
         // Additional strict validation if enabled
         if strict {
-            // Ensure recvWindow parameter is present and valid
-            if let Some(recv_window_str) = query_params
-                .get("recvWindow")
-                .or_else(|| body_params.get("recvWindow"))
-            {
-                let provided_recv_window = recv_window_str.parse::<u64>().map_err(|_| {
-                    ApiKeyError::InvalidTimestamp("Invalid recvWindow format".to_string())
-                })?;
-
+            if let Some(provided_recv_window) = provided_recv_window {
                 if provided_recv_window > 60000 {
                     return Err(ApiKeyError::InvalidTimestamp(
                         "recvWindow cannot exceed 60000ms".to_string(),
@@ -771,7 +853,12 @@ impl ApiKeyMiddleware {
             }
         }
 
-        Ok(())
+        let effective_recv_window = provided_recv_window.unwrap_or(recv_window).min(recv_window);
+
+        // Validate using the exact Binance timing logic
+        SignatureVerifier::validate_timestamp(request_time, effective_recv_window, server_time)?;
+
+        Ok(effective_recv_window)
     }
 }
 
@@ -794,6 +881,7 @@ where
             default_security: self.default_security,
             route_configs: self.route_configs.clone(),
             strict_timestamp_validation: self.strict_timestamp_validation,
+            replay_store: self.replay_store.clone(),
         }))
     }
 }
@@ -804,6 +892,7 @@ pub struct ApiKeyMiddlewareService<S> {
     default_security: SecurityType,
     route_configs: Arc<Vec<RouteSecurityConfig>>,
     strict_timestamp_validation: bool,
+    replay_store: Option<redis::aio::ConnectionManager>,
 }
 
 impl<S, B> Service<ServiceRequest> for ApiKeyMiddlewareService<S>
@@ -823,6 +912,7 @@ where
         let default_security = self.default_security;
         let route_configs = self.route_configs.clone();
         let strict_timestamp_validation = self.strict_timestamp_validation;
+        let replay_store = self.replay_store.clone();
         let service = Rc::clone(&self.service);
 
         Box::pin(async move {
@@ -833,6 +923,7 @@ where
                 default_security,
                 route_configs: route_configs.clone(),
                 strict_timestamp_validation,
+                replay_store: replay_store.clone(),
             };
             let required_security = middleware.get_route_security_type(path, &route_configs);
 
@@ -916,18 +1007,22 @@ where
                     };
 
                 // Validate timestamp
-                if let Err(e) = ApiKeyMiddleware::validate_timestamp_with_recv_window(
-                    &query_params,
-                    &body_params,
-                    api_config.recv_window,
-                    strict_timestamp_validation,
-                ) {
-                    error!("Timestamp validation failed: {}", e);
-                    return Err(actix_web::error::ErrorBadRequest(format!(
-                        "Timestamp validation failed: {}",
-                        e
-                    )));
-                }
+                let effective_recv_window =
+                    match ApiKeyMiddleware::validate_timestamp_with_recv_window(
+                        &query_params,
+                        &body_params,
+                        api_config.recv_window,
+                        strict_timestamp_validation,
+                    ) {
+                        Ok(recv_window) => recv_window,
+                        Err(e) => {
+                            error!("Timestamp validation failed: {}", e);
+                            return Err(actix_web::error::ErrorBadRequest(format!(
+                                "Timestamp validation failed: {}",
+                                e
+                            )));
+                        }
+                    };
 
                 // Validate signature
                 if let Err(e) = ApiKeyMiddleware::validate_signature(
@@ -942,6 +1037,37 @@ where
                         "Signature validation failed: {}",
                         e
                     )));
+                }
+
+                let signature = match ApiKeyMiddleware::signature(&query_params, &body_params) {
+                    Ok(signature) => signature,
+                    Err(e) => {
+                        error!("Signature extraction failed: {}", e);
+                        return Err(actix_web::error::ErrorBadRequest(format!(
+                            "Signature validation failed: {}",
+                            e
+                        )));
+                    }
+                };
+
+                if let Err(e) = guard_signature(
+                    replay_store.as_ref(),
+                    signature,
+                    api_config
+                        .get_key_material()
+                        .expect("signed request key material was already validated"),
+                    // Cover the verifier's 1s future-drift tolerance as well as the receive window.
+                    effective_recv_window.saturating_add(1000),
+                )
+                .await
+                {
+                    error!("Signature replay protection failed: {}", e);
+                    let message = format!("Signature replay protection failed: {}", e);
+                    return Err(if matches!(e, ApiKeyError::Internal(_)) {
+                        actix_web::error::ErrorServiceUnavailable(message)
+                    } else {
+                        actix_web::error::ErrorBadRequest(message)
+                    });
                 }
             }
 
@@ -1186,5 +1312,234 @@ mod tests {
             error.as_response_error().status_code(),
             actix_web::http::StatusCode::FORBIDDEN
         );
+    }
+
+    use actix_web::{test as actix_test, App, HttpResponse};
+
+    fn current_time_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    /// The test Redis that signed requests record their signatures in (CI sets `REDIS_URL`).
+    async fn test_replay_store() -> redis::aio::ConnectionManager {
+        let redis_url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
+        redis::aio::ConnectionManager::new(redis::Client::open(redis_url).unwrap())
+            .await
+            .expect("replay-protection tests need Redis")
+    }
+
+    #[actix_web::test]
+    async fn rejects_replayed_signed_request() {
+        let secret = "replay-test-secret";
+        let api_key = ApiKeyConfig::new("replay-test-key".to_string())
+            .with_hmac_secret(secret.to_string())
+            .with_permissions(vec![SecurityType::Trade]);
+        let middleware = ApiKeyMiddleware::new()
+            .with_api_key(api_key)
+            .with_default_security(SecurityType::Trade)
+            .with_replay_store(test_replay_store().await);
+        let app = actix_test::init_service(
+            App::new()
+                .wrap(middleware)
+                .default_service(web::to(|| async { HttpResponse::Ok().finish() })),
+        )
+        .await;
+        let timestamp = current_time_ms();
+        let nonce = uuid::Uuid::new_v4();
+        let payload = format!("nonce={nonce}&recvWindow=5000&timestamp={timestamp}");
+        let lower_signature = SignatureVerifier::generate_hmac(&payload, secret).unwrap();
+        let upper_signature = lower_signature.to_uppercase();
+        let first_uri = format!(
+            "/orders?timestamp={timestamp}&recvWindow=5000&nonce={nonce}&signature={upper_signature}"
+        );
+
+        let first_request = actix_test::TestRequest::post()
+            .uri(&first_uri)
+            .insert_header(("X-MBX-APIKEY", "replay-test-key"))
+            .to_request();
+        let first_response = actix_test::try_call_service(&app, first_request).await;
+        assert!(first_response.is_ok());
+
+        let replay_uri = format!(
+            "/orders?timestamp={timestamp}&recvWindow=5000&nonce={nonce}&signature={lower_signature}"
+        );
+        let replayed_request = actix_test::TestRequest::post()
+            .uri(&replay_uri)
+            .insert_header(("X-MBX-APIKEY", "replay-test-key"))
+            .to_request();
+        let replayed_response = actix_test::try_call_service(&app, replayed_request).await;
+        assert!(replayed_response.is_err());
+        let error = replayed_response.unwrap_err();
+        assert_eq!(
+            error.as_response_error().status_code(),
+            actix_web::http::StatusCode::BAD_REQUEST
+        );
+        assert!(error
+            .to_string()
+            .contains("Signature has already been used"));
+    }
+
+    #[actix_web::test]
+    async fn replay_guard_keeps_distinct_base64_signatures_separate() {
+        let replay_store = test_replay_store().await;
+        let key_material = KeyMaterial::RsaPublicKey(String::new());
+        let unique_suffix = general_purpose::STANDARD.encode(uuid::Uuid::new_v4().as_bytes());
+        let first_signature = format!("AAAA{unique_suffix}");
+        let second_signature = format!("aAAA{unique_suffix}");
+
+        assert_ne!(
+            general_purpose::STANDARD.decode(&first_signature).unwrap(),
+            general_purpose::STANDARD.decode(&second_signature).unwrap()
+        );
+
+        assert!(
+            guard_signature(Some(&replay_store), &first_signature, &key_material, 5000)
+                .await
+                .is_ok()
+        );
+        assert!(
+            guard_signature(Some(&replay_store), &second_signature, &key_material, 5000)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[actix_web::test]
+    async fn replay_guard_fails_closed_without_replay_store() {
+        // No `with_replay_store`: there is no default Redis to fall back to.
+        let secret = "replay-outage-test-secret";
+        let api_key = ApiKeyConfig::new("replay-outage-test-key".to_string())
+            .with_hmac_secret(secret.to_string())
+            .with_permissions(vec![SecurityType::Trade]);
+        let middleware = ApiKeyMiddleware::new()
+            .with_api_key(api_key)
+            .with_default_security(SecurityType::Trade);
+        let app = actix_test::init_service(
+            App::new()
+                .wrap(middleware)
+                .default_service(web::to(|| async { HttpResponse::Ok().finish() })),
+        )
+        .await;
+        let timestamp = current_time_ms();
+        let payload = format!("timestamp={timestamp}");
+        let signature = SignatureVerifier::generate_hmac(&payload, secret).unwrap();
+        let uri = format!("/orders?timestamp={timestamp}&signature={signature}");
+        let request = actix_test::TestRequest::post()
+            .uri(&uri)
+            .insert_header(("X-MBX-APIKEY", "replay-outage-test-key"))
+            .to_request();
+
+        let error = actix_test::try_call_service(&app, request)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.as_response_error().status_code(),
+            actix_web::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[actix_web::test]
+    async fn replay_guard_outlives_future_timestamp_acceptance_window() {
+        let secret = "future-replay-test-secret";
+        let api_key = ApiKeyConfig::new("future-replay-test-key".to_string())
+            .with_hmac_secret(secret.to_string())
+            .with_permissions(vec![SecurityType::Trade]);
+        let replay_store = test_replay_store().await;
+        let middleware = ApiKeyMiddleware::new()
+            .with_api_key(api_key)
+            .with_default_security(SecurityType::Trade)
+            .with_replay_store(replay_store.clone());
+        let app = actix_test::init_service(
+            App::new()
+                .wrap(middleware)
+                .default_service(web::to(|| async { HttpResponse::Ok().finish() })),
+        )
+        .await;
+        let effective_recv_window = 5000;
+        let server_time = current_time_ms();
+        let timestamp = server_time.saturating_add(999);
+        assert!(SignatureVerifier::validate_timestamp(
+            timestamp,
+            effective_recv_window,
+            server_time
+        )
+        .is_ok());
+        let nonce = uuid::Uuid::new_v4();
+        let payload =
+            format!("nonce={nonce}&recvWindow={effective_recv_window}&timestamp={timestamp}");
+        let signature = SignatureVerifier::generate_hmac(&payload, secret).unwrap();
+        let uri = format!(
+            "/orders?timestamp={timestamp}&recvWindow={effective_recv_window}&nonce={nonce}&signature={signature}"
+        );
+        let request = actix_test::TestRequest::post()
+            .uri(&uri)
+            .insert_header(("X-MBX-APIKEY", "future-replay-test-key"))
+            .to_request();
+
+        assert!(actix_test::try_call_service(&app, request).await.is_ok());
+
+        let signature_bytes = hex::decode(signature).unwrap();
+        let signature_hash = hex::encode(Sha256::digest(signature_bytes));
+        let key = format!("api_signature:{signature_hash}");
+        // The guard wrote to the store it was given.
+        let mut connection = replay_store;
+        let ttl_ms: i64 = redis::cmd("PTTL")
+            .arg(key)
+            .query_async(&mut connection)
+            .await
+            .unwrap();
+
+        assert!(ttl_ms > effective_recv_window as i64);
+    }
+
+    #[test]
+    fn client_recv_window_narrows_key_window() {
+        let timestamp = current_time_ms().saturating_sub(100);
+        let without_client_window =
+            HashMap::from([("timestamp".to_string(), timestamp.to_string())]);
+        assert_eq!(
+            ApiKeyMiddleware::validate_timestamp_with_recv_window(
+                &without_client_window,
+                &HashMap::new(),
+                5000,
+                true,
+            )
+            .unwrap(),
+            5000
+        );
+
+        let with_client_window = HashMap::from([
+            ("timestamp".to_string(), timestamp.to_string()),
+            ("recvWindow".to_string(), "50".to_string()),
+        ]);
+        assert!(ApiKeyMiddleware::validate_timestamp_with_recv_window(
+            &with_client_window,
+            &HashMap::new(),
+            5000,
+            true,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn client_recv_window_does_not_widen_key_window() {
+        let timestamp = current_time_ms().saturating_sub(100);
+        let query_params = HashMap::from([
+            ("timestamp".to_string(), timestamp.to_string()),
+            ("recvWindow".to_string(), "5000".to_string()),
+        ]);
+
+        assert!(ApiKeyMiddleware::validate_timestamp_with_recv_window(
+            &query_params,
+            &HashMap::new(),
+            50,
+            true,
+        )
+        .is_err());
     }
 }

@@ -116,8 +116,10 @@ impl AppState {
             Arc::new(ClickHousePortfolioRepository::new(ch))
         };
 
-        // Initialize API key middleware with database repository
-        let api_key_middleware = Self::init_api_key_middleware(&api_key_repository);
+        // Initialize API key middleware with database repository; signature replay protection
+        // uses the gateway's Redis connection
+        let api_key_middleware =
+            Self::init_api_key_middleware(&api_key_repository, redis_conn.clone());
 
         // Initialize services
         let token_service = TokenService::new(
@@ -299,8 +301,12 @@ impl AppState {
             .map_err(|e| format!("Failed to create HTTP client: {}", e).into())
     }
 
-    /// Create ApiKeyMiddleware using AppState dependencies
-    pub fn init_api_key_middleware(api_key_repo: &Arc<dyn ApiKeyRepository>) -> ApiKeyMiddleware {
+    /// Create ApiKeyMiddleware using AppState dependencies; `redis_conn` (`auth.redis.url`) holds
+    /// the signature replay guards
+    pub fn init_api_key_middleware(
+        api_key_repo: &Arc<dyn ApiKeyRepository>,
+        redis_conn: ConnectionManager,
+    ) -> ApiKeyMiddleware {
         // Create cache configuration
         // This should be loaded from config , hardcoded config should be removed
         let cache_config = CacheConfig {
@@ -312,6 +318,7 @@ impl AppState {
         ApiKeyMiddleware::new()
             .with_cache_config(cache_config)
             .with_repository(api_key_repo.clone())
+            .with_replay_store(redis_conn)
             .with_default_security(SecurityType::Trade)
     }
 
