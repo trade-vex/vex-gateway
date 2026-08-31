@@ -1,7 +1,10 @@
 use crate::dto::auth_request_dto::{OAuthCallbackQuery, OAuthExchangeRequest, OAuthInitQuery};
 use crate::dto::auth_response_dto::OAuthExchangeResponse;
 use crate::error::auth_error::AuthError;
-use crate::service::{oauth_service::OAuthService, session_service::SessionService};
+use crate::service::{
+    oauth_service::{OAuthCallbackMeta, OAuthService},
+    session_service::SessionService,
+};
 
 use actix_web::{
     HttpRequest, HttpResponse,
@@ -12,6 +15,17 @@ use serde_json;
 use std::sync::Arc;
 use tracing::error;
 use url::Url;
+
+pub(crate) fn validate_callback_state_cookie(
+    meta: &OAuthCallbackMeta,
+    has_state_cookie: bool,
+) -> Result<(), AuthError> {
+    if meta.platform.as_deref() != Some("app") && !has_state_cookie {
+        return Err(AuthError::StateMismatch);
+    }
+
+    Ok(())
+}
 
 /// Initiate OAuth flow
 /// GET /oauth/{provider}?platform=app|web&app_challenge=...
@@ -106,9 +120,7 @@ pub async fn handle_oauth_callback(
         Ok((response, meta)) => {
             // For web flows (non-app), require the state cookie to prevent CSRF
             // Mobile apps don't have cookies, they use app_challenge verification instead
-            if meta.app_challenge.is_none() && !has_state_cookie {
-                return Err(AuthError::StateMismatch);
-            }
+            validate_callback_state_cookie(&meta, has_state_cookie)?;
 
             // Get user_id and user_info from the response
             let user_id = response.user.user_id;
