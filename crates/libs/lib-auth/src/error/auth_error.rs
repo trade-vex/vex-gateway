@@ -90,6 +90,9 @@ pub enum AuthError {
 
     #[error("OTP expired")]
     OtpExpired,
+
+    #[error("Too many requests")]
+    RateLimited { retry_after_seconds: u64 },
 }
 
 impl ResponseError for AuthError {
@@ -187,19 +190,34 @@ impl ResponseError for AuthError {
                 "OTP_EXPIRED",
                 "Verification code has expired".to_string(),
             ),
+            AuthError::RateLimited { .. } => (
+                429,
+                "RATE_LIMITED",
+                "Too many requests. Please try again later.".to_string(),
+            ),
             AuthError::Config(_) | AuthError::InternalError(_) => {
                 (500, "INTERNAL_ERROR", "Internal server error".to_string())
             }
         };
 
-        HttpResponse::build(actix_web::http::StatusCode::from_u16(status_code).unwrap()).json(
-            json!({
-                "error": {
-                    "code": error_code,
-                    "message": message
-                }
-            }),
-        )
+        let mut response =
+            HttpResponse::build(actix_web::http::StatusCode::from_u16(status_code).unwrap());
+        if let AuthError::RateLimited {
+            retry_after_seconds,
+        } = self
+        {
+            response.insert_header((
+                actix_web::http::header::RETRY_AFTER,
+                retry_after_seconds.to_string(),
+            ));
+        }
+
+        response.json(json!({
+            "error": {
+                "code": error_code,
+                "message": message
+            }
+        }))
     }
 }
 
@@ -225,5 +243,22 @@ impl From<reqwest::Error> for AuthError {
 impl From<serde_json::Error> for AuthError {
     fn from(error: serde_json::Error) -> Self {
         AuthError::InternalError(format!("JSON parsing failed: {}", error))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::http::{StatusCode, header::RETRY_AFTER};
+
+    #[test]
+    fn rate_limit_response_has_retry_after_header() {
+        let response = AuthError::RateLimited {
+            retry_after_seconds: 42,
+        }
+        .error_response();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "42");
     }
 }

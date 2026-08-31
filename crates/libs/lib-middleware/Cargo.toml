@@ -16,6 +16,7 @@ sha2 = "0.10"
 hex = "0.4"
 base64 = "0.21"
 url = "2.4"
+ipnet = "2"
 # RSASSA-PKCS1-v1_5 signature verification is behind the `pkcs1v15` feature since rsa 0.10.
 rsa = { version = "0.10", features = ["pkcs1v15"] }
 ed25519-dalek = { version = "2.0", features = ["pkcs8"] }

@@ -1,4 +1,5 @@
 pub mod api_key;
+pub mod client_ip;
 pub mod models;
 pub mod repository;
 
@@ -8,6 +9,8 @@ pub use api_key::{
     security::{ApiKeyConfig, KeyMaterial, SecurityType},
     signature::{SignatureAlgorithm, SignatureVerifier},
 };
+
+pub use client_ip::TrustedProxies;
 
 pub use models::api_key::{KeyMaterialType, Model as ApiKeyModel, NewApiKey};
 

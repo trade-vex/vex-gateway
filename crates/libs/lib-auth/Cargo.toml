@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+lib-middleware = { path = "../lib-middleware" }
 actix-web = { workspace = true }
 jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }
@@ -45,3 +46,4 @@ tokio = { workspace = true }
 serde_json = { workspace = true }
 dotenvy = { workspace = true }
 tokio-test = "0.4.4"
+rsa = "0.10"

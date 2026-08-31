@@ -43,6 +43,7 @@ pub fn create_app(
 
     App::new()
         .app_data(web::Data::new(app_state.clone()))
+        .app_data(web::Data::new(app_state.trusted_proxies.clone()))
         .app_data(web::Data::new(api_key_store))
         .app_data(web::Data::new(app_state.user_repo.clone()))
         .app_data(web::Data::new(app_state.db.clone()))
