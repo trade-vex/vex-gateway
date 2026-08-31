@@ -1,7 +1,4 @@
-use crate::model::orders::{
-    ActiveModel as OrderActiveModel, Column as OrderColumn, Entity as OrderEntity,
-    Model as OrderModel,
-};
+use crate::model::orders::{ActiveModel as OrderActiveModel, Model as OrderModel};
 use crate::model::user_balances::{
     ActiveModel as UserBalanceActiveModel, Column as UserBalanceColumn,
     Entity as UserBalanceEntity, Model as UserBalanceModel,
@@ -183,23 +180,164 @@ impl PostgresTradingRepository {
     pub fn new(db: Arc<DatabaseConnection>) -> Self {
         Self { db }
     }
+
+    fn latest_orders_statement(
+        user_id: u64,
+        status_filter: &str,
+        market_id: Option<u32>,
+        pagination: Option<(u64, u64)>,
+    ) -> Statement {
+        let mut values = vec![(user_id as i64).into()];
+        let mut sql = format!(
+            r#"
+            WITH latest_orders AS (
+                SELECT orders_events.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY order_user_id, order_order_id
+                           -- Rank by the event's own timestamp, never its insert id. vex-core's
+                           -- event-ordering contract (KafkaEventsHandler): the timestamp is a
+                           -- strictly increasing per-command engine clock, and a command emits at
+                           -- most one event per key holding the key's state after that command, so
+                           -- the greatest timestamp is the latest state. Kafka and insert order are
+                           -- not engine order; id is a tie-break that should never fire.
+                           ORDER BY order_timestamp DESC, id DESC
+                       ) AS event_rank
+                FROM trading.orders_events
+                WHERE order_user_id = $1
+            )
+            SELECT id, market_id, order_order_id, order_user_id, order_price, order_size,
+                   order_filled_size, order_side, order_time_in_force, order_status,
+                   order_timestamp, created_at
+            FROM latest_orders
+            WHERE event_rank = 1 AND ({status_filter})
+            "#
+        );
+
+        if let Some(market_id) = market_id {
+            values.push((market_id as i32).into());
+            sql.push_str(&format!(" AND market_id = ${}", values.len()));
+        }
+
+        sql.push_str(" ORDER BY order_timestamp DESC, id DESC");
+
+        if let Some((offset, limit)) = pagination {
+            values.push((offset as i64).into());
+            let offset_parameter = values.len();
+            values.push((limit as i64).into());
+            let limit_parameter = values.len();
+            sql.push_str(&format!(
+                " OFFSET ${offset_parameter} LIMIT ${limit_parameter}"
+            ));
+        }
+
+        Statement::from_sql_and_values(DbBackend::Postgres, sql, values)
+    }
+
+    fn latest_orders_count_statement(
+        user_id: u64,
+        status_filter: &str,
+        market_id: Option<u32>,
+    ) -> Statement {
+        let mut values = vec![(user_id as i64).into()];
+        let mut sql = format!(
+            r#"
+            WITH latest_orders AS (
+                SELECT market_id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY order_user_id, order_order_id
+                           -- Rank by the event's own timestamp, never its insert id. vex-core's
+                           -- event-ordering contract (KafkaEventsHandler): the timestamp is a
+                           -- strictly increasing per-command engine clock, and a command emits at
+                           -- most one event per key holding the key's state after that command, so
+                           -- the greatest timestamp is the latest state. Kafka and insert order are
+                           -- not engine order; id is a tie-break that should never fire.
+                           ORDER BY order_timestamp DESC, id DESC
+                       ) AS event_rank,
+                       order_status,
+                       order_time_in_force
+                FROM trading.orders_events
+                WHERE order_user_id = $1
+            )
+            SELECT COUNT(*) AS count
+            FROM latest_orders
+            WHERE event_rank = 1 AND ({status_filter})
+            "#
+        );
+
+        if let Some(market_id) = market_id {
+            values.push((market_id as i32).into());
+            sql.push_str(&format!(" AND market_id = ${}", values.len()));
+        }
+
+        Statement::from_sql_and_values(DbBackend::Postgres, sql, values)
+    }
+
+    async fn count_latest_orders(
+        &self,
+        user_id: u64,
+        status_filter: &str,
+        market_id: Option<u32>,
+    ) -> Result<u64> {
+        let row = self
+            .db
+            .query_one(Self::latest_orders_count_statement(
+                user_id,
+                status_filter,
+                market_id,
+            ))
+            .await?
+            .ok_or_else(|| TradingError::Database("Order count returned no row".to_string()))?;
+        let count: i64 = row.try_get("", "count")?;
+        Ok(count as u64)
+    }
 }
+
+// Status and time-in-force values are vex-core's protobuf enum value names (trading.proto
+// `Status`, `TimeInForce`), which the Kafka Connect sink writes verbatim.
+const OPEN_ORDER_FILTER: &str = r#"
+    order_status IN ('STATUS_PLACED', 'STATUS_PROCESSING')
+    OR (
+        order_status = 'STATUS_PARTIALLY_FILLED'
+        AND order_time_in_force <> 'TIF_IOC'
+    )
+"#;
+
+const HISTORY_ORDER_FILTER: &str =
+    "order_status IN ('STATUS_CANCELLED', 'STATUS_PARTIALLY_FILLED', 'STATUS_FILLED')";
 
 #[async_trait]
 impl TradingRepository for PostgresTradingRepository {
     async fn get_user_balances(&self, user_id: u64) -> Result<Vec<UserBalanceModel>> {
-        UserBalanceEntity::find()
-            .filter(UserBalanceColumn::UserId.eq(user_id as i64))
-            .order_by_desc(UserBalanceColumn::Timestamp)
-            .all(&*self.db)
-            .await
-            .map_err(Into::into)
+        UserBalanceModel::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+            WITH latest_balances AS (
+                SELECT balances_events.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY user_id, asset_id
+                           -- Same contract as the order events above: one balance event per
+                           -- (user, asset) per command, ranked by the engine timestamp.
+                           ORDER BY timestamp DESC, id DESC
+                       ) AS event_rank
+                FROM trading.balances_events
+                WHERE user_id = $1
+            )
+            SELECT id, user_id, asset_id, available, locked, total, timestamp, created_at
+            FROM latest_balances
+            WHERE event_rank = 1
+            ORDER BY timestamp DESC, id DESC
+            "#,
+            [(user_id as i64).into()],
+        ))
+        .all(&*self.db)
+        .await
+        .map_err(Into::into)
     }
 
     async fn get_user_balance(&self, user_id: u64) -> Result<Option<UserBalanceModel>> {
         UserBalanceEntity::find()
             .filter(UserBalanceColumn::UserId.eq(user_id as i64))
-            .order_by_desc(UserBalanceColumn::Timestamp)
+            .order_by_desc(UserBalanceColumn::Id)
             .one(&*self.db)
             .await
             .map_err(Into::into)
@@ -241,30 +379,15 @@ impl TradingRepository for PostgresTradingRepository {
     }
 
     async fn get_open_orders(&self, user_id: u64) -> Result<Vec<OrderModel>> {
-        // Filter for "open" orders: Placed, Pending, PartiallyFilled (non-IOC), Processing
-        // Exclude: Filled, Cancelled, Rejected, and PartiallyFilled IOC (no exception: IOC is immediate-or-cancel, so partially filled = done).
-        let part_filled_not_ioc = Condition::all()
-            .add(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
-            .add(OrderColumn::OrderTimeInForce.ne("Ioc"))
-            .add(OrderColumn::OrderTimeInForce.ne("IOC"))
-            .add(OrderColumn::OrderTimeInForce.ne("ioc"))
-            .add(OrderColumn::OrderTimeInForce.ne("TIF_IOC"))
-            .add(OrderColumn::OrderTimeInForce.ne("TifIoc"));
-        let open_status_condition = Condition::any()
-            .add(OrderColumn::OrderStatus.eq("STATUS_PLACED"))
-            .add(OrderColumn::OrderStatus.eq("STATUS_PENDING"))
-            .add(part_filled_not_ioc)
-            .add(OrderColumn::OrderStatus.eq("STATUS_PROCESSING"));
-
-        let orders = OrderEntity::find()
-            .filter(OrderColumn::OrderUserId.eq(user_id as i64))
-            .filter(open_status_condition)
-            .order_by_desc(OrderColumn::OrderTimestamp)
-            .all(&*self.db)
-            .await
-            .map_err(TradingError::from)?;
-
-        Ok(orders)
+        OrderModel::find_by_statement(Self::latest_orders_statement(
+            user_id,
+            OPEN_ORDER_FILTER,
+            None,
+            None,
+        ))
+        .all(&*self.db)
+        .await
+        .map_err(Into::into)
     }
 
     async fn get_open_orders_paginated(
@@ -274,79 +397,39 @@ impl TradingRepository for PostgresTradingRepository {
         limit: u64,
         market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>> {
-        // Filter for "open" orders: Placed, Pending, PartiallyFilled (non-IOC), Processing
-        // Exclude: Filled, Cancelled, Rejected, and PartiallyFilled IOC (no exception).
-        let part_filled_not_ioc = Condition::all()
-            .add(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
-            .add(OrderColumn::OrderTimeInForce.ne("Ioc"))
-            .add(OrderColumn::OrderTimeInForce.ne("IOC"))
-            .add(OrderColumn::OrderTimeInForce.ne("ioc"))
-            .add(OrderColumn::OrderTimeInForce.ne("TIF_IOC"))
-            .add(OrderColumn::OrderTimeInForce.ne("TifIoc"));
-        let open_status_condition = Condition::any()
-            .add(OrderColumn::OrderStatus.eq("STATUS_PLACED"))
-            .add(OrderColumn::OrderStatus.eq("STATUS_PENDING"))
-            .add(part_filled_not_ioc)
-            .add(OrderColumn::OrderStatus.eq("STATUS_PROCESSING"));
-
-        let mut query = OrderEntity::find()
-            .filter(OrderColumn::OrderUserId.eq(user_id as i64))
-            .filter(open_status_condition);
-
-        if let Some(market_id) = market_id {
-            query = query.filter(OrderColumn::MarketId.eq(market_id as i32));
-        }
-
-        let orders = query
-            .order_by_desc(OrderColumn::OrderTimestamp)
-            .offset(offset)
-            .limit(limit)
-            .all(&*self.db)
-            .await
-            .map_err(TradingError::from)?;
-
-        Ok(orders)
+        OrderModel::find_by_statement(Self::latest_orders_statement(
+            user_id,
+            OPEN_ORDER_FILTER,
+            market_id,
+            Some((offset, limit)),
+        ))
+        .all(&*self.db)
+        .await
+        .map_err(Into::into)
     }
 
     async fn count_open_orders(&self, user_id: u64, market_id: Option<u32>) -> Result<u64> {
-        // Count only "open" orders: Placed, Pending, PartiallyFilled (non-IOC), Processing
-        // Exclude: Filled, Cancelled, Rejected, and PartiallyFilled IOC (no exception).
-        let part_filled_not_ioc = Condition::all()
-            .add(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
-            .add(OrderColumn::OrderTimeInForce.ne("Ioc"))
-            .add(OrderColumn::OrderTimeInForce.ne("IOC"))
-            .add(OrderColumn::OrderTimeInForce.ne("ioc"))
-            .add(OrderColumn::OrderTimeInForce.ne("TIF_IOC"))
-            .add(OrderColumn::OrderTimeInForce.ne("TifIoc"));
-        let open_status_condition = Condition::any()
-            .add(OrderColumn::OrderStatus.eq("STATUS_PLACED"))
-            .add(OrderColumn::OrderStatus.eq("STATUS_PENDING"))
-            .add(part_filled_not_ioc)
-            .add(OrderColumn::OrderStatus.eq("STATUS_PROCESSING"));
-
-        let mut query = OrderEntity::find()
-            .filter(OrderColumn::OrderUserId.eq(user_id as i64))
-            .filter(open_status_condition);
-
-        if let Some(market_id) = market_id {
-            query = query.filter(OrderColumn::MarketId.eq(market_id as i32));
-        }
-
-        let count = query.count(&*self.db).await.map_err(TradingError::from)?;
-
-        Ok(count)
+        self.count_latest_orders(user_id, OPEN_ORDER_FILTER, market_id)
+            .await
     }
 
     async fn get_order_by_id(&self, order_id: u64, user_id: u64) -> Result<Option<OrderModel>> {
-        OrderEntity::find()
-            .filter(
-                OrderColumn::OrderOrderId
-                    .eq(order_id as i64)
-                    .and(OrderColumn::OrderUserId.eq(user_id as i64)),
-            )
-            .one(&*self.db)
-            .await
-            .map_err(Into::into)
+        OrderModel::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+            SELECT id, market_id, order_order_id, order_user_id, order_price, order_size,
+                   order_filled_size, order_side, order_time_in_force, order_status,
+                   order_timestamp, created_at
+            FROM trading.orders_events
+            WHERE order_order_id = $1 AND order_user_id = $2
+            ORDER BY order_timestamp DESC, id DESC
+            LIMIT 1
+            "#,
+            [(order_id as i64).into(), (user_id as i64).into()],
+        ))
+        .one(&*self.db)
+        .await
+        .map_err(Into::into)
     }
 
     async fn create_order(&self, order: OrderModel) -> Result<u64> {
@@ -369,27 +452,19 @@ impl TradingRepository for PostgresTradingRepository {
     }
 
     async fn count_user_orders(&self, user_id: u64) -> Result<u64> {
-        let count = OrderEntity::find()
-            .filter(OrderColumn::OrderUserId.eq(user_id as i64))
-            .count(&*self.db)
-            .await?;
-        Ok(count)
+        self.count_latest_orders(user_id, "TRUE", None).await
     }
 
     async fn get_order_history(&self, user_id: u64) -> Result<Vec<OrderModel>> {
-        // Only return Cancelled, PartiallyFilled, and Filled orders for history
-        OrderEntity::find()
-            .filter(OrderColumn::OrderUserId.eq(user_id as i64))
-            .filter(
-                OrderColumn::OrderStatus
-                    .eq("STATUS_CANCELLED")
-                    .or(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
-                    .or(OrderColumn::OrderStatus.eq("STATUS_FILLED")),
-            )
-            .order_by_desc(OrderColumn::OrderTimestamp)
-            .all(&*self.db)
-            .await
-            .map_err(Into::into)
+        OrderModel::find_by_statement(Self::latest_orders_statement(
+            user_id,
+            HISTORY_ORDER_FILTER,
+            None,
+            None,
+        ))
+        .all(&*self.db)
+        .await
+        .map_err(Into::into)
     }
 
     async fn get_order_history_paginated(
@@ -399,48 +474,20 @@ impl TradingRepository for PostgresTradingRepository {
         limit: u64,
         market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>> {
-        // Only return Cancelled, PartiallyFilled, and Filled orders for history
-        let mut query = OrderEntity::find()
-            .filter(OrderColumn::OrderUserId.eq(user_id as i64))
-            .filter(
-                OrderColumn::OrderStatus
-                    .eq("STATUS_CANCELLED")
-                    .or(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
-                    .or(OrderColumn::OrderStatus.eq("STATUS_FILLED")),
-            );
-
-        if let Some(market_id) = market_id {
-            query = query.filter(OrderColumn::MarketId.eq(market_id as i32));
-        }
-
-        let orders = query
-            .order_by_desc(OrderColumn::OrderTimestamp)
-            .offset(offset)
-            .limit(limit)
-            .all(&*self.db)
-            .await
-            .map_err(TradingError::from)?;
-
-        Ok(orders)
+        OrderModel::find_by_statement(Self::latest_orders_statement(
+            user_id,
+            HISTORY_ORDER_FILTER,
+            market_id,
+            Some((offset, limit)),
+        ))
+        .all(&*self.db)
+        .await
+        .map_err(Into::into)
     }
 
     async fn count_order_history(&self, user_id: u64, market_id: Option<u32>) -> Result<u64> {
-        // Count only Cancelled, PartiallyFilled, and Filled orders for history
-        let mut query = OrderEntity::find()
-            .filter(OrderColumn::OrderUserId.eq(user_id as i64))
-            .filter(
-                OrderColumn::OrderStatus
-                    .eq("STATUS_CANCELLED")
-                    .or(OrderColumn::OrderStatus.eq("STATUS_PARTIALLY_FILLED"))
-                    .or(OrderColumn::OrderStatus.eq("STATUS_FILLED")),
-            );
-
-        if let Some(market_id) = market_id {
-            query = query.filter(OrderColumn::MarketId.eq(market_id as i32));
-        }
-
-        let count = query.count(&*self.db).await?;
-        Ok(count)
+        self.count_latest_orders(user_id, HISTORY_ORDER_FILTER, market_id)
+            .await
     }
 
     async fn get_user_favorite_markets(
