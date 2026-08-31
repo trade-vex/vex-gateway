@@ -234,6 +234,13 @@ fn create_test_user() -> Uuid {
     Uuid::new_v4()
 }
 
+/// The user of one database test. Its `uuid_to_u64` is `id`, so it always fits the BIGINT user
+/// columns (a random UUID's exceeds `i64::MAX` half the time) and every run uses the same rows.
+/// Each test passes its own `id`, so tests running in parallel never share rows.
+fn database_test_user(id: u32) -> Uuid {
+    Uuid::from_u128(id.into())
+}
+
 /// Create AuthenticatedUserId from UUID
 fn create_authenticated_user_id(uuid: Uuid) -> AuthenticatedUserId {
     AuthenticatedUserId(uuid)
@@ -949,12 +956,12 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires database - skip in CI
+    #[ignore = "required test schema is unavailable in CI"]
     async fn test_get_balances_success() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
-        let user = create_test_user();
+        let user = database_test_user(101_001);
         let user_id = uuid_to_u64(user);
 
         // Clean up before test
@@ -1013,12 +1020,12 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires database - skip in CI
+    #[ignore = "required test schema is unavailable in CI"]
     async fn test_get_balances_empty() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
-        let user = create_test_user();
+        let user = database_test_user(101_002);
         let user_id = uuid_to_u64(user);
 
         cleanup_test_data(&db, user_id).await;
@@ -1055,26 +1062,53 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires database - skip in CI
+    #[ignore = "required test schema is unavailable in CI"]
     async fn test_get_open_orders_success() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
-        let user = create_test_user();
+        let user = database_test_user(101_003);
         let user_id = uuid_to_u64(user);
 
         cleanup_test_data(&db, user_id).await;
 
         // Insert test orders - mix of open and filled
-        insert_test_order(&db, 1001, user_id, 65538, 5000000, 100, "Bid", "Placed")
-            .await
-            .unwrap();
-        insert_test_order(&db, 1002, user_id, 65538, 5100000, 200, "Ask", "Pending")
-            .await
-            .unwrap();
-        insert_test_order(&db, 1003, user_id, 65539, 3000000, 150, "Bid", "Filled")
-            .await
-            .unwrap(); // Should not appear
+        insert_test_order(
+            &db,
+            1001,
+            user_id,
+            65538,
+            5000000,
+            100,
+            "SIDE_BID",
+            "STATUS_PLACED",
+        )
+        .await
+        .unwrap();
+        insert_test_order(
+            &db,
+            1002,
+            user_id,
+            65538,
+            5100000,
+            200,
+            "SIDE_ASK",
+            "STATUS_PROCESSING",
+        )
+        .await
+        .unwrap();
+        insert_test_order(
+            &db,
+            1003,
+            user_id,
+            65539,
+            3000000,
+            150,
+            "SIDE_BID",
+            "STATUS_FILLED",
+        )
+        .await
+        .unwrap(); // Should not appear
 
         let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
         let order_store = Arc::new(OrderStore::with_repository(
@@ -1107,7 +1141,7 @@ mod tests {
 
                 assert!(orders_response["orders"].is_array());
                 let orders = orders_response["orders"].as_array().unwrap();
-                // Should have 2 open orders (Placed and Pending), not the Filled one
+                // Should have 2 open orders (Placed and Processing), not the Filled one
                 assert_eq!(orders.len(), 2);
                 assert_eq!(orders_response["total"], 2);
                 assert_eq!(orders_response["page"], 1);
@@ -1121,12 +1155,12 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires database - skip in CI
+    #[ignore = "required test schema is unavailable in CI"]
     async fn test_get_open_orders_pagination() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
-        let user = create_test_user();
+        let user = database_test_user(101_004);
         let user_id = uuid_to_u64(user);
 
         cleanup_test_data(&db, user_id).await;
@@ -1140,8 +1174,8 @@ mod tests {
                 65538,
                 5000000 + (i * 100000),
                 100,
-                "Bid",
-                "Placed",
+                "SIDE_BID",
+                "STATUS_PLACED",
             )
             .await
             .unwrap();
@@ -1192,23 +1226,41 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires database - skip in CI
+    #[ignore = "required test schema is unavailable in CI"]
     async fn test_get_open_orders_all_statuses() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
-        let user = create_test_user();
+        let user = database_test_user(101_005);
         let user_id = uuid_to_u64(user);
 
         cleanup_test_data(&db, user_id).await;
 
         // Insert test orders with all open statuses and some terminal statuses
-        insert_test_order(&db, 4001, user_id, 65538, 5000000, 100, "Bid", "Placed")
-            .await
-            .unwrap();
-        insert_test_order(&db, 4002, user_id, 65538, 5100000, 200, "Ask", "Pending")
-            .await
-            .unwrap();
+        insert_test_order(
+            &db,
+            4001,
+            user_id,
+            65538,
+            5000000,
+            100,
+            "SIDE_BID",
+            "STATUS_PLACED",
+        )
+        .await
+        .unwrap();
+        insert_test_order(
+            &db,
+            4002,
+            user_id,
+            65538,
+            5100000,
+            200,
+            "SIDE_ASK",
+            "STATUS_PROCESSING",
+        )
+        .await
+        .unwrap();
         insert_test_order(
             &db,
             4003,
@@ -1216,24 +1268,60 @@ mod tests {
             65538,
             5200000,
             150,
-            "Bid",
-            "PartiallyFilled",
+            "SIDE_BID",
+            "STATUS_PARTIALLY_FILLED",
         )
         .await
         .unwrap();
-        insert_test_order(&db, 4004, user_id, 65539, 3000000, 200, "Ask", "Processing")
-            .await
-            .unwrap();
+        insert_test_order(
+            &db,
+            4004,
+            user_id,
+            65539,
+            3000000,
+            200,
+            "SIDE_ASK",
+            "STATUS_PROCESSING",
+        )
+        .await
+        .unwrap();
         // Terminal statuses - should not appear in open orders
-        insert_test_order(&db, 4005, user_id, 65538, 5300000, 250, "Bid", "Filled")
-            .await
-            .unwrap();
-        insert_test_order(&db, 4006, user_id, 65538, 5400000, 300, "Ask", "Cancelled")
-            .await
-            .unwrap();
-        insert_test_order(&db, 4007, user_id, 65539, 3500000, 100, "Bid", "Rejected")
-            .await
-            .unwrap();
+        insert_test_order(
+            &db,
+            4005,
+            user_id,
+            65538,
+            5300000,
+            250,
+            "SIDE_BID",
+            "STATUS_FILLED",
+        )
+        .await
+        .unwrap();
+        insert_test_order(
+            &db,
+            4006,
+            user_id,
+            65538,
+            5400000,
+            300,
+            "SIDE_ASK",
+            "STATUS_CANCELLED",
+        )
+        .await
+        .unwrap();
+        insert_test_order(
+            &db,
+            4007,
+            user_id,
+            65539,
+            3500000,
+            100,
+            "SIDE_BID",
+            "STATUS_REJECTED",
+        )
+        .await
+        .unwrap();
 
         let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
         let order_store = Arc::new(OrderStore::with_repository(
@@ -1266,7 +1354,7 @@ mod tests {
 
                 assert!(orders_response["orders"].is_array());
                 let orders = orders_response["orders"].as_array().unwrap();
-                // Should have 4 open orders: Placed, Pending, PartiallyFilled, Processing
+                // Should have 4 open orders: Placed, PartiallyFilled and two Processing
                 // Should NOT include: Filled, Cancelled, Rejected
                 assert_eq!(orders.len(), 4);
                 assert_eq!(orders_response["total"], 4);
@@ -1279,7 +1367,6 @@ mod tests {
 
                 // Check that all open statuses are present
                 assert!(statuses.iter().any(|s| s.eq_ignore_ascii_case("Placed")));
-                assert!(statuses.iter().any(|s| s.eq_ignore_ascii_case("Pending")));
                 assert!(
                     statuses
                         .iter()
@@ -1305,23 +1392,41 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires database - skip in CI
+    #[ignore = "required test schema is unavailable in CI"]
     async fn test_get_order_history_success() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
-        let user = create_test_user();
+        let user = database_test_user(101_006);
         let user_id = uuid_to_u64(user);
 
         cleanup_test_data(&db, user_id).await;
 
         // Insert test orders - mix of history and open
-        insert_test_order(&db, 3001, user_id, 65538, 5000000, 100, "Bid", "Filled")
-            .await
-            .unwrap();
-        insert_test_order(&db, 3002, user_id, 65538, 5100000, 200, "Ask", "Cancelled")
-            .await
-            .unwrap();
+        insert_test_order(
+            &db,
+            3001,
+            user_id,
+            65538,
+            5000000,
+            100,
+            "SIDE_BID",
+            "STATUS_FILLED",
+        )
+        .await
+        .unwrap();
+        insert_test_order(
+            &db,
+            3002,
+            user_id,
+            65538,
+            5100000,
+            200,
+            "SIDE_ASK",
+            "STATUS_CANCELLED",
+        )
+        .await
+        .unwrap();
         insert_test_order(
             &db,
             3003,
@@ -1329,14 +1434,23 @@ mod tests {
             65539,
             3000000,
             150,
-            "Bid",
-            "PartiallyFilled",
+            "SIDE_BID",
+            "STATUS_PARTIALLY_FILLED",
         )
         .await
         .unwrap();
-        insert_test_order(&db, 3004, user_id, 65538, 5200000, 250, "Ask", "Placed")
-            .await
-            .unwrap(); // Should not appear
+        insert_test_order(
+            &db,
+            3004,
+            user_id,
+            65538,
+            5200000,
+            250,
+            "SIDE_ASK",
+            "STATUS_PLACED",
+        )
+        .await
+        .unwrap(); // Should not appear
 
         let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
         let order_store = Arc::new(OrderStore::with_repository(
@@ -1382,12 +1496,12 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires database - skip in CI
+    #[ignore = "required test schema is unavailable in CI"]
     async fn test_get_order_history_with_rejected() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
-        let user = create_test_user();
+        let user = database_test_user(101_007);
         let user_id = uuid_to_u64(user);
 
         cleanup_test_data(&db, user_id).await;
@@ -1395,12 +1509,30 @@ mod tests {
         // Insert test orders - terminal statuses
         // Note: Repository currently only includes Filled, Cancelled, and PartiallyFilled
         // Rejected is a terminal state but is NOT currently included in history (may be a bug)
-        insert_test_order(&db, 5001, user_id, 65538, 5000000, 100, "Bid", "Filled")
-            .await
-            .unwrap();
-        insert_test_order(&db, 5002, user_id, 65538, 5100000, 200, "Ask", "Cancelled")
-            .await
-            .unwrap();
+        insert_test_order(
+            &db,
+            5001,
+            user_id,
+            65538,
+            5000000,
+            100,
+            "SIDE_BID",
+            "STATUS_FILLED",
+        )
+        .await
+        .unwrap();
+        insert_test_order(
+            &db,
+            5002,
+            user_id,
+            65538,
+            5100000,
+            200,
+            "SIDE_ASK",
+            "STATUS_CANCELLED",
+        )
+        .await
+        .unwrap();
         insert_test_order(
             &db,
             5003,
@@ -1408,18 +1540,36 @@ mod tests {
             65539,
             3000000,
             150,
-            "Bid",
-            "PartiallyFilled",
+            "SIDE_BID",
+            "STATUS_PARTIALLY_FILLED",
         )
         .await
         .unwrap();
-        insert_test_order(&db, 5004, user_id, 65538, 5200000, 250, "Ask", "Rejected")
-            .await
-            .unwrap();
+        insert_test_order(
+            &db,
+            5004,
+            user_id,
+            65538,
+            5200000,
+            250,
+            "SIDE_ASK",
+            "STATUS_REJECTED",
+        )
+        .await
+        .unwrap();
         // Open status - should not appear in history
-        insert_test_order(&db, 5005, user_id, 65538, 5300000, 300, "Bid", "Placed")
-            .await
-            .unwrap();
+        insert_test_order(
+            &db,
+            5005,
+            user_id,
+            65538,
+            5300000,
+            300,
+            "SIDE_BID",
+            "STATUS_PLACED",
+        )
+        .await
+        .unwrap();
 
         let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
         let order_store = Arc::new(OrderStore::with_repository(
@@ -1478,7 +1628,6 @@ mod tests {
 
                 // Verify open statuses are NOT present
                 assert!(!statuses.iter().any(|s| s.eq_ignore_ascii_case("Placed")));
-                assert!(!statuses.iter().any(|s| s.eq_ignore_ascii_case("Pending")));
                 assert!(
                     !statuses
                         .iter()
@@ -1494,26 +1643,53 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires database - skip in CI
+    #[ignore = "required test schema is unavailable in CI"]
     async fn test_get_open_orders_with_market_id_filter() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
-        let user = create_test_user();
+        let user = database_test_user(101_008);
         let user_id = uuid_to_u64(user);
 
         cleanup_test_data(&db, user_id).await;
 
         // Insert test orders across different markets
-        insert_test_order(&db, 6001, user_id, 65538, 5000000, 100, "Bid", "Placed")
-            .await
-            .unwrap(); // Market 65538
-        insert_test_order(&db, 6002, user_id, 65538, 5100000, 200, "Ask", "Pending")
-            .await
-            .unwrap(); // Market 65538
-        insert_test_order(&db, 6003, user_id, 65539, 3000000, 150, "Bid", "Placed")
-            .await
-            .unwrap(); // Market 65539 - should be filtered out
+        insert_test_order(
+            &db,
+            6001,
+            user_id,
+            65538,
+            5000000,
+            100,
+            "SIDE_BID",
+            "STATUS_PLACED",
+        )
+        .await
+        .unwrap(); // Market 65538
+        insert_test_order(
+            &db,
+            6002,
+            user_id,
+            65538,
+            5100000,
+            200,
+            "SIDE_ASK",
+            "STATUS_PROCESSING",
+        )
+        .await
+        .unwrap(); // Market 65538
+        insert_test_order(
+            &db,
+            6003,
+            user_id,
+            65539,
+            3000000,
+            150,
+            "SIDE_BID",
+            "STATUS_PLACED",
+        )
+        .await
+        .unwrap(); // Market 65539 - should be filtered out
         insert_test_order(
             &db,
             6004,
@@ -1521,8 +1697,8 @@ mod tests {
             65538,
             5200000,
             250,
-            "Ask",
-            "PartiallyFilled",
+            "SIDE_ASK",
+            "STATUS_PARTIALLY_FILLED",
         )
         .await
         .unwrap(); // Market 65538
@@ -1558,7 +1734,7 @@ mod tests {
 
                 assert!(orders_response["orders"].is_array());
                 let orders = orders_response["orders"].as_array().unwrap();
-                // Should have 3 orders from market 65538 (Placed, Pending, PartiallyFilled)
+                // Should have 3 orders from market 65538 (Placed, Processing, PartiallyFilled)
                 // Should NOT include order from market 65539
                 assert_eq!(orders.len(), 3);
                 assert_eq!(orders_response["total"], 3);
@@ -1577,23 +1753,41 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires database - skip in CI
+    #[ignore = "required test schema is unavailable in CI"]
     async fn test_get_order_history_with_market_id_filter() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
-        let user = create_test_user();
+        let user = database_test_user(101_009);
         let user_id = uuid_to_u64(user);
 
         cleanup_test_data(&db, user_id).await;
 
         // Insert test orders across different markets
-        insert_test_order(&db, 7001, user_id, 65538, 5000000, 100, "Bid", "Filled")
-            .await
-            .unwrap(); // Market 65538
-        insert_test_order(&db, 7002, user_id, 65538, 5100000, 200, "Ask", "Cancelled")
-            .await
-            .unwrap(); // Market 65538
+        insert_test_order(
+            &db,
+            7001,
+            user_id,
+            65538,
+            5000000,
+            100,
+            "SIDE_BID",
+            "STATUS_FILLED",
+        )
+        .await
+        .unwrap(); // Market 65538
+        insert_test_order(
+            &db,
+            7002,
+            user_id,
+            65538,
+            5100000,
+            200,
+            "SIDE_ASK",
+            "STATUS_CANCELLED",
+        )
+        .await
+        .unwrap(); // Market 65538
         insert_test_order(
             &db,
             7003,
@@ -1601,14 +1795,23 @@ mod tests {
             65539,
             3000000,
             150,
-            "Bid",
-            "PartiallyFilled",
+            "SIDE_BID",
+            "STATUS_PARTIALLY_FILLED",
         )
         .await
         .unwrap(); // Market 65539 - should be filtered out
-        insert_test_order(&db, 7004, user_id, 65538, 5200000, 250, "Ask", "Filled")
-            .await
-            .unwrap(); // Market 65538
+        insert_test_order(
+            &db,
+            7004,
+            user_id,
+            65538,
+            5200000,
+            250,
+            "SIDE_ASK",
+            "STATUS_FILLED",
+        )
+        .await
+        .unwrap(); // Market 65538
 
         let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
         let order_store = Arc::new(OrderStore::with_repository(
@@ -1660,12 +1863,12 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires database - skip in CI
+    #[ignore = "required test schema is unavailable in CI"]
     async fn test_get_favorite_markets_success() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
-        let user = create_test_user();
+        let user = database_test_user(101_010);
         let user_id = uuid_to_u64(user);
 
         cleanup_test_data(&db, user_id).await;
@@ -1716,12 +1919,12 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires database - skip in CI
+    #[ignore = "required test schema is unavailable in CI"]
     async fn test_get_favorite_markets_empty() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
-        let user = create_test_user();
+        let user = database_test_user(101_011);
         let user_id = uuid_to_u64(user);
 
         cleanup_test_data(&db, user_id).await;
@@ -1757,12 +1960,12 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires database - skip in CI
+    #[ignore = "required test schema is unavailable in CI"]
     async fn test_toggle_favorite_market_add() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
-        let user = create_test_user();
+        let user = database_test_user(101_012);
         let user_id = uuid_to_u64(user);
 
         cleanup_test_data(&db, user_id).await;
@@ -1808,12 +2011,12 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires database - skip in CI
+    #[ignore = "required test schema is unavailable in CI"]
     async fn test_toggle_favorite_market_remove() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
         };
-        let user = create_test_user();
+        let user = database_test_user(101_013);
         let user_id = uuid_to_u64(user);
 
         cleanup_test_data(&db, user_id).await;
@@ -1873,7 +2076,6 @@ mod tests {
     // ============================================================================
 
     #[tokio::test]
-    #[ignore] // Requires database - skip in CI
     async fn test_get_balances_database_error() {
         let user = create_test_user();
         let authenticated_user = create_authenticated_user_id(user);
@@ -1914,7 +2116,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires database - skip in CI
     async fn test_get_open_orders_count_error() {
         let user = create_test_user();
         let authenticated_user = create_authenticated_user_id(user);
@@ -1967,7 +2168,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires database - skip in CI
     async fn test_get_open_orders_store_error() {
         let user = create_test_user();
         let authenticated_user = create_authenticated_user_id(user);
@@ -2015,7 +2215,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires database - skip in CI
     async fn test_get_order_history_count_error() {
         let user = create_test_user();
         let authenticated_user = create_authenticated_user_id(user);
@@ -2068,7 +2267,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires database - skip in CI
     async fn test_get_order_history_store_error() {
         let user = create_test_user();
         let authenticated_user = create_authenticated_user_id(user);
@@ -2117,7 +2315,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires database - skip in CI
     async fn test_get_favorite_markets_database_error() {
         let user = create_test_user();
         let authenticated_user = create_authenticated_user_id(user);
@@ -2161,14 +2358,13 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires database - skip in CI
-    async fn test_toggle_favorite_market_check_error() {
+    async fn test_toggle_favorite_market_error() {
         let user = create_test_user();
         let authenticated_user = create_authenticated_user_id(user);
 
-        // Create mock repository that returns error on is_market_favorited
+        // The handler makes a single atomic repository call; fail that one.
         let mock_repo =
-            Arc::new(ErrorMockTradingRepository::new().with_error_on("is_market_favorited"));
+            Arc::new(ErrorMockTradingRepository::new().with_error_on("toggle_favorite_market"));
 
         let request = web::Json(ToggleFavoriteMarketRequest { market_id: 65538 });
 
@@ -2188,51 +2384,6 @@ mod tests {
                 let error_response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
                 assert_eq!(error_response["error"], "failed to toggle favorite market");
-                assert!(error_response["message"].is_string());
-                // Handlers return sanitized generic error message, not internal DB errors
-                assert_eq!(
-                    error_response["message"],
-                    "An internal error occurred. Please try again later."
-                );
-            }
-            Err(e) => {
-                panic!(
-                    "Handler should return Ok(HttpResponse) even on error, got: {}",
-                    e
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
-    #[ignore] // Requires database - skip in CI
-    async fn test_toggle_favorite_market_add_error() {
-        let user = create_test_user();
-        let authenticated_user = create_authenticated_user_id(user);
-
-        // Create mock repository that returns error on add_favorite_market
-        // First check succeeds (returns false), then add fails
-        let mock_repo =
-            Arc::new(ErrorMockTradingRepository::new().with_error_on("add_favorite_market"));
-
-        let request = web::Json(ToggleFavoriteMarketRequest { market_id: 65538 });
-
-        let result = toggle_favorite_market(
-            authenticated_user,
-            request,
-            web::Data::new(mock_repo.clone() as Arc<dyn TradingRepository>),
-        )
-        .await;
-
-        match result {
-            Ok(response) => {
-                assert_eq!(response.status(), 500);
-
-                let body = response.into_body();
-                let bytes = actix_web::body::to_bytes(body).await.unwrap();
-                let error_response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-
-                assert_eq!(error_response["error"], "failed to add favorite market");
                 assert!(error_response["message"].is_string());
                 // Handlers return sanitized generic error message, not internal DB errors
                 assert_eq!(
