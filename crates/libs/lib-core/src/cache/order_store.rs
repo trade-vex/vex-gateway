@@ -7,6 +7,37 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrderData {
+    pub market_id: i32,
+    pub order_order_id: i64,
+    pub order_user_id: i64,
+    pub order_price: u64,
+    pub order_size: u64,
+    pub order_filled_size: u64,
+    pub order_side: String,
+    pub order_time_in_force: String,
+    pub order_status: String,
+    pub order_timestamp: i64,
+}
+
+impl From<OrderModel> for OrderData {
+    fn from(model: OrderModel) -> Self {
+        Self {
+            market_id: model.market_id,
+            order_order_id: model.order_order_id,
+            order_user_id: model.order_user_id,
+            order_price: model.order_price as u64,
+            order_size: model.order_size as u64,
+            order_filled_size: model.order_filled_size as u64,
+            order_side: model.order_side,
+            order_time_in_force: model.order_time_in_force,
+            order_status: model.order_status,
+            order_timestamp: model.order_timestamp,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct OrderStore {
     cache: Option<RedisDb>,
@@ -114,13 +145,14 @@ impl OrderStore {
         }
     }
 
-    /// Convert OrderModel to OrderResponse with scaling applied (open orders: size = remaining)
-    pub fn to_response(&self, model: OrderModel) -> crate::dto::trading::OrderResponse {
+    /// Convert order data to OrderResponse with scaling applied (open orders: size = remaining)
+    pub fn to_response(&self, model: impl Into<OrderData>) -> crate::dto::trading::OrderResponse {
         use crate::dto::trading::{OrderResponse, Side};
         use rust_decimal::Decimal;
 
+        let model = model.into();
         let market_id = model.market_id as u32;
-        let remaining = (model.order_size - model.order_filled_size).max(0);
+        let remaining = model.order_size.saturating_sub(model.order_filled_size);
 
         // Apply scaling if scaling cache is available
         let (price, size) = if let Some(scaling_cache) = &self.scaling_cache {
@@ -154,14 +186,15 @@ impl OrderStore {
         }
     }
 
-    /// Convert OrderModel to OrderHistoryResponse with scaling applied (size = original, filled = filled amount)
+    /// Convert order data to OrderHistoryResponse with scaling applied.
     pub fn to_history_response(
         &self,
-        model: OrderModel,
+        model: impl Into<OrderData>,
     ) -> crate::dto::trading::OrderHistoryResponse {
         use crate::dto::trading::{OrderHistoryResponse, Side};
         use rust_decimal::Decimal;
 
+        let model = model.into();
         let market_id = model.market_id as u32;
 
         // Apply scaling if scaling cache is available (size = original, filled = order_filled_size)
@@ -208,7 +241,7 @@ impl OrderStore {
         &self,
         order_id: u64,
         user_id: u64,
-    ) -> Result<Option<OrderModel>, TradingError> {
+    ) -> Result<Option<OrderData>, TradingError> {
         // Cache: Check Redis hash: order:{order_id}
         if self.config.enabled {
             if let Some(cache) = &self.cache {
@@ -237,7 +270,7 @@ impl OrderStore {
             match repo.get_order_by_id(order_id, user_id).await {
                 Ok(Some(order)) => {
                     debug!("Database hit for order ID: {}", order_id);
-                    return Ok(Some(order));
+                    return Ok(Some(order.into()));
                 }
                 Ok(None) => {
                     debug!("Order not found in database: {}", order_id);
@@ -261,7 +294,7 @@ impl OrderStore {
         offset: u64,
         limit: u64,
         market_id: Option<u32>,
-    ) -> Result<Vec<OrderModel>, TradingError> {
+    ) -> Result<Vec<OrderData>, TradingError> {
         // Try Redis first if cache enabled
         if self.config.enabled {
             if let Some(cache) = &self.cache {
@@ -331,7 +364,7 @@ impl OrderStore {
                 .get_order_history_paginated(user_id, offset, limit, market_id)
                 .await?;
             debug!("Postgres: Got {} history orders (paginated)", orders.len());
-            return Ok(orders);
+            return Ok(orders.into_iter().map(Into::into).collect());
         }
 
         debug!(
@@ -346,7 +379,7 @@ impl OrderStore {
     pub async fn get_user_order_history(
         &self,
         user_id: u64,
-    ) -> Result<Vec<OrderModel>, TradingError> {
+    ) -> Result<Vec<OrderData>, TradingError> {
         // Try Redis first if cache enabled
         if self.config.enabled {
             if let Some(cache) = &self.cache {
@@ -395,7 +428,7 @@ impl OrderStore {
         if let Some(repo) = &self.trading_repo {
             let orders = repo.get_order_history(user_id).await?;
             debug!("Postgres: Got {} history orders", orders.len());
-            return Ok(orders);
+            return Ok(orders.into_iter().map(Into::into).collect());
         }
 
         debug!(
@@ -413,7 +446,7 @@ impl OrderStore {
         offset: u64,
         limit: u64,
         market_id: Option<u32>,
-    ) -> Result<Vec<OrderModel>, TradingError> {
+    ) -> Result<Vec<OrderData>, TradingError> {
         // Cache: Query user:{user_id}:orders SET, then fetch each order hash
         if self.config.enabled {
             if let Some(cache) = &self.cache {
@@ -508,7 +541,7 @@ impl OrderStore {
             {
                 Ok(orders) => {
                     debug!("Database hit for user orders (paginated): {}", user_id);
-                    return Ok(orders);
+                    return Ok(orders.into_iter().map(Into::into).collect());
                 }
                 Err(e) => {
                     return Err(e);
@@ -522,7 +555,7 @@ impl OrderStore {
 
     /// Get user's open orders with caching
     /// Uses Redis set user:{user_id}:orders -> fetches each order:{order_id} hash
-    pub async fn get_user_orders(&self, user_id: u64) -> Result<Vec<OrderModel>, TradingError> {
+    pub async fn get_user_orders(&self, user_id: u64) -> Result<Vec<OrderData>, TradingError> {
         // Cache: Query user:{user_id}:orders SET, then fetch each order hash
         if self.config.enabled {
             if let Some(cache) = &self.cache {
@@ -619,7 +652,7 @@ impl OrderStore {
             match repo.get_open_orders(user_id).await {
                 Ok(orders) => {
                     debug!("Database hit for user orders: {}", user_id);
-                    return Ok(orders);
+                    return Ok(orders.into_iter().map(Into::into).collect());
                 }
                 Err(e) => {
                     return Err(e);
@@ -699,19 +732,19 @@ impl OrderStore {
         }
     }
 
-    /// Parse order hash from Redis into OrderModel
+    /// Parse order hash from Redis into OrderData
     /// Redis keys from Kafka sink: orders:{order_id}
     /// Fields: market_id, order_order_id, order_user_id, order_price, order_size, order_filled_size,
     ///   order_side, order_time_in_force, order_status, order_timestamp
-    fn parse_order_hash(hash: HashMap<String, String>) -> Option<OrderModel> {
+    fn parse_order_hash(hash: HashMap<String, String>) -> Option<OrderData> {
         // Parse with order_ prefix (from Kafka Flatten transform)
         let order_order_id = hash.get("order_order_id")?.parse::<i64>().ok()?;
         let order_user_id = hash.get("order_user_id")?.parse::<i64>().ok()?;
-        let order_price = hash.get("order_price")?.parse::<i64>().ok()?;
-        let order_size = hash.get("order_size")?.parse::<i64>().ok()?;
+        let order_price = hash.get("order_price")?.parse::<u64>().ok()?;
+        let order_size = hash.get("order_size")?.parse::<u64>().ok()?;
         let order_filled_size = hash
             .get("order_filled_size")
-            .and_then(|s| s.parse::<i64>().ok())
+            .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
         let order_side = hash.get("order_side")?.clone();
         let order_timestamp = hash.get("order_timestamp")?.parse::<i64>().ok()?;
@@ -719,8 +752,7 @@ impl OrderStore {
         let order_time_in_force = hash.get("order_time_in_force")?.clone();
         let order_status = hash.get("order_status")?.clone();
 
-        Some(OrderModel {
-            id: 0, // Auto-generated by DB
+        Some(OrderData {
             market_id,
             order_order_id,
             order_user_id,
@@ -731,7 +763,6 @@ impl OrderStore {
             order_time_in_force,
             order_status,
             order_timestamp,
-            created_at: None,
         })
     }
 }

@@ -383,16 +383,16 @@ async fn test_large_balance_values() {
     let config = UserBalanceCacheConfig { enabled: false };
 
     // Test with large balance values (12 decimal places precision)
-    let large_available = 1_000_000_000_000_000i64; // 1,000 * 10^12
-    let large_locked = 500_000_000_000_000i64; // 500 * 10^12
+    let large_available = 1_000_000_000_000_000_u64; // 1,000 * 10^12
+    let large_locked = 500_000_000_000_000_u64; // 500 * 10^12
     let large_total = large_available + large_locked;
 
     let balances = vec![create_test_balance(
         100,
         1,
-        large_available,
-        large_locked,
-        large_total,
+        large_available as i64,
+        large_locked as i64,
+        large_total as i64,
     )];
 
     let mock_repo = Arc::new(MockTradingRepository::new().with_balances(balances));
@@ -744,4 +744,75 @@ async fn an_indexed_asset_without_a_hash_sends_the_whole_read_to_the_repository(
     assert_eq!(balances[1].available, 4);
 
     let _: usize = conn.del(&[&asset_set_key, &cached_key]).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_u64_balances_survive_redis_round_trip() {
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6380".to_string());
+    let client = redis::Client::open(redis_url.clone()).expect("Redis URL should be valid");
+    let mut connection = match client.get_multiplexed_async_connection().await {
+        Ok(connection) => connection,
+        Err(error) => {
+            eprintln!("Skipping Redis round-trip test: unable to connect to {redis_url}: {error}");
+            return;
+        }
+    };
+    let user_id = 7_000_000_000_u64 + u64::from(std::process::id());
+    let values = [(1_i32, u64::MAX), (2_i32, i64::MAX as u64 + 1)];
+    let asset_set_key = format!("user:{user_id}:balances");
+    let keys: Vec<String> = values
+        .iter()
+        .map(|(asset_id, _)| format!("user:{user_id}:asset:{asset_id}:balance"))
+        .collect();
+
+    for ((asset_id, balance), key) in values.iter().zip(&keys) {
+        let fields = [
+            ("user_id", user_id.to_string()),
+            ("asset_id", asset_id.to_string()),
+            ("available", balance.to_string()),
+            ("locked", "0".to_string()),
+            ("total", balance.to_string()),
+            ("timestamp", "1700000000".to_string()),
+        ];
+        let _: () = connection
+            .hset_multiple(key, &fields)
+            .await
+            .expect("balance hash should be written");
+        // As the Events Handler does: index the asset alongside its balance hash.
+        let _: usize = connection
+            .sadd(&asset_set_key, asset_id.to_string())
+            .await
+            .expect("asset should be indexed");
+    }
+
+    let store = UserBalanceStore::with_redis_cache(
+        UserBalanceCacheConfig { enabled: true },
+        redis_url,
+        None,
+    )
+    .await
+    .expect("balance store should connect to Redis");
+    let balances = store
+        .get_user_balances(user_id)
+        .await
+        .expect("balances should be read from Redis");
+
+    for (asset_id, expected) in values {
+        let actual = balances
+            .iter()
+            .find(|balance| balance.asset_id == asset_id)
+            .expect("balance row should not be dropped");
+        assert_eq!(actual.available, expected);
+        assert_eq!(actual.total, expected);
+    }
+
+    let _: () = connection
+        .del(keys)
+        .await
+        .expect("test balance hashes should be removed");
+    let _: () = connection
+        .del(asset_set_key)
+        .await
+        .expect("test asset index should be removed");
 }
