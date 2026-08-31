@@ -55,8 +55,8 @@ The gateway reads two environment variables by name, and does not read a `.env` 
   directory at or above its working directory.
 
 They choose the configuration file, so they cannot be set in it. Every other setting (server,
-logging, database, Redis, JWT, email, OAuth, trusted proxies, the vex-core link) lives in that file
-(see [Configuration](#configuration)), and the `APP__` layer of
+logging, database, Redis, ClickHouse, JWT, email, OAuth, trusted proxies, the vex-core link) lives
+in that file (see [Configuration](#configuration)), and the `APP__` layer of
 [Configuration Precedence](#configuration-precedence) is the only way to override one:
 
 ```bash
@@ -106,10 +106,9 @@ whatever it holds, cannot stop the gateway.
 The `config` library converts the values leniently, and the gateway keeps its rules. A numeric
 setting reads `true`, `yes` and `on` as 1 and `false`, `no` and `off` as 0. In the file a decimal
 is rounded (`port = 8080.6` is 8081, and a negative decimal is 0 for a setting that cannot be
-negative), while in a variable it is an error. A boolean setting reads `1`, `yes` and `on` as true
-and `0`, `no` and `off` as false, and in the file any non-zero number as true. Key names are not
-case-sensitive. A variable's value reaches a text setting verbatim; an empty variable sets an empty
-value and cannot unset an optional setting.
+negative), while in a variable it is an error. Key names are not case-sensitive. A variable's
+value reaches a text setting verbatim; an empty variable sets an empty value and cannot unset an
+optional setting.
 
 ### Configuration Validation
 
@@ -120,6 +119,22 @@ The service validates configuration on startup:
 - **Testing**: Allows ephemeral ports (port 0)
 - **Every environment**: `auth.oauth.providers` may list only `google`, `github` and `twitter`;
   another provider stops the gateway at startup, and the error names it
+
+### OAuth Redirects
+
+Once `auth.oauth.providers` lists a provider, the gateway needs the two URLs a completed OAuth
+login is redirected to, and refuses to start without them:
+
+- `auth.oauth.frontend_url_web`: the web frontend page that finishes a browser login (the session
+  cookie is already set).
+- `auth.oauth.frontend_url_app`: the mobile app's landing URL, usually a custom-scheme deep link
+  such as `vex://oauth`. It receives only a one-time `login_code`.
+
+### ClickHouse
+
+`clickhouse.url` (required, no default) is the ClickHouse HTTP endpoint the portfolio and
+balance-chart endpoints read from, such as `http://clickhouse.internal:8123`. Override it with
+`APP__CLICKHOUSE__URL`.
 
 ### VEX Core Connection
 

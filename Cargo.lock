@@ -1535,7 +1535,6 @@ version = "0.1.0"
 dependencies = [
  "actix-web",
  "chrono",
- "dotenvy",
  "jsonwebtoken",
  "lib-auth",
  "lib-config",
@@ -2265,7 +2264,6 @@ dependencies = [
  "bcrypt",
  "chrono",
  "config",
- "dotenvy",
  "futures-util",
  "jsonwebtoken",
  "lettre",

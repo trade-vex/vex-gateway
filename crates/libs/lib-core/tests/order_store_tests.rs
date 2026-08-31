@@ -16,7 +16,8 @@
 /// - Invalidation of single orders and user orders
 /// - Error handling and edge cases
 use async_trait::async_trait;
-use lib_core::cache::order_store::{OrderCacheConfig, OrderStore};
+use lib_core::cache::order_store::{OrderCacheConfig, OrderData, OrderStore};
+use lib_core::dto::trading::Side;
 use lib_core::model::orders::Model as OrderModel;
 use lib_core::model::user_balances::Model as UserBalanceModel;
 use lib_core::model::user_favorite_markets::Model as UserFavoriteMarketModel;
@@ -388,17 +389,6 @@ async fn test_database_error_handling() {
 }
 
 #[tokio::test]
-async fn test_invalidate_operations() {
-    let config = OrderCacheConfig { enabled: false }; // Cache disabled, so invalidation is no-op
-
-    let store = OrderStore::new(config);
-
-    // Should not panic even with cache disabled
-    store.invalidate_order(1, 100).await;
-    store.invalidate_user_orders(100).await;
-}
-
-#[tokio::test]
 async fn test_multiple_users() {
     let config = OrderCacheConfig { enabled: false };
 
@@ -467,6 +457,30 @@ async fn test_order_side_variations() {
     assert_eq!(fetched_orders.len(), 2);
     assert_eq!(fetched_orders[0].order_side, "buy");
     assert_eq!(fetched_orders[1].order_side, "sell");
+}
+
+#[test]
+fn orders_with_an_unknown_stored_side_are_skipped_not_shown_as_bids() {
+    let store = OrderStore::new(OrderCacheConfig::default());
+    let order = |side: &str| create_test_order(1, 100, 50000, 1000, side, "STATUS_PLACED");
+
+    let bid = store
+        .to_response(order("SIDE_BID"))
+        .expect("SIDE_BID is core's bid");
+    assert_eq!(bid.side, Side::Bid);
+    let ask = store
+        .to_history_response(order("SIDE_ASK"))
+        .expect("SIDE_ASK is core's ask");
+    assert_eq!(ask.side, Side::Ask);
+
+    // Anything else is left out, like a record whose other stored fields do not parse.
+    for side in ["Bid", "buy", "sell", "SIDE_UNSPECIFIED", ""] {
+        assert!(store.to_response(order(side)).is_none(), "{side:?} shown");
+        assert!(
+            store.to_history_response(order(side)).is_none(),
+            "{side:?} shown"
+        );
+    }
 }
 
 #[tokio::test]
@@ -588,4 +602,107 @@ async fn test_u64_order_magnitudes_survive_redis_round_trip() {
         .del(key)
         .await
         .expect("test order hash should be removed");
+}
+
+#[tokio::test]
+async fn cached_orders_are_filtered_by_core_status_and_time_in_force_names() {
+    // The Redis order hashes hold vex-core's protobuf enum value names (STATUS_*, TIF_*).
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6380".to_string());
+    let client = redis::Client::open(redis_url.clone()).expect("Redis URL should be valid");
+    let mut connection = match client.get_multiplexed_async_connection().await {
+        Ok(connection) => connection,
+        Err(error) => {
+            eprintln!(
+                "Skipping cached order filter test: unable to connect to {redis_url}: {error}"
+            );
+            return;
+        }
+    };
+    let user_id = (uuid::Uuid::new_v4().as_u128() as u64) & i64::MAX as u64;
+    let first_order_id = (uuid::Uuid::new_v4().as_u128() as u64) >> 2;
+    let set_key = format!("user:{user_id}:orders");
+    let orders = [
+        (1_u64, "STATUS_PLACED", "TIF_GTC"),
+        (2, "STATUS_PROCESSING", "TIF_GTC"),
+        (3, "STATUS_PARTIALLY_FILLED", "TIF_GTC"),
+        (4, "STATUS_PARTIALLY_FILLED", "TIF_IOC"),
+        (5, "STATUS_FILLED", "TIF_GTC"),
+        (6, "STATUS_CANCELLED", "TIF_IOC"),
+        (7, "STATUS_REJECTED", "TIF_GTC"),
+    ];
+    let mut keys = vec![set_key.clone()];
+    for (offset, status, time_in_force) in orders {
+        let order_id = first_order_id + offset;
+        let key = format!("order:{order_id}");
+        let fields = [
+            ("market_id", "1".to_string()),
+            ("order_order_id", order_id.to_string()),
+            ("order_user_id", user_id.to_string()),
+            ("order_price", "100".to_string()),
+            ("order_size", "10".to_string()),
+            ("order_filled_size", "4".to_string()),
+            ("order_side", "SIDE_BID".to_string()),
+            ("order_time_in_force", time_in_force.to_string()),
+            ("order_status", status.to_string()),
+            ("order_timestamp", offset.to_string()),
+        ];
+        let _: () = connection
+            .hset_multiple(&key, &fields)
+            .await
+            .expect("order hash should be written");
+        let _: usize = connection
+            .sadd(&set_key, order_id.to_string())
+            .await
+            .expect("order should be indexed");
+        keys.push(key);
+    }
+
+    let store = OrderStore::with_redis_cache(OrderCacheConfig { enabled: true }, redis_url, None)
+        .await
+        .expect("order store should connect to Redis");
+    let offsets = |orders: &[OrderData]| {
+        let mut offsets: Vec<u64> = orders
+            .iter()
+            .map(|order| order.order_order_id as u64 - first_order_id)
+            .collect();
+        offsets.sort_unstable();
+        offsets
+    };
+
+    let open = store.get_user_orders(user_id).await.unwrap();
+    assert_eq!(offsets(&open), [1, 2, 3]);
+    let mut open_statuses: Vec<String> = open
+        .into_iter()
+        .map(|order| store.to_response(order).unwrap().status)
+        .collect();
+    open_statuses.sort_unstable();
+    assert_eq!(open_statuses, ["PartiallyFilled", "Placed", "Processing"]);
+    let open_page = store
+        .get_user_orders_paginated(user_id, 0, 10, None)
+        .await
+        .unwrap();
+    assert_eq!(offsets(&open_page), [1, 2, 3]);
+
+    let history = store.get_user_order_history(user_id).await.unwrap();
+    assert_eq!(offsets(&history), [3, 4, 5, 6]);
+    let mut history_statuses: Vec<String> = history
+        .into_iter()
+        .map(|order| store.to_history_response(order).unwrap().status)
+        .collect();
+    history_statuses.sort_unstable();
+    assert_eq!(
+        history_statuses,
+        ["Cancelled", "Filled", "PartiallyFilled", "PartiallyFilled"]
+    );
+    let history_page = store
+        .get_user_order_history_paginated(user_id, 0, 10, None)
+        .await
+        .unwrap();
+    assert_eq!(offsets(&history_page), [3, 4, 5, 6]);
+
+    let _: () = connection
+        .del(keys)
+        .await
+        .expect("test order keys should be removed");
 }

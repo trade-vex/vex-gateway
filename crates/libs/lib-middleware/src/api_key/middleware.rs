@@ -33,8 +33,7 @@ fn unix_timestamp_millis(now: SystemTime) -> Result<u64, ApiKeyError> {
         .map_err(|_| ApiKeyError::Internal("System clock is before the Unix epoch".to_string()))
 }
 
-/// Route-specific security configuration
-/// Placeholder : Will be removed and be replaced by direct actix based routing
+/// Route-specific security requirement for paths matching `path_pattern`.
 #[derive(Debug, Clone)]
 pub struct RouteSecurityConfig {
     pub path_pattern: String,
@@ -760,21 +759,6 @@ impl ApiKeyMiddleware {
         req.uri().query().unwrap_or("").to_string()
     }
 
-    /// Mask API key for secure logging
-    fn mask_api_key(api_key: &str) -> String {
-        if api_key.len() <= 4 {
-            // For very short keys, just show asterisks
-            "*".repeat(api_key.len())
-        } else {
-            // Show last 4 characters with asterisks
-            format!(
-                "{}...{}",
-                "*".repeat(api_key.len().saturating_sub(4)),
-                &api_key[api_key.len() - 4..]
-            )
-        }
-    }
-
     /// Parse body parameters from different content types
     async fn parse_body_params(
         req: &mut ServiceRequest,
@@ -981,10 +965,7 @@ where
             let api_config = match api_key_store.get_api_key(&api_key).await {
                 Some(config) => config,
                 None => {
-                    error!(
-                        "API key not found: {}",
-                        ApiKeyMiddleware::mask_api_key(&api_key)
-                    );
+                    error!("API key not found: {}", ApiKeyStore::mask_api_key(&api_key));
                     return Err(actix_web::error::ErrorUnauthorized("Invalid API key"));
                 }
             };
@@ -993,7 +974,7 @@ where
             if !api_config.is_valid() {
                 warn!(
                     "API key is disabled or expired: {}",
-                    ApiKeyMiddleware::mask_api_key(&api_key)
+                    ApiKeyStore::mask_api_key(&api_key)
                 );
                 return Err(actix_web::error::ErrorUnauthorized(
                     "API key is disabled or expired",
@@ -1006,7 +987,7 @@ where
                 warn!(
                     "IP {} is blacklisted for API key: {}",
                     client_ip,
-                    ApiKeyMiddleware::mask_api_key(&api_key)
+                    ApiKeyStore::mask_api_key(&api_key)
                 );
                 return Err(actix_web::error::ErrorForbidden(
                     "IP address is blacklisted",
@@ -1131,7 +1112,7 @@ where
 
             info!(
                 "API key validation successful for key: {} (security: {}, ip: {})",
-                ApiKeyMiddleware::mask_api_key(&api_key),
+                ApiKeyStore::mask_api_key(&api_key),
                 required_security,
                 client_ip
             );

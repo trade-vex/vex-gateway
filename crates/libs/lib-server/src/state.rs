@@ -4,9 +4,10 @@
 
 use clickhouse::Client as ClickHouseClient;
 use jsonwebtoken::{DecodingKey, EncodingKey};
-use lib_auth::config::{AuthConfig, JwtConfig, OAuthProviderConfig, RedisConfig};
+use lib_auth::config::{AuthConfig, JwtConfig, RedisConfig};
 use lib_auth::repository::{PostgresUserRepository, UserRepository};
 use lib_auth::service::{EmailService, OAuthService, SessionService, TokenService};
+use lib_config::ClickHouseConfig;
 use lib_core::Publisher;
 use lib_core::repository::repository::{ClickHousePortfolioRepository, PortfolioRepository};
 use lib_core::{CorrelationService, OrderIdempotencyStore};
@@ -22,7 +23,6 @@ use lib_middleware::{
 use redis::aio::ConnectionManager;
 use reqwest::Client;
 use sea_orm::DatabaseConnection;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info};
 use url::Url;
@@ -36,7 +36,6 @@ pub struct AppState {
     // Database and infrastructure
     pub db: Arc<DatabaseConnection>,
     pub redis_conn: ConnectionManager,
-    pub http_client: Client,
 
     // DB Repository
     pub user_repo: Arc<dyn UserRepository>,
@@ -46,10 +45,7 @@ pub struct AppState {
 
     // Auth configuration
     pub jwt_config: JwtConfig,
-    pub encoding_key: EncodingKey,
     pub decoding_key: DecodingKey,
-    pub oauth_providers: HashMap<String, OAuthProviderConfig>,
-    pub auth_config: AuthConfig,
     pub token_service: TokenService,
     pub oauth_service: OAuthService,
     pub email_service: EmailService,
@@ -80,6 +76,7 @@ impl AppState {
     /// Create a new AppState with all dependencies initialized
     pub async fn new(
         config: &AuthConfig,
+        clickhouse: &ClickHouseConfig,
         gateway_publisher: Publisher,
         correlation_service: CorrelationService,
     ) -> Result<Arc<Self>, Box<dyn std::error::Error + Send + Sync>> {
@@ -108,11 +105,9 @@ impl AppState {
 
         // Initialize portfolio repository (ClickHouse)
         let portfolio_repository: Arc<dyn PortfolioRepository> = {
-            let ch_url = std::env::var("CLICKHOUSE_URL")
-                .unwrap_or_else(|_| "http://localhost:8123".to_string());
-            let sanitized = Self::sanitize_url(&ch_url);
+            let sanitized = Self::sanitize_url(&clickhouse.url);
             info!("Connecting to ClickHouse: {}", sanitized);
-            let ch = ClickHouseClient::default().with_url(ch_url);
+            let ch = ClickHouseClient::default().with_url(&clickhouse.url);
             Arc::new(ClickHousePortfolioRepository::new(ch))
         };
 
@@ -125,18 +120,16 @@ impl AppState {
         let token_service = TokenService::new(
             Arc::new(config.jwt.clone()),
             redis_conn.clone(),
-            Arc::new(encoding_key.clone()),
+            Arc::new(encoding_key),
             Arc::new(decoding_key.clone()),
         );
 
         let oauth_service = OAuthService::new(
             redis_conn.clone(),
             http_client.clone(),
-            config.oauth.providers.clone(),
+            &config.oauth,
             Arc::new(token_service.clone()),
             user_repo.clone(),
-            config.oauth.redirect_base.clone(),
-            config.server.frontend_url.clone(),
         )
         .await?;
 
@@ -185,13 +178,9 @@ impl AppState {
         Ok(Arc::new(Self {
             db,
             redis_conn,
-            http_client,
             user_repo,
             jwt_config: config.jwt.clone(),
-            encoding_key,
             decoding_key,
-            oauth_providers: config.oauth.providers.clone(),
-            auth_config: config.clone(),
             token_service,
             oauth_service,
             email_service,

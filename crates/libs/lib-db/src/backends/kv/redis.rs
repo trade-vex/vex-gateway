@@ -461,27 +461,4 @@ impl RedisDb {
         })
         .await
     }
-
-    /// Delete a key (DEL)
-    pub async fn del_key(&self, key: &str) -> Result<()> {
-        let _: () = self
-            .execute_with_retry(|conn| {
-                let key = key.to_string();
-                Box::pin(async move { conn.del(key).await })
-            })
-            .await?;
-        Ok(())
-    }
-
-    /// Remove member from set (SREM)
-    pub async fn srem_string(&self, key: &str, member: &str) -> Result<()> {
-        let _: () = self
-            .execute_with_retry(|conn| {
-                let key = key.to_string();
-                let member = member.to_string();
-                Box::pin(async move { conn.srem(key, member).await })
-            })
-            .await?;
-        Ok(())
-    }
 }

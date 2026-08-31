@@ -17,8 +17,9 @@ use lib_api::handlers::api_key::{
 use lib_middleware::repository::api_key_repository::ApiKeyRepository;
 
 async fn setup_test_db() -> Result<DatabaseConnection, sea_orm::DbErr> {
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://vex:1234@localhost:5432/vex_gateway".to_string());
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        "postgresql://postgres:postgres123@localhost:5432/trading_db".to_string()
+    });
 
     // Add timeout to prevent hanging
     let connection_future = Database::connect(&database_url);

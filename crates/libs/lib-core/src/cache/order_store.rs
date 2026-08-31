@@ -5,7 +5,7 @@ use lib_db::backends::kv::redis::RedisDb;
 use lib_db::traits::BasicKvStore;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrderData {
@@ -35,6 +35,28 @@ impl From<OrderModel> for OrderData {
             order_status: model.order_status,
             order_timestamp: model.order_timestamp,
         }
+    }
+}
+
+// Status and time-in-force values are vex-core's protobuf enum value names (trading.proto
+// `Status`, `TimeInForce`), which the Kafka Connect sinks write verbatim to Redis and Postgres.
+// These match the repository's OPEN_ORDER_FILTER and HISTORY_ORDER_FILTER.
+
+/// Order history: cancelled, partially filled and filled orders.
+fn is_history_status(status: &str) -> bool {
+    matches!(
+        status,
+        "STATUS_CANCELLED" | "STATUS_PARTIALLY_FILLED" | "STATUS_FILLED"
+    )
+}
+
+/// Open orders: placed and processing ones, and partially filled ones except IOC, whose
+/// remainder the engine cancels.
+fn is_open_order(status: &str, time_in_force: Option<&str>) -> bool {
+    match status {
+        "STATUS_PLACED" | "STATUS_PROCESSING" => true,
+        "STATUS_PARTIALLY_FILLED" => time_in_force != Some("TIF_IOC"),
+        _ => false,
     }
 }
 
@@ -100,57 +122,51 @@ impl OrderStore {
         self
     }
 
-    /// Convert status from database format (STATUS_*) to user-friendly format
+    /// Convert the stored status (STATUS_*) to the API's form
     fn normalize_status(status: &str) -> String {
         match status {
-            "STATUS_FILLED" => "Filled".to_string(),
-            "STATUS_CANCELLED" => "Cancelled".to_string(),
-            "STATUS_PARTIALLY_FILLED" => "PartiallyFilled".to_string(),
-            "STATUS_PLACED" => "Placed".to_string(),
-            "STATUS_PENDING" => "Pending".to_string(),
-            "STATUS_PROCESSING" => "Processing".to_string(),
-            "STATUS_REJECTED" => "Rejected".to_string(),
-            // Handle lowercase variants (from Redis cache)
-            "filled" => "Filled".to_string(),
-            "cancelled" => "Cancelled".to_string(),
-            "partiallyfilled" => "PartiallyFilled".to_string(),
-            "placed" => "Placed".to_string(),
-            "pending" => "Pending".to_string(),
-            "processing" => "Processing".to_string(),
-            "rejected" => "Rejected".to_string(),
-            // Return as-is if already in correct format or unknown
-            _ => {
-                // If it doesn't start with STATUS_, assume it's already normalized
-                if status.starts_with("STATUS_") {
-                    // Convert STATUS_XYZ to Xyz format
-                    let without_prefix = status.strip_prefix("STATUS_").unwrap_or(status);
-                    // Convert to PascalCase
-                    let mut result = String::new();
-                    let mut capitalize_next = true;
-                    for ch in without_prefix.chars() {
-                        if ch == '_' {
-                            capitalize_next = true;
-                        } else if capitalize_next {
-                            result.push(ch.to_uppercase().next().unwrap_or(ch));
-                            capitalize_next = false;
-                        } else {
-                            result.push(ch.to_lowercase().next().unwrap_or(ch));
-                        }
-                    }
-                    result
-                } else {
-                    status.to_string()
-                }
+            "STATUS_REJECTED" => "Rejected",
+            "STATUS_PLACED" => "Placed",
+            "STATUS_CANCELLED" => "Cancelled",
+            "STATUS_PARTIALLY_FILLED" => "PartiallyFilled",
+            "STATUS_FILLED" => "Filled",
+            "STATUS_PROCESSING" => "Processing",
+            "STATUS_PROCESSED" => "Processed",
+            // An unknown value is passed through rather than guessed at.
+            other => other,
+        }
+        .to_string()
+    }
+
+    /// The stored side, or `None` (logged) when it is not one of core's `Side` names. Such a
+    /// record is skipped, as `parse_order_hash` skips one whose other stored fields do not parse:
+    /// guessing a side would show the user an order on the wrong side of the book. The handlers'
+    /// `total` comes from the repository's count, so a page holding a skipped record is short.
+    fn parse_side(model: &OrderData) -> Option<crate::dto::trading::Side> {
+        match model.order_side.parse() {
+            Ok(side) => Some(side),
+            Err(_) => {
+                error!(
+                    order_id = model.order_order_id,
+                    order_side = %model.order_side,
+                    "Skipping stored order with an unknown order_side"
+                );
+                None
             }
         }
     }
 
-    /// Convert order data to OrderResponse with scaling applied (open orders: size = remaining)
-    pub fn to_response(&self, model: impl Into<OrderData>) -> crate::dto::trading::OrderResponse {
-        use crate::dto::trading::{OrderResponse, Side};
+    /// Convert order data to OrderResponse with scaling applied (open orders: size = remaining).
+    /// `None` when the stored side is unknown; see `parse_side`.
+    pub fn to_response(
+        &self,
+        model: impl Into<OrderData>,
+    ) -> Option<crate::dto::trading::OrderResponse> {
+        use crate::dto::trading::OrderResponse;
         use rust_decimal::Decimal;
 
         let model = model.into();
+        let side = Self::parse_side(&model)?;
         let market_id = model.market_id as u32;
         let remaining = model.order_size.saturating_sub(model.order_filled_size);
 
@@ -164,16 +180,7 @@ impl OrderStore {
             (Decimal::from(model.order_price), Decimal::from(remaining))
         };
 
-        let side = model.order_side.parse().unwrap_or_else(|_| {
-            warn!(
-                order_id = model.order_order_id,
-                order_side = %model.order_side,
-                "Invalid order_side value, defaulting to Bid"
-            );
-            Side::Bid
-        });
-
-        OrderResponse {
+        Some(OrderResponse {
             order_id: model.order_order_id,
             user_id: model.order_user_id,
             market_id: model.market_id,
@@ -183,18 +190,20 @@ impl OrderStore {
             timestamp: model.order_timestamp,
             time_in_force: model.order_time_in_force,
             status: Self::normalize_status(&model.order_status),
-        }
+        })
     }
 
     /// Convert order data to OrderHistoryResponse with scaling applied.
+    /// `None` when the stored side is unknown; see `parse_side`.
     pub fn to_history_response(
         &self,
         model: impl Into<OrderData>,
-    ) -> crate::dto::trading::OrderHistoryResponse {
-        use crate::dto::trading::{OrderHistoryResponse, Side};
+    ) -> Option<crate::dto::trading::OrderHistoryResponse> {
+        use crate::dto::trading::OrderHistoryResponse;
         use rust_decimal::Decimal;
 
         let model = model.into();
+        let side = Self::parse_side(&model)?;
         let market_id = model.market_id as u32;
 
         // Apply scaling if scaling cache is available (size = original, filled = order_filled_size)
@@ -214,16 +223,7 @@ impl OrderStore {
             )
         };
 
-        let side = model.order_side.parse().unwrap_or_else(|_| {
-            warn!(
-                order_id = model.order_order_id,
-                order_side = %model.order_side,
-                "Invalid order_side value, defaulting to Bid"
-            );
-            Side::Bid
-        });
-
-        OrderHistoryResponse {
+        Some(OrderHistoryResponse {
             order_id: model.order_order_id,
             user_id: model.order_user_id,
             market_id: model.market_id,
@@ -234,7 +234,7 @@ impl OrderStore {
             timestamp: model.order_timestamp,
             time_in_force: model.order_time_in_force,
             status: Self::normalize_status(&model.order_status),
-        }
+        })
     }
 
     pub async fn get_order_by_id(
@@ -310,11 +310,7 @@ impl OrderStore {
                                 if !hash.is_empty() {
                                     // Only include Cancelled, PartiallyFilled, Filled
                                     if let Some(status) = hash.get("order_status") {
-                                        let status_lower = status.to_lowercase();
-                                        if status_lower == "cancelled"
-                                            || status_lower == "partiallyfilled"
-                                            || status_lower == "filled"
-                                        {
+                                        if is_history_status(status) {
                                             if let Some(order) = Self::parse_order_hash(hash) {
                                                 // Filter by market_id if provided
                                                 if let Some(filter_market_id) = market_id {
@@ -395,11 +391,7 @@ impl OrderStore {
                                 if !hash.is_empty() {
                                     // Only include Cancelled, PartiallyFilled, Filled
                                     if let Some(status) = hash.get("order_status") {
-                                        let status_lower = status.to_lowercase();
-                                        if status_lower == "cancelled"
-                                            || status_lower == "partiallyfilled"
-                                            || status_lower == "filled"
-                                        {
+                                        if is_history_status(status) {
                                             if let Some(order) = Self::parse_order_hash(hash) {
                                                 orders.push(order);
                                             }
@@ -462,35 +454,9 @@ impl OrderStore {
                                 Ok(hash) if !hash.is_empty() => {
                                     // Filter orders by status - only include "open" orders
                                     if let Some(status) = hash.get("order_status") {
-                                        let status_lower = status.to_lowercase();
-
-                                        // Skip orders that are in terminal states (not open)
-                                        if status_lower == "cancelled"
-                                            || status_lower == "filled"
-                                            || status_lower == "rejected"
-                                        {
-                                            continue;
-                                        }
-
-                                        // Skip PartiallyFilled IOC orders (no exception).
-                                        if status_lower == "partiallyfilled" {
-                                            if let Some(tif) = hash.get("order_time_in_force") {
-                                                let tif_lower = tif.to_lowercase();
-                                                if tif_lower == "ioc"
-                                                    || tif_lower == "tif_ioc"
-                                                    || tif_lower == "tifioc"
-                                                {
-                                                    continue;
-                                                }
-                                            }
-                                        }
-
-                                        // Only include: Placed, Pending, PartiallyFilled, Processing
-                                        if status_lower != "placed"
-                                            && status_lower != "pending"
-                                            && status_lower != "partiallyfilled"
-                                            && status_lower != "processing"
-                                        {
+                                        let time_in_force =
+                                            hash.get("order_time_in_force").map(String::as_str);
+                                        if !is_open_order(status, time_in_force) {
                                             continue;
                                         }
                                     }
@@ -583,38 +549,10 @@ impl OrderStore {
                             match cache.hgetall_string(&order_key).await {
                                 Ok(hash) if !hash.is_empty() => {
                                     // Filter orders by status - only include "open" orders
-                                    // Open orders: Placed, Pending, PartiallyFilled, Processing
-                                    // Exclude: Filled, Cancelled, Rejected
                                     if let Some(status) = hash.get("order_status") {
-                                        let status_lower = status.to_lowercase();
-
-                                        // Skip orders that are in terminal states (not open)
-                                        if status_lower == "cancelled"
-                                            || status_lower == "filled"
-                                            || status_lower == "rejected"
-                                        {
-                                            continue;
-                                        }
-
-                                        // Skip PartiallyFilled IOC orders (no exception).
-                                        if status_lower == "partiallyfilled" {
-                                            if let Some(tif) = hash.get("order_time_in_force") {
-                                                let tif_lower = tif.to_lowercase();
-                                                if tif_lower == "ioc"
-                                                    || tif_lower == "tif_ioc"
-                                                    || tif_lower == "tifioc"
-                                                {
-                                                    continue;
-                                                }
-                                            }
-                                        }
-
-                                        // Only include: Placed, Pending, PartiallyFilled, Processing
-                                        if status_lower != "placed"
-                                            && status_lower != "pending"
-                                            && status_lower != "partiallyfilled"
-                                            && status_lower != "processing"
-                                        {
+                                        let time_in_force =
+                                            hash.get("order_time_in_force").map(String::as_str);
+                                        if !is_open_order(status, time_in_force) {
                                             continue;
                                         }
                                     }
@@ -662,74 +600,6 @@ impl OrderStore {
 
         debug!("No repository available for user orders: {}", user_id);
         Ok(vec![])
-    }
-
-    pub async fn invalidate_order(&self, order_id: u64, user_id: u64) {
-        if !self.config.enabled {
-            return;
-        }
-
-        if let Some(cache) = &self.cache {
-            // Delete order:{order_id} hash
-            let order_key = format!("order:{}", order_id);
-            if let Err(e) = cache.del_key(&order_key).await {
-                warn!("Failed to delete order hash {}: {}", order_key, e);
-            }
-
-            // Remove from user:{user_id}:orders set
-            let user_set_key = format!("user:{}:orders", user_id);
-            if let Err(e) = cache
-                .srem_string(&user_set_key, &order_id.to_string())
-                .await
-            {
-                warn!(
-                    "Failed to remove from user orders set {}: {}",
-                    user_set_key, e
-                );
-            }
-
-            debug!(
-                "Invalidated cache for order: {} and user: {}",
-                order_id, user_id
-            );
-        }
-    }
-
-    pub async fn invalidate_user_orders(&self, user_id: u64) {
-        if !self.config.enabled {
-            return;
-        }
-
-        if let Some(cache) = &self.cache {
-            let user_set_key = format!("user:{}:orders", user_id);
-
-            // Get all order IDs first
-            match cache.smembers_string(&user_set_key).await {
-                Ok(order_ids) => {
-                    // Delete each order hash
-                    for order_id_str in &order_ids {
-                        let order_key = format!("order:{}", order_id_str);
-                        if let Err(e) = cache.del_key(&order_key).await {
-                            warn!("Failed to delete order hash {}: {}", order_key, e);
-                        }
-                    }
-
-                    // Delete the set itself
-                    if let Err(e) = cache.del_key(&user_set_key).await {
-                        warn!("Failed to delete user orders set {}: {}", user_set_key, e);
-                    }
-
-                    debug!(
-                        "Invalidated {} orders for user: {}",
-                        order_ids.len(),
-                        user_id
-                    );
-                }
-                Err(e) => {
-                    warn!("Failed to get order IDs for user {}: {}", user_id, e);
-                }
-            }
-        }
     }
 
     /// Parse order hash from Redis into OrderData

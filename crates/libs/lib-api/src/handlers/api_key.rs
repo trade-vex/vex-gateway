@@ -82,12 +82,7 @@ impl FromRequest for AuthenticatedUser {
                 return Ok(AuthenticatedUser::Jwt(jwt_user));
             }
 
-            // If JWT fails, try to extract API key authentication from extensions
-            if let Some(api_config) = req.extensions().get::<ApiKeyConfig>() {
-                return Ok(AuthenticatedUser::ApiKey(api_config.clone()));
-            }
-
-            // Try to get it as Arc<ApiKeyConfig> (in case it was wrapped)
+            // If JWT fails, extract API key authentication from extensions
             if let Some(api_config_arc) = req.extensions().get::<Arc<ApiKeyConfig>>() {
                 return Ok(AuthenticatedUser::ApiKey(api_config_arc.as_ref().clone()));
             }

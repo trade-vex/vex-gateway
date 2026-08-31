@@ -60,14 +60,4 @@ impl Environment {
             Environment::Production => "production.toml",
         }
     }
-
-    /// Check if this is a development environment.
-    pub fn is_development(&self) -> bool {
-        matches!(self, Environment::Development)
-    }
-
-    /// Check if this is a production environment.
-    pub fn is_production(&self) -> bool {
-        matches!(self, Environment::Production)
-    }
 }

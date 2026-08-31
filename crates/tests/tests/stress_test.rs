@@ -16,12 +16,12 @@
 //! - Cancel remaining unfilled orders
 //! - Verify: trades executed, balances transferred, unfilled orders cancelled
 
-use actix_web::{web, App, HttpResponse, HttpServer, Result};
+use actix_web::{App, HttpResponse, HttpServer, Result, web};
 use common::{OrderCommand, OrderCommandType, Side, Status, TimeInForce, UserBalance};
 use lib_core::{
-    generate_client_order_id, wait_for_response, CorrelationService, OrderCacheConfig, OrderStore,
-    OrdersListResponse, PostgresTradingRepository, Publisher, UserBalanceCacheConfig,
-    UserBalanceStore,
+    CorrelationService, OrderCacheConfig, OrderStore, OrdersListResponse,
+    PostgresTradingRepository, Publisher, UserBalanceCacheConfig, UserBalanceStore,
+    generate_client_order_id, wait_for_response,
 };
 use sea_orm::{Database, DatabaseConnection};
 use serde::{Deserialize, Serialize};
@@ -371,8 +371,9 @@ fn spawn_test_server(
 }
 
 async fn init_database() -> Option<Arc<DatabaseConnection>> {
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://postgres:postgres@localhost:5432/trading_db".to_string());
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        "postgresql://postgres:postgres123@localhost:5432/trading_db".to_string()
+    });
 
     match Database::connect(&database_url).await {
         Ok(db) => Some(Arc::new(db)),
