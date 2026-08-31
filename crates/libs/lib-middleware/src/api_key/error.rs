@@ -47,6 +47,9 @@ pub enum ApiKeyError {
     #[error("Internal error: {0}")]
     Internal(String),
 
+    #[error("Request payload too large")]
+    PayloadTooLarge,
+
     #[error("Missing API key")]
     MissingApiKey,
 
