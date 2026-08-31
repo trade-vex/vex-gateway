@@ -468,11 +468,25 @@ grep -i "memory\|oom" logs/app.log
 
 2. **Service Impact**
    - **All order operations will fail** (place/cancel)
-   - Health check may still pass
-   - User data endpoints will still work
+   - `GET /api/health` returns 503 `engine_link: not connected to vex-core` while no core reads
+     this gateway's publication: a few seconds after the core stops, and from then on, also once
+     the core is back, because a restarted core has lost this gateway's session (see
+     Mitigation).
+   - It also returns 503 (`engine_link: response from vex-core timed out`) once order requests
+     have kept timing out for 10 s with no engine response in between (timeouts more than 30 s
+     apart count as separate incidents). With no order traffic this check keeps passing, and
+     once red it turns green only on the next routed response, so do not use the endpoint as a
+     load-balancer readiness check: an instance taken out of rotation would stay red. Use it as
+     the orchestrator's health check, which restarts the gateway.
+   - User data endpoints keep working only until the orchestrator restarts the gateway. A gateway
+     cannot start without a core (its handshake times out after 20 s and it exits), so from then
+     on the whole gateway is down, and it comes back with the orchestrator's first restart after
+     the core is up again.
 
 3. **Mitigation**
-   - Restore VEX Core service
+   - Restore VEX Core service, then restart every gateway: a gateway does not reconnect to a
+     restarted core, and cannot publish until it restarts and handshakes again. The orchestrator
+     restarts it when its health check uses `/api/health`.
    - Order and cancel requests return 503 `Matching engine unavailable` (no `Retry-After`) while
      no core is connected; a busy core answers 503 `Matching engine is busy; please retry` with
      `Retry-After: 1` instead. Until Aeron notices that the core has gone, which takes a few
