@@ -4,14 +4,14 @@ use actix_web::{HttpRequest, HttpResponse, http::StatusCode, web};
 use common::{OrderCommand, OrderCommandType, Side, Status, TimeInForce, UserBalance};
 use lib_core::{
     CompletionWait, CorrelationService, IdempotentOrderOutcome, OrderClaim, OrderIdempotencyError,
-    OrderIdempotencyStore, Publisher, ReleaseReason, ResponseError, TradingRepository,
-    generate_client_order_id, model::orders::Model as OrderModel, wait_for_response,
+    OrderIdempotencyStore, Publisher, ReleaseReason, ResponseError, generate_client_order_id,
+    wait_for_response,
 };
 use lib_utils::AuthenticatedUserId;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 use vex_networking::client::GatewayError;
 
 const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -527,7 +527,6 @@ pub async fn place_order(
     publisher: web::Data<Arc<Publisher>>,
     correlation_service: web::Data<Arc<CorrelationService>>,
     idempotency_store: web::Data<Arc<OrderIdempotencyStore>>,
-    trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> HttpResponse {
     let start = Instant::now();
 
@@ -726,61 +725,9 @@ pub async fn place_order(
                 );
             }
 
-            // Store cancelled/rejected orders in database if they won't come via Kafka
-            // This ensures FOK orders that are cancelled appear in order history
-            if response.order_id != 0 && matches!(response.status, Status::Cancelled) {
-                // Check if order already exists (might have been stored via Kafka)
-                match trading_repo
-                    .get_order_by_id(response.order_id, user_id)
-                    .await
-                {
-                    Ok(Some(_)) => {
-                        // Order already exists, skip insertion
-                        debug!(
-                            "Order {} already exists in database, skipping insertion",
-                            response.order_id
-                        );
-                    }
-                    Ok(None) => {
-                        // Order doesn't exist, create it
-                        let order_model = OrderModel {
-                            id: 0, // Will be auto-generated
-                            market_id: market_id as i32,
-                            order_order_id: response.order_id as i64,
-                            order_user_id: user_id as i64,
-                            order_price: price as i64,
-                            order_size: volume as i64,
-                            order_filled_size: 0,
-                            order_side: format!("{:?}", side),
-                            order_time_in_force: format!("{:?}", time_in_force),
-                            order_status: status_str.clone(),
-                            order_timestamp: command.timestamp as i64, // Store nanoseconds as i64
-                            created_at: None,
-                        };
-
-                        if let Err(e) = trading_repo.create_order(order_model).await {
-                            warn!(
-                                order_id = response.order_id,
-                                error = %e,
-                                "Failed to store cancelled order in database"
-                            );
-                        } else {
-                            info!(
-                                order_id = response.order_id,
-                                "Stored cancelled FOK order in database for order history"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        warn!(
-                            order_id = response.order_id,
-                            error = %e,
-                            "Failed to check if order exists before storing"
-                        );
-                    }
-                }
-            }
-
+            // PR #83 removed the gateway-side cancelled-order insert: order history is
+            // written by the Kafka consumer, and the duplicate writer used a status
+            // vocabulary no read query matched.
             // PR #81: an engine rejection must not be a 200. PR #105 records the outcome
             // for idempotent replays, so it has to record the SAME status the client sees.
             settle_idempotent_order(
