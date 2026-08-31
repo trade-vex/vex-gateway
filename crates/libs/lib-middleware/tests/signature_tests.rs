@@ -381,16 +381,9 @@ fn test_parse_timestamp_milliseconds() {
 }
 
 #[test]
-fn test_parse_timestamp_microseconds() {
-    // Microseconds should be converted to milliseconds
-    assert_eq!(
-        SignatureVerifier::parse_timestamp("1640995200000000").unwrap(),
-        1640995200000
-    );
-    assert_eq!(
-        SignatureVerifier::parse_timestamp("123456789012345").unwrap(),
-        123456789012
-    );
+fn test_parse_timestamp_rejects_microseconds() {
+    assert!(SignatureVerifier::parse_timestamp("1640995200000000").is_err());
+    assert!(SignatureVerifier::parse_timestamp("123456789012345").is_err());
 }
 
 #[test]
@@ -413,17 +406,11 @@ fn test_parse_timestamp_edge_cases() {
         9999999999999
     );
 
-    // 14 digits - microseconds (converted)
-    assert_eq!(
-        SignatureVerifier::parse_timestamp("12345678901234").unwrap(),
-        12345678901
-    );
+    // More than 13 digits is not accepted as milliseconds
+    assert!(SignatureVerifier::parse_timestamp("12345678901234").is_err());
 
     // Very large number
-    assert_eq!(
-        SignatureVerifier::parse_timestamp("1234567890123456").unwrap(),
-        1234567890123
-    );
+    assert!(SignatureVerifier::parse_timestamp("1234567890123456").is_err());
 }
 
 #[test]

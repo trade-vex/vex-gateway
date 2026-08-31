@@ -30,23 +30,32 @@ impl CombinedAuthMiddleware {
     }
 
     fn detect_auth_type(req: &HttpRequest) -> AuthType {
-        if let Some(auth_header) = req.headers().get("authorization")
+        let has_bearer_token = if let Some(auth_header) = req.headers().get("authorization")
             && let Ok(auth_str) = auth_header.to_str()
             && auth_str.starts_with("Bearer ")
         {
-            return AuthType::Jwt;
+            true
+        } else {
+            false
+        };
+        let has_api_key = req.headers().get("X-MBX-APIKEY").is_some();
+        let has_session = req.cookie("session_id").is_some();
+
+        if [has_bearer_token, has_api_key, has_session]
+            .into_iter()
+            .filter(|present| *present)
+            .count()
+            > 1
+        {
+            return AuthType::Ambiguous;
         }
 
-        if req.headers().get("X-MBX-APIKEY").is_some() {
-            return AuthType::ApiKey;
+        match (has_bearer_token, has_api_key, has_session) {
+            (true, false, false) => AuthType::Jwt,
+            (false, true, false) => AuthType::ApiKey,
+            (false, false, true) => AuthType::Session,
+            _ => AuthType::None,
         }
-
-        // Check for session cookie
-        if req.cookie("session_id").is_some() {
-            return AuthType::Session;
-        }
-
-        AuthType::None
     }
 }
 
@@ -55,6 +64,7 @@ enum AuthType {
     Jwt,
     ApiKey,
     Session,
+    Ambiguous,
     None,
 }
 
@@ -182,6 +192,10 @@ where
                     }
                 }
 
+                AuthType::Ambiguous => Err(actix_web::error::ErrorBadRequest(
+                    "Ambiguous authentication credentials",
+                )),
+
                 AuthType::None => {
                     error!("No authentication provided");
                     Err(actix_web::error::ErrorUnauthorized(
@@ -259,5 +273,201 @@ mod tests {
 
         assert!(first_response.status().is_success());
         assert!(second_response.status().is_success());
+    }
+
+    use actix_web::http::StatusCode;
+    use chrono::Utc;
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+    use lib_auth::{
+        config::JwtConfig, dto::jwt_response_dto::AppClaims,
+        middleware::jwt_auth::AuthenticatedUser, service::TokenService,
+    };
+    use redis::AsyncCommands;
+    use rsa::{
+        Generate, PrivateKey,
+        pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding},
+    };
+    use std::sync::OnceLock;
+    use uuid::Uuid;
+
+    async fn redis_connection() -> ConnectionManager {
+        let redis_url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
+        let client = redis::Client::open(redis_url).expect("test Redis URL must be valid");
+        ConnectionManager::new(client)
+            .await
+            .expect("test Redis must be available")
+    }
+
+    /// One RSA key pair per test binary: generating a key in a debug build is slow.
+    fn test_keys() -> (EncodingKey, DecodingKey) {
+        static KEYS: OnceLock<(EncodingKey, DecodingKey)> = OnceLock::new();
+        KEYS.get_or_init(|| {
+            let private_key = PrivateKey::generate();
+            let private_pem = private_key
+                .to_pkcs8_pem(LineEnding::LF)
+                .expect("test private key must encode");
+            let public_pem = private_key
+                .to_public_key()
+                .to_public_key_pem(LineEnding::LF)
+                .expect("test public key must encode");
+            (
+                EncodingKey::from_rsa_pem(private_pem.as_bytes())
+                    .expect("test private key must be valid"),
+                DecodingKey::from_rsa_pem(public_pem.as_bytes())
+                    .expect("test public key must be valid"),
+            )
+        })
+        .clone()
+    }
+
+    #[actix_web::test]
+    async fn rejects_ambiguous_bearer_and_api_key_credentials() {
+        let redis_conn = redis_connection().await;
+        let session_service = Arc::new(SessionService::new(redis_conn.clone(), 300));
+        let (_, decoding_key) = test_keys();
+        let jwt_middleware = JwtAuthentication::new(
+            decoding_key,
+            "test-issuer".to_string(),
+            "test-audience".to_string(),
+            redis_conn,
+        );
+        let middleware =
+            CombinedAuthMiddleware::new(jwt_middleware, ApiKeyMiddleware::new(), session_service);
+        let app = test::init_service(
+            App::new()
+                .wrap(middleware)
+                .route("/protected", web::get().to(HttpResponse::Ok)),
+        )
+        .await;
+
+        let request = test::TestRequest::get()
+            .uri("/protected")
+            .insert_header(("Authorization", "Bearer jwt-token"))
+            .insert_header(("X-MBX-APIKEY", "api-key"))
+            .to_request();
+        let error = test::try_call_service(&app, request)
+            .await
+            .expect_err("ambiguous credentials must be rejected");
+
+        assert_eq!(
+            error.as_response_error().status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(error.to_string(), "Ambiguous authentication credentials");
+    }
+
+    #[actix_web::test]
+    async fn refreshes_expired_access_token_for_live_session() {
+        let redis_conn = redis_connection().await;
+        let (encoding_key, decoding_key) = test_keys();
+        let issuer = "combined-auth-test".to_string();
+        let audience = "combined-auth-audience".to_string();
+        let jwt_config = Arc::new(JwtConfig {
+            private_key_path: String::new(),
+            public_key_path: String::new(),
+            access_token_ttl_minutes: 60,
+            refresh_token_ttl_days: 1,
+            issuer: issuer.clone(),
+            audience: audience.clone(),
+        });
+        let encoding_key = Arc::new(encoding_key);
+        let decoding_key = Arc::new(decoding_key);
+        let token_service = Arc::new(TokenService::new(
+            jwt_config,
+            redis_conn.clone(),
+            encoding_key.clone(),
+            decoding_key.clone(),
+        ));
+        let session_service = Arc::new(SessionService::new(redis_conn.clone(), 300));
+        let user_id = Uuid::new_v4();
+        let tokens = token_service
+            .mint_tokens(user_id)
+            .await
+            .expect("initial token mint must succeed");
+
+        let refresh_key = format!("refresh:{}", tokens.refresh_token);
+        let mut cleanup_conn = redis_conn.clone();
+        let refresh_value: String = cleanup_conn
+            .get(&refresh_key)
+            .await
+            .expect("refresh token must be stored");
+        let record: Vec<&str> = refresh_value.split(':').collect();
+        let [_, old_jti, token_version] = record[..] else {
+            panic!("refresh token value must be user:jti:version, got {refresh_value}");
+        };
+        let old_jti = old_jti.to_string();
+        let token_version: u64 = token_version.parse().expect("token version must be a u64");
+
+        let now = Utc::now().timestamp();
+        let expired_access_token = encode(
+            &Header::new(Algorithm::RS256),
+            &AppClaims {
+                sub: user_id.to_string(),
+                exp: now - 120,
+                iat: now - 3600,
+                iss: issuer.clone(),
+                aud: audience.clone(),
+                jti: old_jti.clone(),
+                pwd: now - 3600,
+                token_version,
+            },
+            &encoding_key,
+        )
+        .expect("expired access token must encode");
+        let session_id = session_service
+            .create_session(user_id, expired_access_token.clone(), tokens.refresh_token)
+            .await
+            .expect("live session must be created");
+
+        let jwt_middleware = JwtAuthentication::with_auto_refresh(
+            (*decoding_key).clone(),
+            issuer,
+            audience,
+            redis_conn,
+            token_service,
+            session_service.clone(),
+        );
+        let middleware = CombinedAuthMiddleware::new(
+            jwt_middleware,
+            ApiKeyMiddleware::new(),
+            session_service.clone(),
+        );
+        let app = test::init_service(App::new().wrap(middleware).route(
+            "/protected",
+            web::get().to(|user: AuthenticatedUser| async move {
+                HttpResponse::Ok().body(user.user_id.to_string())
+            }),
+        ))
+        .await;
+
+        let request = test::TestRequest::get()
+            .uri("/protected")
+            .cookie(actix_web::cookie::Cookie::new(
+                "session_id",
+                session_id.clone(),
+            ))
+            .to_request();
+        let response = test::call_service(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let updated_session = session_service
+            .get_session(&session_id)
+            .await
+            .expect("live session must remain available");
+        assert_ne!(updated_session.access_token, expired_access_token);
+
+        session_service
+            .delete_session(&session_id)
+            .await
+            .expect("test session cleanup must succeed");
+        let _: () = cleanup_conn
+            .del(format!("refresh:{}", updated_session.refresh_token))
+            .await
+            .expect("test refresh token cleanup must succeed");
+        let _: () = cleanup_conn
+            .del(format!("blacklist:{}", old_jti))
+            .await
+            .expect("test blacklist cleanup must succeed");
     }
 }
