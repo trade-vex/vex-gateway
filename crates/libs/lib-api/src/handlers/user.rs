@@ -111,7 +111,7 @@ pub async fn get_balances(
 /// `GET /api/user/orders/open?page=1&limit=20`
 ///
 /// # Query Parameters
-/// - `page` (optional): Page number (1-indexed). Defaults to 1.
+/// - `page` (optional): Page number (1-indexed). Defaults to 1, max 10,000.
 /// - `limit` (optional): Number of orders per page. Defaults to 20, max 100.
 /// - `market_id` (optional): Filter orders by market ID. If not provided, returns orders from all markets.
 ///
@@ -181,6 +181,9 @@ pub struct OrdersQuery {
     pub market_id: Option<u32>,
 }
 
+const MAX_PAGE: usize = 10_000;
+const INTERNAL_ERROR_MESSAGE: &str = "An internal error occurred. Please try again later.";
+
 pub async fn get_open_orders(
     user: AuthenticatedUserId,
     query: web::Query<OrdersQuery>,
@@ -191,9 +194,9 @@ pub async fn get_open_orders(
     let user_id = ((raw >> 64) as u64) ^ (raw as u64);
 
     // Parse pagination parameters
-    let page = query.page.unwrap_or(1).max(1);
+    let page = query.page.unwrap_or(1).clamp(1, MAX_PAGE);
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
-    let offset = ((page - 1) * limit) as u64;
+    let offset = (page as u64).saturating_sub(1).saturating_mul(limit as u64);
     let limit_u64 = limit as u64;
 
     // Get total count for pagination metadata
@@ -224,7 +227,7 @@ pub async fn get_open_orders(
                 .collect();
 
             let total_pages = total_count.div_ceil(limit);
-            let has_next = page < total_pages;
+            let has_next = page < total_pages && page < MAX_PAGE;
             let has_prev = page > 1;
 
             let response = OrdersListResponse {
@@ -259,7 +262,7 @@ pub async fn get_open_orders(
 /// `GET /api/user/orders/history?page=1&limit=20`
 ///
 /// # Query Parameters
-/// - `page` (optional): Page number (1-indexed). Defaults to 1.
+/// - `page` (optional): Page number (1-indexed). Defaults to 1, max 10,000.
 /// - `limit` (optional): Number of orders per page. Defaults to 20, max 100.
 /// - `market_id` (optional): Filter orders by market ID. If not provided, returns orders from all markets.
 ///
@@ -329,9 +332,9 @@ pub async fn get_order_history(
     let user_id = ((raw >> 64) as u64) ^ (raw as u64);
 
     // Parse pagination parameters
-    let page = query.page.unwrap_or(1).max(1);
+    let page = query.page.unwrap_or(1).clamp(1, MAX_PAGE);
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
-    let offset = ((page - 1) * limit) as u64;
+    let offset = (page as u64).saturating_sub(1).saturating_mul(limit as u64);
     let limit_u64 = limit as u64;
 
     // Get total count for pagination metadata
@@ -366,7 +369,7 @@ pub async fn get_order_history(
                 .collect();
 
             let total_pages = total_count.div_ceil(limit);
-            let has_next = page < total_pages;
+            let has_next = page < total_pages && page < MAX_PAGE;
             let has_prev = page > 1;
 
             let response = OrdersHistoryListResponse {
@@ -445,10 +448,19 @@ pub async fn get_portfolio_overview(
     // Use default resolution (Day) for metrics - resolution only affects pnl_series which we don't need here
     let resolution = PnlResolution::Day;
 
-    let metrics = portfolio_repo
+    let metrics = match portfolio_repo
         .get_portfolio(user_id, now_secs, resolution)
         .await
-        .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
+    {
+        Ok(metrics) => metrics,
+        Err(e) => {
+            tracing::error!(user_id, error = %e, "failed to get portfolio overview");
+            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "failed to retrieve portfolio",
+                "message": INTERNAL_ERROR_MESSAGE
+            })));
+        }
+    };
 
     let response = PortfolioMetricsResponse::new(
         metrics.balance,
@@ -524,10 +536,19 @@ pub async fn get_balance_chart(
         .and_then(PnlResolution::from_query)
         .unwrap_or_default();
 
-    let balance_series = portfolio_repo
+    let balance_series = match portfolio_repo
         .get_balance_chart(user_id, now_secs, resolution)
         .await
-        .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
+    {
+        Ok(balance_series) => balance_series,
+        Err(e) => {
+            tracing::error!(user_id, error = %e, "failed to get balance chart");
+            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "failed to retrieve balance chart",
+                "message": INTERNAL_ERROR_MESSAGE
+            })));
+        }
+    };
 
     let response = BalanceChartResponse {
         balance_series,
@@ -607,10 +628,19 @@ pub async fn get_pnl_chart(
         .unwrap_or_default();
 
     // Get portfolio metrics to extract pnl_series
-    let metrics = portfolio_repo
+    let metrics = match portfolio_repo
         .get_portfolio(user_id, now_secs, resolution)
         .await
-        .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
+    {
+        Ok(metrics) => metrics,
+        Err(e) => {
+            tracing::error!(user_id, error = %e, "failed to get PnL chart");
+            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "failed to retrieve PnL chart",
+                "message": INTERNAL_ERROR_MESSAGE
+            })));
+        }
+    };
 
     let response = PnlChartResponse {
         pnl_series: metrics.pnl_series,

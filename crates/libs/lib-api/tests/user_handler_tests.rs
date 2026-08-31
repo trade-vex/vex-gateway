@@ -17,9 +17,10 @@ use uuid::Uuid;
 use async_trait::async_trait;
 use lib_api::handlers::user::{
     OrdersQuery, get_balances, get_favorite_markets, get_open_orders, get_order_history,
-    toggle_favorite_market,
+    get_portfolio_overview, toggle_favorite_market,
 };
 use lib_core::{
+    BalancePoint, PnlResolution, PortfolioMetrics, PortfolioRepository,
     ToggleFavoriteMarketRequest,
     cache::{order_store::OrderCacheConfig, user_store::UserBalanceCacheConfig},
     model::{
@@ -254,15 +255,24 @@ async fn insert_test_order(
 #[derive(Clone)]
 struct ErrorMockTradingRepository {
     error_method: Option<&'static str>, // Method name that should return error
+    total_count: u64,
 }
 
 impl ErrorMockTradingRepository {
     fn new() -> Self {
-        Self { error_method: None }
+        Self {
+            error_method: None,
+            total_count: 0,
+        }
     }
 
     fn with_error_on(mut self, method: &'static str) -> Self {
         self.error_method = Some(method);
+        self
+    }
+
+    fn with_total_count(mut self, total_count: u64) -> Self {
+        self.total_count = total_count;
         self
     }
 
@@ -362,7 +372,7 @@ impl TradingRepository for ErrorMockTradingRepository {
                 "Database connection failed".to_string(),
             ));
         }
-        Ok(0)
+        Ok(self.total_count)
     }
 
     async fn get_order_by_id(
@@ -439,7 +449,7 @@ impl TradingRepository for ErrorMockTradingRepository {
                 "Database connection failed".to_string(),
             ));
         }
-        Ok(0)
+        Ok(self.total_count)
     }
 
     async fn get_user_favorite_markets(
@@ -511,6 +521,222 @@ impl TradingRepository for ErrorMockTradingRepository {
 mod tests {
     use super::*;
     use lib_core::cache::{order_store::OrderStore, user_store::UserBalanceStore};
+    use std::sync::Mutex;
+    use tracing::{
+        Event, Metadata, Subscriber,
+        field::{Field, Visit},
+        span::{Attributes, Id, Record},
+    };
+
+    const DATABASE_DETAIL: &str = "SELECT secret FROM api_keys";
+
+    struct ErrorPortfolioRepository;
+
+    #[async_trait]
+    impl PortfolioRepository for ErrorPortfolioRepository {
+        async fn get_portfolio(
+            &self,
+            _user_id: u64,
+            _now_ts_secs: i64,
+            _resolution: PnlResolution,
+        ) -> lib_core::repository::repository::Result<PortfolioMetrics> {
+            Err(TradingError::Database(format!(
+                "relation missing while running {DATABASE_DETAIL}"
+            )))
+        }
+
+        async fn get_balance_chart(
+            &self,
+            _user_id: u64,
+            _now_ts_secs: i64,
+            _resolution: PnlResolution,
+        ) -> lib_core::repository::repository::Result<Vec<BalancePoint>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[derive(Clone)]
+    struct CapturingSubscriber {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct FieldVisitor<'a> {
+        output: &'a mut String,
+    }
+
+    impl Visit for FieldVisitor<'_> {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.output
+                .push_str(&format!(" {}={value:?}", field.name()));
+        }
+    }
+
+    impl Subscriber for CapturingSubscriber {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut output = String::new();
+            event.record(&mut FieldVisitor {
+                output: &mut output,
+            });
+            self.events.lock().unwrap().push(output);
+        }
+
+        fn enter(&self, _span: &Id) {}
+
+        fn exit(&self, _span: &Id) {}
+    }
+
+    #[tokio::test]
+    async fn test_extreme_page_returns_empty_page_without_overflow() {
+        let user = create_authenticated_user_id(create_test_user());
+        let repo = Arc::new(ErrorMockTradingRepository::new());
+        let order_store = Arc::new(OrderStore::with_repository(
+            OrderCacheConfig::default(),
+            repo.clone(),
+        ));
+
+        let open_response = get_open_orders(
+            user.clone(),
+            web::Query(OrdersQuery {
+                page: Some(usize::MAX),
+                limit: Some(100),
+                market_id: None,
+            }),
+            web::Data::new(order_store.clone()),
+            web::Data::new(repo.clone() as Arc<dyn TradingRepository>),
+        )
+        .await
+        .unwrap();
+        let open_body = actix_web::body::to_bytes(open_response.into_body())
+            .await
+            .unwrap();
+        let open_json: serde_json::Value = serde_json::from_slice(&open_body).unwrap();
+
+        assert_eq!(open_json["page"], 10_000);
+        assert_eq!(open_json["limit"], 100);
+        assert_eq!(open_json["orders"], serde_json::json!([]));
+
+        let history_response = get_order_history(
+            user,
+            web::Query(OrdersQuery {
+                page: Some(usize::MAX),
+                limit: Some(100),
+                market_id: None,
+            }),
+            web::Data::new(order_store),
+            web::Data::new(repo as Arc<dyn TradingRepository>),
+        )
+        .await
+        .unwrap();
+        let history_body = actix_web::body::to_bytes(history_response.into_body())
+            .await
+            .unwrap();
+        let history_json: serde_json::Value = serde_json::from_slice(&history_body).unwrap();
+
+        assert_eq!(history_json["page"], 10_000);
+        assert_eq!(history_json["limit"], 100);
+        assert_eq!(history_json["orders"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn test_has_next_is_false_at_max_page() {
+        let user = create_authenticated_user_id(create_test_user());
+        let repo = Arc::new(ErrorMockTradingRepository::new().with_total_count(1_000_001));
+        let order_store = Arc::new(OrderStore::with_repository(
+            OrderCacheConfig::default(),
+            repo.clone(),
+        ));
+
+        let open_response = get_open_orders(
+            user.clone(),
+            web::Query(OrdersQuery {
+                page: Some(10_000),
+                limit: Some(100),
+                market_id: None,
+            }),
+            web::Data::new(order_store.clone()),
+            web::Data::new(repo.clone() as Arc<dyn TradingRepository>),
+        )
+        .await
+        .unwrap();
+        let open_body = actix_web::body::to_bytes(open_response.into_body())
+            .await
+            .unwrap();
+        let open_json: serde_json::Value = serde_json::from_slice(&open_body).unwrap();
+
+        assert_eq!(open_json["page"], 10_000);
+        assert_eq!(open_json["total_pages"], 10_001);
+        assert_eq!(open_json["has_next"], false);
+
+        let history_response = get_order_history(
+            user,
+            web::Query(OrdersQuery {
+                page: Some(10_000),
+                limit: Some(100),
+                market_id: None,
+            }),
+            web::Data::new(order_store),
+            web::Data::new(repo as Arc<dyn TradingRepository>),
+        )
+        .await
+        .unwrap();
+        let history_body = actix_web::body::to_bytes(history_response.into_body())
+            .await
+            .unwrap();
+        let history_json: serde_json::Value = serde_json::from_slice(&history_body).unwrap();
+
+        assert_eq!(history_json["page"], 10_000);
+        assert_eq!(history_json["total_pages"], 10_001);
+        assert_eq!(history_json["has_next"], false);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_database_error_is_generic_for_client_and_detailed_in_log() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = CapturingSubscriber {
+            events: events.clone(),
+        };
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let user = create_authenticated_user_id(create_test_user());
+        let repo: Arc<dyn PortfolioRepository> = Arc::new(ErrorPortfolioRepository);
+
+        let response = get_portfolio_overview(user, web::Data::new(repo))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 500);
+
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .unwrap();
+        let body_text = std::str::from_utf8(&body).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["error"], "failed to retrieve portfolio");
+        assert_eq!(
+            json["message"],
+            "An internal error occurred. Please try again later."
+        );
+        assert!(!body_text.contains(DATABASE_DETAIL));
+        assert!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| event.contains(DATABASE_DETAIL))
+        );
+    }
+
     #[tokio::test]
     #[ignore] // Requires database - skip in CI
     async fn test_get_balances_success() {

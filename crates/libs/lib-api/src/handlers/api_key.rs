@@ -16,6 +16,8 @@ use lib_middleware::{
 use sea_orm::Set;
 use std::sync::Arc;
 
+const INTERNAL_ERROR_MESSAGE: &str = "An internal error occurred. Please try again later.";
+
 async fn invalidate_api_key_cache(cache: Option<&web::Data<ApiKeyStore>>, api_key: &str) {
     let Some(cache) = cache else {
         tracing::error!("API key cache unavailable after successful API key mutation");
@@ -335,10 +337,10 @@ pub async fn create_api_key(
             Ok(HttpResponse::Created().json(response))
         }
         Err(e) => {
-            tracing::error!("Failed to create API key: {}", e);
+            tracing::error!(user_id = %user_id, error = %e, "failed to create API key");
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "Failed to create API key",
-                "message": e.to_string()
+                "message": INTERNAL_ERROR_MESSAGE
             })))
         }
     }
@@ -364,10 +366,10 @@ pub async fn list_api_keys(
             Ok(HttpResponse::Ok().json(response))
         }
         Err(e) => {
-            tracing::error!("Failed to list API keys: {}", e);
+            tracing::error!(user_id = %user_id, error = %e, "failed to list API keys");
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "Failed to list API keys",
-                "message": e.to_string()
+                "message": INTERNAL_ERROR_MESSAGE
             })))
         }
     }
@@ -403,10 +405,10 @@ pub async fn get_api_key(
             "error": "API key not found"
         }))),
         Err(e) => {
-            tracing::error!("Failed to get API key: {}", e);
+            tracing::error!(user_id = %user_id, api_key_id = %api_key_id, error = %e, "failed to get API key");
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "Failed to get API key",
-                "message": e.to_string()
+                "message": INTERNAL_ERROR_MESSAGE
             })))
         }
     }
@@ -444,10 +446,10 @@ pub async fn update_api_key(
             })));
         }
         Err(e) => {
-            tracing::error!("Failed to find API key: {}", e);
+            tracing::error!(user_id = %user_id, api_key_id = %api_key_id, error = %e, "failed to find API key for update");
             return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "Failed to find API key",
-                "message": e.to_string()
+                "message": INTERNAL_ERROR_MESSAGE
             })));
         }
     };
@@ -487,10 +489,10 @@ pub async fn update_api_key(
             Ok(HttpResponse::Ok().json(response))
         }
         Err(e) => {
-            tracing::error!("Failed to update API key: {}", e);
+            tracing::error!(user_id = %user_id, api_key_id = %api_key_id, error = %e, "failed to update API key");
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "Failed to update API key",
-                "message": e.to_string()
+                "message": INTERNAL_ERROR_MESSAGE
             })))
         }
     }
@@ -527,10 +529,10 @@ pub async fn delete_api_key(
             })));
         }
         Err(e) => {
-            tracing::error!("Failed to find API key: {}", e);
+            tracing::error!(user_id = %user_id, api_key_id = %api_key_id, error = %e, "failed to find API key for deletion");
             return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "Failed to find API key",
-                "message": e.to_string()
+                "message": INTERNAL_ERROR_MESSAGE
             })));
         }
     };
@@ -543,10 +545,10 @@ pub async fn delete_api_key(
             })))
         }
         Err(e) => {
-            tracing::error!("Failed to delete API key: {}", e);
+            tracing::error!(user_id = %user_id, api_key_id = %api_key_id, error = %e, "failed to delete API key");
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "Failed to delete API key",
-                "message": e.to_string()
+                "message": INTERNAL_ERROR_MESSAGE
             })))
         }
     }
@@ -588,10 +590,10 @@ pub async fn toggle_api_key(
             })));
         }
         Err(e) => {
-            tracing::error!("Failed to find API key: {}", e);
+            tracing::error!(user_id = %user_id, api_key_id = %api_key_id, error = %e, "failed to find API key for toggle");
             return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "Failed to find API key",
-                "message": e.to_string()
+                "message": INTERNAL_ERROR_MESSAGE
             })));
         }
     };
@@ -607,10 +609,10 @@ pub async fn toggle_api_key(
             })))
         }
         Err(e) => {
-            tracing::error!("Failed to toggle API key: {}", e);
+            tracing::error!(user_id = %user_id, api_key_id = %api_key_id, error = %e, "failed to toggle API key");
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "Failed to toggle API key",
-                "message": e.to_string()
+                "message": INTERNAL_ERROR_MESSAGE
             })))
         }
     }
