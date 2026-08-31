@@ -51,8 +51,6 @@ jobs:
       CI: true
       DATABASE_URL: postgres://myuser:mypassword@localhost:5432/mydb
       REDIS_URL: redis://localhost:6379
-      JWT_PRIVATE_KEY_PATH: crates/libs/lib-auth/src/keys/private_key.pem
-      JWT_PUBLIC_KEY_PATH: crates/libs/lib-auth/src/keys/public_key.pem
     steps:
       - uses: actions/checkout@v4
 
@@ -152,8 +150,6 @@ jobs:
       CI: true
       DATABASE_URL: postgres://myuser:mypassword@localhost:5432/mydb
       REDIS_URL: redis://localhost:6379
-      JWT_PRIVATE_KEY_PATH: crates/libs/lib-auth/src/keys/private_key.pem
-      JWT_PUBLIC_KEY_PATH: crates/libs/lib-auth/src/keys/public_key.pem
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

@@ -36,11 +36,20 @@ else
 fi
 
 echo ""
-echo "📋 Step 3: Building the project..."
+echo "📋 Step 3: Creating config/development.toml..."
+if [ -f "config/development.toml" ]; then
+    echo "✅ config/development.toml already exists"
+else
+    cp config/development.toml.example config/development.toml
+    echo "✅ Copied config/development.toml.example"
+fi
+
+echo ""
+echo "📋 Step 4: Building the project..."
 cargo build
 
 echo ""
-echo "📋 Step 4: Setting up test data..."
+echo "📋 Step 5: Setting up test data..."
 if [ -f "scripts/setup_test_data.sh" ]; then
     ./scripts/setup_test_data.sh
 else

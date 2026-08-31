@@ -8,19 +8,29 @@ use thiserror::Error;
 /// configuration issues during development and deployment.
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    /// Failed to load configuration from files or environment variables
+    /// The runtime environment was not explicitly selected
+    #[error("APP_ENV must be set explicitly to one of: development, testing, production")]
+    MissingEnvironment,
+
+    /// Failed to load configuration from files or environment variables. The message never shows
+    /// a value, which may be a secret set in the wrong place.
     #[error("Failed to load configuration: {0}")]
-    LoadError(#[from] config::ConfigError),
+    LoadError(String),
 
-    /// Invalid server address (host:port combination cannot be parsed)
-    #[error("Invalid server address: {host}:{port}")]
-    InvalidServerAddress { host: String, port: u16 },
+    /// `server.host` and `server.port` name no address to bind
+    #[error("Invalid server address: server.host and server.port do not resolve to an address")]
+    InvalidServerAddress,
 
-    /// Invalid environment name provided
-    #[error("Invalid environment: {0}. Must be one of: development, testing, production")]
-    InvalidEnvironment(String),
+    /// `APP_ENV` names no environment
+    #[error("Invalid environment in APP_ENV. Must be one of: development, testing, production")]
+    InvalidEnvironment,
 
     /// Configuration validation failed (environment-specific rules violated)
     #[error("Configuration validation failed: {0}")]
     ValidationError(String),
+
+    /// Settings that no configuration key reads: each `APP__` variable by name, each file key by
+    /// its path and file
+    #[error("Unknown configuration settings: {}", .0.join(", "))]
+    UnknownSettings(Vec<String>),
 }

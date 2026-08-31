@@ -43,7 +43,7 @@ impl FromStr for Environment {
             "development" | "dev" => Ok(Environment::Development),
             "testing" | "test" => Ok(Environment::Testing),
             "production" | "prod" => Ok(Environment::Production),
-            _ => Err(ConfigError::InvalidEnvironment(s.to_string())),
+            _ => Err(ConfigError::InvalidEnvironment),
         }
     }
 }

@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 serde = {workspace = true}
 config = {workspace = true}
+serde_ignored = "0.1.14"
 thiserror = {workspace = true}
 tracing = {workspace = true}
 

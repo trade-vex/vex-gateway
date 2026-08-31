@@ -172,7 +172,6 @@ impl EmailService {
         tracing::info!("Recipient: {} <{}>", recipient_name, recipient_email);
 
         let otp = self.generate_otp();
-        tracing::debug!("Generated OTP: {}", otp);
 
         // Store OTP in Redis
         tracing::debug!("Storing OTP in Redis for email: {}", recipient_email);
@@ -642,7 +641,6 @@ return count
         } else {
             // generating new OTP since the existing one is expired or not exist
             let new_otp = self.generate_otp();
-            tracing::debug!("Generated new OTP: {}", new_otp);
 
             // storing new OTP in Redis
             tracing::debug!("Storing new OTP in Redis for email: {}", recipient_email);
@@ -800,7 +798,6 @@ The Team"#,
         tracing::info!("Recipient: {} <{}>", recipient_name, recipient_email);
 
         let otp = self.generate_otp();
-        tracing::debug!("Generated password reset OTP: {}", otp);
 
         // Store OTP in Redis
         self.store_password_reset_otp(recipient_email, &otp).await?;

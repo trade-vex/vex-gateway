@@ -401,11 +401,22 @@ mod tests {
 
     #[test]
     fn development_without_trusted_proxies_uses_the_peer_ip() {
-        let mut config = lib_config::Config::load_development_defaults();
-        config.auth.server.trusted_proxies = Vec::new();
-        config
-            .validate()
-            .expect("development needs no trusted proxies");
+        // The committed development example, which leaves trusted_proxies unset.
+        let config_dir =
+            std::env::temp_dir().join(format!("gw-dev-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("development.toml"),
+            include_str!("../../../../config/development.toml.example"),
+        )
+        .unwrap();
+        let config = lib_config::Config::load(
+            lib_config::Environment::Development,
+            Some(config_dir.clone()),
+        );
+        std::fs::remove_dir_all(&config_dir).unwrap();
+        let config = config.expect("development needs no trusted proxies");
+        assert!(config.auth.server.trusted_proxies.is_empty());
 
         // The same parse AppState::new applies to the configured list.
         let trusted_proxies = config.auth.server.parsed_trusted_proxies().unwrap();

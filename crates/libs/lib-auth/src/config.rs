@@ -3,7 +3,6 @@ use secrecy::SecretString;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::env;
-use std::path::PathBuf;
 #[derive(Deserialize, Clone, Debug)]
 pub struct JwtConfig {
     pub private_key_path: String,
@@ -31,6 +30,10 @@ pub struct OAuthConfig {
     pub redirect_base: String,
 }
 
+/// The providers `auth.oauth.providers` may list: `OAuthService` fixes their scopes, user-info
+/// endpoints and profile parsing (lib-config validation).
+pub const OAUTH_PROVIDERS: [&str; 3] = ["google", "github", "twitter"];
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct OAuthProviderConfig {
     pub client_id: String,
@@ -38,6 +41,7 @@ pub struct OAuthProviderConfig {
     pub auth_url: String,
     pub token_url: String,
     pub user_info_url: String,
+    #[serde(deserialize_with = "list")]
     pub scopes: Vec<String>,
     pub response_type: String,
     /// Optional OpenID Connect discovery URL (e.g., for Google)
@@ -63,9 +67,8 @@ pub struct ServerConfig {
     pub frontend_url: String,
     /// Proxy addresses or CIDR ranges whose `X-Forwarded-For` is believed when resolving the
     /// client IP for rate limits and API-key IP checks. Empty trusts none (the TCP peer is used);
-    /// production requires at least one (lib-config validation). Overridden by `TRUSTED_PROXIES`
-    /// (comma-separated).
-    #[serde(default)]
+    /// production requires at least one (lib-config validation).
+    #[serde(default, deserialize_with = "list")]
     pub trusted_proxies: Vec<String>,
 }
 
@@ -75,6 +78,46 @@ impl ServerConfig {
     pub fn parsed_trusted_proxies(&self) -> Result<TrustedProxies, String> {
         TrustedProxies::parse(&self.trusted_proxies)
     }
+}
+
+/// A list setting: a TOML array, or a comma-separated string, which is how an `APP__` environment
+/// variable sets one (`APP__AUTH__SERVER__TRUSTED_PROXIES=10.0.1.0/24,10.0.2.0/24`). Items are
+/// trimmed and empty ones dropped, so an empty string is an empty list.
+fn list<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    use serde::de::{self, MapAccess, SeqAccess, Visitor};
+    use std::fmt;
+
+    struct List;
+
+    impl<'de> Visitor<'de> for List {
+        type Value = Vec<String>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a list of strings, or a comma-separated string")
+        }
+
+        fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+            Ok(value
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(String::from)
+                .collect())
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, items: A) -> Result<Self::Value, A::Error> {
+            Vec::deserialize(de::value::SeqAccessDeserializer::new(items))
+        }
+
+        /// A table, such as one an indexed `APP__…__TRUSTED_PROXIES__0` variable makes, is an
+        /// error. Its entries are first read as ignored values, so lib-config names each of them.
+        fn visit_map<M: MapAccess<'de>>(self, mut entries: M) -> Result<Self::Value, M::Error> {
+            while entries.next_entry::<String, de::IgnoredAny>()?.is_some() {}
+            Err(de::Error::invalid_type(de::Unexpected::Map, &self))
+        }
+    }
+
+    deserializer.deserialize_any(List)
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -103,113 +146,6 @@ impl AuthConfig {
             email: EmailConfig::from_env()?,
             otp: OtpConfig::from_env()?,
         })
-    }
-
-    /// Create configuration from environment variables with proper OAuth setup
-    pub fn from_env_with_oauth() -> Result<Self, ConfigError> {
-        let mut config = Self::development_defaults();
-
-        // Override with environment variables if present
-        if let Ok(db_url) = env::var("DATABASE_URL") {
-            config.database.url = db_url;
-        }
-
-        if let Ok(redis_url) = env::var("REDIS_URL") {
-            config.redis.url = redis_url;
-        }
-
-        // JWT configuration from environment
-        if let Ok(private_key_path) = env::var("JWT_PRIVATE_KEY_PATH") {
-            config.jwt.private_key_path = private_key_path;
-        }
-        if let Ok(public_key_path) = env::var("JWT_PUBLIC_KEY_PATH") {
-            config.jwt.public_key_path = public_key_path;
-        }
-        if let Ok(issuer) = env::var("JWT_ISSUER") {
-            config.jwt.issuer = issuer;
-        }
-        if let Ok(audience) = env::var("JWT_AUDIENCE") {
-            config.jwt.audience = audience;
-        }
-
-        // Load OAuth providers from environment
-        config.oauth = OAuthConfig::from_env()?;
-
-        if let Ok(smtp_host) = env::var("SMTP_HOST") {
-            config.email.smtp_host = smtp_host;
-        }
-        if let Ok(smtp_port) = env::var("SMTP_PORT") {
-            config.email.smtp_port = smtp_port.parse().unwrap_or(587);
-        }
-        if let Ok(smtp_username) = env::var("SMTP_USERNAME") {
-            config.email.smtp_username = smtp_username;
-        }
-        if let Ok(smtp_password) = env::var("SMTP_PASSWORD") {
-            config.email.smtp_password = SecretString::new(smtp_password);
-        }
-        if let Ok(from_email) = env::var("FROM_EMAIL") {
-            config.email.from_email = from_email;
-        }
-
-        // Override frontend_url from FRONTEND_URL environment variable if set
-        if let Ok(frontend_url) = env::var("FRONTEND_URL") {
-            config.server.frontend_url = frontend_url;
-        }
-        if let Some(trusted_proxies) = trusted_proxies_from_env() {
-            config.server.trusted_proxies = trusted_proxies;
-        }
-
-        Ok(config)
-    }
-
-    /// Create development defaults without requiring environment variables
-    pub fn development_defaults() -> Self {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        Self {
-            database: DatabaseConfig {
-                url: "postgresql://postgres:postgres123@localhost:5432/trading_db".to_string(),
-                max_connections: 10,
-            },
-            redis: RedisConfig {
-                url: "redis://127.0.0.1:6380".to_string(),
-                max_connections: 10,
-            },
-            jwt: JwtConfig {
-                private_key_path: manifest_dir
-                    .join("src/keys/private_key.pem")
-                    .to_string_lossy()
-                    .to_string(),
-                public_key_path: manifest_dir
-                    .join("src/keys/public_key.pem")
-                    .to_string_lossy()
-                    .to_string(),
-                access_token_ttl_minutes: 60,
-                refresh_token_ttl_days: 30,
-                issuer: "vex-gateway-dev".to_string(),
-                audience: "vex-api-dev".to_string(),
-            },
-            oauth: OAuthConfig {
-                providers: std::collections::HashMap::new(), // Empty for development
-                redirect_base: "http://localhost:8081".to_string(),
-            },
-            email: EmailConfig {
-                smtp_host: "smtp.example.com".to_string(),
-                smtp_port: 587,
-                smtp_username: "user@example.com".to_string(),
-                smtp_password: SecretString::new("password".to_string()),
-                from_email: "noreply@example.com".to_string(),
-            },
-            server: ServerConfig {
-                base_url: "http://localhost:8081".to_string(),
-                port: 8081,
-                frontend_url: "http://localhost:3000".to_string(),
-                trusted_proxies: Vec::new(),
-            },
-            otp: OtpConfig {
-                otp_length: 6,
-                email_verification_expiry_minutes: 15,
-            },
-        }
     }
 }
 

@@ -2,7 +2,6 @@
 
 use crate::ConfigError;
 use serde::{Deserialize, Serialize};
-use std::env;
 use std::net::{SocketAddr, ToSocketAddrs};
 
 /// Server configuration settings for the VEX Gateway Service.
@@ -18,19 +17,6 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-    pub fn from_env() -> Result<Self, ConfigError> {
-        Ok(Self {
-            // Default to 127.0.0.1 for development safety; production should explicitly set APP_SERVER_HOST
-            host: env::var("APP_SERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
-            port: env::var("APP_SERVER_PORT")
-                .unwrap_or_else(|_| "8081".to_string())
-                .parse()
-                .map_err(|_| {
-                    ConfigError::ValidationError("Invalid APP_SERVER_PORT value".to_string())
-                })?,
-        })
-    }
-
     /// Validate server configuration values.
     ///
     /// Performs basic validation to ensure the server configuration
@@ -62,14 +48,8 @@ impl ServerConfig {
     pub fn socket_addr(&self) -> Result<SocketAddr, ConfigError> {
         (self.host.as_str(), self.port)
             .to_socket_addrs()
-            .map_err(|_| ConfigError::InvalidServerAddress {
-                host: self.host.clone(),
-                port: self.port,
-            })?
+            .map_err(|_| ConfigError::InvalidServerAddress)?
             .next()
-            .ok_or_else(|| ConfigError::InvalidServerAddress {
-                host: self.host.clone(),
-                port: self.port,
-            })
+            .ok_or(ConfigError::InvalidServerAddress)
     }
 }

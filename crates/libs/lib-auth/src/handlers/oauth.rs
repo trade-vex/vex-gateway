@@ -12,7 +12,7 @@ use actix_web::{
     cookie::{Cookie, SameSite, time::Duration},
     web,
 };
-use lib_middleware::client_ip::client_ip;
+use lib_middleware::client_ip::{client_ip, is_https};
 use serde_json;
 use std::sync::Arc;
 use tracing::error;
@@ -31,7 +31,8 @@ pub(crate) fn validate_callback_state_cookie(
 
 const OAUTH_INIT_RATE_LIMIT_SCOPE: &str = "oauth_initiate";
 const OAUTH_CALLBACK_RATE_LIMIT_SCOPE: &str = "oauth_callback";
-// `client_ip` honours X-Forwarded-For only from configured trusted proxies (TRUSTED_PROXIES).
+// `client_ip` honours X-Forwarded-For only from configured trusted proxies
+// (`auth.server.trusted_proxies`).
 // This loose limit is a coarse flood guard.
 const OAUTH_IP_MAX_REQUESTS: u64 = 300;
 const OAUTH_IP_WINDOW_SECONDS: u64 = 5 * 60;
@@ -79,7 +80,7 @@ pub async fn initiate_oauth(
             // This prevents login CSRF / session swapping attacks
             // Mobile apps don't use cookies, they use app_challenge instead
             if platform != Some("app") {
-                let is_secure = req.connection_info().scheme() == "https";
+                let is_secure = is_https(&req);
                 let cookie_name = format!("oauth_state_{}", provider.as_str());
                 let state_cookie = Cookie::build(cookie_name, state)
                     .path(format!("/api/oauth/{}/callback", provider.as_str()))
@@ -176,7 +177,7 @@ pub async fn handle_oauth_callback(
                     .or_else(|_| std::env::var("OAUTH_FRONTEND_URL_WEB"))
                     .unwrap_or_else(|_| oauth_service.get_frontend_url().to_string()),
             };
-            let is_secure = req.connection_info().scheme() == "https";
+            let is_secure = is_https(&req);
 
             // Serialize user_info to JSON
             let user_info_json = serde_json::to_string(&user_info).map_err(|e| {
