@@ -5,6 +5,7 @@
 use actix_web::{App, web};
 use lib_api::routes;
 use lib_auth::middleware::jwt_auth::JwtAuthentication;
+use lib_middleware::ApiKeyStore;
 use std::sync::Arc;
 
 use crate::combined_auth::CombinedAuthMiddleware;
@@ -13,6 +14,7 @@ use crate::state::AppState;
 /// Application factory that creates the Actix-web application with all routes and middleware
 pub fn create_app(
     app_state: Arc<AppState>,
+    api_key_store: ApiKeyStore,
 ) -> App<
     impl actix_web::dev::ServiceFactory<
         actix_web::dev::ServiceRequest,
@@ -41,6 +43,7 @@ pub fn create_app(
 
     App::new()
         .app_data(web::Data::new(app_state.clone()))
+        .app_data(web::Data::new(api_key_store))
         .app_data(web::Data::new(app_state.user_repo.clone()))
         .app_data(web::Data::new(app_state.db.clone()))
         .app_data(web::Data::new(app_state.redis_conn.clone()))

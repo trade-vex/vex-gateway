@@ -701,3 +701,33 @@ async fn test_cache_invalidation_l1() {
     let metrics = store.metrics();
     assert!(metrics.l1_misses.load(std::sync::atomic::Ordering::Relaxed) >= 1);
 }
+
+#[tokio::test]
+async fn test_invalidated_cached_key_stops_authenticating() {
+    let store = ApiKeyStore::new(CacheConfig::default());
+    let api_key =
+        ApiKeyConfig::new("revoked-key".to_string()).with_hmac_secret("revoked-secret".to_string());
+
+    store.add_api_key(api_key).await;
+    assert!(store.get_api_key("revoked-key").await.is_some());
+
+    store.invalidate("revoked-key").await;
+
+    assert!(store.get_api_key("revoked-key").await.is_none());
+}
+
+#[tokio::test]
+async fn test_cache_invalidation_does_not_affect_unrelated_key() {
+    let store = ApiKeyStore::new(CacheConfig::default());
+    let revoked_key =
+        ApiKeyConfig::new("revoked-key".to_string()).with_hmac_secret("revoked-secret".to_string());
+    let unrelated_key = ApiKeyConfig::new("unrelated-key".to_string())
+        .with_hmac_secret("unrelated-secret".to_string());
+
+    store.add_api_key(revoked_key).await;
+    store.add_api_key(unrelated_key).await;
+
+    store.invalidate("revoked-key").await;
+
+    assert!(store.get_api_key("unrelated-key").await.is_some());
+}

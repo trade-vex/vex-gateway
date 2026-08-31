@@ -32,13 +32,14 @@ pub async fn initialize_server(
 
     // Initialize AppState with all dependencies
     let app_state = AppState::new(&auth_config, gateway_publisher, correlation_service).await?;
+    let api_key_store = app_state.api_key_middleware.lock().await.api_key_store();
 
     // Create TCP listener
     let listener = TcpListener::bind(config.server_address()?)?;
     info!("Server listening on {}", listener.local_addr().unwrap());
 
     // Create the HTTP server
-    let server = HttpServer::new(move || create_app(app_state.clone()))
+    let server = HttpServer::new(move || create_app(app_state.clone(), api_key_store.clone()))
         .listen(listener)?
         .run();
 

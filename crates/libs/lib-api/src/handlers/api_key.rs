@@ -8,12 +8,22 @@ use uuid::Uuid;
 
 use lib_middleware::{
     api_key::SecurityType,
+    api_key::middleware::ApiKeyStore,
     api_key::security::{ApiKeyConfig, KeyMaterial},
     models::api_key::{ActiveModel, Model as ApiKeyModel, NewApiKey},
     repository::api_key_repository::ApiKeyRepository,
 };
 use sea_orm::Set;
 use std::sync::Arc;
+
+async fn invalidate_api_key_cache(cache: Option<&web::Data<ApiKeyStore>>, api_key: &str) {
+    let Some(cache) = cache else {
+        tracing::error!("API key cache unavailable after successful API key mutation");
+        return;
+    };
+
+    cache.invalidate(api_key).await;
+}
 
 /// Combined authentication result that can be either JWT or API key
 #[derive(Debug, Clone)]
@@ -407,6 +417,7 @@ pub async fn update_api_key(
     path: web::Path<Uuid>,
     req: web::Json<UpdateApiKeyRequest>,
     repo: web::Data<Arc<dyn ApiKeyRepository>>,
+    cache: Option<web::Data<ApiKeyStore>>,
     auth_user: AuthenticatedUser,
 ) -> Result<HttpResponse> {
     let api_key_id = path.into_inner();
@@ -417,7 +428,7 @@ pub async fn update_api_key(
     })?;
 
     // checking if the API key exists and belongs to the user
-    match repo.as_ref().find_by_id(api_key_id).await {
+    let api_key = match repo.as_ref().find_by_id(api_key_id).await {
         Ok(Some(api_key)) => {
             if api_key.user_id != Some(user_id) {
                 return Ok(HttpResponse::Forbidden().json(serde_json::json!({
@@ -425,6 +436,7 @@ pub async fn update_api_key(
                     "message": "You don't have permission to update this API key"
                 })));
             }
+            api_key
         }
         Ok(None) => {
             return Ok(HttpResponse::NotFound().json(serde_json::json!({
@@ -438,7 +450,7 @@ pub async fn update_api_key(
                 "message": e.to_string()
             })));
         }
-    }
+    };
 
     // parsing permissions
     let permissions: Result<Vec<SecurityType>, String> = req
@@ -470,6 +482,7 @@ pub async fn update_api_key(
 
     match repo.as_ref().update(api_key_id, updates).await {
         Ok(updated_key) => {
+            invalidate_api_key_cache(cache.as_ref(), &api_key.api_key).await;
             let response = ApiKeyResponse::from(updated_key);
             Ok(HttpResponse::Ok().json(response))
         }
@@ -487,6 +500,7 @@ pub async fn update_api_key(
 pub async fn delete_api_key(
     path: web::Path<Uuid>,
     repo: web::Data<Arc<dyn ApiKeyRepository>>,
+    cache: Option<web::Data<ApiKeyStore>>,
     auth_user: AuthenticatedUser,
 ) -> Result<HttpResponse> {
     let api_key_id = path.into_inner();
@@ -497,7 +511,7 @@ pub async fn delete_api_key(
     })?;
 
     // first, check if the API key exists and belongs to the user
-    match repo.as_ref().find_by_id(api_key_id).await {
+    let api_key = match repo.as_ref().find_by_id(api_key_id).await {
         Ok(Some(api_key)) => {
             if api_key.user_id != Some(user_id) {
                 return Ok(HttpResponse::Forbidden().json(serde_json::json!({
@@ -505,6 +519,7 @@ pub async fn delete_api_key(
                     "message": "You don't have permission to delete this API key"
                 })));
             }
+            api_key
         }
         Ok(None) => {
             return Ok(HttpResponse::NotFound().json(serde_json::json!({
@@ -518,12 +533,15 @@ pub async fn delete_api_key(
                 "message": e.to_string()
             })));
         }
-    }
+    };
 
     match repo.as_ref().delete(api_key_id).await {
-        Ok(_) => Ok(HttpResponse::Ok().json(serde_json::json!({
-            "message": "API key deleted successfully"
-        }))),
+        Ok(_) => {
+            invalidate_api_key_cache(cache.as_ref(), &api_key.api_key).await;
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "message": "API key deleted successfully"
+            })))
+        }
         Err(e) => {
             tracing::error!("Failed to delete API key: {}", e);
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
@@ -539,6 +557,7 @@ pub async fn toggle_api_key(
     path: web::Path<Uuid>,
     req: web::Json<serde_json::Value>,
     repo: web::Data<Arc<dyn ApiKeyRepository>>,
+    cache: Option<web::Data<ApiKeyStore>>,
     auth_user: AuthenticatedUser,
 ) -> Result<HttpResponse> {
     let api_key_id = path.into_inner();
@@ -553,7 +572,7 @@ pub async fn toggle_api_key(
     })?;
 
     // First, check if the API key exists and belongs to the user
-    match repo.as_ref().find_by_id(api_key_id).await {
+    let api_key = match repo.as_ref().find_by_id(api_key_id).await {
         Ok(Some(api_key)) => {
             if api_key.user_id != Some(user_id) {
                 return Ok(HttpResponse::Forbidden().json(serde_json::json!({
@@ -561,6 +580,7 @@ pub async fn toggle_api_key(
                     "message": "You don't have permission to modify this API key"
                 })));
             }
+            api_key
         }
         Ok(None) => {
             return Ok(HttpResponse::NotFound().json(serde_json::json!({
@@ -574,10 +594,13 @@ pub async fn toggle_api_key(
                 "message": e.to_string()
             })));
         }
-    }
+    };
 
     match repo.as_ref().set_enabled(api_key_id, enabled).await {
         Ok(_) => {
+            if !enabled {
+                invalidate_api_key_cache(cache.as_ref(), &api_key.api_key).await;
+            }
             let action = if enabled { "enabled" } else { "disabled" };
             Ok(HttpResponse::Ok().json(serde_json::json!({
                 "message": format!("API key {} successfully", action)

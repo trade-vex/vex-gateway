@@ -5,6 +5,8 @@ use actix_web::{
 };
 use futures_util::future::{ready, LocalBoxFuture, Ready};
 use futures_util::stream;
+use std::hash::{BuildHasher, RandomState};
+use std::sync::{RwLock, RwLockWriteGuard};
 use std::{
     collections::HashMap,
     pin::Pin,
@@ -12,7 +14,6 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 use crate::api_key::{
@@ -38,8 +39,8 @@ pub struct RouteSecurityConfig {
 /// 3. L3 (Database)
 #[derive(Clone)]
 pub struct ApiKeyStore {
-    /// L1 Cache: In-memory LRU for hot keys
-    l1_cache: Arc<RwLock<lru::LruCache<String, CachedApiKey>>>,
+    /// L1 Cache: In-memory LRU for hot keys, sharded by key
+    l1_cache: Arc<L1Cache>,
     /// Database repository for persistent storage
     api_key_repo: Option<Arc<dyn ApiKeyRepository>>,
     /// Fallback: In-memory HashMap for development
@@ -55,6 +56,102 @@ pub struct ApiKeyStore {
 struct CachedApiKey {
     config: Arc<ApiKeyConfig>,
     cached_at: SystemTime,
+}
+
+/// How many independently locked shards the L1 cache has. A lookup updates its entry's LRU
+/// recency, so it takes a write lock: with one lock, every API-key request would queue on it.
+const L1_SHARDS: usize = 16;
+
+/// The L1 cache, split into [`L1_SHARDS`] shards chosen by a hash of the API key. Everything kept
+/// per key (its entry, its invalidation epoch and in-flight fills) lives in that key's shard, so a
+/// fill and an invalidation of one key still meet under one lock.
+struct L1Cache {
+    shards: [RwLock<L1CacheState>; L1_SHARDS],
+    hasher: RandomState,
+}
+
+impl L1Cache {
+    /// `max_size` is spread over the shards, rounded up.
+    fn new(max_size: usize) -> Self {
+        let shard_size = max_size.div_ceil(L1_SHARDS);
+        Self {
+            shards: std::array::from_fn(|_| RwLock::new(L1CacheState::new(shard_size))),
+            hasher: RandomState::new(),
+        }
+    }
+
+    fn shard_index(&self, api_key: &str) -> usize {
+        (self.hasher.hash_one(api_key) % L1_SHARDS as u64) as usize
+    }
+
+    /// The write lock of `api_key`'s shard.
+    fn write(&self, api_key: &str) -> RwLockWriteGuard<'_, L1CacheState> {
+        self.shards[self.shard_index(api_key)]
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+struct L1CacheState {
+    entries: lru::LruCache<String, CachedApiKey>,
+    invalidation_epochs: HashMap<String, InvalidationEpoch>,
+}
+
+#[derive(Default)]
+struct InvalidationEpoch {
+    value: u64,
+    in_flight: usize,
+}
+
+impl L1CacheState {
+    fn new(max_size: usize) -> Self {
+        Self {
+            entries: lru::LruCache::new(
+                std::num::NonZeroUsize::new(max_size).expect("L1 cache size must be > 0"),
+            ),
+            invalidation_epochs: HashMap::new(),
+        }
+    }
+
+    fn begin_fill(&mut self, api_key: &str) -> u64 {
+        let epoch = self
+            .invalidation_epochs
+            .entry(api_key.to_string())
+            .or_default();
+        epoch.in_flight += 1;
+        epoch.value
+    }
+
+    fn finish_fill(&mut self, api_key: &str) {
+        if let Some(epoch) = self.invalidation_epochs.get_mut(api_key) {
+            epoch.in_flight -= 1;
+        }
+        self.prune_epoch_if_idle(api_key);
+    }
+
+    fn bump_epoch(&mut self, api_key: &str) {
+        let epoch = self
+            .invalidation_epochs
+            .entry(api_key.to_string())
+            .or_default();
+        epoch.value = epoch.value.wrapping_add(1);
+    }
+
+    fn put(&mut self, api_key: String, cached: CachedApiKey) {
+        if let Some((evicted_key, _)) = self.entries.push(api_key, cached) {
+            self.prune_epoch_if_idle(&evicted_key);
+        }
+    }
+
+    fn prune_epoch_if_idle(&mut self, api_key: &str) {
+        if self
+            .invalidation_epochs
+            .get(api_key)
+            .is_some_and(|epoch| epoch.in_flight == 0)
+        {
+            self.invalidation_epochs.remove(api_key);
+        }
+    }
 }
 
 impl CachedApiKey {
@@ -120,12 +217,52 @@ impl CacheMetrics {
     }
 }
 
+/// Ends an in-flight cache fill exactly once, on completion or on drop.
+///
+/// `Drop` runs even when the owning future is cancelled (an actix client disconnect), which is the
+/// path that previously leaked `in_flight` and pinned the per-key epoch entry forever (G2-2).
+struct CacheFillGuard {
+    cache: Arc<L1Cache>,
+    api_key: String,
+    epoch: u64,
+    finished: bool,
+}
+
+impl CacheFillGuard {
+    /// Completes the fill, writing `config` into L1 only if no invalidation raced us.
+    fn finish(mut self, config: Option<ApiKeyConfig>) {
+        let mut cache = self.cache.write(&self.api_key);
+        let epoch_unchanged = cache
+            .invalidation_epochs
+            .get(&self.api_key)
+            .is_some_and(|epoch| epoch.value == self.epoch);
+
+        if epoch_unchanged {
+            if let Some(config) = config {
+                cache.put(self.api_key.clone(), CachedApiKey::new(config));
+            }
+        }
+        cache.finish_fill(&self.api_key);
+        self.finished = true;
+    }
+}
+
+impl Drop for CacheFillGuard {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        // Cancelled mid-fill: release the bookkeeping so the epoch entry can be pruned. Never
+        // write to the cache here - we do not know whether the lookup completed.
+        let mut cache = self.cache.write(&self.api_key);
+        cache.finish_fill(&self.api_key);
+    }
+}
+
 impl ApiKeyStore {
     /// Create new store
     pub fn new(config: CacheConfig) -> Self {
-        let l1_cache = Arc::new(RwLock::new(lru::LruCache::new(
-            std::num::NonZeroUsize::new(config.l1_max_size).expect("L1 cache size must be > 0"),
-        )));
+        let l1_cache = Arc::new(L1Cache::new(config.l1_max_size));
 
         Self {
             l1_cache,
@@ -138,9 +275,7 @@ impl ApiKeyStore {
 
     /// Create store with database repository
     pub fn with_repository(config: CacheConfig, api_key_repo: Arc<dyn ApiKeyRepository>) -> Self {
-        let l1_cache = Arc::new(RwLock::new(lru::LruCache::new(
-            std::num::NonZeroUsize::new(config.l1_max_size).expect("L1 cache size must be > 0"),
-        )));
+        let l1_cache = Arc::new(L1Cache::new(config.l1_max_size));
 
         Self {
             l1_cache,
@@ -161,12 +296,32 @@ impl ApiKeyStore {
         self
     }
 
+    /// Marks a cache fill in flight and returns a guard that ALWAYS ends it.
+    ///
+    /// The bookkeeping must be released even if the caller's future is dropped mid-flight, which
+    /// actix does routinely when a client disconnects. A bare begin/finish pair leaked `in_flight`
+    /// on that path, and since pruning requires `in_flight == 0`, the per-key epoch entry could
+    /// then never be removed - growing without bound past the LRU capacity (finding G2-2).
+    fn begin_cache_fill(&self, api_key: &str) -> CacheFillGuard {
+        let epoch = self.l1_cache.write(api_key).begin_fill(api_key);
+        CacheFillGuard {
+            cache: Arc::clone(&self.l1_cache),
+            api_key: api_key.to_string(),
+            epoch,
+            finished: false,
+        }
+    }
+
+    fn finish_cache_fill(&self, guard: CacheFillGuard, config: Option<ApiKeyConfig>) {
+        guard.finish(config);
+    }
+
     /// Fast API key lookup with caching
     pub async fn get_api_key(&self, api_key: &str) -> Option<Arc<ApiKeyConfig>> {
         // L1 Cache: Check in-memory LRU first
         {
-            let mut cache = self.l1_cache.write().await;
-            if let Some(cached) = cache.get(api_key) {
+            let mut cache = self.l1_cache.write(api_key);
+            if let Some(cached) = cache.entries.get(api_key) {
                 if !cached.is_expired(self.config.l1_ttl) {
                     self.metrics
                         .l1_hits
@@ -178,7 +333,8 @@ impl ApiKeyStore {
                     return Some(cached.config.clone());
                 } else {
                     // Remove expired entry
-                    cache.pop(api_key);
+                    cache.entries.pop(api_key);
+                    cache.prune_epoch_if_idle(api_key);
                 }
             }
         }
@@ -189,6 +345,7 @@ impl ApiKeyStore {
 
         // L3: Check database first (if available)
         if let Some(repo) = &self.api_key_repo {
+            let fill_guard = self.begin_cache_fill(api_key);
             match repo.find_by_api_key(api_key).await {
                 Ok(Some(model)) => {
                     if model.is_valid() {
@@ -198,10 +355,7 @@ impl ApiKeyStore {
                         let config = model.to_api_key_config();
                         let config_arc = Arc::new(config.clone());
 
-                        // Update L1 cache
-                        let cached = CachedApiKey::new(config);
-                        let mut cache = self.l1_cache.write().await;
-                        cache.put(api_key.to_string(), cached);
+                        self.finish_cache_fill(fill_guard, Some(config));
 
                         debug!(
                             "Database hit for key: {}",
@@ -209,6 +363,7 @@ impl ApiKeyStore {
                         );
                         return Some(config_arc);
                     } else {
+                        self.finish_cache_fill(fill_guard, None);
                         debug!(
                             "API key found but invalid (disabled/expired): {}",
                             ApiKeyStore::mask_api_key(api_key)
@@ -217,12 +372,14 @@ impl ApiKeyStore {
                     }
                 }
                 Ok(None) => {
+                    self.finish_cache_fill(fill_guard, None);
                     debug!(
                         "API key not found in database: {}",
                         ApiKeyStore::mask_api_key(api_key)
                     );
                 }
                 Err(e) => {
+                    self.finish_cache_fill(fill_guard, None);
                     error!(
                         "Database error while fetching API key {}: {}",
                         ApiKeyStore::mask_api_key(api_key),
@@ -233,16 +390,14 @@ impl ApiKeyStore {
         }
 
         // Fallback: Check memory store (for development/testing)
+        let fill_guard = self.begin_cache_fill(api_key);
         if let Some(config) = self.memory_store.get(api_key) {
             self.metrics
                 .db_queries
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let config_arc = Arc::new(config.clone());
 
-            // Update L1 cache
-            let cached = CachedApiKey::new(config.clone());
-            let mut cache = self.l1_cache.write().await;
-            cache.put(api_key.to_string(), cached);
+            self.finish_cache_fill(fill_guard, Some(config.clone()));
 
             debug!(
                 "Memory store hit for key: {}",
@@ -250,6 +405,7 @@ impl ApiKeyStore {
             );
             return Some(config_arc);
         }
+        self.finish_cache_fill(fill_guard, None);
 
         // TODO: Add Redis (L2) lookup between L1 and L3
         // if let Some(config) = self.check_redis(api_key).await {
@@ -263,8 +419,10 @@ impl ApiKeyStore {
 
     /// Invalidate cache entry (when key is updated/disabled)
     pub async fn invalidate(&self, api_key: &str) {
-        let mut cache = self.l1_cache.write().await;
-        cache.pop(api_key);
+        let mut cache = self.l1_cache.write(api_key);
+        cache.bump_epoch(api_key);
+        cache.entries.pop(api_key);
+        cache.prune_epoch_if_idle(api_key);
         // TODO: Invalidate Redis cache when implemented
         info!(
             "Invalidated cache for key: {}",
@@ -279,7 +437,7 @@ impl ApiKeyStore {
 
     /// Add a new API key to the cache
     pub async fn add_api_key(&self, config: ApiKeyConfig) {
-        let mut cache = self.l1_cache.write().await;
+        let mut cache = self.l1_cache.write(&config.api_key);
         let cached = CachedApiKey::new(config.clone());
         cache.put(config.api_key.clone(), cached);
 
@@ -291,8 +449,9 @@ impl ApiKeyStore {
 
     /// Remove an API key from the cache
     pub async fn remove_api_key(&self, api_key: &str) {
-        let mut cache = self.l1_cache.write().await;
-        cache.pop(api_key);
+        let mut cache = self.l1_cache.write(api_key);
+        cache.entries.pop(api_key);
+        cache.prune_epoch_if_idle(api_key);
 
         info!(
             "Removed API key from cache: {}",
@@ -382,6 +541,11 @@ impl ApiKeyMiddleware {
     /// Get cache metrics for monitoring
     pub fn cache_metrics(&self) -> &CacheMetrics {
         self.api_key_store.metrics()
+    }
+
+    /// Get a handle to the shared API key store.
+    pub fn api_key_store(&self) -> ApiKeyStore {
+        self.api_key_store.clone()
     }
 
     /// Add a new API key to the cache
@@ -810,5 +974,184 @@ where
             // Forward the request to the next service
             service.call(req).await
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::api_key::{ActiveModel, Model, NewApiKey};
+    use chrono::{DateTime, Utc};
+    use tokio::sync::Notify;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn cancelled_cache_fill_does_not_leak_epoch_bookkeeping() {
+        // Finding G2-2: actix drops a request future when the client disconnects. If that happens
+        // between begin_fill and finish_fill, `in_flight` stayed incremented forever, and because
+        // pruning requires in_flight == 0 the per-key epoch entry could never be removed - it grew
+        // past the LRU capacity with one entry per distinct key an attacker chose to send.
+        const API_KEY: &str = "cancelled-fill-key";
+        let store = ApiKeyStore::new(CacheConfig::default());
+
+        {
+            let guard = store.begin_cache_fill(API_KEY);
+            assert_eq!(
+                store
+                    .l1_cache
+                    .write(API_KEY)
+                    .invalidation_epochs
+                    .get(API_KEY)
+                    .map(|epoch| epoch.in_flight),
+                Some(1),
+                "the fill must be recorded as in flight"
+            );
+            drop(guard); // the request future is cancelled here
+        }
+
+        let cache = store.l1_cache.write(API_KEY);
+        assert!(
+            !cache.invalidation_epochs.contains_key(API_KEY),
+            "a cancelled fill must release its bookkeeping so the epoch entry can be pruned"
+        );
+    }
+
+    #[test]
+    fn lookups_of_keys_in_different_shards_do_not_share_a_lock() {
+        const HELD_KEY: &str = "held-shard-key";
+        let store = ApiKeyStore::new(CacheConfig::default());
+        let other_key = (0..)
+            .map(|i| format!("other-shard-key-{i}"))
+            .find(|key| store.l1_cache.shard_index(key) != store.l1_cache.shard_index(HELD_KEY))
+            .unwrap();
+        let store = store.with_api_keys(vec![ApiKeyConfig::new(other_key.clone())]);
+
+        // Another request holds the held key's shard. With one lock for the whole cache, this
+        // lookup would wait until it is released.
+        let _held = store.l1_cache.write(HELD_KEY);
+        let (found_tx, found_rx) = std::sync::mpsc::channel();
+        let lookup_store = store.clone();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            let found = runtime.block_on(lookup_store.get_api_key(&other_key));
+            found_tx.send(found.is_some()).unwrap();
+        });
+
+        assert_eq!(found_rx.recv_timeout(Duration::from_secs(5)), Ok(true));
+    }
+
+    struct BlockingApiKeyRepository {
+        model: Model,
+        read_started: Notify,
+        release_read: Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl ApiKeyRepository for BlockingApiKeyRepository {
+        async fn find_by_api_key(&self, _api_key: &str) -> Result<Option<Model>, ApiKeyError> {
+            self.read_started.notify_one();
+            self.release_read.notified().await;
+            Ok(Some(self.model.clone()))
+        }
+
+        async fn find_by_id(&self, _id: Uuid) -> Result<Option<Model>, ApiKeyError> {
+            unreachable!()
+        }
+
+        async fn find_by_user_id(&self, _user_id: Uuid) -> Result<Vec<Model>, ApiKeyError> {
+            unreachable!()
+        }
+
+        async fn create(&self, _new_api_key: NewApiKey) -> Result<Model, ApiKeyError> {
+            unreachable!()
+        }
+
+        async fn update(&self, _id: Uuid, _updates: ActiveModel) -> Result<Model, ApiKeyError> {
+            unreachable!()
+        }
+
+        async fn set_enabled(&self, _id: Uuid, _enabled: bool) -> Result<(), ApiKeyError> {
+            unreachable!()
+        }
+
+        async fn update_last_used(
+            &self,
+            _id: Uuid,
+            _timestamp: DateTime<Utc>,
+        ) -> Result<(), ApiKeyError> {
+            unreachable!()
+        }
+
+        async fn delete(&self, _id: Uuid) -> Result<(), ApiKeyError> {
+            unreachable!()
+        }
+
+        async fn find_active_keys(&self, _limit: Option<u64>) -> Result<Vec<Model>, ApiKeyError> {
+            unreachable!()
+        }
+
+        async fn find_expiring_keys(&self, _days: i64) -> Result<Vec<Model>, ApiKeyError> {
+            unreachable!()
+        }
+
+        async fn count_by_user(&self, _user_id: Uuid) -> Result<u64, ApiKeyError> {
+            unreachable!()
+        }
+
+        async fn find_by_permission(
+            &self,
+            _permission: SecurityType,
+        ) -> Result<Vec<Model>, ApiKeyError> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn invalidation_during_fill_does_not_cache_stale_config() {
+        const API_KEY: &str = "stale-fill-key";
+        let now = Utc::now();
+        let repository = Arc::new(BlockingApiKeyRepository {
+            model: Model {
+                id: Uuid::new_v4(),
+                api_key: API_KEY.to_string(),
+                key_material_type: None,
+                key_material_value: None,
+                permissions: vec![SecurityType::None],
+                recv_window: 5_000,
+                enabled: true,
+                description: Some("stale config".to_string()),
+                ip_blacklist: vec![],
+                user_id: None,
+                created_at: now,
+                updated_at: now,
+                expires_at: None,
+                last_used_at: None,
+            },
+            read_started: Notify::new(),
+            release_read: Notify::new(),
+        });
+        let store = ApiKeyStore::with_repository(
+            CacheConfig {
+                l1_max_size: 2,
+                l1_ttl: Duration::from_secs(300),
+            },
+            repository.clone(),
+        );
+
+        let fill_store = store.clone();
+        let fill = tokio::spawn(async move { fill_store.get_api_key(API_KEY).await });
+        repository.read_started.notified().await;
+
+        store.invalidate(API_KEY).await;
+        repository.release_read.notify_one();
+
+        let returned = fill.await.unwrap().unwrap();
+        assert_eq!(returned.description.as_deref(), Some("stale config"));
+
+        let cache = store.l1_cache.write(API_KEY);
+        assert!(cache.entries.peek(API_KEY).is_none());
+        assert!(!cache.invalidation_epochs.contains_key(API_KEY));
     }
 }
