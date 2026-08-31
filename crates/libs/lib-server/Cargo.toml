@@ -33,8 +33,8 @@ lib-middleware = {path = "../lib-middleware"}
 vex-networking = {workspace = true}
 vex-config = {workspace = true}
 common = {workspace = true}
-rusteron-client = "0.1.143"
-rusteron-archive = "0.1.143"
+rusteron-client = "=0.1.157"
+rusteron-archive = "=0.1.157"
 
 [dev-dependencies]
 rsa = "0.10"

@@ -46,25 +46,24 @@ APP_ENV=production ./target/release/gateway
 
 ### Environment Variables
 
-Key variables the gateway reads (it does not read a `.env` file). `APP_ENV` selects the
-environment and so `config/<APP_ENV>.toml`, whose `environment` key must name the same
-environment. Database, Redis, JWT, email, OAuth and trusted-proxy settings come from the
-configuration file's `auth.*` sections (see [Configuration](#configuration)); no dedicated variable
-overrides them, only the `APP__` layer of [Configuration Precedence](#configuration-precedence).
+The gateway reads two environment variables by name, and does not read a `.env` file:
+
+- `APP_ENV` (required): `development`, `testing` or `production`. Selects `<APP_ENV>.toml`, whose
+  `environment` key must name the same environment.
+- `APP_CONFIG_DIR` (optional): the directory holding that file. The gateway refuses to start
+  when it does not name a directory. When it is unset, the gateway uses the nearest `config/`
+  directory at or above its working directory.
+
+They choose the configuration file, so they cannot be set in it. Every other setting (server,
+logging, database, Redis, JWT, email, OAuth, trusted proxies, the vex-core link) lives in that file
+(see [Configuration](#configuration)), and the `APP__` layer of
+[Configuration Precedence](#configuration-precedence) is the only way to override one:
 
 ```bash
-# Application
 APP_ENV=production
-APP__SERVER__HOST=0.0.0.0
-APP__SERVER__PORT=8081
-APP__AUTH__SERVER__TRUSTED_PROXIES=10.0.1.0/24,10.0.2.0/24
-
-# VEX Core
-CONTEXT_DIR=/dev/shm/aeron
-CORE_ADDRESS=aeron-media-driver-core
-CORE_PORT=40123
-CORE_CONTROL_PORT=40123
-LOCAL_ADDRESS=0.0.0.0
+APP__SERVER__HOST=0.0.0.0                                  # server.host
+APP__AUTH__SERVER__TRUSTED_PROXIES=10.0.1.0/24,10.0.2.0/24 # auth.server.trusted_proxies
+APP__CORE__AUTH_KEY=<signed 32-bit integer>                # core.auth_key, kept out of the file
 ```
 
 ---
@@ -87,10 +86,11 @@ it the gateway does not start.
 
 1. Environment-specific TOML file
 2. Environment variables `APP__<SECTION>__<KEY>`, named like vex-core's `VEX__` variables: the key
-   path in upper case with `__` between its levels. `APP__SERVER__PORT` overrides `server.port`
-   and `APP__AUTH__SERVER__TRUSTED_PROXIES` overrides `auth.server.trusted_proxies`. A list takes
-   comma-separated values (`10.0.1.0/24,10.0.2.0/24`). `APP_ENV` and `APP_CONFIG_DIR`, with a
-   single `_`, are not overrides.
+   path in upper case with `__` between its levels. `APP__SERVER__PORT` overrides `server.port`,
+   `APP__AUTH__SERVER__TRUSTED_PROXIES` overrides `auth.server.trusted_proxies` and
+   `APP__CORE__AUTH_KEY` overrides `core.auth_key`. A list takes comma-separated values
+   (`10.0.1.0/24,10.0.2.0/24`). `APP_ENV` and `APP_CONFIG_DIR`, with a single `_`, are not
+   overrides.
 
 An `APP__` variable that names no key stops the gateway, and the error names the variable; so does
 a key in the file that no setting reads. A missing required setting, a malformed file or an invalid
@@ -115,11 +115,36 @@ value and cannot unset an optional setting.
 
 The service validates configuration on startup:
 - **Production**: Cannot bind to localhost, cannot use debug logging, port must be > 0,
-  `auth.server.trusted_proxies` must not be empty
+  `auth.server.trusted_proxies` and `core.auth_key` must not be empty
 - **Development**: More lenient validation
 - **Testing**: Allows ephemeral ports (port 0)
 - **Every environment**: `auth.oauth.providers` may list only `google`, `github` and `twitter`;
   another provider stops the gateway at startup, and the error names it
+
+### VEX Core Connection
+
+The `[core]` section holds the Aeron link to vex-core (see `config/development.toml.example`).
+`APP__CORE__<KEY>` overrides a key, such as `APP__CORE__CONTROL_PORT` for `core.control_port`:
+
+- `gateway_id`: this gateway's id at the core, 0-15, unique among the gateways connected to it.
+- `auth_key`: the handshake credential (below).
+- `address`: vex-core's Aeron address.
+- `port`, `control_port`: vex-core's `core_networking.initial_port` and `initial_control_port`:
+  3521 and 3522 for a production core, 40001 and 40002 for vex-core's development and test
+  defaults. The two must differ.
+- `context_dir`: this gateway's Aeron media driver directory.
+
+`auth_key` is a signed 32-bit integer equal to vex-core's
+`VEX__GATEWAY_NETWORKING__GATEWAY_AUTHENTICATION_KEY`, shared by every gateway. With
+`APP_ENV=production` the gateway refuses to start when it is empty, as vex-core does. Leave it
+empty only for a core running without authentication
+(`VEX__CORE_NETWORKING__ENABLE_AUTHENTICATION=false`). To keep it out of the file, set
+`APP__CORE__AUTH_KEY`. The key travels in cleartext in the handshake, so keep gateway-to-core traffic
+on a trusted network segment.
+
+The gateway exits at startup when one of these keys is missing, malformed or unknown, or when
+vex-core's own rules reject the combination (`Invalid vex-core link settings in [core]: ...`, for
+example equal ports).
 
 ### Client IP Behind a Proxy
 
@@ -304,18 +329,21 @@ redis-cli -u "<auth.redis.url>" INFO server
 **Diagnosis**:
 ```bash
 # Check Aeron context directory exists
-ls -la $CONTEXT_DIR
+ls -la <core.context_dir>
 
 # Check VEX Core is running
 
 # Check network connectivity
-ping $CORE_ADDRESS
+ping <core.address>
 ```
 
 **Solutions**:
-- Verify `CONTEXT_DIR` exists and is writable
+- Verify `core.context_dir` exists and is writable
 - Check VEX Core service is running
-- Verify `CORE_ADDRESS` and `CORE_PORT` are correct
+- Verify `core.address`, `core.port` and `core.control_port` are correct (see "VEX Core Connection")
+- `Connection rejected: Handshake rejected` at startup, with `handshake_rejected` and
+  `reason=Authentication failed: Invalid credentials` in the vex-core log, means `core.auth_key`
+  differs from vex-core's key
 - Check Aeron media driver is running
 - Verify network connectivity to VEX Core
 
@@ -474,10 +502,10 @@ grep -i "memory\|oom" logs/app.log
 1. **Check VEX Core Status**
    ```bash
    # Check Aeron connection
-   ls -la $CONTEXT_DIR
+   ls -la <core.context_dir>
    
    # Check network connectivity
-   ping $CORE_ADDRESS
+   ping <core.address>
    ```
 
 2. **Service Impact**

@@ -4,7 +4,7 @@ use common::OrderCommand;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
@@ -24,12 +24,15 @@ const ENGINE_LINK_TIMEOUT_GAP_MS: u64 = 30_000;
 /// Generate a globally unique client order ID
 #[inline]
 pub fn generate_client_order_id() -> u64 {
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_nanos() as u64;
-
     let counter = CLIENT_ORDER_COUNTER.fetch_add(1, Ordering::Relaxed);
+    generate_client_order_id_at(SystemTime::now(), counter)
+}
+
+fn generate_client_order_id_at(now: SystemTime, counter: u64) -> u64 {
+    let timestamp = now
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(counter);
 
     // Combine: top 48 bits = timestamp, bottom 16 bits = counter
     ((timestamp & 0xFFFF_FFFF_FFFF) << 16) | (counter & 0xFFFF)
@@ -279,6 +282,18 @@ mod tests {
             ..OrderCommand::default()
         }));
         assert!(service.is_engine_link_healthy());
+    }
+
+    #[test]
+    fn correlation_ids_use_counter_when_clock_is_before_epoch() {
+        let before_epoch = UNIX_EPOCH.checked_sub(Duration::from_secs(1)).unwrap();
+
+        let first = generate_client_order_id_at(before_epoch, 41);
+        let second = generate_client_order_id_at(before_epoch, 42);
+
+        assert_ne!(first, second);
+        assert_eq!(first, (41 << 16) | 41);
+        assert_eq!(second, (42 << 16) | 42);
     }
 }
 

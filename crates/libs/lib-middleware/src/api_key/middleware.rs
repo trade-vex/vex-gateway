@@ -27,6 +27,12 @@ use crate::repository::api_key_repository::ApiKeyRepository;
 
 const MAX_SIGNED_BODY_SIZE: usize = 16 * 1024;
 
+fn unix_timestamp_millis(now: SystemTime) -> Result<u64, ApiKeyError> {
+    now.duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .map_err(|_| ApiKeyError::Internal("System clock is before the Unix epoch".to_string()))
+}
+
 /// Route-specific security configuration
 /// Placeholder : Will be removed and be replaced by direct actix based routing
 #[derive(Debug, Clone)]
@@ -847,10 +853,7 @@ impl ApiKeyMiddleware {
 
         let request_time = SignatureVerifier::parse_timestamp(timestamp_str)?;
 
-        let server_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let server_time = unix_timestamp_millis(SystemTime::now())?;
 
         let provided_recv_window = query_params
             .get("recvWindow")
@@ -879,6 +882,16 @@ impl ApiKeyMiddleware {
         SignatureVerifier::validate_timestamp(request_time, effective_recv_window, server_time)?;
 
         Ok(effective_recv_window)
+    }
+
+    /// A server fault (the host clock reads before 1970) is a generic 500 that keeps the detail in
+    /// the log; every other timestamp failure is the client's and stays a descriptive 400.
+    fn timestamp_validation_error(e: &ApiKeyError) -> Error {
+        if matches!(e, ApiKeyError::Internal(_)) {
+            actix_web::error::ErrorInternalServerError("Internal server error")
+        } else {
+            actix_web::error::ErrorBadRequest(format!("Timestamp validation failed: {}", e))
+        }
     }
 }
 
@@ -1053,10 +1066,7 @@ where
                         Ok(recv_window) => recv_window,
                         Err(e) => {
                             error!("Timestamp validation failed: {}", e);
-                            return Err(actix_web::error::ErrorBadRequest(format!(
-                                "Timestamp validation failed: {}",
-                                e
-                            )));
+                            return Err(ApiKeyMiddleware::timestamp_validation_error(&e));
                         }
                     };
 
@@ -1906,5 +1916,45 @@ mod tests {
             error.as_response_error().status_code(),
             actix_web::http::StatusCode::PAYLOAD_TOO_LARGE
         );
+    }
+
+    #[test]
+    fn server_timestamp_fails_closed_when_clock_is_before_epoch() {
+        let before_epoch = UNIX_EPOCH.checked_sub(Duration::from_secs(1)).unwrap();
+
+        let result = unix_timestamp_millis(before_epoch);
+
+        assert!(matches!(
+            result,
+            Err(ApiKeyError::Internal(message))
+                if message == "System clock is before the Unix epoch"
+        ));
+    }
+
+    #[test]
+    fn timestamp_failures_map_server_faults_to_500_and_client_faults_to_400() {
+        let clock_fault = ApiKeyMiddleware::timestamp_validation_error(&ApiKeyError::Internal(
+            "System clock is before the Unix epoch".to_string(),
+        ));
+        assert_eq!(
+            clock_fault.as_response_error().status_code(),
+            actix_web::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert!(!clock_fault.to_string().contains("clock"));
+
+        for client_fault in [
+            ApiKeyError::RequestExpired {
+                request_time: 1,
+                server_time: 100_000,
+                recv_window: 5_000,
+            },
+            ApiKeyError::InvalidTimestamp("Invalid recvWindow format".to_string()),
+        ] {
+            let error = ApiKeyMiddleware::timestamp_validation_error(&client_fault);
+            assert_eq!(
+                error.as_response_error().status_code(),
+                actix_web::http::StatusCode::BAD_REQUEST
+            );
+        }
     }
 }

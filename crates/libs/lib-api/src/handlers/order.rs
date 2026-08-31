@@ -10,12 +10,18 @@ use lib_core::{
 use lib_utils::AuthenticatedUserId;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{error, info, warn};
 use vex_networking::client::GatewayError;
 
 const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
 const MAX_IDEMPOTENCY_KEY_LENGTH: usize = 128;
+
+fn unix_timestamp_nanos(now: SystemTime) -> u64 {
+    now.duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_nanos() as u64
+}
 
 // Request/Response DTOs
 
@@ -666,10 +672,7 @@ pub async fn place_order(
         original_size: volume,
         side,
         time_in_force,
-        timestamp: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64,
+        timestamp: unix_timestamp_nanos(SystemTime::now()),
         status: Status::Processing,
         events: None,
         balance: [UserBalance::default(); 2],
@@ -906,10 +909,7 @@ pub async fn cancel_order(
         original_size: 0,
         side: Side::Bid,
         time_in_force: TimeInForce::Gtc,
-        timestamp: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64,
+        timestamp: unix_timestamp_nanos(SystemTime::now()),
         status: Status::Processing,
         events: None,
         balance: [UserBalance::default(); 2],
@@ -1515,5 +1515,12 @@ mod tests {
     fn parses_cancel_order_id() {
         assert_eq!(parse_order_id("18446744073709551615"), Ok(u64::MAX));
         assert!(parse_order_id("not-an-order-id").is_err());
+    }
+
+    #[test]
+    fn order_timestamp_saturates_at_epoch_when_clock_is_before_epoch() {
+        let before_epoch = UNIX_EPOCH.checked_sub(Duration::from_secs(1)).unwrap();
+
+        assert_eq!(unix_timestamp_nanos(before_epoch), 0);
     }
 }
