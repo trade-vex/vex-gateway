@@ -1,10 +1,11 @@
 //! Order Management API Handlers
 
-use actix_web::{HttpResponse, http::StatusCode, web};
+use actix_web::{HttpRequest, HttpResponse, http::StatusCode, web};
 use common::{OrderCommand, OrderCommandType, Side, Status, TimeInForce, UserBalance};
 use lib_core::{
-    CorrelationService, Publisher, ResponseError, TradingRepository, generate_client_order_id,
-    model::orders::Model as OrderModel, wait_for_response,
+    CompletionWait, CorrelationService, IdempotentOrderOutcome, OrderClaim, OrderIdempotencyError,
+    OrderIdempotencyStore, Publisher, ReleaseReason, ResponseError, TradingRepository,
+    generate_client_order_id, model::orders::Model as OrderModel, wait_for_response,
 };
 use lib_utils::AuthenticatedUserId;
 use serde::{Deserialize, Serialize};
@@ -12,6 +13,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 use vex_networking::client::GatewayError;
+
+const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
+const MAX_IDEMPOTENCY_KEY_LENGTH: usize = 128;
 
 // Request/Response DTOs
 
@@ -37,7 +41,7 @@ use vex_networking::client::GatewayError;
 ///   "order_type": "Limit"
 /// }
 /// ```
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize)]
 pub enum OrderType {
     Limit,
     Market,
@@ -183,11 +187,193 @@ fn send_failure_response(
     })
 }
 
+/// Why a failed publish gives its idempotency claim back. A request waiting on the claim then gets
+/// the 503 for that reason: busy, or engine unavailable (also when this gateway's own publication
+/// failed, which the failed request itself was told with a 500).
+fn release_reason(error: &GatewayError) -> ReleaseReason {
+    match error {
+        GatewayError::Busy => ReleaseReason::Busy,
+        _ => ReleaseReason::EngineUnavailable,
+    }
+}
+
 fn serialize_u64_as_string<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
     serializer.serialize_str(&value.to_string())
+}
+
+fn response_from_outcome(outcome: IdempotentOrderOutcome) -> HttpResponse {
+    let status =
+        StatusCode::from_u16(outcome.http_status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    HttpResponse::build(status).json(OrderResponse {
+        order_id: outcome.order_id,
+        client_order_id: outcome.client_order_id,
+        status: outcome.status,
+        message: outcome.message,
+    })
+}
+
+/// Client guidance for every 408 `outcome_unknown`. It must never invite a retry of the key: a
+/// retry can only replay this same 408 for the claim's lifetime, and if the claim was lost (Redis
+/// eviction or failover) the retry is accepted as new and places a second order.
+fn outcome_unknown_message(summary: &str, client_order_id: u64) -> String {
+    format!(
+        "{summary} Retain client_order_id {client_order_id} and check open orders or order \
+         history after asynchronous persistence catches up. Do not retry this idempotency key."
+    )
+}
+
+fn record_idempotent_completion(
+    result: Result<bool, OrderIdempotencyError>,
+    client_order_id: u64,
+    idempotency_key: &str,
+) {
+    match result {
+        Ok(true) => {}
+        Ok(false) => error!(
+            client_order_id,
+            %idempotency_key,
+            "idempotency claim vanished before completion could be recorded — retry-safety guarantee no longer holds"
+        ),
+        Err(e) => error!(
+            client_order_id,
+            %idempotency_key,
+            error = %e,
+            "failed to record idempotent completion"
+        ),
+    }
+}
+
+async fn complete_idempotent_order(
+    store: &OrderIdempotencyStore,
+    user_id: u64,
+    idempotency_key: &str,
+    fingerprint: &str,
+    outcome: IdempotentOrderOutcome,
+) -> HttpResponse {
+    let result = store
+        .complete(user_id, idempotency_key, fingerprint, outcome.clone())
+        .await;
+    record_idempotent_completion(result, outcome.client_order_id, idempotency_key);
+    response_from_outcome(outcome)
+}
+
+/// Releases the claim of an order the engine never executed, so a retry with the same key is
+/// published again instead of replaying a transient failure for the claim's lifetime. A request
+/// already waiting on the claim sees the release and its `reason`, and gets the same answer.
+async fn release_idempotency_claim(
+    store: &OrderIdempotencyStore,
+    user_id: u64,
+    idempotency_key: &str,
+    fingerprint: &str,
+    client_order_id: u64,
+    reason: ReleaseReason,
+) {
+    match store
+        .release(
+            user_id,
+            idempotency_key,
+            fingerprint,
+            client_order_id,
+            reason,
+        )
+        .await
+    {
+        Ok(true) => {}
+        // The key no longer holds this attempt's claim (expired, evicted, or never ours), so a
+        // retry may find it free or still in flight; there is nothing left to release.
+        Ok(false) => warn!(
+            client_order_id,
+            %idempotency_key,
+            "idempotency claim was already gone when releasing an order the engine did not execute"
+        ),
+        Err(error) => error!(
+            client_order_id,
+            error = %error,
+            "Failed to release idempotency claim for an order the engine did not execute"
+        ),
+    }
+}
+
+/// Answers a request whose key is held by another in-flight attempt by waiting for that attempt's
+/// outcome. An attempt the engine turned away releases its claim, and the waiter gets the 503 that
+/// attempt got: busy, with `Retry-After`, or engine unavailable (a retry claims the key afresh). A
+/// claim that vanished without a release may have been published, so that waiter is told not to
+/// retry the key.
+async fn await_in_flight_order(
+    store: &OrderIdempotencyStore,
+    user_id: u64,
+    idempotency_key: &str,
+    fingerprint: &str,
+    client_order_id: u64,
+) -> HttpResponse {
+    match store
+        .wait_for_completion(
+            user_id,
+            idempotency_key,
+            fingerprint,
+            Duration::from_secs(5),
+        )
+        .await
+    {
+        Ok(CompletionWait::Completed(outcome)) => response_from_outcome(outcome),
+        Ok(CompletionWait::Released(ReleaseReason::Busy)) => {
+            engine_busy_response(0, client_order_id)
+        }
+        Ok(CompletionWait::Released(ReleaseReason::EngineUnavailable)) => {
+            send_failure_response(&GatewayError::NotConnected, "order", 0, client_order_id)
+        }
+        Ok(CompletionWait::Unresolved) => HttpResponse::RequestTimeout().json(OrderResponse {
+            order_id: 0,
+            client_order_id,
+            status: "outcome_unknown".to_string(),
+            message: outcome_unknown_message(
+                "Original order is still unresolved.",
+                client_order_id,
+            ),
+        }),
+        Err(error) => {
+            error!(
+                client_order_id,
+                error = %error,
+                "Failed while waiting for idempotent order outcome"
+            );
+            HttpResponse::ServiceUnavailable().json(OrderResponse {
+                order_id: 0,
+                client_order_id,
+                status: "error".to_string(),
+                message: "Unable to retrieve the original order outcome".to_string(),
+            })
+        }
+    }
+}
+
+/// Settles the claim once the engine has answered. A busy engine executed nothing, so its answer
+/// is not recorded: the claim is released, as for an unsent order, and a retry with the same key
+/// is published again. Any other answer is final and is recorded, so a retry replays it.
+async fn settle_idempotent_order(
+    store: &OrderIdempotencyStore,
+    user_id: u64,
+    idempotency_key: &str,
+    fingerprint: &str,
+    engine_status: Status,
+    outcome: IdempotentOrderOutcome,
+) -> HttpResponse {
+    if engine_status == Status::Busy {
+        release_idempotency_claim(
+            store,
+            user_id,
+            idempotency_key,
+            fingerprint,
+            outcome.client_order_id,
+            ReleaseReason::Busy,
+        )
+        .await;
+        return engine_busy_response(0, outcome.client_order_id);
+    }
+    complete_idempotent_order(store, user_id, idempotency_key, fingerprint, outcome).await
 }
 
 // API Handlers
@@ -214,6 +400,7 @@ where
 /// curl -X POST http://localhost:8080/api/order/order \
 ///   -H "Authorization: Bearer <jwt_token>" \
 ///   -H "Content-Type: application/json" \
+///   -H "Idempotency-Key: <unique-logical-order-key>" \
 ///   -d '{
 ///     "price": 5000000,
 ///     "volume": 100,
@@ -242,25 +429,27 @@ where
 /// {
 ///   "order_id": "0",
 ///   "client_order_id": "987654321",
-///   "status": "timeout",
-///   "message": "Order processing timeout"
+///   "status": "outcome_unknown",
+///   "message": "Order was sent but its outcome is unknown. Retain client_order_id 987654321 and check open orders or order history after asynchronous persistence catches up. Do not retry this idempotency key."
 /// }
 /// ```
 ///
-/// # Example Error Response (500)
+/// # Example Error Response (503)
 /// ```json
 /// {
 ///   "order_id": "0",
 ///   "client_order_id": "987654321",
 ///   "status": "error",
-///   "message": "Failed to send order: connection refused"
+///   "message": "Matching engine is busy; please retry"
 /// }
 /// ```
 pub async fn place_order(
+    request: HttpRequest,
     order_data: web::Json<OrderRequest>,
     auth_user: AuthenticatedUserId,
     publisher: web::Data<Arc<Publisher>>,
     correlation_service: web::Data<Arc<CorrelationService>>,
+    idempotency_store: web::Data<Arc<OrderIdempotencyStore>>,
     trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> HttpResponse {
     let start = Instant::now();
@@ -268,6 +457,31 @@ pub async fn place_order(
     // Extract user ID from JWT
     let raw = auth_user.0.as_u128();
     let user_id = ((raw >> 64) as u64) ^ (raw as u64);
+    let idempotency_key = match request
+        .headers()
+        .get(IDEMPOTENCY_KEY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+    {
+        Some(key)
+            if !key.is_empty()
+                && key.len() <= MAX_IDEMPOTENCY_KEY_LENGTH
+                && !key.chars().any(char::is_control) =>
+        {
+            key.to_owned()
+        }
+        _ => {
+            return HttpResponse::BadRequest().json(OrderResponse {
+                order_id: 0,
+                client_order_id: 0,
+                status: "rejected".to_string(),
+                message: format!(
+                    "A non-empty {IDEMPOTENCY_KEY_HEADER} header of at most \
+                     {MAX_IDEMPOTENCY_KEY_LENGTH} characters is required"
+                ),
+            });
+        }
+    };
     let order_data = order_data.into_inner();
 
     let OrderRequest {
@@ -304,8 +518,49 @@ pub async fn place_order(
         }
     };
 
+    let fingerprint =
+        format!("{price}:{volume}:{market_id}:{side:?}:{time_in_force:?}:{order_type:?}");
+
     // Generate unique client order ID for correlation
     let client_order_id = generate_client_order_id();
+
+    match idempotency_store
+        .claim(user_id, &idempotency_key, &fingerprint, client_order_id)
+        .await
+    {
+        Ok(OrderClaim::Acquired) => {}
+        Ok(OrderClaim::Completed(outcome)) => return response_from_outcome(outcome),
+        Ok(OrderClaim::InFlight { client_order_id }) => {
+            return await_in_flight_order(
+                &idempotency_store,
+                user_id,
+                &idempotency_key,
+                &fingerprint,
+                client_order_id,
+            )
+            .await;
+        }
+        Ok(OrderClaim::PayloadMismatch) => {
+            return HttpResponse::Conflict().json(OrderResponse {
+                order_id: 0,
+                client_order_id: 0,
+                status: "rejected".to_string(),
+                message: format!(
+                    "{IDEMPOTENCY_KEY_HEADER} was already used with a different order payload"
+                ),
+            });
+        }
+        Err(error) => {
+            error!(error = %error, "Failed to claim order idempotency key");
+            return HttpResponse::ServiceUnavailable().json(OrderResponse {
+                order_id: 0,
+                client_order_id: 0,
+                status: "error".to_string(),
+                message: "Order was not sent because idempotency storage is unavailable"
+                    .to_string(),
+            });
+        }
+    }
 
     // Register this request - get receiver for response
     let response_receiver = correlation_service.register_request(client_order_id);
@@ -344,20 +599,23 @@ pub async fn place_order(
             error = %e,
             "Failed to send order to VEX Core"
         );
+        release_idempotency_claim(
+            &idempotency_store,
+            user_id,
+            &idempotency_key,
+            &fingerprint,
+            client_order_id,
+            release_reason(&e),
+        )
+        .await;
+        // PR #92 distinguishes engine back-pressure (503) from a hard send failure (500);
+        // PR #105's unconditional 503 would mislabel the latter.
         return send_failure_response(&e, "order", 0, client_order_id);
     }
 
     // Wait for response with timeout - function pauses here
     match wait_for_response(response_receiver, Duration::from_secs(5)).await {
         Ok(response) => {
-            if response.status == Status::Busy {
-                warn!(
-                    client_order_id = client_order_id,
-                    user_id = user_id,
-                    "Matching engine busy; order not accepted"
-                );
-                return engine_busy_response(0, client_order_id);
-            }
             let latency = start.elapsed();
             let status_str = format!("{:?}", response.status);
 
@@ -425,12 +683,21 @@ pub async fn place_order(
                 }
             }
 
-            HttpResponse::Ok().json(OrderResponse {
-                order_id: response.order_id,
-                client_order_id: response.client_order_id,
-                status: status_str,
-                message: "Order processed successfully".to_string(),
-            })
+            settle_idempotent_order(
+                &idempotency_store,
+                user_id,
+                &idempotency_key,
+                &fingerprint,
+                response.status,
+                IdempotentOrderOutcome {
+                    http_status: StatusCode::OK.as_u16(),
+                    order_id: response.order_id,
+                    client_order_id: response.client_order_id,
+                    status: status_str,
+                    message: "Order processed successfully".to_string(),
+                },
+            )
+            .await
         }
         Err(ResponseError::Timeout) => {
             correlation_service.cancel_request(client_order_id);
@@ -441,12 +708,23 @@ pub async fn place_order(
                 "Order processing timeout"
             );
 
-            HttpResponse::RequestTimeout().json(OrderResponse {
-                order_id: 0,
-                client_order_id,
-                status: "timeout".to_string(),
-                message: "Order processing timeout".to_string(),
-            })
+            complete_idempotent_order(
+                &idempotency_store,
+                user_id,
+                &idempotency_key,
+                &fingerprint,
+                IdempotentOrderOutcome {
+                    http_status: StatusCode::REQUEST_TIMEOUT.as_u16(),
+                    order_id: 0,
+                    client_order_id,
+                    status: "outcome_unknown".to_string(),
+                    message: outcome_unknown_message(
+                        "Order was sent but its outcome is unknown.",
+                        client_order_id,
+                    ),
+                },
+            )
+            .await
         }
         Err(ResponseError::Cancelled) => {
             error!(
@@ -454,12 +732,20 @@ pub async fn place_order(
                 "Response channel cancelled"
             );
 
-            HttpResponse::InternalServerError().json(OrderResponse {
-                order_id: 0,
-                client_order_id,
-                status: "error".to_string(),
-                message: "Internal error".to_string(),
-            })
+            complete_idempotent_order(
+                &idempotency_store,
+                user_id,
+                &idempotency_key,
+                &fingerprint,
+                IdempotentOrderOutcome {
+                    http_status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                    order_id: 0,
+                    client_order_id,
+                    status: "error".to_string(),
+                    message: "Internal error".to_string(),
+                },
+            )
+            .await
         }
     }
 }
@@ -721,6 +1007,332 @@ mod tests {
         assert_eq!(
             gateway_error_status(&GatewayError::ProtocolError("invalid command".to_string())),
             StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    use std::sync::{Arc, Mutex};
+    use tracing::{
+        Event, Metadata, Subscriber,
+        field::{Field, Visit},
+        span::{Attributes, Id, Record},
+    };
+
+    #[derive(Clone)]
+    struct CapturingSubscriber {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct FieldVisitor<'a> {
+        output: &'a mut String,
+    }
+
+    impl Visit for FieldVisitor<'_> {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.output
+                .push_str(&format!(" {}={value:?}", field.name()));
+        }
+    }
+
+    impl Subscriber for CapturingSubscriber {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut output = String::new();
+            event.record(&mut FieldVisitor {
+                output: &mut output,
+            });
+            self.events.lock().unwrap().push(output);
+        }
+
+        fn enter(&self, _span: &Id) {}
+
+        fn exit(&self, _span: &Id) {}
+    }
+
+    #[test]
+    fn outcome_unknown_message_never_invites_a_retry() {
+        let message = outcome_unknown_message("Order was sent but its outcome is unknown.", 42);
+
+        assert_eq!(
+            message,
+            "Order was sent but its outcome is unknown. Retain client_order_id 42 and check \
+             open orders or order history after asynchronous persistence catches up. Do not \
+             retry this idempotency key."
+        );
+    }
+
+    /// The store on `REDIS_URL` (default local 6379), or `None` when Redis is unreachable so the
+    /// calling test skips, as lib-core's own idempotency tests do.
+    async fn live_idempotency_store() -> Option<OrderIdempotencyStore> {
+        let redis_url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        let client = redis::Client::open(redis_url.as_str()).expect("valid Redis URL");
+        match redis::aio::ConnectionManager::new(client).await {
+            Ok(connection) => Some(OrderIdempotencyStore::new(connection)),
+            Err(error) => {
+                eprintln!("Skipping live-Redis test: unable to connect to {redis_url}: {error}");
+                None
+            }
+        }
+    }
+
+    fn engine_outcome_record(client_order_id: u64, status: &str) -> IdempotentOrderOutcome {
+        IdempotentOrderOutcome {
+            http_status: StatusCode::OK.as_u16(),
+            order_id: 42,
+            client_order_id,
+            status: status.to_string(),
+            message: "Order processed successfully".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn busy_engine_answer_releases_the_claim_so_the_same_key_is_published_again() {
+        let Some(store) = live_idempotency_store().await else {
+            return;
+        };
+        let user_id = generate_client_order_id();
+        let key = format!("busy-answer-{}", generate_client_order_id());
+        let client_order_id = generate_client_order_id();
+        assert_eq!(
+            store
+                .claim(user_id, &key, "payload", client_order_id)
+                .await
+                .unwrap(),
+            OrderClaim::Acquired
+        );
+
+        let response = settle_idempotent_order(
+            &store,
+            user_id,
+            &key,
+            "payload",
+            Status::Busy,
+            engine_outcome_record(client_order_id, "Busy"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            response
+                .headers()
+                .contains_key(actix_web::http::header::RETRY_AFTER)
+        );
+        let retry_client_order_id = generate_client_order_id();
+        assert_eq!(
+            store
+                .claim(user_id, &key, "payload", retry_client_order_id)
+                .await
+                .unwrap(),
+            OrderClaim::Acquired
+        );
+        store
+            .release(
+                user_id,
+                &key,
+                "payload",
+                retry_client_order_id,
+                ReleaseReason::Busy,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn final_engine_answer_is_recorded_and_replayed_for_the_same_key() {
+        let Some(store) = live_idempotency_store().await else {
+            return;
+        };
+        let user_id = generate_client_order_id();
+        let key = format!("final-answer-{}", generate_client_order_id());
+        let client_order_id = generate_client_order_id();
+        store
+            .claim(user_id, &key, "payload", client_order_id)
+            .await
+            .unwrap();
+        let outcome = engine_outcome_record(client_order_id, "Placed");
+
+        let response = settle_idempotent_order(
+            &store,
+            user_id,
+            &key,
+            "payload",
+            Status::Placed,
+            outcome.clone(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            store
+                .claim(user_id, &key, "payload", generate_client_order_id())
+                .await
+                .unwrap(),
+            OrderClaim::Completed(outcome)
+        );
+    }
+
+    #[tokio::test]
+    async fn request_waiting_on_a_released_claim_gets_a_retryable_503() {
+        let Some(store) = live_idempotency_store().await else {
+            return;
+        };
+        let user_id = generate_client_order_id();
+        let key = format!("released-wait-{}", generate_client_order_id());
+        let client_order_id = generate_client_order_id();
+        assert_eq!(
+            store
+                .claim(user_id, &key, "payload", client_order_id)
+                .await
+                .unwrap(),
+            OrderClaim::Acquired
+        );
+        // The engine turned the owner away, so the owner releases its claim.
+        settle_idempotent_order(
+            &store,
+            user_id,
+            &key,
+            "payload",
+            Status::Busy,
+            engine_outcome_record(client_order_id, "Busy"),
+        )
+        .await;
+
+        let response =
+            await_in_flight_order(&store, user_id, &key, "payload", client_order_id).await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(actix_web::http::header::RETRY_AFTER)
+                .unwrap(),
+            "1"
+        );
+        assert_eq!(body_message(response).await, ENGINE_BUSY_MESSAGE);
+        let retry_client_order_id = generate_client_order_id();
+        assert_eq!(
+            store
+                .claim(user_id, &key, "payload", retry_client_order_id)
+                .await
+                .unwrap(),
+            OrderClaim::Acquired
+        );
+        store
+            .release(
+                user_id,
+                &key,
+                "payload",
+                retry_client_order_id,
+                ReleaseReason::Busy,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn only_back_pressure_releases_a_claim_as_busy() {
+        assert_eq!(release_reason(&GatewayError::Busy), ReleaseReason::Busy);
+        for error in [
+            GatewayError::NotConnected,
+            GatewayError::SendError("publication closed".to_string()),
+        ] {
+            assert_eq!(release_reason(&error), ReleaseReason::EngineUnavailable);
+        }
+    }
+
+    #[tokio::test]
+    async fn request_waiting_on_a_claim_released_without_a_core_gets_the_unavailable_503() {
+        let Some(store) = live_idempotency_store().await else {
+            return;
+        };
+        let user_id = generate_client_order_id();
+        let key = format!("unavailable-wait-{}", generate_client_order_id());
+        let client_order_id = generate_client_order_id();
+        assert_eq!(
+            store
+                .claim(user_id, &key, "payload", client_order_id)
+                .await
+                .unwrap(),
+            OrderClaim::Acquired
+        );
+        // The owner's publish failed because no core is connected, so it releases its claim.
+        release_idempotency_claim(
+            &store,
+            user_id,
+            &key,
+            "payload",
+            client_order_id,
+            release_reason(&GatewayError::NotConnected),
+        )
+        .await;
+
+        let response =
+            await_in_flight_order(&store, user_id, &key, "payload", client_order_id).await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            !response
+                .headers()
+                .contains_key(actix_web::http::header::RETRY_AFTER)
+        );
+        assert_eq!(body_message(response).await, "Matching engine unavailable");
+    }
+
+    #[tokio::test]
+    async fn request_waiting_on_a_missing_claim_is_still_told_not_to_retry() {
+        let Some(store) = live_idempotency_store().await else {
+            return;
+        };
+        // No claim and no release marker under the key: an evicted claim looks exactly like this,
+        // and its order may have been published.
+        let user_id = generate_client_order_id();
+        let key = format!("missing-wait-{}", generate_client_order_id());
+        let client_order_id = generate_client_order_id();
+
+        let response =
+            await_in_flight_order(&store, user_id, &key, "payload", client_order_id).await;
+
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        assert!(
+            body_message(response)
+                .await
+                .ends_with("Do not retry this idempotency key.")
+        );
+    }
+
+    #[test]
+    fn missing_idempotency_claim_is_logged() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = CapturingSubscriber {
+            events: events.clone(),
+        };
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let idempotency_key = format!("missing-claim-{}", generate_client_order_id());
+        let client_order_id = generate_client_order_id();
+
+        record_idempotent_completion(Ok(false), client_order_id, &idempotency_key);
+
+        let events = events.lock().unwrap();
+        assert!(events.iter().any(|event| {
+            event.contains("idempotency claim vanished before completion could be recorded")
+                && event.contains(&idempotency_key)
+                && event.contains(&client_order_id.to_string())
+        }));
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.contains("failed to record idempotent completion"))
         );
     }
 }

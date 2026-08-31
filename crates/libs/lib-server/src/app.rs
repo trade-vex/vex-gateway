@@ -55,6 +55,7 @@ pub fn create_app(
         .app_data(web::Data::new(Arc::new(app_state.session_service.clone())))
         .app_data(web::Data::new(app_state.gateway_publisher.clone()))
         .app_data(web::Data::new(app_state.correlation_service.clone()))
+        .app_data(web::Data::new(app_state.order_idempotency_store.clone()))
         // Configure all routes under a single /api scope
         .service(
             web::scope("/api")
@@ -85,6 +86,7 @@ pub fn create_app(
                             web::scope("")
                                 .app_data(web::Data::new(app_state.gateway_publisher.clone()))
                                 .app_data(web::Data::new(app_state.correlation_service.clone()))
+                                .app_data(web::Data::new(app_state.order_idempotency_store.clone()))
                                 .app_data(web::Data::new(Arc::new(app_state.balance_store.clone())))
                                 .app_data(web::Data::new(Arc::new(app_state.order_store.clone())))
                                 .app_data(web::Data::new(app_state.portfolio_repository.clone()))

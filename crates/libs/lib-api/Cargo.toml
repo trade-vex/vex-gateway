@@ -26,5 +26,6 @@ rust_decimal = "1.40"
 
 [dev-dependencies]
 tokio-test = "0.4"
+redis = { workspace = true }
 async-trait = "0.1"
 rust_decimal = "1.40"

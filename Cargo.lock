@@ -2244,6 +2244,7 @@ dependencies = [
  "lib-middleware",
  "lib-utils",
  "rand 0.8.8",
+ "redis",
  "rust_decimal",
  "sea-orm",
  "serde",
