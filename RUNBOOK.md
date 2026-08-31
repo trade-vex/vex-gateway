@@ -110,9 +110,9 @@ The service validates configuration on startup:
 
 ### Client IP Behind a Proxy
 
-Login, signup, email-verification and OAuth rate limits key on the client IP. By default that is
-the TCP peer, so behind a load balancer every client shares the balancer's address: one client's
-failed logins then lock that email out for everyone.
+Login, signup, email-verification and OAuth rate limits, and API-key IP blacklists, key on the
+client IP. By default that is the TCP peer, so behind a load balancer every client shares the
+balancer's address: one client's failed logins then lock that email out for everyone.
 
 Set `TRUSTED_PROXIES` (or `auth.server.trusted_proxies` in the TOML file) to the comma-separated
 addresses or CIDR ranges of the proxies in front of the gateway. Only for a request whose TCP peer
