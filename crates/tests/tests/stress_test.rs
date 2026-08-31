@@ -25,6 +25,7 @@ use lib_core::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
+use tests::gateway_send_error;
 
 // ==================== DTOs ====================
 
@@ -73,7 +74,7 @@ struct DepositResponse {
 
 async fn test_deposit_funds(
     deposit_data: web::Json<DepositRequest>,
-    publisher: web::Data<Arc<tokio::sync::Mutex<Publisher>>>,
+    publisher: web::Data<Arc<Publisher>>,
     correlation_service: web::Data<Arc<CorrelationService>>,
 ) -> HttpResponse {
     let deposit_data = deposit_data.into_inner();
@@ -104,19 +105,17 @@ async fn test_deposit_funds(
 
     command.balance[0].available = deposit_data.amount;
 
-    let send_result = {
-        let publisher = publisher.lock().await;
-        publisher.send_order_command(&command)
-    };
+    let send_result = publisher.try_send_order_command(&command);
 
     if let Err(e) = send_result {
         correlation_service.cancel_request(client_order_id);
-        return HttpResponse::InternalServerError().json(DepositResponse {
+        let (status, message) = gateway_send_error(&e, format!("Failed: {}", e));
+        return HttpResponse::build(status).json(DepositResponse {
             user_id: deposit_data.user_id,
             asset_id: deposit_data.asset_id,
             amount: deposit_data.amount,
             status: "error".to_string(),
-            message: format!("Failed: {}", e),
+            message,
         });
     }
 
@@ -140,7 +139,7 @@ async fn test_deposit_funds(
 
 async fn test_place_order(
     order_data: web::Json<OrderRequest>,
-    publisher: web::Data<Arc<tokio::sync::Mutex<Publisher>>>,
+    publisher: web::Data<Arc<Publisher>>,
     correlation_service: web::Data<Arc<CorrelationService>>,
 ) -> HttpResponse {
     let order_data = order_data.into_inner();
@@ -169,18 +168,16 @@ async fn test_place_order(
         route_gateway_id: 0,
     };
 
-    let send_result = {
-        let publisher = publisher.lock().await;
-        publisher.send_order_command(&command)
-    };
+    let send_result = publisher.try_send_order_command(&command);
 
     if let Err(e) = send_result {
         correlation_service.cancel_request(client_order_id);
-        return HttpResponse::InternalServerError().json(OrderResponse {
+        let (status, message) = gateway_send_error(&e, format!("Failed: {}", e));
+        return HttpResponse::build(status).json(OrderResponse {
             order_id: 0,
             client_order_id,
             status: "error".to_string(),
-            message: format!("Failed: {}", e),
+            message,
         });
     }
 
@@ -202,7 +199,7 @@ async fn test_place_order(
 
 async fn test_cancel_order(
     cancel_data: web::Json<CancelOrderRequest>,
-    publisher: web::Data<Arc<tokio::sync::Mutex<Publisher>>>,
+    publisher: web::Data<Arc<Publisher>>,
     correlation_service: web::Data<Arc<CorrelationService>>,
 ) -> HttpResponse {
     let cancel_data = cancel_data.into_inner();
@@ -231,18 +228,16 @@ async fn test_cancel_order(
         route_gateway_id: 0,
     };
 
-    let send_result = {
-        let publisher = publisher.lock().await;
-        publisher.send_order_command(&command)
-    };
+    let send_result = publisher.try_send_order_command(&command);
 
     if let Err(e) = send_result {
         correlation_service.cancel_request(client_order_id);
-        return HttpResponse::InternalServerError().json(OrderResponse {
+        let (status, message) = gateway_send_error(&e, format!("Failed: {}", e));
+        return HttpResponse::build(status).json(OrderResponse {
             order_id: cancel_data.order_id,
             client_order_id,
             status: "error".to_string(),
-            message: format!("Failed: {}", e),
+            message,
         });
     }
 
@@ -342,7 +337,7 @@ fn spawn_test_server(
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to bind random port");
     let port = listener.local_addr().unwrap().port();
 
-    let publisher = Arc::new(tokio::sync::Mutex::new(publisher));
+    let publisher = Arc::new(publisher);
     let correlation_service = Arc::new(correlation_service);
     let balance_store = Arc::new(balance_store);
     let order_store = Arc::new(order_store);
@@ -443,29 +438,29 @@ async fn test_high_frequency_stress_test() {
 
     for user_id in &users {
         // Base deposit
-        let resp = client
-            .post(format!("{}/test/faucet/deposit", server_address))
-            .json(&DepositRequest {
+        let resp = post_expecting_success(
+            &client,
+            &format!("{}/test/faucet/deposit", server_address),
+            &DepositRequest {
                 user_id: *user_id,
                 asset_id: base_asset_id,
                 amount: initial_base,
-            })
-            .send()
-            .await
-            .expect("Failed");
+            },
+        )
+        .await;
         let _: DepositResponse = resp.json().await.expect("Failed");
 
         // Quote deposit
-        let resp = client
-            .post(format!("{}/test/faucet/deposit", server_address))
-            .json(&DepositRequest {
+        let resp = post_expecting_success(
+            &client,
+            &format!("{}/test/faucet/deposit", server_address),
+            &DepositRequest {
                 user_id: *user_id,
                 asset_id: quote_asset_id,
                 amount: initial_quote,
-            })
-            .send()
-            .await
-            .expect("Failed");
+            },
+        )
+        .await;
         let _: DepositResponse = resp.json().await.expect("Failed");
 
         print!(".");
@@ -485,19 +480,19 @@ async fn test_high_frequency_stress_test() {
     for (idx, user_id) in users[0..5].iter().enumerate() {
         for i in 0..20 {
             let price = 95_000_000_000 + (idx as u64 * 3_000_000_000) + (i * 500_000_000);
-            let resp = client
-                .post(format!("{}/test/order/place", server_address))
-                .json(&OrderRequest {
+            let resp = post_expecting_success(
+                &client,
+                &format!("{}/test/order/place", server_address),
+                &OrderRequest {
                     price,
                     volume: 1,
                     market_id,
                     side: Side::Ask,
                     time_in_force: TimeInForce::Gtc,
                     user_id: *user_id,
-                })
-                .send()
-                .await
-                .expect("Failed");
+                },
+            )
+            .await;
             let _: OrderResponse = resp.json().await.expect("Failed");
             print!("S");
         }
@@ -507,19 +502,19 @@ async fn test_high_frequency_stress_test() {
     for (idx, user_id) in users[5..10].iter().enumerate() {
         for i in 0..20 {
             let price = 105_000_000_000 - (idx as u64 * 3_000_000_000) - (i * 500_000_000);
-            let resp = client
-                .post(format!("{}/test/order/place", server_address))
-                .json(&OrderRequest {
+            let resp = post_expecting_success(
+                &client,
+                &format!("{}/test/order/place", server_address),
+                &OrderRequest {
                     price,
                     volume: 1,
                     market_id,
                     side: Side::Bid,
                     time_in_force: TimeInForce::Gtc,
                     user_id: *user_id,
-                })
-                .send()
-                .await
-                .expect("Failed");
+                },
+            )
+            .await;
             let _: OrderResponse = resp.json().await.expect("Failed");
             print!("B");
         }
@@ -564,16 +559,16 @@ async fn test_high_frequency_stress_test() {
                 let order = &orders_data.orders[i];
                 let order_id: u64 = order.order_id.try_into().unwrap_or(0); // Convert Decimal to u64
 
-                let resp = client
-                    .post(format!("{}/test/order/cancel", server_address))
-                    .json(&CancelOrderRequest {
+                let resp = post_expecting_success(
+                    &client,
+                    &format!("{}/test/order/cancel", server_address),
+                    &CancelOrderRequest {
                         order_id,
                         market_id,
                         user_id: *user_id,
-                    })
-                    .send()
-                    .await
-                    .expect("Failed");
+                    },
+                )
+                .await;
                 let cancel_resp: crate::OrderResponse = resp.json().await.expect("Failed");
 
                 if cancel_resp.status.contains("Cancelled") {
@@ -699,4 +694,40 @@ async fn test_high_frequency_stress_test() {
     println!("  - Final open orders: {}", total_open_orders);
     println!("  - System-wide fund conservation: VERIFIED ✓");
     println!("  - All users verified ✓");
+}
+
+/// POST `body` and return the response once it is 2xx, so the run only counts commands the
+/// engine actually applied. A 503 means the gateway did not publish the command (engine busy),
+/// so it is retried with bounded backoff. Any other non-2xx fails the run: in particular a 408
+/// must not be retried, because these test handlers take no idempotency key and the timed-out
+/// command may still have been applied.
+async fn post_expecting_success<T: Serialize>(
+    client: &reqwest::Client,
+    url: &str,
+    body: &T,
+) -> reqwest::Response {
+    const MAX_ATTEMPTS: u32 = 10;
+    let mut backoff = Duration::from_millis(10);
+
+    for _ in 0..MAX_ATTEMPTS {
+        let resp = client
+            .post(url)
+            .json(body)
+            .send()
+            .await
+            .expect("request failed");
+        let status = resp.status();
+        if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_secs(1));
+            continue;
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            panic!("POST {url} returned {status}: {body}");
+        }
+        return resp;
+    }
+
+    panic!("POST {url}: engine still busy (503) after {MAX_ATTEMPTS} attempts");
 }

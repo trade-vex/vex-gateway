@@ -24,7 +24,6 @@ use reqwest::Client;
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex as TokioMutex;
 use tracing::{debug, info};
 use url::Url;
 
@@ -56,8 +55,9 @@ pub struct AppState {
     pub email_service: EmailService,
     pub session_service: SessionService,
 
-    // Gateway publisher for order processing
-    pub gateway_publisher: Arc<TokioMutex<Publisher>>,
+    // Gateway publisher for order processing, shared without a lock: publishing offers once to a
+    // concurrent Aeron publication through `&self`
+    pub gateway_publisher: Arc<Publisher>,
 
     // API key middleware for dynamic updates
     pub api_key_middleware: ApiKeyMiddleware,
@@ -186,7 +186,7 @@ impl AppState {
             oauth_service,
             email_service,
             session_service,
-            gateway_publisher: Arc::new(TokioMutex::new(gateway_publisher)),
+            gateway_publisher: Arc::new(gateway_publisher),
             api_key_middleware,
             api_key_repository,
             portfolio_repository,
@@ -364,6 +364,15 @@ mod tests {
         let url = "redis://localhost:6379/1";
         let sanitized = AppState::sanitize_url(url);
         assert_eq!(sanitized, "redis://localhost:6379/1");
+    }
+
+    /// Compile-time: the handlers share the one `Publisher` directly. A lock around it would
+    /// serialise every order and cancel publish across all workers, and it needs none: publishing
+    /// offers once through `&self` to a concurrent Aeron publication, which is `Send + Sync`.
+    #[test]
+    fn handlers_share_the_publisher_without_a_lock() {
+        fn shared_directly<T: Send + Sync>(_field: fn(&AppState) -> &Arc<T>) {}
+        shared_directly::<Publisher>(|state| &state.gateway_publisher);
     }
 
     #[test]

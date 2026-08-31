@@ -30,6 +30,7 @@ use sea_orm::{Database, DatabaseConnection};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
+use tests::gateway_send_error;
 
 // ==================== DTOs ====================
 
@@ -78,7 +79,7 @@ struct DepositResponse {
 
 async fn test_deposit_funds(
     deposit_data: web::Json<DepositRequest>,
-    publisher: web::Data<Arc<tokio::sync::Mutex<Publisher>>>,
+    publisher: web::Data<Arc<Publisher>>,
     correlation_service: web::Data<Arc<CorrelationService>>,
 ) -> HttpResponse {
     let deposit_data = deposit_data.into_inner();
@@ -109,19 +110,17 @@ async fn test_deposit_funds(
 
     command.balance[0].available = deposit_data.amount;
 
-    let send_result = {
-        let publisher = publisher.lock().await;
-        publisher.send_order_command(&command)
-    };
+    let send_result = publisher.try_send_order_command(&command);
 
     if let Err(e) = send_result {
         correlation_service.cancel_request(client_order_id);
-        return HttpResponse::InternalServerError().json(DepositResponse {
+        let (status, message) = gateway_send_error(&e, format!("Failed: {}", e));
+        return HttpResponse::build(status).json(DepositResponse {
             user_id: deposit_data.user_id,
             asset_id: deposit_data.asset_id,
             amount: deposit_data.amount,
             status: "error".to_string(),
-            message: format!("Failed: {}", e),
+            message,
         });
     }
 
@@ -145,7 +144,7 @@ async fn test_deposit_funds(
 
 async fn test_place_order(
     order_data: web::Json<OrderRequest>,
-    publisher: web::Data<Arc<tokio::sync::Mutex<Publisher>>>,
+    publisher: web::Data<Arc<Publisher>>,
     correlation_service: web::Data<Arc<CorrelationService>>,
 ) -> HttpResponse {
     let order_data = order_data.into_inner();
@@ -174,18 +173,16 @@ async fn test_place_order(
         route_gateway_id: 0,
     };
 
-    let send_result = {
-        let publisher = publisher.lock().await;
-        publisher.send_order_command(&command)
-    };
+    let send_result = publisher.try_send_order_command(&command);
 
     if let Err(e) = send_result {
         correlation_service.cancel_request(client_order_id);
-        return HttpResponse::InternalServerError().json(OrderResponse {
+        let (status, message) = gateway_send_error(&e, format!("Failed: {}", e));
+        return HttpResponse::build(status).json(OrderResponse {
             order_id: 0,
             client_order_id,
             status: "error".to_string(),
-            message: format!("Failed: {}", e),
+            message,
         });
     }
 
@@ -207,7 +204,7 @@ async fn test_place_order(
 
 async fn test_cancel_order(
     cancel_data: web::Json<CancelOrderRequest>,
-    publisher: web::Data<Arc<tokio::sync::Mutex<Publisher>>>,
+    publisher: web::Data<Arc<Publisher>>,
     correlation_service: web::Data<Arc<CorrelationService>>,
 ) -> HttpResponse {
     let cancel_data = cancel_data.into_inner();
@@ -236,18 +233,16 @@ async fn test_cancel_order(
         route_gateway_id: 0,
     };
 
-    let send_result = {
-        let publisher = publisher.lock().await;
-        publisher.send_order_command(&command)
-    };
+    let send_result = publisher.try_send_order_command(&command);
 
     if let Err(e) = send_result {
         correlation_service.cancel_request(client_order_id);
-        return HttpResponse::InternalServerError().json(OrderResponse {
+        let (status, message) = gateway_send_error(&e, format!("Failed: {}", e));
+        return HttpResponse::build(status).json(OrderResponse {
             order_id: cancel_data.order_id,
             client_order_id,
             status: "error".to_string(),
-            message: format!("Failed: {}", e),
+            message,
         });
     }
 
@@ -349,7 +344,7 @@ fn spawn_test_server(
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to bind random port");
     let port = listener.local_addr().unwrap().port();
 
-    let publisher = Arc::new(tokio::sync::Mutex::new(publisher));
+    let publisher = Arc::new(publisher);
     let correlation_service = Arc::new(correlation_service);
     let balance_store = Arc::new(balance_store);
     let order_store = Arc::new(order_store);
