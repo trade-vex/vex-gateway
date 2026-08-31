@@ -131,7 +131,9 @@ where
                     // Handle session-based authentication
                     if let Some(session_id_cookie) = req.request().cookie("session_id") {
                         let session_id = session_id_cookie.value().to_string();
-                        tracing::debug!("Session auth: Found session_id cookie: {}", session_id);
+                        // Never log the session id: it is a bearer credential, and a log
+                        // reader could replay it as a cookie to authenticate as this user.
+                        tracing::debug!("Session auth: found session_id cookie");
 
                         // Get session from Redis (contains access_token and refresh_token)
                         match session_service.get_session(&session_id).await {

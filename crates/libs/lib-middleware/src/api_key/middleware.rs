@@ -257,7 +257,7 @@ impl ApiKeyStore {
         //     return Some(config);
         // }
 
-        warn!("API key not found: {}", api_key);
+        warn!("API key not found: {}", ApiKeyStore::mask_api_key(api_key));
         None
     }
 
@@ -709,16 +709,20 @@ where
             let api_config = match api_key_store.get_api_key(&api_key).await {
                 Some(config) => config,
                 None => {
-                    error!("API key not found: {}", api_key);
+                    error!(
+                        "API key not found: {}",
+                        ApiKeyMiddleware::mask_api_key(&api_key)
+                    );
                     return Err(actix_web::error::ErrorUnauthorized("Invalid API key"));
                 }
             };
 
-            println!("API CONFIG: {:?}", api_config);
-
             // Validate API key state
             if !api_config.is_valid() {
-                warn!("API key is disabled or expired: {}", api_key);
+                warn!(
+                    "API key is disabled or expired: {}",
+                    ApiKeyMiddleware::mask_api_key(&api_key)
+                );
                 return Err(actix_web::error::ErrorUnauthorized(
                     "API key is disabled or expired",
                 ));
@@ -727,7 +731,11 @@ where
             // Validate IP blacklist
             let client_ip = ApiKeyMiddleware::extract_client_ip(req.request());
             if !api_config.is_ip_allowed(&client_ip) {
-                warn!("IP {} is blacklisted for API key: {}", client_ip, api_key);
+                warn!(
+                    "IP {} is blacklisted for API key: {}",
+                    client_ip,
+                    ApiKeyMiddleware::mask_api_key(&api_key)
+                );
                 return Err(actix_web::error::ErrorForbidden(
                     "IP address is blacklisted",
                 ));

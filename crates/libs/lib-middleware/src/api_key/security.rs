@@ -43,7 +43,7 @@ impl std::fmt::Display for SecurityType {
 }
 
 /// Key material for different signature algorithms
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum KeyMaterial {
     /// HMAC secret key
     HmacSecret(String),
@@ -51,6 +51,16 @@ pub enum KeyMaterial {
     RsaPublicKey(String),
     /// Ed25519 public key in PEM format
     Ed25519PublicKey(String),
+}
+
+impl std::fmt::Debug for KeyMaterial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            KeyMaterial::HmacSecret(_) => f.debug_tuple("HmacSecret").field(&"[REDACTED]").finish(),
+            KeyMaterial::RsaPublicKey(_) => f.write_str("RsaPublicKey"),
+            KeyMaterial::Ed25519PublicKey(_) => f.write_str("Ed25519PublicKey"),
+        }
+    }
 }
 
 impl KeyMaterial {
@@ -64,7 +74,7 @@ impl KeyMaterial {
 }
 
 /// API Key configuration and permissions
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ApiKeyConfig {
     pub api_key: String,
     pub key_material: Option<KeyMaterial>,
@@ -76,6 +86,23 @@ pub struct ApiKeyConfig {
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub ip_blacklist: Vec<String>,
     pub user_id: Option<uuid::Uuid>,
+}
+
+impl std::fmt::Debug for ApiKeyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiKeyConfig")
+            .field("api_key", &"[REDACTED]")
+            .field("key_material", &self.key_material)
+            .field("permissions", &self.permissions)
+            .field("recv_window", &self.recv_window)
+            .field("enabled", &self.enabled)
+            .field("description", &self.description)
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .field("ip_blacklist", &self.ip_blacklist)
+            .field("user_id", &self.user_id)
+            .finish()
+    }
 }
 
 impl ApiKeyConfig {
@@ -190,5 +217,28 @@ impl ApiKeyConfig {
     /// Check if this API key requires signatures (TRADE or USER_DATA)
     pub fn requires_signature(&self, security_type: SecurityType) -> bool {
         matches!(security_type, SecurityType::Trade | SecurityType::UserData)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ApiKeyConfig;
+
+    #[test]
+    fn debug_redacts_hmac_secret_and_masks_api_key() {
+        let api_key = "vex_full_api_key_for_debug_test";
+        let secret = "hmac-secret-must-not-leak";
+        let config = ApiKeyConfig::new(api_key.to_string()).with_hmac_secret(secret.to_string());
+
+        let debug_output = format!("{:?}", config);
+
+        assert!(!debug_output.contains(secret));
+        assert!(!debug_output.contains(api_key));
+
+        let multibyte_api_key = "ab€cd";
+        let multibyte_config = ApiKeyConfig::new(multibyte_api_key.to_string());
+        let multibyte_debug_output = format!("{:?}", multibyte_config);
+
+        assert!(!multibyte_debug_output.contains(multibyte_api_key));
     }
 }

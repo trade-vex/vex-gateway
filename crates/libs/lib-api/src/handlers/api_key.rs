@@ -339,7 +339,6 @@ pub async fn list_api_keys(
     repo: web::Data<Arc<dyn ApiKeyRepository>>,
     auth_user: AuthenticatedUser,
 ) -> Result<HttpResponse> {
-    println!("AUTH USER IN CREATE: {:?}", auth_user);
     // Get user ID from either JWT or API key authentication
     let user_id = auth_user.user_id().ok_or_else(|| {
         actix_web::error::ErrorUnauthorized("User ID not found in authentication")
