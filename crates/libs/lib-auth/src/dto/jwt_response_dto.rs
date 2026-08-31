@@ -20,4 +20,5 @@ pub struct AppClaims {
     // Custom claims
     pub jti: String, // JWT ID (for revocation)
     pub pwd: i64,    // Password changed timestamp (for session invalidation)
+    pub token_version: u64,
 }
