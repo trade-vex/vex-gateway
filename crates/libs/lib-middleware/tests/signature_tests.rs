@@ -1,6 +1,5 @@
 use lib_middleware::api_key::error::ApiKeyError;
 use lib_middleware::api_key::signature::{SignatureAlgorithm, SignatureVerifier};
-use std::collections::HashMap;
 
 #[test]
 fn test_signature_algorithm_equality() {
@@ -152,95 +151,160 @@ fn test_verify_ed25519_invalid_key() {
 }
 
 #[test]
-fn test_build_payload_empty() {
-    let query_params = HashMap::new();
-    let body_params = HashMap::new();
+fn test_canonical_payload_with_empty_body_is_well_defined() {
+    let payload =
+        SignatureVerifier::build_request_payload("GET", "/api/orders", "symbol=BTCUSDT", "", false);
 
-    let payload = SignatureVerifier::build_payload(&query_params, &body_params);
-    assert_eq!(payload, "");
+    assert_eq!(payload, "GET\n%2Fapi%2Forders\nsymbol=BTCUSDT\n");
 }
 
 #[test]
-fn test_build_payload_single_param() {
-    let mut query_params = HashMap::new();
-    query_params.insert("symbol".to_string(), "BTCUSDT".to_string());
-    let body_params = HashMap::new();
+fn test_canonical_payload_sorts_query() {
+    let payload = SignatureVerifier::build_request_payload(
+        "GET",
+        "/api/orders",
+        "timestamp=1640995200000&symbol=BTCUSDT&side=BUY",
+        "",
+        false,
+    );
 
-    let payload = SignatureVerifier::build_payload(&query_params, &body_params);
-    assert_eq!(payload, "symbol=BTCUSDT");
+    assert_eq!(
+        payload,
+        "GET\n%2Fapi%2Forders\nside=BUY&symbol=BTCUSDT&timestamp=1640995200000\n"
+    );
 }
 
 #[test]
-fn test_build_payload_multiple_params_sorted() {
-    let mut query_params = HashMap::new();
-    query_params.insert("symbol".to_string(), "BTCUSDT".to_string());
-    query_params.insert("side".to_string(), "BUY".to_string());
-    query_params.insert("timestamp".to_string(), "1640995200000".to_string());
+fn test_canonical_payload_excludes_exact_signature_fields() {
+    let payload = SignatureVerifier::build_request_payload(
+        "POST",
+        "/api/orders",
+        "symbol=BTCUSDT&signature=should_be_excluded",
+        "quantity=1&signature=also_excluded",
+        true,
+    );
 
-    let body_params = HashMap::new();
-
-    let payload = SignatureVerifier::build_payload(&query_params, &body_params);
-    assert_eq!(payload, "side=BUY&symbol=BTCUSDT&timestamp=1640995200000");
+    assert_eq!(
+        payload,
+        format!(
+            "POST\n%2Fapi%2Forders\nsymbol=BTCUSDT\n{}",
+            hex::encode("quantity=1")
+        )
+    );
 }
 
 #[test]
-fn test_build_payload_excludes_signature() {
-    let mut query_params = HashMap::new();
-    query_params.insert("symbol".to_string(), "BTCUSDT".to_string());
-    query_params.insert("signature".to_string(), "should_be_excluded".to_string());
+fn test_body_parameter_does_not_override_same_named_query_parameter() {
+    let payload = SignatureVerifier::build_request_payload(
+        "POST",
+        "/api/orders",
+        "symbol=query",
+        "symbol=body",
+        true,
+    );
 
-    let mut body_params = HashMap::new();
-    body_params.insert("quantity".to_string(), "1".to_string());
-    body_params.insert("signature".to_string(), "also_excluded".to_string());
-
-    let payload = SignatureVerifier::build_payload(&query_params, &body_params);
-    assert_eq!(payload, "quantity=1&symbol=BTCUSDT");
+    assert_eq!(
+        payload,
+        format!(
+            "POST\n%2Fapi%2Forders\nsymbol=query\n{}",
+            hex::encode("symbol=body")
+        )
+    );
 }
 
 #[test]
-fn test_build_payload_mixed_query_and_body() {
-    let mut query_params = HashMap::new();
-    query_params.insert("symbol".to_string(), "BTCUSDT".to_string());
-    query_params.insert("side".to_string(), "BUY".to_string());
-
-    let mut body_params = HashMap::new();
-    body_params.insert("quantity".to_string(), "1".to_string());
-    body_params.insert("price".to_string(), "50000".to_string());
-
-    let payload = SignatureVerifier::build_payload(&query_params, &body_params);
-    assert_eq!(payload, "price=50000&quantity=1&side=BUY&symbol=BTCUSDT");
-}
-
-#[test]
-fn test_build_mixed_payload() {
+fn test_build_request_payload() {
     let query_string = "symbol=LTCBTC&side=BUY&type=LIMIT&timeInForce=GTC";
     let request_body = "quantity=1&price=0.1&recvWindow=5000&timestamp=1499827319559";
 
-    let payload = SignatureVerifier::build_mixed_payload(query_string, request_body);
-    let expected = "symbol=LTCBTC&side=BUY&type=LIMIT&timeInForce=GTCquantity=1&price=0.1&recvWindow=5000&timestamp=1499827319559";
+    let payload = SignatureVerifier::build_request_payload(
+        "POST",
+        "/api/order",
+        query_string,
+        request_body,
+        true,
+    );
+    let expected = format!(
+        "POST\n%2Fapi%2Forder\nside=BUY&symbol=LTCBTC&timeInForce=GTC&type=LIMIT\n{}",
+        hex::encode(request_body)
+    );
 
     assert_eq!(payload, expected);
 }
 
 #[test]
-fn test_build_mixed_payload_with_signature() {
-    let query_string = "symbol=BTCUSDT&signature=should_be_removed";
-    let request_body = "quantity=1&signature=also_removed&price=50000";
+fn test_query_body_splits_have_distinct_payloads() {
+    let first = SignatureVerifier::build_request_payload(
+        "POST",
+        "/api/orders",
+        "value=left",
+        "right",
+        false,
+    );
+    let second = SignatureVerifier::build_request_payload(
+        "POST",
+        "/api/orders",
+        "value=leftright",
+        "",
+        false,
+    );
 
-    let payload = SignatureVerifier::build_mixed_payload(query_string, request_body);
-    assert_eq!(payload, "symbol=BTCUSDTquantity=1&price=50000");
+    assert_ne!(first, second);
 }
 
 #[test]
-fn test_build_mixed_payload_empty_parts() {
-    assert_eq!(SignatureVerifier::build_mixed_payload("", ""), "");
+fn test_signature_prefixed_parameter_is_signed() {
+    let payload = SignatureVerifier::build_request_payload(
+        "POST",
+        "/api/orders",
+        "signature_foo=query&signature=excluded",
+        "signature_foo=body&signature=excluded",
+        true,
+    );
+
     assert_eq!(
-        SignatureVerifier::build_mixed_payload("symbol=BTCUSDT", ""),
-        "symbol=BTCUSDT"
+        payload,
+        format!(
+            "POST\n%2Fapi%2Forders\nsignature_foo=query\n{}",
+            hex::encode("signature_foo=body")
+        )
+    );
+}
+
+#[test]
+fn test_build_request_payload_with_signature() {
+    let query_string = "symbol=BTCUSDT&signature=should_be_removed";
+    let request_body = "quantity=1&signature=also_removed&price=50000";
+
+    let payload = SignatureVerifier::build_request_payload(
+        "POST",
+        "/api/order",
+        query_string,
+        request_body,
+        true,
     );
     assert_eq!(
-        SignatureVerifier::build_mixed_payload("", "quantity=1"),
-        "quantity=1"
+        payload,
+        format!(
+            "POST\n%2Fapi%2Forder\nsymbol=BTCUSDT\n{}",
+            hex::encode("quantity=1&price=50000")
+        )
+    );
+}
+
+#[test]
+fn test_build_request_payload_empty_parts() {
+    assert_eq!(
+        SignatureVerifier::build_request_payload("GET", "/api/orders", "", "", false),
+        "GET\n%2Fapi%2Forders\n\n"
+    );
+    assert_eq!(
+        SignatureVerifier::build_request_payload("GET", "/api/orders", "symbol=BTCUSDT", "", false,),
+        "GET\n%2Fapi%2Forders\nsymbol=BTCUSDT\n"
+    );
+    assert_eq!(
+        SignatureVerifier::build_request_payload("POST", "/api/orders", "", "quantity=1", true,),
+        format!("POST\n%2Fapi%2Forders\n\n{}", hex::encode("quantity=1"))
     );
 }
 
@@ -250,26 +314,55 @@ fn test_mixed_payload_removes_signature() {
     let query_with_sig = "symbol=BTCUSDT&signature=should_be_removed";
     let body_with_sig = "quantity=1&signature=also_removed&price=50000";
 
-    let payload = SignatureVerifier::build_mixed_payload(query_with_sig, body_with_sig);
-    // Should not contain any signature parameters
-    assert!(!payload.contains("signature="));
-    assert!(payload.contains("symbol=BTCUSDT"));
-    assert!(payload.contains("quantity=1"));
-    assert!(payload.contains("price=50000"));
+    let payload = SignatureVerifier::build_request_payload(
+        "POST",
+        "/api/order",
+        query_with_sig,
+        body_with_sig,
+        true,
+    );
+    assert_eq!(
+        payload,
+        format!(
+            "POST\n%2Fapi%2Forder\nsymbol=BTCUSDT\n{}",
+            hex::encode("quantity=1&price=50000")
+        )
+    );
 }
 
 #[test]
 fn test_mixed_payload_signature_removal_edge_cases() {
     // Test empty strings
-    assert_eq!(SignatureVerifier::build_mixed_payload("", ""), "");
+    assert_eq!(
+        SignatureVerifier::build_request_payload("GET", "/api/orders", "", "", true),
+        "GET\n%2Fapi%2Forders\n\n"
+    );
 
     // Test signature only
-    let payload = SignatureVerifier::build_mixed_payload("signature=only", "signature=this");
-    assert_eq!(payload, "");
+    let payload = SignatureVerifier::build_request_payload(
+        "GET",
+        "/api/orders",
+        "signature=only",
+        "signature=this",
+        true,
+    );
+    assert_eq!(payload, "GET\n%2Fapi%2Forders\n\n");
 
     // Test no signature parameters
-    let payload = SignatureVerifier::build_mixed_payload("symbol=BTCUSDT", "quantity=1");
-    assert_eq!(payload, "symbol=BTCUSDTquantity=1");
+    let payload = SignatureVerifier::build_request_payload(
+        "POST",
+        "/api/orders",
+        "symbol=BTCUSDT",
+        "quantity=1",
+        true,
+    );
+    assert_eq!(
+        payload,
+        format!(
+            "POST\n%2Fapi%2Forders\nsymbol=BTCUSDT\n{}",
+            hex::encode("quantity=1")
+        )
+    );
 }
 
 #[test]
@@ -414,19 +507,23 @@ fn test_parse_timestamp_edge_cases() {
 }
 
 #[test]
-fn test_binance_compatibility() {
-    // Test the exact Binance examples from the signature module
+fn test_hmac_and_canonical_payload_roundtrip() {
     let payload1 = "symbol=LTCBTC&side=BUY&type=LIMIT&timeInForce=GTC&quantity=1&price=0.1&recvWindow=5000&timestamp=1499827319559";
     let secret_key = "NhqPtmdSJYdKjVHjA7PZj4Mge3R5YNiP1e3UZjInClVN65XAbvqqM6A7H5fATj0j";
     let expected_sig1 = "c8db56825ae71d6d79447849e617115f4a920fa2acdcab2b053c4b2838bd6b71";
 
     assert!(SignatureVerifier::verify_hmac(payload1, expected_sig1, secret_key).unwrap());
 
-    // Test Example 3 with mixed payload
     let query_string = "symbol=LTCBTC&side=BUY&type=LIMIT&timeInForce=GTC";
     let request_body = "quantity=1&price=0.1&recvWindow=5000&timestamp=1499827319559";
-    let payload3 = SignatureVerifier::build_mixed_payload(query_string, request_body);
-    let expected_sig3 = "0fd168b8ddb4876a0358a8d14d0c9f3da0e9b20c5d52b2a00fcf7d1c602f9a77";
+    let payload3 = SignatureVerifier::build_request_payload(
+        "POST",
+        "/api/order",
+        query_string,
+        request_body,
+        true,
+    );
+    let signature3 = SignatureVerifier::generate_hmac(&payload3, secret_key).unwrap();
 
-    assert!(SignatureVerifier::verify_hmac(&payload3, expected_sig3, secret_key).unwrap());
+    assert!(SignatureVerifier::verify_hmac(&payload3, &signature3, secret_key).unwrap());
 }
