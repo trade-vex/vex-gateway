@@ -138,7 +138,7 @@ impl ApiKeyCache for RedisApiKeyCache {
                 self.stats
                     .hits
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                match bincode::deserialize::<ApiKeyConfig>(&data) {
+                match serde_json::from_slice::<ApiKeyConfig>(&data) {
                     Ok(config) => {
                         debug!("Cache hit for API key: {}", redact_key(key));
                         Ok(Some(config))
@@ -174,7 +174,7 @@ impl ApiKeyCache for RedisApiKeyCache {
     ) -> Result<(), ApiKeyError> {
         let cache_key = self.build_key(key);
 
-        let serialized = bincode::serialize(config).map_err(|e| {
+        let serialized = serde_json::to_vec(config).map_err(|e| {
             ApiKeyError::Serialization(format!("Failed to serialize API key config: {}", e))
         })?;
 

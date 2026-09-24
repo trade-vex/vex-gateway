@@ -479,7 +479,7 @@ impl BasicKvStore for MemoryDb {
     where
         T: Serialize + Send + Sync,
     {
-        let bytes = bincode::serialize(value).map_err(|e| DbError::Serialization {
+        let bytes = serde_json::to_vec(value).map_err(|e| DbError::Serialization {
             message: format!("Failed to serialize value: {}", e),
             source: Some(Box::new(e)),
         })?;
@@ -519,10 +519,11 @@ impl BasicKvStore for MemoryDb {
             // Update access metadata
             Self::update_access(&mut entry);
 
-            let value = bincode::deserialize(&entry.data).map_err(|e| DbError::Serialization {
-                message: format!("Failed to deserialize value: {}", e),
-                source: Some(Box::new(e)),
-            })?;
+            let value =
+                serde_json::from_slice(&entry.data).map_err(|e| DbError::Serialization {
+                    message: format!("Failed to deserialize value: {}", e),
+                    source: Some(Box::new(e)),
+                })?;
             Ok(Some(value))
         } else {
             Ok(None)
@@ -607,11 +608,12 @@ impl AdvancedKvStore for MemoryDb {
                     results.push(None);
                 } else {
                     Self::update_access(&mut entry);
-                    let value =
-                        bincode::deserialize(&entry.data).map_err(|e| DbError::Serialization {
+                    let value = serde_json::from_slice(&entry.data).map_err(|e| {
+                        DbError::Serialization {
                             message: format!("Failed to deserialize value: {}", e),
                             source: Some(Box::new(e)),
-                        })?;
+                        }
+                    })?;
                     results.push(Some(value));
                 }
             } else {
@@ -640,7 +642,7 @@ impl AdvancedKvStore for MemoryDb {
         let now = Instant::now();
 
         for (key, value) in pairs {
-            let bytes = bincode::serialize(value).map_err(|e| DbError::Serialization {
+            let bytes = serde_json::to_vec(value).map_err(|e| DbError::Serialization {
                 message: format!("Failed to serialize value: {}", e),
                 source: Some(Box::new(e)),
             })?;
@@ -681,7 +683,7 @@ impl AtomicKvStore for MemoryDb {
                 let now = Instant::now();
                 let new_value = delta;
                 entry.data =
-                    bincode::serialize(&new_value).map_err(|e| DbError::Serialization {
+                    serde_json::to_vec(&new_value).map_err(|e| DbError::Serialization {
                         message: format!("Failed to serialize value: {}", e),
                         source: Some(Box::new(e)),
                     })?;
@@ -691,9 +693,9 @@ impl AtomicKvStore for MemoryDb {
                 entry.last_accessed = now;
                 return Ok(new_value);
             }
-            let current = bincode::deserialize::<i64>(&entry.data).unwrap_or(0);
+            let current = serde_json::from_slice::<i64>(&entry.data).unwrap_or(0);
             let new_value = current + delta;
-            entry.data = bincode::serialize(&new_value).map_err(|e| DbError::Serialization {
+            entry.data = serde_json::to_vec(&new_value).map_err(|e| DbError::Serialization {
                 message: format!("Failed to serialize value: {}", e),
                 source: Some(Box::new(e)),
             })?;
@@ -706,7 +708,7 @@ impl AtomicKvStore for MemoryDb {
         let now = Instant::now();
         let expires_at = self.config.default_ttl.map(|ttl| now + ttl);
         let new_value = delta;
-        let bytes = bincode::serialize(&new_value).map_err(|e| DbError::Serialization {
+        let bytes = serde_json::to_vec(&new_value).map_err(|e| DbError::Serialization {
             message: format!("Failed to serialize value: {}", e),
             source: Some(Box::new(e)),
         })?;
@@ -732,7 +734,7 @@ impl AtomicKvStore for MemoryDb {
             Entry::Occupied(mut occ) => {
                 if Self::is_expired(occ.get()) {
                     let now = Instant::now();
-                    let bytes = bincode::serialize(value).map_err(|e| DbError::Serialization {
+                    let bytes = serde_json::to_vec(value).map_err(|e| DbError::Serialization {
                         message: format!("Failed to serialize value: {}", e),
                         source: Some(Box::new(e)),
                     })?;
@@ -751,7 +753,7 @@ impl AtomicKvStore for MemoryDb {
             Entry::Vacant(vac) => {
                 self.ensure_capacity(1).await?;
                 let now = Instant::now();
-                let bytes = bincode::serialize(value).map_err(|e| DbError::Serialization {
+                let bytes = serde_json::to_vec(value).map_err(|e| DbError::Serialization {
                     message: format!("Failed to serialize value: {}", e),
                     source: Some(Box::new(e)),
                 })?;
@@ -775,12 +777,12 @@ impl AtomicKvStore for MemoryDb {
             if Self::is_expired(&entry) {
                 return Ok(false);
             }
-            let current = bincode::deserialize::<T>(&entry.data).ok();
+            let current = serde_json::from_slice::<T>(&entry.data).ok();
             if current.as_ref() != Some(old) {
                 return Ok(false);
             }
             let now = Instant::now();
-            entry.data = bincode::serialize(new).map_err(|e| DbError::Serialization {
+            entry.data = serde_json::to_vec(new).map_err(|e| DbError::Serialization {
                 message: format!("Failed to serialize value: {}", e),
                 source: Some(Box::new(e)),
             })?;
@@ -798,7 +800,7 @@ impl ExpiringKvStore for MemoryDb {
     where
         T: Serialize + Send + Sync,
     {
-        let bytes = bincode::serialize(value).map_err(|e| DbError::Serialization {
+        let bytes = serde_json::to_vec(value).map_err(|e| DbError::Serialization {
             message: format!("Failed to serialize value: {}", e),
             source: Some(Box::new(e)),
         })?;

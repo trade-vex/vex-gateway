@@ -262,20 +262,6 @@ impl From<redis::RedisError> for DbError {
 }
 
 // ============================================================================
-// BINCODE ERROR CONVERSION (for Redis serialization)
-// ============================================================================
-
-#[cfg(feature = "redis")]
-impl From<bincode::Error> for DbError {
-    fn from(err: bincode::Error) -> Self {
-        DbError::Serialization {
-            message: format!("bincode error: {}", err),
-            source: Some(Box::new(err)),
-        }
-    }
-}
-
-// ============================================================================
 // HELPER IMPLEMENTATIONS
 // ============================================================================
 

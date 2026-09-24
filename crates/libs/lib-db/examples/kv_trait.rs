@@ -49,13 +49,13 @@ async fn basic_kv_operations<T: BasicKvStore>(kv: &T) -> Result<()> {
         created_at: 1234567890,
     };
 
-    let bytes = bincode::serialize(&session).unwrap();
+    let bytes = serde_json::to_vec(&session).unwrap();
     kv.set_bytes("session:123", &bytes).await?;
     println!("Stored session as raw bytes");
 
     let retrieved_bytes = kv.get_bytes("session:123").await?;
     if let Some(bytes) = retrieved_bytes {
-        let session: Session = bincode::deserialize(&bytes).unwrap();
+        let session: Session = serde_json::from_slice(&bytes).unwrap();
         println!("Retrieved session: {:?}", session);
     }
 

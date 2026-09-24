@@ -50,14 +50,14 @@ async fn test_basic_operations<T: BasicKvStore>(kv: &T) -> Result<()> {
         created_at: 1234567890,
     };
 
-    let bytes = bincode::serialize(&session).unwrap();
+    let bytes = serde_json::to_vec(&session).unwrap();
     kv.set_bytes("session:123", &bytes).await?;
 
     let retrieved_bytes = kv.get_bytes("session:123").await?;
     assert!(retrieved_bytes.is_some());
 
     if let Some(bytes) = retrieved_bytes {
-        let session: TestSession = bincode::deserialize(&bytes).unwrap();
+        let session: TestSession = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(session.user_id, 123);
         assert_eq!(session.token, "abc123");
     }

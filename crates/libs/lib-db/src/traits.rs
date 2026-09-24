@@ -652,7 +652,7 @@ pub trait SqlDb: Send + Sync + Clone + 'static {
 ///
 /// This trait defines the core operations that all KV stores must support.
 /// It provides the foundation for storing and retrieving data with automatic
-/// serialization/deserialization using bincode.
+/// serialization/deserialization using JSON (serde_json).
 ///
 /// ## Core Capabilities
 /// - Basic CRUD operations (get, set, delete, exists)
@@ -725,7 +725,7 @@ pub trait BasicKvStore: Send + Sync + Clone + 'static {
 
     /// Set a value with automatic serialization
     ///
-    /// Serializes the value using bincode and stores it under the given key.
+    /// Serializes the value as JSON and stores it under the given key.
     /// If the key already exists, the value will be overwritten.
     ///
     /// # Arguments

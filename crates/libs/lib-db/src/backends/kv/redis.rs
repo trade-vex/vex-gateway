@@ -98,7 +98,7 @@ impl BasicKvStore for RedisDb {
     where
         T: Serialize + Send + Sync,
     {
-        let bytes = bincode::serialize(value).map_err(|e| DbError::Serialization {
+        let bytes = serde_json::to_vec(value).map_err(|e| DbError::Serialization {
             message: format!("Failed to serialize value: {}", e),
             source: Some(Box::new(e)),
         })?;
@@ -124,7 +124,7 @@ impl BasicKvStore for RedisDb {
 
         match bytes {
             Some(data) => {
-                let value = bincode::deserialize(&data).map_err(|e| DbError::Serialization {
+                let value = serde_json::from_slice(&data).map_err(|e| DbError::Serialization {
                     message: format!("Failed to deserialize value: {}", e),
                     source: Some(Box::new(e)),
                 })?;
@@ -212,7 +212,7 @@ impl AdvancedKvStore for RedisDb {
             match value_opt {
                 Some(bytes) => {
                     let value =
-                        bincode::deserialize(&bytes).map_err(|e| DbError::Serialization {
+                        serde_json::from_slice(&bytes).map_err(|e| DbError::Serialization {
                             message: format!("Failed to deserialize value: {}", e),
                             source: Some(Box::new(e)),
                         })?;
@@ -232,7 +232,7 @@ impl AdvancedKvStore for RedisDb {
         let mut items = Vec::with_capacity(pairs.len() * 2);
 
         for (key, value) in pairs {
-            let bytes = bincode::serialize(value).map_err(|e| DbError::Serialization {
+            let bytes = serde_json::to_vec(value).map_err(|e| DbError::Serialization {
                 message: format!("Failed to serialize value: {}", e),
                 source: Some(Box::new(e)),
             })?;
@@ -305,7 +305,7 @@ impl AtomicKvStore for RedisDb {
     where
         T: Serialize + Send + Sync,
     {
-        let bytes = bincode::serialize(value).map_err(|e| DbError::Serialization {
+        let bytes = serde_json::to_vec(value).map_err(|e| DbError::Serialization {
             message: format!("Failed to serialize value: {}", e),
             source: Some(Box::new(e)),
         })?;
@@ -333,12 +333,12 @@ impl AtomicKvStore for RedisDb {
             end
         "#;
 
-        let old_bytes = bincode::serialize(old).map_err(|e| DbError::Serialization {
+        let old_bytes = serde_json::to_vec(old).map_err(|e| DbError::Serialization {
             message: format!("Failed to serialize old value: {}", e),
             source: Some(Box::new(e)),
         })?;
 
-        let new_bytes = bincode::serialize(new).map_err(|e| DbError::Serialization {
+        let new_bytes = serde_json::to_vec(new).map_err(|e| DbError::Serialization {
             message: format!("Failed to serialize new value: {}", e),
             source: Some(Box::new(e)),
         })?;
@@ -371,7 +371,7 @@ impl ExpiringKvStore for RedisDb {
     where
         T: Serialize + Send + Sync,
     {
-        let bytes = bincode::serialize(value).map_err(|e| DbError::Serialization {
+        let bytes = serde_json::to_vec(value).map_err(|e| DbError::Serialization {
             message: format!("Failed to serialize value: {}", e),
             source: Some(Box::new(e)),
         })?;
@@ -417,7 +417,7 @@ impl ExpiringKvStore for RedisDb {
 }
 
 // Raw String Operations (for Kafka-written data)
-// These methods work with plain strings instead of bincode serialization
+// These methods work with plain strings instead of JSON serialization
 impl RedisDb {
     /// Get all fields and values from a hash (HGETALL)
     /// Returns HashMap<String, String> for plain string data

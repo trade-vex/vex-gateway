@@ -3,7 +3,19 @@ name: Vex Gateway CI
 on:
   push:
     branches: [main, develop]
+  # No base-branch filter: stacked PRs are based on their predecessor, not on develop.
+  # `edited` is required as well: retargeting a stacked PR onto develop as the stack
+  # merges is an edit, and the default event types do not include it.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+
+# Per-PR, so restacking cancels only that PR's superseded runs. A workflow-wide group
+# would discard other PRs' pending checks. Each push gets its own group (run_id): GitHub
+# cancels a PENDING run whenever a newer one joins its group, even without
+# cancel-in-progress, so a per-branch group would skip develop commits merged back to back.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -37,8 +49,6 @@ jobs:
           - 6379:6379
     env:
       CI: true
-      SERVER_HOST: ${{ secrets.SERVER_HOST || '127.0.0.1' }}
-      SERVER_PORT: ${{ secrets.SERVER_PORT || '8000' }}
       DATABASE_URL: postgres://myuser:mypassword@localhost:5432/mydb
       REDIS_URL: redis://localhost:6379
       JWT_PRIVATE_KEY_PATH: crates/libs/lib-auth/src/keys/private_key.pem
@@ -140,8 +150,6 @@ jobs:
           - 6379:6379
     env:
       CI: true
-      SERVER_HOST: ${{ secrets.SERVER_HOST || '127.0.0.1' }}
-      SERVER_PORT: ${{ secrets.SERVER_PORT || '8000' }}
       DATABASE_URL: postgres://myuser:mypassword@localhost:5432/mydb
       REDIS_URL: redis://localhost:6379
       JWT_PRIVATE_KEY_PATH: crates/libs/lib-auth/src/keys/private_key.pem
@@ -151,6 +159,8 @@ jobs:
         uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: llvm-tools-preview
 
       - uses: Swatinem/rust-cache@v2
 
@@ -171,12 +181,17 @@ jobs:
           openssl genrsa -out crates/libs/lib-auth/src/keys/private_key.pem 2048
           openssl rsa -in crates/libs/lib-auth/src/keys/private_key.pem -pubout -out crates/libs/lib-auth/src/keys/public_key.pem
 
-      - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin
+      # cargo-llvm-cov, not tarpaulin: tarpaulin links with -Clink-dead-code, which leaves the
+      # rusteron (Aeron) C symbols unresolved.
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: cargo-llvm-cov@0.9.1
+          checksum: true
+          fallback: none
 
       - name: Generate code coverage
-        run: |
-          cargo tarpaulin --verbose --workspace --timeout 600 --out Html --output-dir coverage
+        run: cargo llvm-cov --workspace --html --output-dir coverage
 
       - name: Upload coverage reports
         uses: actions/upload-artifact@v4
@@ -185,6 +200,29 @@ jobs:
           name: coverage-report
           path: coverage/
           retention-days: 30
+
+  # Single required check: branch protection names this job instead of each job, so a job
+  # that is added, renamed or skipped cannot silently drop out of the gate (a SKIPPED job
+  # satisfies an ordinary required-status rule).
+  ci-required:
+    name: CI required
+    if: ${{ always() }}
+    needs: [test, fmt, clippy, coverage, audit]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce required results
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, sys
+          results = json.loads(os.environ["RESULTS"])
+          failed = [name for name, job in results.items() if job["result"] != "success"]
+          if failed:
+              print("Required jobs did not succeed:", ", ".join(failed))
+              sys.exit(1)
+          print("All required jobs succeeded:", ", ".join(results))
+          EOF
 
   audit:
     name: Security audit
@@ -197,16 +235,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: cargo-audit@0.22.2
+          checksum: true
+          fallback: none
 
       - name: Run security audit
-        # RUSTSEC-2023-0071: rsa crate timing side-channel (Marvin Attack). MEDIUM severity.
-        #   Ignored because: RSA operations are not exposed in network-observable timing paths.
-        #   JWT signing uses constant-time implementations and keys are used server-side only.
-        # RUSTSEC-2025-0134: rustls-pemfile unmaintained (informational).
-        #   Ignored because: Migration to rustls-pki-types planned for future release.
-        #   This is informational only, not a security vulnerability.
-        # RUSTSEC-2025-0141: bincode unmaintained (informational).
-        #   Ignored because: Migration to bincode 2.x/3.x requires significant API changes.
-        #   Used for binary serialization in cache layer. Not a security vulnerability.
-        run: cargo audit --deny warnings --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2025-0141
+        # Accepted advisories live in .cargo/audit.toml, each with its reason.
+        run: cargo audit --deny warnings

@@ -1,0 +1,19 @@
+[advisories]
+ignore = [
+    # unsafe-libyaml is unmaintained. Path: vex-config (vex-core, pinned rev efeaeb4) -> serde_yaml
+    # -> unsafe-libyaml. vex-core removes serde_yaml in its own PR, and the gateway's vex-core pin
+    # moves to that revision later in this stack; drop this entry then.
+    "RUSTSEC-2024-0449",
+    # rsa 0.9 (Marvin attack: a timing side channel in private-key decryption and signing). There is
+    # no fixed 0.9 release; the fix is rsa 0.10, which lib-middleware uses. Two paths still reach 0.9:
+    # - openidconnect 4.1 (its latest release) -> rsa 0.9. It only verifies ID-token signatures with
+    #   the provider's public keys, so no private-key operation exists for the attack to time.
+    # - sqlx 0.8 -> sqlx-mysql -> rsa 0.9. This is in Cargo.lock only: the MySQL driver is never
+    #   built (rust-lang/cargo#10801 lists unused optional dependencies in the lockfile).
+    # Drop this entry once neither openidconnect nor sqlx depends on rsa 0.9.
+    "RUSTSEC-2023-0071",
+    # libsqlite3-sys < 0.39. sqlx 0.8 -> sqlx-sqlite -> libsqlite3-sys 0.30, in Cargo.lock only: the
+    # SQLite driver is never built (rust-lang/cargo#10801), and no sqlx release accepts 0.39.
+    # Drop this entry once sqlx does.
+    "RUSTSEC-2026-0459",
+]
