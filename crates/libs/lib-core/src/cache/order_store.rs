@@ -286,6 +286,42 @@ impl OrderStore {
         Ok(None)
     }
 
+    /// The hashes of the orders indexed in `user:{user_id}:orders`, in index order: SMEMBERS,
+    /// then every `order:{order_id}` HGETALL in one pipelined round trip. A missing order hash is
+    /// an empty map. `None` when the cache is off, the index is empty or Redis fails, so the
+    /// caller reads the database instead.
+    async fn cached_order_hashes(&self, user_id: u64) -> Option<Vec<HashMap<String, String>>> {
+        if !self.config.enabled {
+            return None;
+        }
+        let cache = self.cache.as_ref()?;
+        let set_key = format!("user:{}:orders", user_id);
+        let order_ids = match cache.smembers_string(&set_key).await {
+            Ok(order_ids) if !order_ids.is_empty() => order_ids,
+            Ok(_) => {
+                debug!("User orders cache miss for user: {}", user_id);
+                return None;
+            }
+            Err(e) => {
+                warn!("User orders cache error for user {}: {}", user_id, e);
+                return None;
+            }
+        };
+        debug!("Found {} order IDs in {}", order_ids.len(), set_key);
+
+        let order_keys: Vec<String> = order_ids
+            .iter()
+            .map(|order_id| format!("order:{}", order_id))
+            .collect();
+        match cache.hgetall_strings(&order_keys).await {
+            Ok(hashes) => Some(hashes),
+            Err(e) => {
+                warn!("Failed to get order hashes for user {}: {}", user_id, e);
+                None
+            }
+        }
+    }
+
     /// Get user's order history from orders table (paginated)
     /// Returns Cancelled, PartiallyFilled, and Filled orders
     pub async fn get_user_order_history_paginated(
@@ -296,61 +332,44 @@ impl OrderStore {
         market_id: Option<u32>,
     ) -> Result<Vec<OrderData>, TradingError> {
         // Try Redis first if cache enabled
-        if self.config.enabled {
-            if let Some(cache) = &self.cache {
-                let set_key = format!("user:{}:orders", user_id);
-                debug!("Redis: Querying orders from SET: {}", set_key);
-
-                match cache.smembers_string(&set_key).await {
-                    Ok(order_ids) if !order_ids.is_empty() => {
-                        let mut orders = Vec::new();
-                        for order_id_str in &order_ids {
-                            let order_key = format!("order:{}", order_id_str);
-                            if let Ok(hash) = cache.hgetall_string(&order_key).await {
-                                if !hash.is_empty() {
-                                    // Only include Cancelled, PartiallyFilled, Filled
-                                    if let Some(status) = hash.get("order_status") {
-                                        if is_history_status(status) {
-                                            if let Some(order) = Self::parse_order_hash(hash) {
-                                                // Filter by market_id if provided
-                                                if let Some(filter_market_id) = market_id {
-                                                    if order.market_id as u32 != filter_market_id {
-                                                        continue;
-                                                    }
-                                                }
-                                                orders.push(order);
-                                            }
-                                        }
-                                    }
+        if let Some(hashes) = self.cached_order_hashes(user_id).await {
+            let mut orders = Vec::new();
+            for hash in hashes {
+                if hash.is_empty() {
+                    continue;
+                }
+                // Only include Cancelled, PartiallyFilled, Filled
+                if let Some(status) = hash.get("order_status") {
+                    if is_history_status(status) {
+                        if let Some(order) = Self::parse_order_hash(hash) {
+                            // Filter by market_id if provided
+                            if let Some(filter_market_id) = market_id {
+                                if order.market_id as u32 != filter_market_id {
+                                    continue;
                                 }
                             }
+                            orders.push(order);
                         }
-
-                        // Sort by timestamp descending and apply pagination
-                        orders.sort_by(|a, b| b.order_timestamp.cmp(&a.order_timestamp));
-                        let start = offset as usize;
-                        let end = (offset + limit) as usize;
-                        let paginated_orders: Vec<_> = orders
-                            .into_iter()
-                            .skip(start)
-                            .take((end - start).min(limit as usize))
-                            .collect();
-
-                        if !paginated_orders.is_empty() {
-                            debug!(
-                                "Redis cache hit: {} history orders (paginated)",
-                                paginated_orders.len()
-                            );
-                            return Ok(paginated_orders);
-                        }
-                    }
-                    Ok(_) => {
-                        debug!("Redis cache miss for user orders: {}", user_id);
-                    }
-                    Err(e) => {
-                        warn!("Redis error for user {}: {}", user_id, e);
                     }
                 }
+            }
+
+            // Sort by timestamp descending and apply pagination
+            orders.sort_by(|a, b| b.order_timestamp.cmp(&a.order_timestamp));
+            let start = offset as usize;
+            let end = (offset + limit) as usize;
+            let paginated_orders: Vec<_> = orders
+                .into_iter()
+                .skip(start)
+                .take((end - start).min(limit as usize))
+                .collect();
+
+            if !paginated_orders.is_empty() {
+                debug!(
+                    "Redis cache hit: {} history orders (paginated)",
+                    paginated_orders.len()
+                );
+                return Ok(paginated_orders);
             }
         }
 
@@ -377,42 +396,25 @@ impl OrderStore {
         user_id: u64,
     ) -> Result<Vec<OrderData>, TradingError> {
         // Try Redis first if cache enabled
-        if self.config.enabled {
-            if let Some(cache) = &self.cache {
-                let set_key = format!("user:{}:orders", user_id);
-                debug!("Redis: Querying orders from SET: {}", set_key);
-
-                match cache.smembers_string(&set_key).await {
-                    Ok(order_ids) if !order_ids.is_empty() => {
-                        let mut orders = Vec::new();
-                        for order_id_str in &order_ids {
-                            let order_key = format!("order:{}", order_id_str);
-                            if let Ok(hash) = cache.hgetall_string(&order_key).await {
-                                if !hash.is_empty() {
-                                    // Only include Cancelled, PartiallyFilled, Filled
-                                    if let Some(status) = hash.get("order_status") {
-                                        if is_history_status(status) {
-                                            if let Some(order) = Self::parse_order_hash(hash) {
-                                                orders.push(order);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+        if let Some(hashes) = self.cached_order_hashes(user_id).await {
+            let mut orders = Vec::new();
+            for hash in hashes {
+                if hash.is_empty() {
+                    continue;
+                }
+                // Only include Cancelled, PartiallyFilled, Filled
+                if let Some(status) = hash.get("order_status") {
+                    if is_history_status(status) {
+                        if let Some(order) = Self::parse_order_hash(hash) {
+                            orders.push(order);
                         }
-
-                        if !orders.is_empty() {
-                            debug!("Redis cache hit: {} history orders", orders.len());
-                            return Ok(orders);
-                        }
-                    }
-                    Ok(_) => {
-                        debug!("Redis cache miss for user orders: {}", user_id);
-                    }
-                    Err(e) => {
-                        warn!("Redis error for user {}: {}", user_id, e);
                     }
                 }
+            }
+
+            if !orders.is_empty() {
+                debug!("Redis cache hit: {} history orders", orders.len());
+                return Ok(orders);
             }
         }
 
@@ -431,7 +433,7 @@ impl OrderStore {
     }
 
     /// Get user's open orders with caching (paginated)
-    /// Uses Redis set user:{user_id}:orders -> fetches each order:{order_id} hash
+    /// Cache: the order hashes indexed in user:{user_id}:orders (see `cached_order_hashes`)
     pub async fn get_user_orders_paginated(
         &self,
         user_id: u64,
@@ -439,63 +441,43 @@ impl OrderStore {
         limit: u64,
         market_id: Option<u32>,
     ) -> Result<Vec<OrderData>, TradingError> {
-        // Cache: Query user:{user_id}:orders SET, then fetch each order hash
-        if self.config.enabled {
-            if let Some(cache) = &self.cache {
-                let set_key = format!("user:{}:orders", user_id);
-
-                match cache.smembers_string(&set_key).await {
-                    Ok(order_ids) if !order_ids.is_empty() => {
-                        let mut orders = Vec::new();
-                        // Fetch each order hash
-                        for order_id_str in order_ids {
-                            let order_key = format!("order:{}", order_id_str);
-                            match cache.hgetall_string(&order_key).await {
-                                Ok(hash) if !hash.is_empty() => {
-                                    // Filter orders by status - only include "open" orders
-                                    if let Some(status) = hash.get("order_status") {
-                                        let time_in_force =
-                                            hash.get("order_time_in_force").map(String::as_str);
-                                        if !is_open_order(status, time_in_force) {
-                                            continue;
-                                        }
-                                    }
-
-                                    if let Some(order) = Self::parse_order_hash(hash) {
-                                        // Filter by market_id if provided
-                                        if let Some(filter_market_id) = market_id {
-                                            if order.market_id as u32 != filter_market_id {
-                                                continue;
-                                            }
-                                        }
-                                        orders.push(order);
-                                    }
-                                }
-                                _ => continue,
-                            }
-                        }
-
-                        // Sort by timestamp descending and apply pagination
-                        orders.sort_by(|a, b| b.order_timestamp.cmp(&a.order_timestamp));
-                        let start = offset as usize;
-                        let end = (offset + limit) as usize;
-                        let paginated_orders: Vec<_> = orders
-                            .into_iter()
-                            .skip(start)
-                            .take((end - start).min(limit as usize))
-                            .collect();
-
-                        if !paginated_orders.is_empty() {
-                            return Ok(paginated_orders);
-                        }
-                    }
-                    Ok(_) => {
-                        debug!("User orders cache miss for user: {}", user_id);
-                    }
-                    Err(e) => {
-                        warn!("User orders cache error for user {}: {}", user_id, e);
+        if let Some(hashes) = self.cached_order_hashes(user_id).await {
+            let mut orders = Vec::new();
+            for hash in hashes {
+                if hash.is_empty() {
+                    continue;
+                }
+                // Filter orders by status - only include "open" orders
+                if let Some(status) = hash.get("order_status") {
+                    let time_in_force = hash.get("order_time_in_force").map(String::as_str);
+                    if !is_open_order(status, time_in_force) {
+                        continue;
                     }
                 }
+
+                if let Some(order) = Self::parse_order_hash(hash) {
+                    // Filter by market_id if provided
+                    if let Some(filter_market_id) = market_id {
+                        if order.market_id as u32 != filter_market_id {
+                            continue;
+                        }
+                    }
+                    orders.push(order);
+                }
+            }
+
+            // Sort by timestamp descending and apply pagination
+            orders.sort_by(|a, b| b.order_timestamp.cmp(&a.order_timestamp));
+            let start = offset as usize;
+            let end = (offset + limit) as usize;
+            let paginated_orders: Vec<_> = orders
+                .into_iter()
+                .skip(start)
+                .take((end - start).min(limit as usize))
+                .collect();
+
+            if !paginated_orders.is_empty() {
+                return Ok(paginated_orders);
             }
         }
 
@@ -520,69 +502,30 @@ impl OrderStore {
     }
 
     /// Get user's open orders with caching
-    /// Uses Redis set user:{user_id}:orders -> fetches each order:{order_id} hash
+    /// Cache: the order hashes indexed in user:{user_id}:orders (see `cached_order_hashes`)
     pub async fn get_user_orders(&self, user_id: u64) -> Result<Vec<OrderData>, TradingError> {
-        // Cache: Query user:{user_id}:orders SET, then fetch each order hash
-        if self.config.enabled {
-            if let Some(cache) = &self.cache {
-                let set_key = format!("user:{}:orders", user_id);
-
-                debug!("OrderStore: Querying Redis SET: {}", set_key);
-
-                match cache.smembers_string(&set_key).await {
-                    Ok(order_ids) if !order_ids.is_empty() => {
-                        debug!(
-                            "User orders cache hit for user: {} ({} orders in SET)",
-                            user_id,
-                            order_ids.len()
-                        );
-                        debug!(
-                            "Found {} order IDs in SET: {:?}",
-                            order_ids.len(),
-                            order_ids
-                        );
-
-                        let mut orders = Vec::new();
-                        // Fetch each order hash
-                        for order_id_str in order_ids {
-                            let order_key = format!("order:{}", order_id_str);
-                            match cache.hgetall_string(&order_key).await {
-                                Ok(hash) if !hash.is_empty() => {
-                                    // Filter orders by status - only include "open" orders
-                                    if let Some(status) = hash.get("order_status") {
-                                        let time_in_force =
-                                            hash.get("order_time_in_force").map(String::as_str);
-                                        if !is_open_order(status, time_in_force) {
-                                            continue;
-                                        }
-                                    }
-
-                                    if let Some(order) = Self::parse_order_hash(hash) {
-                                        orders.push(order);
-                                    }
-                                }
-                                _ => continue,
-                            }
-                        }
-
-                        debug!("Returning {} orders after filtering", orders.len());
-
-                        if !orders.is_empty() {
-                            return Ok(orders);
-                        }
-
-                        // If all orders were filtered out (all cancelled), return empty vec
-                        debug!("All orders were cancelled - returning empty list");
-                        return Ok(vec![]);
-                    }
-                    Ok(_) => {
-                        debug!("User orders cache miss for user: {}", user_id);
-                    }
-                    Err(e) => {
-                        warn!("User orders cache error for user {}: {}", user_id, e);
+        if let Some(hashes) = self.cached_order_hashes(user_id).await {
+            let mut orders = Vec::new();
+            for hash in hashes {
+                if hash.is_empty() {
+                    continue;
+                }
+                // Filter orders by status - only include "open" orders
+                if let Some(status) = hash.get("order_status") {
+                    let time_in_force = hash.get("order_time_in_force").map(String::as_str);
+                    if !is_open_order(status, time_in_force) {
+                        continue;
                     }
                 }
+
+                if let Some(order) = Self::parse_order_hash(hash) {
+                    orders.push(order);
+                }
             }
+
+            // The index answers on its own, even when none of its orders is open.
+            debug!("Returning {} orders after filtering", orders.len());
+            return Ok(orders);
         }
 
         // Database fallback
