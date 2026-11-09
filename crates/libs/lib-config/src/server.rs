@@ -4,10 +4,7 @@ use crate::ConfigError;
 use serde::{Deserialize, Serialize};
 use std::net::{SocketAddr, ToSocketAddrs};
 
-/// Server configuration settings for the VEX Gateway Service.
-///
-/// Contains all network-related configuration including host, port,
-/// connection limits, and timeout settings.
+/// Server configuration settings for the VEX Gateway Service: the address the HTTP server binds.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServerConfig {
     /// The host address to bind the server to (e.g., "127.0.0.1", "0.0.0.0")

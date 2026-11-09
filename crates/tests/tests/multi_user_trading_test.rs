@@ -18,12 +18,12 @@
 //! - Grace (10007): IOC/FOK trader - Immediate execution only
 //! - Henry (10008): Patient trader - Low BUY, high SELL
 
-use actix_web::{web, App, HttpResponse, HttpServer, Result};
+use actix_web::{App, HttpResponse, HttpServer, Result, web};
 use common::{OrderCommand, OrderCommandType, Side, Status, TimeInForce, UserBalance};
 use lib_core::{
-    generate_client_order_id, wait_for_response, BalancesListResponse, CorrelationService,
-    OrderCacheConfig, OrderStore, OrdersListResponse, PostgresTradingRepository, Publisher,
-    UserBalanceCacheConfig, UserBalanceStore,
+    BalancesListResponse, CorrelationService, OrderCacheConfig, OrderStore, OrdersListResponse,
+    PostgresTradingRepository, Publisher, UserBalanceCacheConfig, UserBalanceStore,
+    generate_client_order_id, wait_for_response,
 };
 use rust_decimal::Decimal;
 use sea_orm::{Database, DatabaseConnection};
@@ -311,7 +311,7 @@ async fn test_get_open_orders(
             let total = orders.len();
             let order_responses: Vec<_> = orders
                 .into_iter()
-                .map(|order| order_store.to_response(order))
+                .filter_map(|order| order_store.to_response(order))
                 .collect();
 
             let response = OrdersListResponse {
@@ -1018,7 +1018,9 @@ async fn test_multi_user_trading_scenario() {
     println!(
         "   docker exec vex-kafka-pipeline-redis-1 redis-cli -p 6379 SMEMBERS user:10001:orders"
     );
-    println!("   docker exec -it vex-kafka-pipeline-postgres-1 psql -U postgres -d trading_db -c \"SELECT * FROM trading.orders_events WHERE order_user_id = 10001;\"");
+    println!(
+        "   docker exec -it vex-kafka-pipeline-postgres-1 psql -U postgres -d trading_db -c \"SELECT * FROM trading.orders_events WHERE order_user_id = 10001;\""
+    );
     println!();
 
     // Check balances after BUY orders - ASSERT locked funds
@@ -1065,12 +1067,16 @@ async fn test_multi_user_trading_scenario() {
         );
         println!("   Expected order IDs: {:?}", alice_orders);
         println!("   Run these commands to debug:");
-        println!("   docker exec vex-kafka-pipeline-redis-1 redis-cli -p 6379 SMEMBERS user:10001:orders");
+        println!(
+            "   docker exec vex-kafka-pipeline-redis-1 redis-cli -p 6379 SMEMBERS user:10001:orders"
+        );
         println!(
             "   docker exec vex-kafka-pipeline-redis-1 redis-cli -p 6379 HGETALL order:{}",
             alice_orders[0]
         );
-        println!("   Check Kafka consumer logs: docker-compose logs trading-events-consumer | grep 10001");
+        println!(
+            "   Check Kafka consumer logs: docker-compose logs trading-events-consumer | grep 10001"
+        );
     }
     assert_eq!(
         alice_orders_list.total, 3,

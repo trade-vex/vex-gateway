@@ -7,7 +7,7 @@ use lib_core::{
     OrderIdempotencyStore, Publisher, ReleaseReason, ResponseError, generate_client_order_id,
     wait_for_response,
 };
-use lib_utils::AuthenticatedUserId;
+use lib_utils::{AuthenticatedUserId, uuid_to_u64};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -466,10 +466,11 @@ fn parse_order_id(order_id: &str) -> Result<u64, std::num::ParseIntError> {
 /// Place a new order in the market
 ///
 /// Submits a new order to the VEX Core matching engine for processing.
-/// The order is validated, sent asynchronously, and tracked using a correlation ID.
+/// The market ID is checked for the database storage range, then the order is sent
+/// asynchronously and tracked using a correlation ID.
 ///
 /// # Endpoint
-/// `POST /api/order/order`
+/// `POST /api/order`
 ///
 /// # Authentication
 /// Requires valid JWT token in Authorization header: `Bearer <token>`
@@ -484,7 +485,7 @@ fn parse_order_id(order_id: &str) -> Result<u64, std::num::ParseIntError> {
 ///
 /// # Example Request
 /// ```bash
-/// curl -X POST http://localhost:8080/api/order/order \
+/// curl -X POST http://localhost:8081/api/order \
 ///   -H "Authorization: Bearer <jwt_token>" \
 ///   -H "Content-Type: application/json" \
 ///   -H "Idempotency-Key: <unique-logical-order-key>" \
@@ -541,8 +542,7 @@ pub async fn place_order(
     let start = Instant::now();
 
     // Extract user ID from JWT
-    let raw = auth_user.0.as_u128();
-    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
+    let user_id = uuid_to_u64(auth_user.0);
     let idempotency_key = match request
         .headers()
         .get(IDEMPOTENCY_KEY_HEADER)
@@ -810,7 +810,7 @@ pub async fn place_order(
 /// The cancellation is processed asynchronously with correlation tracking.
 ///
 /// # Endpoint
-/// `POST /api/order/cancel`
+/// `POST /api/cancel`
 ///
 /// # Authentication
 /// Requires valid JWT token in Authorization header: `Bearer <token>`
@@ -825,7 +825,7 @@ pub async fn place_order(
 ///
 /// # Example Request
 /// ```bash
-/// curl -X POST http://localhost:8080/api/order/cancel \
+/// curl -X POST http://localhost:8081/api/cancel \
 ///   -H "Authorization: Bearer <jwt_token>" \
 ///   -H "Content-Type: application/json" \
 ///   -d '{
@@ -871,8 +871,7 @@ pub async fn cancel_order(
 ) -> HttpResponse {
     let start = Instant::now();
 
-    let raw = auth_user.0.as_u128();
-    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
+    let user_id = uuid_to_u64(auth_user.0);
     let cancel_data = cancel_data.into_inner();
 
     // Parse order_id from string to u64

@@ -6,12 +6,12 @@
 //! 3. Fetch balances via user handler - verify balance updates
 //! 4. Fetch orders via user handler - verify order is stored correctly
 
-use actix_web::{web, App, HttpResponse, HttpServer, Result};
+use actix_web::{App, HttpResponse, HttpServer, Result, web};
 use common::{OrderCommand, OrderCommandType, Side, Status, TimeInForce, UserBalance};
 use lib_core::{
-    generate_client_order_id, wait_for_response, BalancesListResponse, CorrelationService,
-    OrderCacheConfig, OrderStore, OrdersListResponse, PostgresTradingRepository, Publisher,
-    ResponseError, UserBalanceCacheConfig, UserBalanceStore,
+    BalancesListResponse, CorrelationService, OrderCacheConfig, OrderStore, OrdersListResponse,
+    PostgresTradingRepository, Publisher, ResponseError, UserBalanceCacheConfig, UserBalanceStore,
+    generate_client_order_id, wait_for_response,
 };
 use sea_orm::{Database, DatabaseConnection};
 use serde::{Deserialize, Serialize};
@@ -325,7 +325,7 @@ async fn test_get_open_orders(
             let total = orders.len();
             let order_responses: Vec<_> = orders
                 .into_iter()
-                .map(|order| order_store.to_response(order))
+                .filter_map(|order| order_store.to_response(order))
                 .collect();
 
             let response = OrdersListResponse {
@@ -645,9 +645,15 @@ async fn test_user_balance_and_order_retrieval() {
         test_user_id
     );
     println!("\n   # Check balances in Postgres:");
-    println!("   docker exec -it vex-kafka-pipeline-postgres-1 psql -U postgres -d trading_db -c \"SELECT * FROM trading.balances_events WHERE user_id = {} ORDER BY timestamp DESC LIMIT 10;\"", test_user_id);
+    println!(
+        "   docker exec -it vex-kafka-pipeline-postgres-1 psql -U postgres -d trading_db -c \"SELECT * FROM trading.balances_events WHERE user_id = {} ORDER BY timestamp DESC LIMIT 10;\"",
+        test_user_id
+    );
     println!("\n   # Check orders in Postgres:");
-    println!("   docker exec -it vex-kafka-pipeline-postgres-1 psql -U postgres -d trading_db -c \"SELECT * FROM trading.orders_events WHERE order_user_id = {} ORDER BY order_timestamp DESC LIMIT 10;\"", test_user_id);
+    println!(
+        "   docker exec -it vex-kafka-pipeline-postgres-1 psql -U postgres -d trading_db -c \"SELECT * FROM trading.orders_events WHERE order_user_id = {} ORDER BY order_timestamp DESC LIMIT 10;\"",
+        test_user_id
+    );
     println!();
 
     println!("📤 GET /test/user/{}/balances", test_user_id);

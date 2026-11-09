@@ -8,7 +8,7 @@ use lib_core::{
     UserBalanceResponse, UserBalanceStore,
 };
 use lib_core::{PnlResolution, PortfolioRepository, TradingRepository};
-use lib_utils::auth_extractors::AuthenticatedUserId;
+use lib_utils::{AuthenticatedUserId, uuid_to_u64};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -18,7 +18,7 @@ use std::sync::Arc;
 /// Balances include available, locked, and total amounts for each asset.
 ///
 /// # Endpoint
-/// `GET /api/user/balances`
+/// `GET /api/balances`
 ///
 /// # Authentication
 /// Requires valid JWT token in Authorization header: `Bearer <token>`
@@ -28,7 +28,7 @@ use std::sync::Arc;
 ///
 /// # Example Request
 /// ```bash
-/// curl -X GET http://localhost:8080/api/user/balances \
+/// curl -X GET http://localhost:8081/api/balances \
 ///   -H "Authorization: Bearer <jwt_token>"
 /// ```
 ///
@@ -73,8 +73,7 @@ pub async fn get_balances(
     user: AuthenticatedUserId,
     balance_store: web::Data<Arc<UserBalanceStore>>,
 ) -> Result<HttpResponse> {
-    let raw = user.0.as_u128();
-    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
+    let user_id = uuid_to_u64(user.0);
 
     match balance_store.get_user_balances(user_id).await {
         Ok(balances) => {
@@ -108,7 +107,7 @@ pub async fn get_balances(
 /// Supports pagination via query parameters.
 ///
 /// # Endpoint
-/// `GET /api/user/orders/open?page=1&limit=20`
+/// `GET /api/orders/open?page=1&limit=20`
 ///
 /// # Query Parameters
 /// - `page` (optional): Page number (1-indexed). Defaults to 1, max 10,000.
@@ -123,7 +122,7 @@ pub async fn get_balances(
 ///
 /// # Example Request
 /// ```bash
-/// curl -X GET "http://localhost:8080/api/user/orders/open?page=1&limit=20&market_id=1" \
+/// curl -X GET "http://localhost:8081/api/orders/open?page=1&limit=20&market_id=1" \
 ///   -H "Authorization: Bearer <jwt_token>"
 /// ```
 ///
@@ -190,8 +189,7 @@ pub async fn get_open_orders(
     order_store: web::Data<Arc<OrderStore>>,
     trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
-    let raw = user.0.as_u128();
-    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
+    let user_id = uuid_to_u64(user.0);
 
     // Parse pagination parameters
     let page = query.page.unwrap_or(1).clamp(1, MAX_PAGE);
@@ -223,7 +221,7 @@ pub async fn get_open_orders(
             // Use order_store.to_response for scaling
             let order_responses: Vec<OrderResponse> = orders
                 .into_iter()
-                .map(|order| order_store.to_response(order))
+                .filter_map(|order| order_store.to_response(order))
                 .collect();
 
             let total_pages = total_count.div_ceil(limit);
@@ -259,7 +257,7 @@ pub async fn get_open_orders(
 /// Supports pagination via query parameters.
 ///
 /// # Endpoint
-/// `GET /api/user/orders/history?page=1&limit=20`
+/// `GET /api/orders/history?page=1&limit=20`
 ///
 /// # Query Parameters
 /// - `page` (optional): Page number (1-indexed). Defaults to 1, max 10,000.
@@ -274,7 +272,7 @@ pub async fn get_open_orders(
 ///
 /// # Example Request
 /// ```bash
-/// curl -X GET "http://localhost:8080/api/user/orders/history?page=1&limit=20&market_id=1" \
+/// curl -X GET "http://localhost:8081/api/orders/history?page=1&limit=20&market_id=1" \
 ///   -H "Authorization: Bearer <jwt_token>"
 /// ```
 ///
@@ -328,8 +326,7 @@ pub async fn get_order_history(
     order_store: web::Data<Arc<OrderStore>>,
     trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
-    let raw = user.0.as_u128();
-    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
+    let user_id = uuid_to_u64(user.0);
 
     // Parse pagination parameters
     let page = query.page.unwrap_or(1).clamp(1, MAX_PAGE);
@@ -365,7 +362,7 @@ pub async fn get_order_history(
             // Use order_store.to_history_response for scaling
             let order_responses: Vec<OrderHistoryResponse> = orders
                 .into_iter()
-                .map(|order| order_store.to_history_response(order))
+                .filter_map(|order| order_store.to_history_response(order))
                 .collect();
 
             let total_pages = total_count.div_ceil(limit);
@@ -441,8 +438,7 @@ pub async fn get_portfolio_overview(
     user: AuthenticatedUserId,
     portfolio_repo: web::Data<Arc<dyn PortfolioRepository>>,
 ) -> Result<HttpResponse> {
-    let raw = user.0.as_u128();
-    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
+    let user_id = uuid_to_u64(user.0);
     let now_secs = chrono::Utc::now().timestamp();
 
     // Use default resolution (Day) for metrics - resolution only affects pnl_series which we don't need here
@@ -479,7 +475,7 @@ pub async fn get_portfolio_overview(
 /// Uses ClickHouse equity_per_minute table to compute balance series.
 ///
 /// # Endpoint
-/// `GET /api/user/balance-chart?resolution={resolution}`
+/// `GET /api/balance-chart?resolution={resolution}`
 ///
 /// # Query Parameters
 /// - `resolution` (optional): Time resolution for the chart (1d, 1w, 1m, 1y). Defaults to 1d.
@@ -496,7 +492,7 @@ pub async fn get_portfolio_overview(
 ///
 /// # Example Request
 /// ```bash
-/// curl -X GET "http://localhost:8080/api/user/balance-chart?resolution=1w" \
+/// curl -X GET "http://localhost:8081/api/balance-chart?resolution=1w" \
 ///   -H "Authorization: Bearer <jwt_token>"
 /// ```
 ///
@@ -526,8 +522,7 @@ pub async fn get_balance_chart(
     query: web::Query<BalanceChartQuery>,
     portfolio_repo: web::Data<Arc<dyn PortfolioRepository>>,
 ) -> Result<HttpResponse> {
-    let raw = user.0.as_u128();
-    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
+    let user_id = uuid_to_u64(user.0);
     let now_secs = chrono::Utc::now().timestamp();
 
     let resolution = query
@@ -617,8 +612,7 @@ pub async fn get_pnl_chart(
     query: web::Query<PnlChartQuery>,
     portfolio_repo: web::Data<Arc<dyn PortfolioRepository>>,
 ) -> Result<HttpResponse> {
-    let raw = user.0.as_u128();
-    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
+    let user_id = uuid_to_u64(user.0);
     let now_secs = chrono::Utc::now().timestamp();
 
     let resolution = query
@@ -656,7 +650,7 @@ pub async fn get_pnl_chart(
 /// Returns a list of favorite markets with metadata about when they were favorited.
 ///
 /// # Endpoint
-/// `GET /api/user/favorites`
+/// `GET /api/favorites`
 ///
 /// # Authentication
 /// Requires valid JWT token in Authorization header: `Bearer <token>`
@@ -666,7 +660,7 @@ pub async fn get_pnl_chart(
 ///
 /// # Example Request
 /// ```bash
-/// curl -X GET http://localhost:8080/api/user/favorites \
+/// curl -X GET http://localhost:8081/api/favorites \
 ///   -H "Authorization: Bearer <jwt_token>"
 /// ```
 ///
@@ -691,8 +685,7 @@ pub async fn get_favorite_markets(
     user: AuthenticatedUserId,
     trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
-    let raw = user.0.as_u128();
-    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
+    let user_id = uuid_to_u64(user.0);
 
     match trading_repo.get_user_favorite_markets(user_id).await {
         Ok(favorites) => {
@@ -729,7 +722,7 @@ pub async fn get_favorite_markets(
 /// If the market is already favorited, it will be removed. If not, it will be added.
 ///
 /// # Endpoint
-/// `POST /api/user/favorites`
+/// `POST /api/favorites`
 ///
 /// # Authentication
 /// Requires valid JWT token in Authorization header: `Bearer <token>`
@@ -746,7 +739,7 @@ pub async fn get_favorite_markets(
 ///
 /// # Example Request
 /// ```bash
-/// curl -X POST http://localhost:8080/api/user/favorites \
+/// curl -X POST http://localhost:8081/api/favorites \
 ///   -H "Authorization: Bearer <jwt_token>" \
 ///   -H "Content-Type: application/json" \
 ///   -d '{"market_id": 1}'
@@ -784,8 +777,7 @@ pub async fn toggle_favorite_market(
     request: web::Json<ToggleFavoriteMarketRequest>,
     trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
-    let raw = user.0.as_u128();
-    let user_id = ((raw >> 64) as u64) ^ (raw as u64);
+    let user_id = uuid_to_u64(user.0);
     let market_id = request.market_id;
 
     // Use atomic toggle operation to prevent race conditions

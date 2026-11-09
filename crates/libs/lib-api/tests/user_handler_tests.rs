@@ -29,18 +29,13 @@ use lib_core::{
     },
     repository::repository::{PostgresTradingRepository, TradingError, TradingRepository},
 };
-use lib_utils::auth_extractors::AuthenticatedUserId;
-
-/// Helper to convert UUID to u64 using the same logic as handlers
-fn uuid_to_u64(uuid: Uuid) -> u64 {
-    let raw = uuid.as_u128();
-    ((raw >> 64) as u64) ^ (raw as u64)
-}
+use lib_utils::{AuthenticatedUserId, uuid_to_u64};
 
 /// Setup test database connection
 async fn setup_test_db() -> Result<DatabaseConnection, sea_orm::DbErr> {
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://vex:1234@localhost:5432/vex_gateway".to_string());
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        "postgresql://postgres:postgres123@localhost:5432/trading_db".to_string()
+    });
 
     let connection_future = Database::connect(&database_url);
     let timeout_duration = std::time::Duration::from_secs(5);

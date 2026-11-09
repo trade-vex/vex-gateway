@@ -43,7 +43,7 @@ impl ScalingCache {
 
     async fn load_markets(&self) -> Result<(), String> {
         let query = r#"
-            SELECT market_id, base_scale_k, quote_scale_k, base_asset, quote_asset
+            SELECT market_id, quote_scale_k, base_asset, quote_asset
             FROM markets
             WHERE active = true
         "#;

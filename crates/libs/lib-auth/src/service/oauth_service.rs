@@ -38,7 +38,7 @@
 //!    └─> Return tokens + user info
 //! ```
 
-use crate::config::OAuthProviderConfig;
+use crate::config::{OAuthConfig, OAuthProviderConfig};
 use crate::dto::auth_response_dto::{OAuthLoginResponse, OAuthUserInfo};
 use crate::error::auth_error::AuthError;
 use crate::service::token_service::TokenService;
@@ -132,8 +132,11 @@ pub struct OAuthService {
     /// User repository for database operations
     user_repo: Arc<dyn UserRepository>,
 
-    /// Frontend URL for redirects after OAuth success
-    frontend_url: String,
+    /// Where a completed login lands: `auth.oauth.frontend_url_web`
+    frontend_url_web: Option<String>,
+
+    /// Where a completed mobile-app login lands: `auth.oauth.frontend_url_app`
+    frontend_url_app: Option<String>,
 }
 
 impl OAuthService {
@@ -264,11 +267,11 @@ impl OAuthService {
     ///
     /// * `redis_pool` - Redis connection pool for state storage
     /// * `http_client` - HTTP client for API requests
-    /// * `oauth_providers` - Configuration for each OAuth provider
+    /// * `oauth_config` - The `auth.oauth` section: the providers, the base URL for OAuth
+    ///   callbacks (e.g., "https://api.example.com") and the frontend URLs a completed login
+    ///   lands on
     /// * `token_service` - Service for minting JWT tokens
     /// * `user_repo` - Repository for user database operations
-    /// * `redirect_base` - Base URL for OAuth callbacks (e.g., "https://api.example.com")
-    /// * `frontend_url` - Frontend URL for redirects after OAuth success
     ///
     /// # Returns
     ///
@@ -282,21 +285,17 @@ impl OAuthService {
     /// let oauth_service = OAuthService::new(
     ///     redis_pool,
     ///     http_client,
-    ///     providers_config,
+    ///     &config.auth.oauth,
     ///     token_service,
     ///     user_repo,
-    ///     "https://api.example.com".to_string(),
-    ///     "https://frontend.example.com".to_string(),
     /// ).await?;
     /// ```
     pub async fn new(
         conn: ConnectionManager,
         http_client: reqwest::Client,
-        oauth_providers: HashMap<String, OAuthProviderConfig>,
+        oauth_config: &OAuthConfig,
         token_service: Arc<TokenService>,
         user_repo: Arc<dyn UserRepository>,
-        redirect_base: String,
-        frontend_url: String,
     ) -> Result<Self, AuthError> {
         let oidc_http_client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -305,11 +304,15 @@ impl OAuthService {
         let mut oauth_clients = HashMap::new();
 
         // Initialize OAuth clients for each configured provider
-        for (provider, config) in oauth_providers {
-            let client =
-                Self::create_oauth_client(&provider, &config, &redirect_base, &oidc_http_client)
-                    .await?;
-            oauth_clients.insert(provider, client);
+        for (provider, config) in &oauth_config.providers {
+            let client = Self::create_oauth_client(
+                provider,
+                config,
+                &oauth_config.redirect_base,
+                &oidc_http_client,
+            )
+            .await?;
+            oauth_clients.insert(provider.clone(), client);
         }
 
         Ok(Self {
@@ -319,7 +322,8 @@ impl OAuthService {
             oauth_clients,
             token_service,
             user_repo,
-            frontend_url,
+            frontend_url_web: oauth_config.frontend_url_web.clone(),
+            frontend_url_app: oauth_config.frontend_url_app.clone(),
         })
     }
 
@@ -410,9 +414,11 @@ impl OAuthService {
         self.oauth_clients.keys().cloned().collect()
     }
 
-    /// Returns the frontend URL for redirects after OAuth success
-    pub fn get_frontend_url(&self) -> &str {
-        &self.frontend_url
+    /// Where a completed OAuth login for `platform` lands: `auth.oauth.frontend_url_app` for the
+    /// mobile app (`"app"`), `auth.oauth.frontend_url_web` otherwise. lib-config requires both
+    /// whenever a provider is configured; there is no fallback URL.
+    pub fn frontend_url(&self, platform: Option<&str>) -> Result<&str, AuthError> {
+        landing_url(platform, &self.frontend_url_web, &self.frontend_url_app)
     }
 
     /// Generates an authorization URL for initiating OAuth flow
@@ -1190,5 +1196,47 @@ impl OAuthService {
         self.token_service
             .blacklist_jti(&claims.jti, ttl_secs)
             .await
+    }
+}
+
+/// `app` for the mobile app (`platform == "app"`), `web` for every other platform.
+fn landing_url<'a>(
+    platform: Option<&str>,
+    web: &'a Option<String>,
+    app: &'a Option<String>,
+) -> Result<&'a str, AuthError> {
+    let (url, key) = match platform {
+        Some("app") => (app, "frontend_url_app"),
+        _ => (web, "frontend_url_web"),
+    };
+    url.as_deref()
+        .ok_or_else(|| AuthError::Config(format!("auth.oauth.{key} is not configured")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_logins_land_on_the_app_url_and_every_other_platform_on_the_web_url() {
+        let web = Some("https://app.example.com/oauth/done".to_string());
+        let app = Some("vex://oauth".to_string());
+
+        assert_eq!(landing_url(Some("app"), &web, &app).unwrap(), "vex://oauth");
+        for platform in [None, Some("web"), Some("APP"), Some("")] {
+            assert_eq!(
+                landing_url(platform, &web, &app).unwrap(),
+                "https://app.example.com/oauth/done"
+            );
+        }
+        // No fallback from one to the other.
+        assert!(matches!(
+            landing_url(Some("app"), &web, &None),
+            Err(AuthError::Config(_))
+        ));
+        assert!(matches!(
+            landing_url(None, &None, &app),
+            Err(AuthError::Config(_))
+        ));
     }
 }

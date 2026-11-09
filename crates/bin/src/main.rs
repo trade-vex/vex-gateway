@@ -5,7 +5,7 @@
 
 use lib_config::Config;
 use lib_server::{CorrelationHandler, CorrelationService};
-use tracing::{error, info};
+use tracing::info;
 use tracing_subscriber::{EnvFilter, filter::LevelFilter, fmt};
 use vex_networking::client::VexGateway;
 
@@ -27,12 +27,6 @@ async fn main() -> std::io::Result<()> {
         eprintln!("Failed to load configuration: {e}");
         std::io::Error::other(e.to_string())
     })?;
-
-    // Validate configuration before using any config values
-    if let Err(e) = config.validate() {
-        error!("Configuration validation failed: {}", e);
-        std::process::exit(1);
-    }
 
     // Initialize logging.
     //

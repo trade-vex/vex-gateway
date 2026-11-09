@@ -152,6 +152,11 @@ pub async fn handle_oauth_callback(
             // Mobile apps don't have cookies, they use app_challenge verification instead
             validate_callback_state_cookie(&meta, has_state_cookie)?;
 
+            // Get the frontend URL based on platform, before a session exists to orphan
+            let frontend_url = oauth_service
+                .frontend_url(meta.platform.as_deref())?
+                .to_string();
+
             // Get user_id and user_info from the response
             let user_id = response.user.user_id;
             let user_info = response.user.clone();
@@ -168,15 +173,6 @@ pub async fn handle_oauth_callback(
                     AuthError::CodeExchangeFailed(format!("Failed to create session: {}", e))
                 })?;
 
-            // Get the frontend URL based on platform
-            let frontend_url = match meta.platform.as_deref() {
-                Some("app") => std::env::var("FRONTEND_URL_APP")
-                    .or_else(|_| std::env::var("OAUTH_FRONTEND_URL_APP"))
-                    .unwrap_or_else(|_| oauth_service.get_frontend_url().to_string()),
-                _ => std::env::var("FRONTEND_URL_WEB")
-                    .or_else(|_| std::env::var("OAUTH_FRONTEND_URL_WEB"))
-                    .unwrap_or_else(|_| oauth_service.get_frontend_url().to_string()),
-            };
             let is_secure = is_https(&req);
 
             // Serialize user_info to JSON

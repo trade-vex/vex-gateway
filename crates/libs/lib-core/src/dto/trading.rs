@@ -23,17 +23,17 @@ impl std::fmt::Display for Side {
     }
 }
 
+/// Parses a stored order side: vex-core's protobuf `Side` value name, which the Kafka Connect
+/// sinks write verbatim, like the `STATUS_*` and `TIF_*` names in `cache::order_store`.
 impl std::str::FromStr for Side {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // Case-insensitive matching with common aliases and protobuf format
-        match s.to_lowercase().as_str() {
-            "bid" | "buy" | "side_bid" => Ok(Side::Bid),
-            "ask" | "sell" | "side_ask" => Ok(Side::Ask),
+        match s {
+            "SIDE_BID" => Ok(Side::Bid),
+            "SIDE_ASK" => Ok(Side::Ask),
             _ => Err(format!(
-                "Invalid side: '{}'. Expected: Bid, Ask, Buy, Sell, SIDE_BID, or SIDE_ASK",
-                s
+                "Invalid side: '{s}'. Expected SIDE_BID or SIDE_ASK"
             )),
         }
     }
@@ -230,6 +230,30 @@ impl PortfolioMetricsResponse {
             volume_24h,
             pnl_7d,
             max_drawdown_1m,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Side;
+
+    #[test]
+    fn side_parses_only_cores_protobuf_value_names() {
+        assert_eq!("SIDE_BID".parse::<Side>(), Ok(Side::Bid));
+        assert_eq!("SIDE_ASK".parse::<Side>(), Ok(Side::Ask));
+        for other in [
+            "Bid",
+            "bid",
+            "buy",
+            "side_bid",
+            "Ask",
+            "ask",
+            "sell",
+            "side_ask",
+            "SIDE_UNSPECIFIED",
+        ] {
+            assert!(other.parse::<Side>().is_err(), "{other} must not parse");
         }
     }
 }

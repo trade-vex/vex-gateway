@@ -31,7 +31,13 @@ pub async fn initialize_server(
     let auth_config = config.auth.clone();
 
     // Initialize AppState with all dependencies
-    let app_state = AppState::new(&auth_config, gateway_publisher, correlation_service).await?;
+    let app_state = AppState::new(
+        &auth_config,
+        &config.clickhouse,
+        gateway_publisher,
+        correlation_service,
+    )
+    .await?;
     let api_key_store = app_state.api_key_middleware.api_key_store();
 
     // Create TCP listener

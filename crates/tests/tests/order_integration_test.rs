@@ -3,10 +3,10 @@
 //! This test starts a web server and tests the order handlers without authentication,
 //! directly testing the integration with vex-core through the correlation service.
 
-use actix_web::{web, App, HttpResponse, HttpServer};
+use actix_web::{App, HttpResponse, HttpServer, web};
 use common::{OrderCommand, OrderCommandType, Side, Status, TimeInForce, UserBalance};
 use lib_core::{
-    generate_client_order_id, wait_for_response, CorrelationService, Publisher, ResponseError,
+    CorrelationService, Publisher, ResponseError, generate_client_order_id, wait_for_response,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

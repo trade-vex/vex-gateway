@@ -56,6 +56,7 @@
 //! 2. Searching for `config/` directory in current and parent directories
 //! 3. Falling back to current directory if nothing found
 
+mod clickhouse;
 mod core_link;
 pub mod environment;
 mod error;
@@ -64,6 +65,7 @@ pub mod server;
 pub mod util;
 
 // Re-export commonly used types for convenience
+pub use clickhouse::ClickHouseConfig;
 pub use core_link::CoreLinkConfig;
 pub use environment::Environment;
 pub use error::ConfigError;
@@ -97,14 +99,16 @@ use lib_auth::config::OAUTH_PROVIDERS;
 pub struct Config {
     /// Current runtime environment (determines validation rules)
     pub environment: Environment,
-    /// Server-specific configuration (network, connections, timeouts)
+    /// The address the HTTP server binds
     pub server: ServerConfig,
-    /// Logging configuration (level, format, output)
+    /// Logging configuration (level)
     pub logging: LoggingConfig,
     /// Authentication configuration
     pub auth: AuthConfig,
     /// The Aeron link to vex-core
     pub core: CoreLinkConfig,
+    /// ClickHouse, for portfolio and balance-chart reads
+    pub clickhouse: ClickHouseConfig,
 }
 
 impl Config {
@@ -319,14 +323,14 @@ impl Config {
     ///
     /// ## All Environments
     /// - Server host cannot be empty
-    /// - Max connections cannot be 0
-    /// - Connection timeout cannot be 0
     /// - Log level must be valid
     /// - The `core` link settings must pass vex-core's own rules (distinct non-zero ports,
     ///   gateway id below 16, an empty or signed 32-bit `auth_key`, non-empty `context_dir`), and
     ///   `core.address` cannot be empty
     /// - Every `auth.server.trusted_proxies` entry must be an IP address or CIDR range
     /// - `auth.oauth.providers` may list only `google`, `github` and `twitter`
+    /// - With an OAuth provider configured, `auth.oauth.frontend_url_web` and `frontend_url_app`
+    ///   must be set
     ///
     /// ## Production Environment
     /// - Server port cannot be 0 (must be explicitly configured)
@@ -334,9 +338,6 @@ impl Config {
     /// - Cannot use trace or debug logging levels
     /// - `auth.server.trusted_proxies` cannot be empty: production runs behind a load balancer
     /// - `core.auth_key` cannot be empty, as vex-core requires
-    ///
-    /// ## Development Environment
-    /// - Max connections should be reasonable (< 10000)
     ///
     /// ## Testing Environment
     /// - Port 0 is allowed for ephemeral port usage
@@ -394,6 +395,21 @@ impl Config {
                 unsupported.join(", "),
                 OAUTH_PROVIDERS.join(", ")
             )));
+        }
+
+        // A completed OAuth login is redirected to one of these; there is no fallback URL.
+        let oauth = &self.auth.oauth;
+        if !oauth.providers.is_empty() {
+            for (key, url) in [
+                ("frontend_url_web", &oauth.frontend_url_web),
+                ("frontend_url_app", &oauth.frontend_url_app),
+            ] {
+                if url.as_deref().is_none_or(|url| url.trim().is_empty()) {
+                    return Err(ConfigError::ValidationError(format!(
+                        "auth.oauth.{key} is required when OAuth providers are configured"
+                    )));
+                }
+            }
         }
 
         // Environment-specific validations
@@ -485,31 +501,6 @@ impl Config {
     /// ```
     pub fn server_address(&self) -> Result<SocketAddr, ConfigError> {
         self.server.socket_addr()
-    }
-
-    /// Check if the current environment is development.
-    pub fn is_development(&self) -> bool {
-        self.environment.is_development()
-    }
-
-    /// Check if the current environment is production.
-    pub fn is_production(&self) -> bool {
-        self.environment.is_production()
-    }
-
-    /// Get a human-readable description of the configuration.
-    ///
-    /// Returns a formatted string describing the current configuration
-    /// for logging and debugging purposes.
-    ///
-    /// # Returns
-    ///
-    /// Returns a formatted string with environment, server address, and log level.
-    pub fn description(&self) -> String {
-        format!(
-            "VEX Gateway Service Configuration - Environment: {:?}, Server: {}:{}, Log Level: {}",
-            self.environment, self.server.host, self.server.port, self.logging.level
-        )
     }
 }
 
@@ -725,8 +716,6 @@ port = 8081
 
 [logging]
 level = "info"
-structured = true
-colored = false
 
 [auth.jwt]
 private_key_path = "/run/secrets/jwt-private.pem"
@@ -738,20 +727,15 @@ audience = "vex-api"
 
 [auth.database]
 url = "postgresql://configured@db.internal/vex"
-max_connections = 20
 
 [auth.redis]
 url = "redis://redis.internal:6379"
-max_connections = 20
 
 [auth.oauth]
 providers = {}
 redirect_base = "https://gateway.example.com"
 
 [auth.server]
-base_url = "https://gateway.example.com"
-port = 8081
-frontend_url = "https://app.example.com"
 trusted_proxies = ["10.0.1.0/24", "10.0.2.0/24"]
 
 [auth.email]
@@ -772,6 +756,9 @@ address = "core.internal"
 port = 3521
 control_port = 3522
 context_dir = "/var/lib/vex/aeron-gateway"
+
+[clickhouse]
+url = "http://clickhouse.internal:8123"
 "#,
         )
         .unwrap();
@@ -797,6 +784,7 @@ context_dir = "/var/lib/vex/aeron-gateway"
         assert_eq!(link.core_address, "core.internal");
         assert_eq!((link.core_port, link.core_control_port), (3521, 3522));
         assert_eq!(link.context_dir, "/var/lib/vex/aeron-gateway");
+        assert_eq!(config.clickhouse.url, "http://clickhouse.internal:8123");
     }
 
     #[test]
@@ -892,7 +880,7 @@ context_dir = "/var/lib/vex/aeron-gateway"
     fn test_unsupported_oauth_provider_stops_loading_and_is_named() {
         let (result, _) = load_edited_example(
             "providers = {}",
-            r#"providers = { gitlab = { client_id = "id", client_secret = "secret", auth_url = "https://gitlab.example.com/auth", token_url = "https://gitlab.example.com/token", user_info_url = "https://gitlab.example.com/user", scopes = ["read_user"], response_type = "code" } }"#,
+            r#"providers = { gitlab = { client_id = "id", client_secret = "secret", auth_url = "https://gitlab.example.com/auth", token_url = "https://gitlab.example.com/token" } }"#,
         );
 
         assert_eq!(
@@ -903,16 +891,69 @@ context_dir = "/var/lib/vex/aeron-gateway"
     }
 
     #[test]
+    fn test_oauth_providers_require_both_frontend_urls() {
+        let load = |oauth: &str| {
+            let config_dir = tempfile::tempdir().unwrap();
+            let example = include_str!("../../../../config/development.toml.example");
+            assert_eq!(example.matches("providers = {}").count(), 1);
+            fs::write(
+                config_dir.path().join("development.toml"),
+                example.replace("providers = {}", oauth),
+            )
+            .unwrap();
+            Config::load(
+                Environment::Development,
+                Some(config_dir.path().to_path_buf()),
+            )
+        };
+        let provider = r#"providers = { google = { client_id = "id", client_secret = "secret", auth_url = "https://accounts.example.com/auth", token_url = "https://accounts.example.com/token" } }"#;
+        let web = r#"frontend_url_web = "https://app.example.com/oauth/done""#;
+        let app = r#"frontend_url_app = "vex://oauth""#;
+        let with_provider = |urls: &[&str]| load(&format!("{provider}\n{}", urls.join("\n")));
+
+        // Without a provider OAuth is off and needs neither URL (the example).
+        assert!(load("providers = {}").is_ok());
+
+        let config = with_provider(&[web, app]).unwrap();
+        assert_eq!(
+            config.auth.oauth.frontend_url_app.as_deref(),
+            Some("vex://oauth")
+        );
+
+        for (urls, missing) in [
+            (vec![app], "auth.oauth.frontend_url_web"),
+            (vec![web], "auth.oauth.frontend_url_app"),
+            (
+                vec![web, r#"frontend_url_app = " ""#],
+                "auth.oauth.frontend_url_app",
+            ),
+        ] {
+            let error = with_provider(&urls).unwrap_err();
+            assert!(
+                matches!(error, ConfigError::ValidationError(_))
+                    && error.to_string().contains(missing),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn test_development_example_loads() {
         let config = development_config();
         assert_eq!(config.environment, Environment::Development);
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 8081);
         assert_eq!(config.logging.level, "debug");
-        assert!(config.logging.colored);
-        assert!(!config.logging.structured);
-        // trusted_proxies is optional: absent, development trusts no proxy.
+        // trusted_proxies is optional: absent, development trusts no proxy. So is [auth.server],
+        // which holds nothing else.
         assert!(config.auth.server.trusted_proxies.is_empty());
+        let (without_section, _) = load_edited_example("[auth.server]\n", "");
+        assert!(without_section
+            .unwrap()
+            .auth
+            .server
+            .trusted_proxies
+            .is_empty());
         // The vex-core link: a production core's ports, no authentication.
         let link = config.core.networking();
         let core = vex_config::CoreNetworkingConfig::production_defaults();
@@ -924,6 +965,46 @@ context_dir = "/var/lib/vex/aeron-gateway"
             (core.initial_port, core.initial_control_port)
         );
         assert_eq!(link.context_dir, "/dev/shm/aeron");
+        assert_eq!(config.clickhouse.url, "http://localhost:8123");
+    }
+
+    #[test]
+    fn test_clickhouse_url_is_required_and_overridable() {
+        let config = load_development_example(&[(
+            "APP__CLICKHOUSE__URL",
+            "http://clickhouse.internal:8123",
+        )])
+        .unwrap();
+        assert_eq!(config.clickhouse.url, "http://clickhouse.internal:8123");
+
+        // A misspelt name is an error that names it, not ignored.
+        let error = load_development_example(&[("APP__CLICKHOUSE__HTTP_URL", "http://other:8123")])
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Unknown configuration settings: APP__CLICKHOUSE__HTTP_URL"
+        );
+
+        // No built-in default: without the section the configuration does not load.
+        let config_dir = tempfile::tempdir().unwrap();
+        let example = include_str!("../../../../config/development.toml.example");
+        let section = "[clickhouse]\nurl = \"http://localhost:8123\"\n";
+        assert_eq!(example.matches(section).count(), 1);
+        fs::write(
+            config_dir.path().join("development.toml"),
+            example.replace(section, ""),
+        )
+        .unwrap();
+        let error = Config::load_with(
+            Environment::Development,
+            Some(config_dir.path().to_path_buf()),
+            Config::app_overrides([]).unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, ConfigError::LoadError(_)) && error.to_string().contains("clickhouse"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -1026,8 +1107,7 @@ context_dir = "/var/lib/vex/aeron-gateway"
             ),
             ("APP__AUTH__JWT__ACCESS_TOKEN_TTL_MINUTES", "5"),
             ("APP__AUTH__JWT__ISSUER", "0123"),
-            ("APP__LOGGING__FILE_PATH", "/var/log/vex-gateway.log"),
-            // A map entry, with a list below it.
+            // A map entry.
             ("APP__AUTH__OAUTH__PROVIDERS__GOOGLE__CLIENT_ID", "id"),
             (
                 "APP__AUTH__OAUTH__PROVIDERS__GOOGLE__CLIENT_SECRET",
@@ -1042,14 +1122,10 @@ context_dir = "/var/lib/vex/aeron-gateway"
                 "https://accounts.example.com/token",
             ),
             (
-                "APP__AUTH__OAUTH__PROVIDERS__GOOGLE__USER_INFO_URL",
-                "https://accounts.example.com/userinfo",
+                "APP__AUTH__OAUTH__FRONTEND_URL_WEB",
+                "https://app.example.com/oauth/done",
             ),
-            (
-                "APP__AUTH__OAUTH__PROVIDERS__GOOGLE__SCOPES",
-                "openid,email",
-            ),
-            ("APP__AUTH__OAUTH__PROVIDERS__GOOGLE__RESPONSE_TYPE", "code"),
+            ("APP__AUTH__OAUTH__FRONTEND_URL_APP", "vex://oauth"),
         ])
         .unwrap();
 
@@ -1062,12 +1138,12 @@ context_dir = "/var/lib/vex/aeron-gateway"
         // A text setting is taken verbatim, not read as the number 123.
         assert_eq!(config.auth.jwt.issuer, "0123");
         assert_eq!(
-            config.logging.file_path.as_deref(),
-            Some(Path::new("/var/log/vex-gateway.log"))
+            config.auth.oauth.providers["google"].token_url,
+            "https://accounts.example.com/token"
         );
         assert_eq!(
-            config.auth.oauth.providers["google"].scopes,
-            ["openid", "email"]
+            config.auth.oauth.frontend_url_app.as_deref(),
+            Some("vex://oauth")
         );
     }
 
@@ -1078,6 +1154,18 @@ context_dir = "/var/lib/vex/aeron-gateway"
             "APP__FOO__BAR",
             "APP__SERVER__HOTS",
             "APP__AUTH__SERVER__TRUSTED_PROXY",
+            // Settings that were parsed but never used, now removed.
+            "APP__LOGGING__STRUCTURED",
+            "APP__LOGGING__COLORED",
+            "APP__LOGGING__FILE_PATH",
+            "APP__AUTH__SERVER__BASE_URL",
+            "APP__AUTH__SERVER__PORT",
+            "APP__AUTH__DATABASE__MAX_CONNECTIONS",
+            "APP__AUTH__REDIS__MAX_CONNECTIONS",
+            // An OAuth provider's: fixed per provider in the code.
+            "APP__AUTH__OAUTH__PROVIDERS__GOOGLE__SCOPES",
+            "APP__AUTH__OAUTH__PROVIDERS__GOOGLE__USER_INFO_URL",
+            "APP__AUTH__OAUTH__PROVIDERS__GOOGLE__RESPONSE_TYPE",
             // Below a setting, including a list index.
             "APP__SERVER__PORT__NUMBER",
             "APP__AUTH__SERVER__TRUSTED_PROXIES__0",
@@ -1228,21 +1316,16 @@ context_dir = "/var/lib/vex/aeron-gateway"
 
     #[test]
     fn test_lenient_conversions_documented_in_the_runbook() {
-        let config = load_development_example(&[
-            ("APP__SERVER__PORT", "yes"),
-            ("APP__LOGGING__STRUCTURED", "on"),
-        ])
-        .unwrap();
+        let config = load_development_example(&[("APP__SERVER__PORT", "yes")]).unwrap();
         assert_eq!(config.server.port, 1);
-        assert!(config.logging.structured);
 
         // A decimal is rounded in the file, and rejected in a variable.
         let config_dir = tempfile::tempdir().unwrap();
         let example = include_str!("../../../../config/development.toml.example");
-        assert_eq!(example.matches("port = 8081\n").count(), 2);
+        assert_eq!(example.matches("port = 8081\n").count(), 1);
         fs::write(
             config_dir.path().join("development.toml"),
-            example.replacen("port = 8081\n", "port = 8080.6\n", 1),
+            example.replace("port = 8081\n", "port = 8080.6\n"),
         )
         .unwrap();
         let config = Config::load_with(

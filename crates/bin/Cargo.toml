@@ -20,4 +20,3 @@ lib-auth = {path = "../libs/lib-auth"}
 chrono = { workspace = true }
 jsonwebtoken = { workspace = true }
 redis = { workspace = true }
-dotenvy = { workspace = true }
