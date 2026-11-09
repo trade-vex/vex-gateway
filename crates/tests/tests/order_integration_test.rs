@@ -241,7 +241,7 @@ fn spawn_test_server(publisher: Publisher, correlation_service: CorrelationServi
 }
 
 #[tokio::test]
-#[ignore] // Requires vex-core - skip in CI
+#[ignore = "no vex-core engine or Aeron media driver in CI"]
 async fn test_order_placement_and_cancellation() {
     // Initialize VexGateway client
     println!("Initializing VexGateway client for testing");

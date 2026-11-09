@@ -383,7 +383,7 @@ async fn init_database() -> Option<Arc<DatabaseConnection>> {
 // ==================== STRESS TEST ====================
 
 #[tokio::test]
-#[ignore] // Requires vex-core, database, and redis - skip in CI
+#[ignore = "no vex-core engine or Aeron media driver in CI"]
 async fn test_high_frequency_stress_test() {
     println!("\n╔═══════════════════════════════════════════════════════════════╗");
     println!("║  HIGH-FREQUENCY STRESS TEST - 10 Users, 200+ Orders          ║");

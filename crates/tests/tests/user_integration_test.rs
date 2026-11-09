@@ -439,7 +439,7 @@ async fn init_database() -> Option<Arc<DatabaseConnection>> {
 // ==================== Integration Test ====================
 
 #[tokio::test]
-#[ignore] // Requires vex-core, database, and redis - skip in CI
+#[ignore = "no vex-core engine or Aeron media driver in CI"]
 async fn test_user_balance_and_order_retrieval() {
     println!("\n╔═══════════════════════════════════════════════════════════════╗");
     println!("║  Integration Test: User Balance & Order Retrieval            ║");
