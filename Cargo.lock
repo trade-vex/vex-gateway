@@ -638,7 +638,7 @@ dependencies = [
 [[package]]
 name = "common"
 version = "0.1.0"
-source = "git+https://github.com/trade-vex/vex-core?rev=c24f7b83566df917a876fee496e2a21f6c8d0a2b#c24f7b83566df917a876fee496e2a21f6c8d0a2b"
+source = "git+https://github.com/trade-vex/vex-core?rev=29092e3197b680f1e7a4b213cdb7f6e8cb860a35#29092e3197b680f1e7a4b213cdb7f6e8cb860a35"
 dependencies = [
  "ahash 0.8.12",
  "borsh",
@@ -3679,7 +3679,7 @@ dependencies = [
 [[package]]
 name = "sbe_order"
 version = "0.1.0"
-source = "git+https://github.com/trade-vex/vex-core?rev=c24f7b83566df917a876fee496e2a21f6c8d0a2b#c24f7b83566df917a876fee496e2a21f6c8d0a2b"
+source = "git+https://github.com/trade-vex/vex-core?rev=29092e3197b680f1e7a4b213cdb7f6e8cb860a35#29092e3197b680f1e7a4b213cdb7f6e8cb860a35"
 
 [[package]]
 name = "schannel"
@@ -5059,7 +5059,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vex-config"
 version = "0.1.0"
-source = "git+https://github.com/trade-vex/vex-core?rev=c24f7b83566df917a876fee496e2a21f6c8d0a2b#c24f7b83566df917a876fee496e2a21f6c8d0a2b"
+source = "git+https://github.com/trade-vex/vex-core?rev=29092e3197b680f1e7a4b213cdb7f6e8cb860a35#29092e3197b680f1e7a4b213cdb7f6e8cb860a35"
 dependencies = [
  "common",
  "config",
@@ -5074,7 +5074,7 @@ dependencies = [
 [[package]]
 name = "vex-networking"
 version = "0.1.0"
-source = "git+https://github.com/trade-vex/vex-core?rev=c24f7b83566df917a876fee496e2a21f6c8d0a2b#c24f7b83566df917a876fee496e2a21f6c8d0a2b"
+source = "git+https://github.com/trade-vex/vex-core?rev=29092e3197b680f1e7a4b213cdb7f6e8cb860a35#29092e3197b680f1e7a4b213cdb7f6e8cb860a35"
 dependencies = [
  "arc-swap",
  "common",

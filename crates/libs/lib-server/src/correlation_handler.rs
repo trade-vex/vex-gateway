@@ -118,4 +118,25 @@ mod tests {
 
         assert_eq!(response.try_recv().unwrap().client_order_id, 42);
     }
+
+    #[test]
+    fn busy_status_survives_cores_codec_and_reaches_the_waiting_request() {
+        let correlation_service = CorrelationService::new();
+        let mut response = correlation_service.register_request(42);
+        let mut handler = CorrelationHandler::new(1, correlation_service.clone());
+        let mut buffer = [0u8; common::ORDERCOMMANDSIZE];
+        common::encode_order_command(
+            &common::OrderCommand {
+                client_order_id: 42,
+                status: common::Status::Busy,
+                ..common::OrderCommand::default()
+            },
+            &mut buffer,
+        )
+        .unwrap();
+
+        handler.handle_aeron_fragment_handler(&buffer, AeronHeader::new_zeroed_on_stack());
+
+        assert_eq!(response.try_recv().unwrap().status, common::Status::Busy);
+    }
 }
