@@ -68,6 +68,27 @@ pub struct OrderRequest {
     pub order_type: OrderType,
 }
 
+fn validate_order_inputs(
+    price: u64,
+    volume: u64,
+    time_in_force: TimeInForce,
+    order_type: &OrderType,
+) -> Result<(), String> {
+    if volume == 0 {
+        return Err("order volume must be greater than zero".to_string());
+    }
+
+    if matches!(order_type, OrderType::Limit) && (price == 0 || price == u64::MAX) {
+        return Err("limit order price must not use market sentinel values".to_string());
+    }
+
+    if matches!(order_type, OrderType::Market) && time_in_force == TimeInForce::Gtc {
+        return Err("market order time_in_force must be IOC or FOK".to_string());
+    }
+
+    Ok(())
+}
+
 /// Request payload for cancelling an existing order
 ///
 /// # Fields
@@ -560,6 +581,15 @@ pub async fn place_order(
                 market_id,
                 i32::MAX
             ),
+        });
+    }
+
+    if let Err(message) = validate_order_inputs(price, volume, time_in_force, &order_type) {
+        return HttpResponse::BadRequest().json(OrderResponse {
+            order_id: 0,
+            client_order_id: 0,
+            status: "rejected".to_string(),
+            message,
         });
     }
 
@@ -1481,5 +1511,52 @@ mod tests {
                 .iter()
                 .any(|event| event.contains("failed to record idempotent completion"))
         );
+    }
+
+    #[test]
+    fn rejects_zero_volume() {
+        let result = validate_order_inputs(100, 0, TimeInForce::Gtc, &OrderType::Limit);
+
+        assert_eq!(
+            result,
+            Err("order volume must be greater than zero".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_zero_price_limit_order() {
+        let result = validate_order_inputs(0, 1, TimeInForce::Gtc, &OrderType::Limit);
+
+        assert_eq!(
+            result,
+            Err("limit order price must not use market sentinel values".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_max_price_limit_order() {
+        let result = validate_order_inputs(u64::MAX, 1, TimeInForce::Gtc, &OrderType::Limit);
+
+        assert_eq!(
+            result,
+            Err("limit order price must not use market sentinel values".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_gtc_market_order() {
+        let result = validate_order_inputs(100, 1, TimeInForce::Gtc, &OrderType::Market);
+
+        assert_eq!(
+            result,
+            Err("market order time_in_force must be IOC or FOK".to_string())
+        );
+    }
+
+    #[test]
+    fn accepts_valid_order() {
+        let result = validate_order_inputs(100, 1, TimeInForce::Gtc, &OrderType::Limit);
+
+        assert_eq!(result, Ok(()));
     }
 }
