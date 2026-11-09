@@ -747,7 +747,7 @@ pub async fn place_order(
             .await
         }
         Err(ResponseError::Timeout) => {
-            correlation_service.cancel_request(client_order_id);
+            correlation_service.timeout_request(client_order_id);
 
             warn!(
                 client_order_id = client_order_id,
@@ -950,7 +950,7 @@ pub async fn cancel_order(
             cancel_response(order_id, client_order_id, &response)
         }
         Err(ResponseError::Timeout) => {
-            correlation_service.cancel_request(client_order_id);
+            correlation_service.timeout_request(client_order_id);
             HttpResponse::RequestTimeout().json(OrderResponse {
                 order_id,
                 client_order_id,
