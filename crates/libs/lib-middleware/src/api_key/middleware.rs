@@ -25,6 +25,8 @@ use crate::api_key::{
 };
 use crate::repository::api_key_repository::ApiKeyRepository;
 
+const MAX_SIGNED_BODY_SIZE: usize = 16 * 1024;
+
 /// Route-specific security configuration
 /// Placeholder : Will be removed and be replaced by direct actix based routing
 #[derive(Debug, Clone)]
@@ -771,6 +773,17 @@ impl ApiKeyMiddleware {
     async fn parse_body_params(
         req: &mut ServiceRequest,
     ) -> Result<(HashMap<String, String>, String, bool), ApiKeyError> {
+        if let Some(content_length) = req
+            .headers()
+            .get(actix_web::http::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            if content_length > MAX_SIGNED_BODY_SIZE as u64 {
+                return Err(ApiKeyError::PayloadTooLarge);
+            }
+        }
+
         let content_type = req
             .headers()
             .get("content-type")
@@ -786,6 +799,9 @@ impl ApiKeyMiddleware {
         while let Some(chunk) = payload.next().await {
             let chunk =
                 chunk.map_err(|e| ApiKeyError::Internal(format!("Failed to read body: {}", e)))?;
+            if chunk.len() > MAX_SIGNED_BODY_SIZE.saturating_sub(body.len()) {
+                return Err(ApiKeyError::PayloadTooLarge);
+            }
             body.extend_from_slice(&chunk);
         }
 
@@ -1010,6 +1026,13 @@ where
                 let (body_params, raw_body, body_is_form) =
                     match ApiKeyMiddleware::parse_body_params(&mut req).await {
                         Ok(result) => result,
+                        Err(e @ ApiKeyError::PayloadTooLarge) => {
+                            error!("Failed to parse body: {}", e);
+                            return Err(actix_web::error::ErrorPayloadTooLarge(format!(
+                                "Failed to parse request body: {}",
+                                e
+                            )));
+                        }
                         Err(e) => {
                             error!("Failed to parse body: {}", e);
                             return Err(actix_web::error::ErrorBadRequest(format!(
@@ -1769,5 +1792,119 @@ mod tests {
         assert!(error
             .to_string()
             .contains("duplicate form body parameter name"));
+    }
+
+    fn secured_middleware() -> ApiKeyMiddleware {
+        let api_key = ApiKeyConfig::new("test-key".to_string())
+            .with_hmac_secret("test-secret".to_string())
+            .with_permissions(vec![SecurityType::Trade])
+            .with_recv_window(60_000);
+
+        ApiKeyMiddleware::new()
+            .with_api_key(api_key)
+            .with_default_security(SecurityType::Trade)
+            .with_strict_timestamp_validation(false)
+    }
+
+    fn signed_body_at_limit() -> String {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let prefix = format!("timestamp={}&padding=", timestamp);
+        let signature_field_len = "&signature=".len() + 64;
+        let padding_len = MAX_SIGNED_BODY_SIZE - prefix.len() - signature_field_len;
+        let unsigned_body = format!("{}{}", prefix, "a".repeat(padding_len));
+        // PR #93 binds the signature to method + path and hex-encodes the body, so the
+        // fixture must go through the canonical builder (TestRequest::post() with no uri
+        // yields path "/").
+        let payload =
+            SignatureVerifier::build_request_payload("POST", "/", "", &unsigned_body, true);
+        let signature = SignatureVerifier::generate_hmac(&payload, "test-secret").unwrap();
+        let body = format!("{}&signature={}", unsigned_body, signature);
+
+        assert_eq!(body.len(), MAX_SIGNED_BODY_SIZE);
+        body
+    }
+
+    #[actix_web::test]
+    async fn oversized_content_length_is_rejected_without_reading_payload() {
+        let downstream = actix_web::dev::fn_service(|req: ServiceRequest| async move {
+            Ok::<_, Error>(req.into_response(HttpResponse::Ok().finish()))
+        });
+        let service = secured_middleware()
+            .new_transform(downstream)
+            .await
+            .unwrap();
+        let mut request = TestRequest::post()
+            .insert_header(("X-MBX-APIKEY", "test-key"))
+            .insert_header((
+                actix_web::http::header::CONTENT_LENGTH,
+                (MAX_SIGNED_BODY_SIZE + 1).to_string(),
+            ))
+            .to_srv_request();
+        let payload =
+            stream::poll_fn(|_| panic!("oversized Content-Length payload must not be polled"));
+        request.set_payload(actix_web::dev::Payload::from(Box::pin(payload)
+            as Pin<
+                Box<dyn futures_util::Stream<Item = Result<actix_web::web::Bytes, PayloadError>>>,
+            >));
+
+        let error = service.call(request).await.unwrap_err();
+
+        assert_eq!(
+            error.as_response_error().status_code(),
+            actix_web::http::StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    #[actix_web::test]
+    async fn signed_body_at_limit_is_accepted() {
+        let downstream = actix_web::dev::fn_service(|req: ServiceRequest| async move {
+            Ok::<_, Error>(req.into_response(HttpResponse::Ok().finish()))
+        });
+        let service = secured_middleware()
+            .with_replay_store(test_replay_store().await)
+            .new_transform(downstream)
+            .await
+            .unwrap();
+        let request = TestRequest::post()
+            .insert_header(("X-MBX-APIKEY", "test-key"))
+            .insert_header(("content-type", "application/x-www-form-urlencoded"))
+            .set_payload(signed_body_at_limit())
+            .to_srv_request();
+
+        let response = service.call(request).await.unwrap();
+
+        assert_eq!(response.status(), actix_web::http::StatusCode::OK);
+    }
+
+    #[actix_web::test]
+    async fn signed_body_over_limit_is_rejected_with_413() {
+        let downstream = actix_web::dev::fn_service(|req: ServiceRequest| async move {
+            Ok::<_, Error>(req.into_response(HttpResponse::Ok().finish()))
+        });
+        let service = secured_middleware()
+            .new_transform(downstream)
+            .await
+            .unwrap();
+        let mut request = TestRequest::post()
+            .insert_header(("X-MBX-APIKEY", "test-key"))
+            .to_srv_request();
+        let payload = stream::iter([
+            Ok::<_, PayloadError>(web::Bytes::from(vec![b'a'; MAX_SIGNED_BODY_SIZE])),
+            Ok(web::Bytes::from_static(b"a")),
+        ]);
+        request.set_payload(actix_web::dev::Payload::from(Box::pin(payload)
+            as Pin<
+                Box<dyn futures_util::Stream<Item = Result<actix_web::web::Bytes, PayloadError>>>,
+            >));
+
+        let error = service.call(request).await.unwrap_err();
+
+        assert_eq!(
+            error.as_response_error().status_code(),
+            actix_web::http::StatusCode::PAYLOAD_TOO_LARGE
+        );
     }
 }
