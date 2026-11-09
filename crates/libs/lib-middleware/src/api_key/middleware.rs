@@ -31,12 +31,11 @@ pub struct RouteSecurityConfig {
     pub security_type: SecurityType,
 }
 
-/// API Key Store with multi-level caching
+/// API Key Store with in-memory caching backed by the database
 ///
 /// Cache Hierarchy:
 /// 1. L1 (In-Memory LRU)
-/// 2. L2 (Redis) - TODO
-/// 3. L3 (Database)
+/// 2. L2 (Database)
 #[derive(Clone)]
 pub struct ApiKeyStore {
     /// L1 Cache: In-memory LRU for hot keys, sharded by key
@@ -571,7 +570,16 @@ impl ApiKeyMiddleware {
         route_configs: &[RouteSecurityConfig],
     ) -> SecurityType {
         for config in route_configs {
-            if path.starts_with(&config.path_pattern) {
+            let pattern = config.path_pattern.trim_end_matches('/');
+            // An empty pattern is the root ("/" trimmed): it covers every path, as it did under
+            // prefix matching. Treating it as "matches nothing" would fail open to the default.
+            let matches = pattern.is_empty()
+                || path == pattern
+                || path
+                    .strip_prefix(pattern)
+                    .is_some_and(|suffix| suffix.starts_with('/'));
+
+            if matches {
                 return config.security_type;
             }
         }

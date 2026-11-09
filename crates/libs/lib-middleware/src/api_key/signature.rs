@@ -208,20 +208,19 @@ impl SignatureVerifier {
         url::form_urlencoded::byte_serialize(signature.as_bytes()).collect()
     }
 
-    /// Parse timestamp from milliseconds or microseconds
+    /// Parse a timestamp expressed in milliseconds
     pub fn parse_timestamp(timestamp_str: &str) -> Result<u64, ApiKeyError> {
         let timestamp = timestamp_str
             .parse::<u64>()
             .map_err(|_| ApiKeyError::InvalidTimestamp("Invalid timestamp format".to_string()))?;
 
-        // Binance accepts both milliseconds and microseconds
-        // If the timestamp is too large, assume it's microseconds and convert to milliseconds
         if timestamp > 9999999999999 {
-            // More than 13 digits, likely microseconds
-            Ok(timestamp / 1000) // Convert microseconds to milliseconds
-        } else {
-            Ok(timestamp) // Already in milliseconds
+            return Err(ApiKeyError::InvalidTimestamp(
+                "Timestamp must be in milliseconds".to_string(),
+            ));
         }
+
+        Ok(timestamp)
     }
 }
 
@@ -327,11 +326,8 @@ mod tests {
             1640995200000
         );
 
-        // Microseconds (should be converted to milliseconds)
-        assert_eq!(
-            SignatureVerifier::parse_timestamp("1640995200000000").unwrap(),
-            1640995200000
-        );
+        // Microseconds are rejected rather than silently reinterpreted
+        assert!(SignatureVerifier::parse_timestamp("1640995200000000").is_err());
 
         // Invalid format
         assert!(SignatureVerifier::parse_timestamp("invalid").is_err());
