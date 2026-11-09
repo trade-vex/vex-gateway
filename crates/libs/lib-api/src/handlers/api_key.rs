@@ -317,7 +317,7 @@ pub async fn create_api_key(
         api_key: api_key.clone(),
         key_material: Some(KeyMaterial::HmacSecret(secret_key.clone())),
         permissions,
-        recv_window: req.recv_window.unwrap_or(5000),
+        recv_window: req.recv_window.unwrap_or(5000).min(60000),
         description: req.description.clone(),
         ip_blacklist: req.ip_blacklist.clone().unwrap_or_default(),
         user_id: Some(user_id),

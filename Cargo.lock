@@ -2362,6 +2362,7 @@ dependencies = [
  "ipnet",
  "lru",
  "pkcs8 0.10.2",
+ "redis",
  "rsa 0.10.0",
  "sea-orm",
  "serde",

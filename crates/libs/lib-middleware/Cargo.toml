@@ -29,3 +29,7 @@ lru = "0.19"
 sea-orm = { workspace = true }
 uuid = { version = "1", features = ["v4", "serde"] }
 async-trait = "0.1.88"
+
+# Required by the signature replay guard (PR #87). PR #103 removed the redis dependency
+# together with the dead redis_cache module, but the replay store still needs it.
+redis = { workspace = true }
