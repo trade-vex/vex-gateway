@@ -27,7 +27,7 @@ sea-orm = { workspace = true }
 tracing = { workspace = true }
 
 # OAuth & OpenID Connect
-openidconnect = "3.5"
+openidconnect = { version = "4.1", default-features = false, features = ["reqwest"] }
 
 # Crypto
 rand = "0.8"

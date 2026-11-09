@@ -3,7 +3,7 @@ use base64::{engine::general_purpose, Engine as _};
 use ed25519_dalek::{Signature, Verifier as Ed25519Verifier, VerifyingKey};
 use hmac::{Hmac, Mac};
 use pkcs8::DecodePublicKey;
-use rsa::{Pkcs1v15Sign, RsaPublicKey};
+use rsa::{pkcs8::DecodePublicKey as _, Pkcs1v15Sign, PublicKey as RsaPublicKey};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
@@ -59,8 +59,9 @@ impl SignatureVerifier {
         hasher.update(payload.as_bytes());
         let hashed = hasher.finalize();
 
-        // Verify using PKCS#1 v1.5 padding with SHA-256
-        let padding = Pkcs1v15Sign::new::<Sha256>();
+        // Verify using PKCS#1 v1.5 padding with SHA-256. rsa is built on sha2 0.11, so the
+        // padding takes the digest OID from rsa's own sha2 re-export.
+        let padding = Pkcs1v15Sign::new::<rsa::sha2::Sha256>();
         let verification_result = public_key.verify(padding, &hashed, &signature_bytes);
 
         Ok(verification_result.is_ok())

@@ -3,7 +3,9 @@ resolver = "2"
 members = [ "crates/bin" , "crates/tests" , "crates/libs/lib-api", "crates/libs/lib-server", "crates/libs/lib-config", "crates/libs/lib-auth", "crates/libs/lib-db", "crates/libs/lib-middleware", "crates/libs/lib-utils", "crates/libs/lib-core"]
 
 [workspace.dependencies]
-actix-web = "4.11.0"
+# No HTTP/2, TLS or body (de)compression: the gateway listens on plain HTTP/1.1 behind the load
+# balancer. Dropping the default features keeps h2 0.3 and the brotli/zstd stack out of the tree.
+actix-web = { version = "4.11.0", default-features = false, features = ["macros", "cookies"] }
 tokio = {version = "1.45" , features = ["full"]}
 serde = { version = "1.0", features = ["derive"] }
 config = "0.14"
@@ -20,7 +22,7 @@ jsonwebtoken = "9.3.1"
 dotenvy = "0.15.7"
 chrono = { version = "0.4.41", features = ["serde"] } 
 uuid = { version = "1", features = ["v4", "serde"] }
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.12", features = ["json"] }
 url = "2.5"
 
 vex-networking ={ git = "https://github.com/trade-vex/vex-core" , rev = "efeaeb4"}

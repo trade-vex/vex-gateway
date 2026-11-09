@@ -71,10 +71,10 @@ pub struct OAuthCallbackMeta {
 #[allow(unused_imports)]
 use openidconnect::TokenResponse;
 use openidconnect::{
-    AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce,
-    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, ResponseTypes, Scope, TokenUrl,
+    AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointMaybeSet,
+    EndpointNotSet, EndpointSet, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier,
+    RedirectUrl, ResponseTypes, Scope, TokenUrl,
     core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata, CoreResponseType},
-    reqwest::async_http_client,
 };
 use secrecy::ExposeSecret;
 use serde_json::Value;
@@ -84,6 +84,17 @@ use uuid::Uuid;
 
 use crate::models::user::{Model, UserStatus};
 use crate::repository::UserRepository;
+
+/// A client built from provider metadata: the authorization endpoint is always present, while the
+/// token and user info endpoints may be absent from the metadata.
+type OAuthClient = CoreClient<
+    EndpointSet,
+    EndpointNotSet,
+    EndpointNotSet,
+    EndpointNotSet,
+    EndpointMaybeSet,
+    EndpointMaybeSet,
+>;
 
 /// OAuth 2.0 / OpenID Connect authentication service
 ///
@@ -108,8 +119,12 @@ pub struct OAuthService {
     /// HTTP client for API requests to providers
     http_client: reqwest::Client,
 
+    /// HTTP client for the OAuth/OIDC protocol requests (discovery, token exchange). It does not
+    /// follow redirects, which would open the token exchange to SSRF.
+    oidc_http_client: reqwest::Client,
+
     /// Pre-configured OAuth clients per provider (initialized at startup)
-    oauth_clients: HashMap<String, CoreClient>,
+    oauth_clients: HashMap<String, OAuthClient>,
 
     /// JWT token service for minting application tokens
     token_service: Arc<TokenService>,
@@ -283,17 +298,24 @@ impl OAuthService {
         redirect_base: String,
         frontend_url: String,
     ) -> Result<Self, AuthError> {
+        let oidc_http_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| AuthError::Config(format!("Failed to build OAuth HTTP client: {}", e)))?;
         let mut oauth_clients = HashMap::new();
 
         // Initialize OAuth clients for each configured provider
         for (provider, config) in oauth_providers {
-            let client = Self::create_oauth_client(&provider, &config, &redirect_base).await?;
+            let client =
+                Self::create_oauth_client(&provider, &config, &redirect_base, &oidc_http_client)
+                    .await?;
             oauth_clients.insert(provider, client);
         }
 
         Ok(Self {
             conn,
             http_client,
+            oidc_http_client,
             oauth_clients,
             token_service,
             user_repo,
@@ -319,7 +341,8 @@ impl OAuthService {
         provider: &str,
         config: &OAuthProviderConfig,
         redirect_base: &str,
-    ) -> Result<CoreClient, AuthError> {
+        http_client: &reqwest::Client,
+    ) -> Result<OAuthClient, AuthError> {
         let client_id = ClientId::new(config.client_id.clone());
         let client_secret = ClientSecret::new(config.client_secret.expose_secret().to_string());
         let redirect_uri = format!("{}/api/oauth/{}/callback", redirect_base, provider);
@@ -336,7 +359,7 @@ impl OAuthService {
             let issuer = IssuerUrl::new(issuer_url.clone())
                 .map_err(|e| AuthError::Config(format!("Invalid issuer URL: {}", e)))?;
 
-            let provider_metadata = CoreProviderMetadata::discover_async(issuer, async_http_client)
+            let provider_metadata = CoreProviderMetadata::discover_async(issuer, http_client)
                 .await
                 .map_err(|e| AuthError::Config(format!("OIDC discovery failed: {}", e)))?;
 
@@ -668,8 +691,9 @@ impl OAuthService {
         // Exchange authorization code for access token using stored PKCE verifier
         let token_response = client
             .exchange_code(AuthorizationCode::new(code.to_string()))
+            .map_err(|e| AuthError::Config(format!("Token endpoint not configured: {}", e)))?
             .set_pkce_verifier(PkceCodeVerifier::new(txn.pkce_verifier))
-            .request_async(async_http_client)
+            .request_async(&self.oidc_http_client)
             .await
             .map_err(|e| AuthError::CodeExchangeFailed(format!("Token exchange failed: {}", e)))?;
 
@@ -776,7 +800,7 @@ impl OAuthService {
     /// - Any validation step fails (signature, issuer, audience, expiration, nonce)
     async fn validate_id_token(
         &self,
-        client: &CoreClient,
+        client: &OAuthClient,
         token_response: &openidconnect::core::CoreTokenResponse,
         stored_nonce_secret: &str,
     ) -> Result<(), AuthError> {
