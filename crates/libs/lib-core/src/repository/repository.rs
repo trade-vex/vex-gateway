@@ -612,7 +612,7 @@ impl TradingRepository for PostgresTradingRepository {
 
 /// ClickHouse-backed Portfolio Repository
 ///
-/// Data model (ClickHouse):
+/// Data model (ClickHouse; `trading` stands for the database `clickhouse.database` names):
 /// - `trading.equity_per_minute(user_id, minute, equity_quote)`
 ///   ReplacingMergeTree with last-per-minute equity valued in configured quote asset.
 /// - `trading.user_cashflow_per_minute(user_id, minute, cashflow_quote)`
@@ -637,10 +637,7 @@ pub struct ClickHousePortfolioRepository {
 }
 
 impl ClickHousePortfolioRepository {
-    pub fn new(ch: ClickHouseClient) -> Self {
-        Self::new_with_schema(ch, "trading")
-    }
-
+    /// A repository reading the tables of the database `schema`, which every query names.
     pub fn new_with_schema<S: Into<String>>(ch: ClickHouseClient, schema: S) -> Self {
         Self {
             ch,

@@ -21,6 +21,7 @@ thiserror = {workspace = true}
 num_cpus = "1.16"
 async-trait = "0.1"
 clickhouse = "0.12"
+secrecy = "0.8"
 
 #  Internal crate dependencies
 lib-api = {path = "../lib-api"}
