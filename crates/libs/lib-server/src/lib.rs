@@ -11,20 +11,22 @@ use tracing::info;
 mod app;
 mod combined_auth;
 mod correlation_handler;
+mod engine_connector;
 mod state;
 
 pub use app::create_app;
 pub use combined_auth::CombinedAuthMiddleware;
 pub use correlation_handler::CorrelationHandler;
+pub use engine_connector::spawn_engine_link;
 pub use lib_core::{
-    CorrelationService, ResponseError, generate_client_order_id, wait_for_response,
+    CorrelationService, EngineLink, ResponseError, generate_client_order_id, wait_for_response,
 };
 pub use state::AppState;
 
 /// Initialize the HTTP server with proper configuration
 pub async fn initialize_server(
     config: &Config,
-    gateway_publisher: lib_core::Publisher,
+    engine_link: EngineLink,
     correlation_service: CorrelationService,
 ) -> Result<Server, Box<dyn std::error::Error + Send + Sync>> {
     // Use the auth configuration from lib-config
@@ -34,7 +36,7 @@ pub async fn initialize_server(
     let app_state = AppState::new(
         &auth_config,
         &config.clickhouse,
-        gateway_publisher,
+        engine_link,
         correlation_service,
     )
     .await?;

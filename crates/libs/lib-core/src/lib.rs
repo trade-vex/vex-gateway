@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod correlation;
 pub mod dto;
+pub mod engine_link;
 pub mod model;
 pub mod order_idempotency;
 pub mod repository;
@@ -23,6 +24,8 @@ pub use cache::order_store::{OrderCacheConfig, OrderData, OrderStore};
 pub use correlation::{
     generate_client_order_id, wait_for_response, CorrelationService, ResponseError,
 };
+
+pub use engine_link::{CoreConnector, EngineLink, EngineLinkSupervisor, LinkPublisher};
 
 pub use order_idempotency::{
     CompletionWait, IdempotentOrderOutcome, OrderClaim, OrderIdempotencyError,

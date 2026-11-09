@@ -150,15 +150,13 @@ async fn test_deposit_funds(
                 message: "Deposit processing timeout".to_string(),
             })
         }
-        Err(ResponseError::Cancelled) => {
-            HttpResponse::InternalServerError().json(DepositResponse {
-                user_id,
-                asset_id,
-                amount,
-                status: "error".to_string(),
-                message: "Internal error".to_string(),
-            })
-        }
+        Err(ResponseError::LinkLost) => HttpResponse::InternalServerError().json(DepositResponse {
+            user_id,
+            asset_id,
+            amount,
+            status: "error".to_string(),
+            message: "Internal error".to_string(),
+        }),
     }
 }
 
@@ -244,7 +242,7 @@ async fn test_place_order(
                 message: "Order processing timeout".to_string(),
             })
         }
-        Err(ResponseError::Cancelled) => HttpResponse::InternalServerError().json(OrderResponse {
+        Err(ResponseError::LinkLost) => HttpResponse::InternalServerError().json(OrderResponse {
             order_id: 0,
             client_order_id,
             status: "error".to_string(),
