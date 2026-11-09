@@ -535,6 +535,7 @@ mod tests {
             web::Path::from(api_key_id),
             web::Json(update_request),
             web::Data::new(repo.clone() as Arc<dyn ApiKeyRepository>),
+            None,
             user.clone(),
         )
         .await;
@@ -623,6 +624,7 @@ mod tests {
             web::Path::from(api_key_id),
             web::Json(update_request),
             web::Data::new(repo.clone() as Arc<dyn ApiKeyRepository>),
+            None,
             user.clone(),
         )
         .await;
@@ -676,6 +678,7 @@ mod tests {
         let result = delete_api_key(
             web::Path::from(api_key_id),
             web::Data::new(repo.clone() as Arc<dyn ApiKeyRepository>),
+            None,
             user.clone(),
         )
         .await;
@@ -743,6 +746,7 @@ mod tests {
             web::Path::from(api_key_id),
             web::Json(disable_request),
             web::Data::new(repo.clone() as Arc<dyn ApiKeyRepository>),
+            None,
             user.clone(),
         )
         .await;
@@ -753,6 +757,7 @@ mod tests {
             web::Path::from(api_key_id),
             web::Json(enable_request),
             web::Data::new(repo.clone() as Arc<dyn ApiKeyRepository>),
+            None,
             user.clone(),
         )
         .await;
@@ -819,6 +824,7 @@ mod tests {
             web::Path::from(api_key_id),
             web::Json(disable_request),
             web::Data::new(repo.clone() as Arc<dyn ApiKeyRepository>),
+            None,
             user.clone(),
         )
         .await;
