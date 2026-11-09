@@ -115,6 +115,21 @@ pub async fn login(
         .find_by_email(&req.email)
         .await?
         .ok_or(AuthError::InvalidCredentials)?;
+    // PR #85: capture the token version immediately after the lookup and
+    // BEFORE the bcrypt verification below, so a racing password change cannot
+    // have a token minted at a version that outlives its revocation.
+    let token_version = token_service.get_token_version(user.user_id).await?;
+
+    // ...and re-read the user AFTER capturing that version, so the password hash we verify is
+    // never OLDER than the version we will mint at. Without this, a password reset committing
+    // between the two reads leaves the old hash verifying while the new version is minted, and
+    // the resulting token survives the revocation that reset was supposed to perform (G3-1).
+    // If a reset lands after this re-read instead, it bumps the version past the captured one and
+    // `mint_tokens_at_version` fails closed. The two together close the window.
+    let user = match user_repo.find_by_id(user.user_id).await? {
+        Some(user) => user,
+        None => return Err(AuthError::InvalidCredentials),
+    };
 
     // Check if user can login
     if !user.can_login() {
@@ -142,7 +157,9 @@ pub async fn login(
     let user_id = user.user_id;
 
     // Generate tokens
-    let tokens = token_service.mint_tokens(user_id).await?;
+    let tokens = token_service
+        .mint_tokens_at_version(user_id, token_version)
+        .await?;
 
     // Update last login
     user_repo.update_last_login(user_id).await?;
@@ -175,9 +192,12 @@ pub async fn login(
 // Logout handler
 pub async fn logout(
     req: HttpRequest,
+    user: AuthenticatedUser,
     token_service: web::Data<Arc<TokenService>>,
     session_service: web::Data<Arc<SessionService>>,
 ) -> Result<HttpResponse, AuthError> {
+    token_service.bump_token_version(user.user_id).await?;
+
     // Try to extract session ID from cookie
     if let Some(cookie) = req.cookie("session_id") {
         // Delete session from Redis
@@ -397,7 +417,10 @@ pub async fn change_password(
         .update_password(user.user_id, &new_password_hash)
         .await?;
 
-    // Generate new tokens (with updated password timestamp)
+    // Invalidate all previously issued access and refresh tokens.
+    token_service.bump_token_version(user.user_id).await?;
+
+    // Generate new tokens at the current version.
     let new_tokens = token_service.mint_tokens(user.user_id).await?;
 
     // Get current session ID from cookie if present
@@ -688,6 +711,9 @@ pub async fn reset_password(
         .update_password(user_id, &new_password_hash)
         .await?;
 
+    // Invalidate all previously issued access and refresh tokens.
+    token_service.bump_token_version(user_id).await?;
+
     // Revoke all user sessions
     if let Err(e) = session_service.revoke_all_user_sessions(user_id).await {
         tracing::error!(
@@ -718,4 +744,227 @@ pub async fn reset_password(
         "message": "Password reset successfully. Please login with your new password.",
         "timestamp": chrono::Utc::now().to_rfc3339()
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::JwtConfig;
+    use jsonwebtoken::{DecodingKey, EncodingKey};
+    use redis::AsyncCommands;
+
+    async fn create_test_redis_conn() -> redis::aio::ConnectionManager {
+        let redis_url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
+        let client = redis::Client::open(redis_url).expect("Failed to create test Redis client");
+        redis::aio::ConnectionManager::new(client)
+            .await
+            .expect("Failed to create test Redis connection manager")
+    }
+
+    #[tokio::test]
+    async fn refresh_token_stops_working_after_logout() {
+        let user_id = Uuid::new_v4();
+        let refresh_token = Uuid::new_v4().to_string();
+        let redis_conn = create_test_redis_conn().await;
+        let jwt_config = Arc::new(JwtConfig {
+            private_key_path: String::new(),
+            public_key_path: String::new(),
+            access_token_ttl_minutes: 60,
+            refresh_token_ttl_days: 30,
+            issuer: "vex-gateway".to_string(),
+            audience: "vex-api".to_string(),
+        });
+        let token_service = Arc::new(TokenService::new(
+            jwt_config,
+            redis_conn.clone(),
+            Arc::new(EncodingKey::from_secret(b"unused")),
+            Arc::new(DecodingKey::from_secret(b"unused")),
+        ));
+        let session_service = Arc::new(SessionService::new(redis_conn.clone(), 3600));
+
+        let mut conn = redis_conn;
+        let _: () = conn
+            .set_ex(
+                format!("refresh:{}", refresh_token),
+                format!("{}:{}:0", user_id, Uuid::new_v4()),
+                3600,
+            )
+            .await
+            .unwrap();
+
+        let response = logout(
+            actix_web::test::TestRequest::default().to_http_request(),
+            AuthenticatedUser { user_id },
+            web::Data::new(token_service.clone()),
+            web::Data::new(session_service),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), actix_web::http::StatusCode::OK);
+
+        let result = token_service.refresh_tokens(&refresh_token).await;
+        assert!(matches!(result, Err(AuthError::TokenRevoked)));
+    }
+
+    #[tokio::test]
+    async fn revoke_user_sessions_revokes_versioned_refresh_records() {
+        let user_id = Uuid::new_v4();
+        let versioned_refresh_token = Uuid::new_v4().to_string();
+        let versioned_jti = Uuid::new_v4().to_string();
+        let redis_conn = create_test_redis_conn().await;
+        let jwt_config = Arc::new(JwtConfig {
+            private_key_path: String::new(),
+            public_key_path: String::new(),
+            access_token_ttl_minutes: 60,
+            refresh_token_ttl_days: 30,
+            issuer: "vex-gateway".to_string(),
+            audience: "vex-api".to_string(),
+        });
+        let token_service = TokenService::new(
+            jwt_config,
+            redis_conn.clone(),
+            Arc::new(EncodingKey::from_secret(b"unused")),
+            Arc::new(DecodingKey::from_secret(b"unused")),
+        );
+
+        let mut conn = redis_conn;
+        let _: () = conn
+            .set_ex(
+                format!("refresh:{}", versioned_refresh_token),
+                format!("{}:{}:1", user_id, versioned_jti),
+                3600,
+            )
+            .await
+            .unwrap();
+
+        token_service.revoke_user_sessions(user_id).await.unwrap();
+
+        let versioned_refresh_exists: bool = conn
+            .exists(format!("refresh:{}", versioned_refresh_token))
+            .await
+            .unwrap();
+        let versioned_blacklist_exists: bool = conn
+            .exists(format!("blacklist:{}", versioned_jti))
+            .await
+            .unwrap();
+
+        assert!(!versioned_refresh_exists);
+        assert!(versioned_blacklist_exists);
+    }
+
+    use async_trait::async_trait;
+
+    /// Serves a STALE user on `find_by_email` and the CURRENT one on `find_by_id`, modelling a
+    /// password reset that commits between the two reads.
+    struct RereadRepository {
+        stale: Model,
+        current: Model,
+    }
+
+    #[async_trait]
+    impl UserRepository for RereadRepository {
+        async fn find_by_id(&self, _user_id: Uuid) -> Result<Option<Model>, AuthError> {
+            Ok(Some(self.current.clone()))
+        }
+
+        async fn find_by_email(&self, _email: &str) -> Result<Option<Model>, AuthError> {
+            Ok(Some(self.stale.clone()))
+        }
+
+        async fn find_by_provider_id(
+            &self,
+            _provider: &str,
+            _provider_id: &str,
+        ) -> Result<Option<Model>, AuthError> {
+            unreachable!()
+        }
+
+        async fn create_user(&self, _user: &Model) -> Result<Model, AuthError> {
+            unreachable!()
+        }
+
+        async fn update_last_login(&self, _user_id: Uuid) -> Result<(), AuthError> {
+            Ok(())
+        }
+
+        async fn verify_email(&self, _user_id: Uuid) -> Result<(), AuthError> {
+            unreachable!()
+        }
+
+        async fn update_password(
+            &self,
+            _user_id: Uuid,
+            _password_hash: &str,
+        ) -> Result<(), AuthError> {
+            unreachable!()
+        }
+    }
+
+    fn login_user(email: String, password: &str) -> Model {
+        let now = Utc::now();
+        Model {
+            user_id: Uuid::new_v4(),
+            email,
+            username: format!("user-{}", Uuid::new_v4()),
+            password_hash: Some(hash(password, 4).unwrap()),
+            auth_provider: "email".to_string(),
+            provider_id: None,
+            avatar_url: None,
+            email_verified: true,
+            status: UserStatus::Active,
+            created_at: now,
+            updated_at: now,
+            last_login: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn login_verifies_the_password_hash_captured_after_the_token_version() {
+        // Finding G3-1. The login path reads the user, captures token_version, then re-reads the
+        // user so the hash it verifies is never OLDER than the version it will mint at. The
+        // repository serves a STALE hash on the first read (the old password) and the current
+        // hash on the re-read, so a login with the old password must fail. Without the re-read
+        // it would pass verification and mint at the post-reset version.
+        const OLD_PASSWORD: &str = "old-correct-horse";
+        const NEW_PASSWORD: &str = "new-correct-horse";
+        let redis_conn = create_test_redis_conn().await;
+        let jwt_config = Arc::new(JwtConfig {
+            private_key_path: String::new(),
+            public_key_path: String::new(),
+            access_token_ttl_minutes: 60,
+            refresh_token_ttl_days: 30,
+            issuer: "vex-gateway".to_string(),
+            audience: "vex-api".to_string(),
+        });
+        let token_service = Arc::new(TokenService::new(
+            jwt_config,
+            redis_conn.clone(),
+            Arc::new(EncodingKey::from_secret(b"unused")),
+            Arc::new(DecodingKey::from_secret(b"unused")),
+        ));
+        let session_service = Arc::new(SessionService::new(redis_conn, 3600));
+        let email = format!("{}@example.com", Uuid::new_v4());
+        let user_repo: Arc<dyn UserRepository> = Arc::new(RereadRepository {
+            stale: login_user(email.clone(), OLD_PASSWORD),
+            current: login_user(email.clone(), NEW_PASSWORD),
+        });
+
+        let result = login(
+            web::Json(LoginRequest {
+                email,
+                password: OLD_PASSWORD.to_string(),
+            }),
+            web::Data::new(user_repo),
+            web::Data::new(token_service),
+            web::Data::new(session_service),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(AuthError::InvalidCredentials)),
+            "the password must be checked against the re-read hash, not the first read; got {:?}",
+            result.err()
+        );
+    }
 }

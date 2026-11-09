@@ -15,6 +15,22 @@ use std::rc::Rc;
 use std::sync::Arc;
 use uuid::Uuid;
 
+async fn refreshed_token_is_revoked(
+    conn: &mut ConnectionManager,
+    user_id: Uuid,
+    jti: &str,
+    token_version: u64,
+) -> redis::RedisResult<bool> {
+    if conn.exists::<_, bool>(format!("blacklist:{}", jti)).await? {
+        return Ok(true);
+    }
+
+    let stored_version: Option<u64> = conn
+        .get(crate::service::token_service::token_version_key(user_id))
+        .await?;
+    Ok(token_version < stored_version.unwrap_or_default())
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AuthenticatedUser {
     pub user_id: Uuid,
@@ -29,6 +45,7 @@ pub struct JwtClaims {
     aud: String,
     jti: String,
     pwd: i64, // password changed timestamp
+    token_version: u64,
 }
 
 #[derive(Clone)]
@@ -187,6 +204,7 @@ where
                     if let Ok(user_id) = Uuid::parse_str(&token_data.claims.sub) {
                         let jti = token_data.claims.jti.clone();
                         let token_exp = token_data.claims.exp as i64;
+                        let token_version = token_data.claims.token_version;
                         let authenticated_user: AuthenticatedUser = AuthenticatedUser { user_id };
 
                         // Store the authenticated user for later
@@ -199,19 +217,36 @@ where
 
                         return Box::pin(async move {
                             tracing::debug!("JWT middleware: Checking blacklist for JTI: {}", jti);
-                            // Check if token is blacklisted BEFORE calling the inner service
-                            let blacklist_result = {
+                            // Check revocation state BEFORE calling the inner service.
+                            let revocation_result = {
                                 let mut conn = redis_conn.clone();
                                 let blacklist_key = format!("blacklist:{}", jti);
                                 match conn.exists::<_, bool>(&blacklist_key).await {
-                                    Ok(exists) => {
-                                        if exists {
-                                            tracing::warn!(
-                                                "Attempted use of blacklisted token with JTI: {}",
-                                                jti
+                                    Ok(true) => {
+                                        tracing::warn!(
+                                            "Attempted use of blacklisted token with JTI: {}",
+                                            jti
+                                        );
+                                        Ok(true)
+                                    }
+                                    Ok(false) => {
+                                        let version_key =
+                                            crate::service::token_service::token_version_key(
+                                                user_id,
                                             );
+                                        match conn.get::<_, Option<u64>>(version_key).await {
+                                            Ok(stored_version) => {
+                                                Ok(token_version
+                                                    < stored_version.unwrap_or_default())
+                                            }
+                                            Err(e) => {
+                                                tracing::error!(
+                                                    "Failed to check token version: {}",
+                                                    e
+                                                );
+                                                Err("Redis token version check failed")
+                                            }
                                         }
-                                        Ok(exists)
                                     }
                                     Err(e) => {
                                         tracing::error!("Failed to check token blacklist: {}", e);
@@ -220,11 +255,11 @@ where
                                 }
                             };
 
-                            match blacklist_result {
+                            match revocation_result {
                                 Ok(true) => {
                                     tracing::warn!(
-                                        "JWT middleware: Token is blacklisted with JTI: {}",
-                                        jti
+                                        "JWT middleware: Token is revoked with JTI: {}",
+                                        jti,
                                     );
                                     // Token is blacklisted, short-circuit with an unauthorized response
                                     let (req, _) = req.into_parts();
@@ -390,18 +425,19 @@ where
                                                         req.extensions_mut()
                                                             .insert(authenticated_user.clone());
 
-                                                        // Check if new token is blacklisted (shouldn't be, but check anyway)
+                                                        // Recheck revocation after refresh before forwarding.
+                                                        let mut conn = redis_conn.clone();
+                                                        match refreshed_token_is_revoked(
+                                                            &mut conn,
+                                                            user_id,
+                                                            &jti,
+                                                            token_data.claims.token_version,
+                                                        )
+                                                        .await
                                                         {
-                                                            let mut conn = redis_conn.clone();
-                                                            let blacklist_key =
-                                                                format!("blacklist:{}", jti);
-                                                            if let Ok(exists) = conn
-                                                                .exists::<_, bool>(&blacklist_key)
-                                                                .await
-                                                                && exists
-                                                            {
+                                                            Ok(true) => {
                                                                 tracing::warn!(
-                                                                    "Refreshed token is blacklisted"
+                                                                    "Refreshed token is revoked"
                                                                 );
                                                                 let (req, _) = req.into_parts();
                                                                 let response = HttpResponse::Unauthorized().json(
@@ -413,6 +449,27 @@ where
                                                                     }
                                                                 })
                                                             );
+                                                                return Ok(ServiceResponse::new(
+                                                                    req, response,
+                                                                )
+                                                                .map_into_boxed_body());
+                                                            }
+                                                            Ok(false) => {}
+                                                            Err(e) => {
+                                                                tracing::error!(
+                                                                    "Failed to check refreshed token revocation: {}",
+                                                                    e
+                                                                );
+                                                                let (req, _) = req.into_parts();
+                                                                let response = HttpResponse::ServiceUnavailable().json(
+                                                                    serde_json::json!({
+                                                                        "error": {
+                                                                            "code": "service_unavailable",
+                                                                            "message": "Authentication service temporarily unavailable",
+                                                                            "status": 503
+                                                                        }
+                                                                    }),
+                                                                );
                                                                 return Ok(ServiceResponse::new(
                                                                     req, response,
                                                                 )
@@ -577,6 +634,15 @@ mod tests {
     }
 
     fn create_test_jwt(user_id: &str, expired: bool, jti: &str) -> String {
+        create_test_jwt_with_version(user_id, expired, jti, 0)
+    }
+
+    fn create_test_jwt_with_version(
+        user_id: &str,
+        expired: bool,
+        jti: &str,
+        token_version: u64,
+    ) -> String {
         let key = EncodingKey::from_secret("test_secret".as_ref());
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -592,10 +658,30 @@ mod tests {
             aud: "vex-api".to_string(),
             jti: jti.to_string(),
             pwd: now as i64, // Use current time as password timestamp for tests
+            token_version,
         };
 
         let header = Header::new(Algorithm::HS256);
         encode(&header, &claims, &key).expect("Failed to encode JWT token")
+    }
+
+    #[tokio::test]
+    async fn auto_refresh_rejects_stale_token_version() {
+        let user_id = Uuid::new_v4();
+        let mut conn = create_test_redis_conn().await;
+        let _: () = conn
+            .set(
+                crate::service::token_service::token_version_key(user_id),
+                2_u64,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            refreshed_token_is_revoked(&mut conn, user_id, "auto-refresh-stale-version", 1)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -636,6 +722,140 @@ mod tests {
 
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_jwt_middleware_current_token_version_works() {
+        let user_id = Uuid::new_v4();
+        let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
+        let redis_conn = create_test_redis_conn().await;
+        let middleware = JwtAuthentication::new_with_algorithm(
+            decoding_key,
+            "vex-gateway".to_string(),
+            "vex-api".to_string(),
+            Algorithm::HS256,
+            redis_conn.clone(),
+        );
+
+        let mut conn = redis_conn.clone();
+        let _: () = conn
+            .set(
+                crate::service::token_service::token_version_key(user_id),
+                4_u64,
+            )
+            .await
+            .unwrap();
+
+        let app = test::init_service(
+            App::new()
+                .wrap(middleware)
+                .route("/protected", web::get().to(protected_handler)),
+        )
+        .await;
+        let token = create_test_jwt_with_version(
+            &user_id.to_string(),
+            false,
+            "test-jti-current-version",
+            4,
+        );
+        let req = test::TestRequest::get()
+            .uri("/protected")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_jwt_middleware_rejects_token_after_password_change_bump() {
+        let user_id = Uuid::new_v4();
+        let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
+        let redis_conn = create_test_redis_conn().await;
+        let middleware = JwtAuthentication::new_with_algorithm(
+            decoding_key,
+            "vex-gateway".to_string(),
+            "vex-api".to_string(),
+            Algorithm::HS256,
+            redis_conn.clone(),
+        );
+
+        let mut conn = redis_conn.clone();
+        let _: () = conn
+            .set(
+                crate::service::token_service::token_version_key(user_id),
+                5_u64,
+            )
+            .await
+            .unwrap();
+
+        let app = test::init_service(
+            App::new()
+                .wrap(middleware)
+                .route("/protected", web::get().to(protected_handler)),
+        )
+        .await;
+        let token = create_test_jwt_with_version(
+            &user_id.to_string(),
+            false,
+            "test-jti-password-change",
+            4,
+        );
+        let req = test::TestRequest::get()
+            .uri("/protected")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 401);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["error"]["code"], "token_revoked");
+    }
+
+    #[tokio::test]
+    async fn test_jwt_middleware_rejects_token_without_a_version() {
+        let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
+        let redis_conn = create_test_redis_conn().await;
+        let middleware = JwtAuthentication::new_with_algorithm(
+            decoding_key,
+            "vex-gateway".to_string(),
+            "vex-api".to_string(),
+            Algorithm::HS256,
+            redis_conn,
+        );
+        let app = test::init_service(
+            App::new()
+                .wrap(middleware)
+                .route("/protected", web::get().to(protected_handler)),
+        )
+        .await;
+
+        // Correctly signed and unexpired, but without the token_version claim.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Failed to get current system time")
+            .as_secs();
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &json!({
+                "sub": Uuid::new_v4().to_string(),
+                "exp": now + 3600,
+                "iat": now,
+                "iss": "vex-gateway",
+                "aud": "vex-api",
+                "jti": "test-jti-no-version",
+                "pwd": now,
+            }),
+            &EncodingKey::from_secret("test_secret".as_ref()),
+        )
+        .expect("Failed to encode JWT token");
+        let req = test::TestRequest::get()
+            .uri("/protected")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 401);
     }
 
     #[tokio::test]
