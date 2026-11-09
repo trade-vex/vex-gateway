@@ -49,3 +49,19 @@ from_email = "noreply@example.com"
 [auth.otp]
 otp_length = 6
 email_verification_expiry_minutes = 15
+
+# The Aeron link to vex-core. Override a key with APP__CORE__<KEY>, e.g. APP__CORE__AUTH_KEY.
+[core]
+# This gateway's id at the core: 0-15, unique among the gateways connected to it.
+gateway_id = 1
+# Handshake credential: a signed 32-bit integer equal to vex-core's
+# VEX__GATEWAY_NETWORKING__GATEWAY_AUTHENTICATION_KEY. Empty only for a core running without
+# authentication; required in production.
+auth_key = ""
+address = "aeron-media-driver-core"
+# = vex-core core_networking.initial_port / initial_control_port (3521/3522 in production,
+# 40001/40002 for vex-core's development and test defaults). The two must differ.
+port = 3521
+control_port = 3522
+# This gateway's Aeron media driver directory.
+context_dir = "/dev/shm/aeron"

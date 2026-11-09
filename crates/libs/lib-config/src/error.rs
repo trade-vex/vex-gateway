@@ -1,5 +1,6 @@
 //! lib-config/src/error.rs
 
+use std::path::PathBuf;
 use thiserror::Error;
 
 /// Configuration errors that can occur during loading or validation.
@@ -11,6 +12,10 @@ pub enum ConfigError {
     /// The runtime environment was not explicitly selected
     #[error("APP_ENV must be set explicitly to one of: development, testing, production")]
     MissingEnvironment,
+
+    /// `APP_CONFIG_DIR` is set but does not name a directory
+    #[error("APP_CONFIG_DIR is set to {0:?}, which is not a directory")]
+    ConfigDirNotFound(PathBuf),
 
     /// Failed to load configuration from files or environment variables. The message never shows
     /// a value, which may be a secret set in the wrong place.

@@ -7,13 +7,12 @@ use lib_config::Config;
 use lib_server::{CorrelationHandler, CorrelationService};
 use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, filter::LevelFilter, fmt};
-use vex_config::GatewayNetworkingConfig;
 use vex_networking::client::VexGateway;
 
 /// Main entry point for the VEX Gateway Service
 ///
 /// This function:
-/// 1. Loads environment variables and configuration
+/// 1. Loads the configuration (`config/<APP_ENV>.toml` and its `APP__` overrides)
 /// 2. Initializes logging
 /// 3. Starts the HTTP server
 ///
@@ -57,29 +56,8 @@ async fn main() -> std::io::Result<()> {
     // Initialize VexGateway client
     info!("Initializing VexGateway client");
 
-    // Load gateway networking configuration from environment variables
-    let mut gateway_config = GatewayNetworkingConfig::development_defaults();
-    gateway_config.context_dir =
-        std::env::var("CONTEXT_DIR").unwrap_or_else(|_| "/dev/shm/aeron".to_string());
-    gateway_config.core_address =
-        std::env::var("CORE_ADDRESS").unwrap_or_else(|_| "aeron-media-driver-core".to_string());
-    gateway_config.local_address =
-        std::env::var("LOCAL_ADDRESS").unwrap_or_else(|_| "0.0.0.0".to_string());
-    gateway_config.core_port = std::env::var("CORE_PORT")
-        .unwrap_or_else(|_| "40123".to_string())
-        .parse::<u16>()
-        .unwrap_or_else(|e| {
-            tracing::warn!("Invalid CORE_PORT, defaulting to 40123: {}", e);
-            40123
-        });
-    gateway_config.core_control_port = std::env::var("CORE_CONTROL_PORT")
-        .unwrap_or_else(|_| "40123".to_string())
-        .parse::<u16>()
-        .unwrap_or_else(|e| {
-            tracing::warn!("Invalid CORE_CONTROL_PORT, defaulting to 40123: {}", e);
-            40123
-        });
-    let mut gateway_client = VexGateway::new(gateway_config)
+    // The [core] link settings, validated with the rest of the configuration
+    let mut gateway_client = VexGateway::new(config.core.networking())
         .map_err(|e| std::io::Error::other(format!("Failed to initialize VexGateway: {}", e)))?;
 
     // Create correlation service

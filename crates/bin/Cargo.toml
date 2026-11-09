@@ -16,8 +16,6 @@ lib-config = {path = "../libs/lib-config"}
 
 # Vex dependencies
 vex-networking = {workspace = true}
-vex-config = {workspace = true}
-common = {workspace = true}
 lib-auth = {path = "../libs/lib-auth"}
 chrono = { workspace = true }
 jsonwebtoken = { workspace = true }

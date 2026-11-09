@@ -31,8 +31,9 @@
 //!
 //! # Environment Variables
 //!
-//! `APP_ENV` selects the environment and so the configuration file, and `APP_CONFIG_DIR` may name
-//! the directory holding it.
+//! Only two variables are read by name, because they select the configuration file and so cannot
+//! be set in it: `APP_ENV` (required: `development`, `testing` or `production`) and
+//! `APP_CONFIG_DIR` (optional: the directory holding `<environment>.toml`).
 //!
 //! Any setting can be overridden with `APP__<SECTION>__<KEY>`: its key path in upper case with `__`
 //! between the levels, like vex-core's `VEX__` variables. A list takes comma-separated values. A
@@ -45,6 +46,7 @@
 //! export APP__SERVER__HOST=0.0.0.0                       # server.host
 //! export APP__LOGGING__LEVEL=info                        # logging.level
 //! export APP__AUTH__SERVER__TRUSTED_PROXIES=10.0.1.0/24  # auth.server.trusted_proxies
+//! export APP__CORE__AUTH_KEY=123456                      # core.auth_key
 //! ```
 //!
 //! # Configuration Discovery
@@ -54,6 +56,7 @@
 //! 2. Searching for `config/` directory in current and parent directories
 //! 3. Falling back to current directory if nothing found
 
+mod core_link;
 pub mod environment;
 mod error;
 pub mod logging;
@@ -61,6 +64,7 @@ pub mod server;
 pub mod util;
 
 // Re-export commonly used types for convenience
+pub use core_link::CoreLinkConfig;
 pub use environment::Environment;
 pub use error::ConfigError;
 pub use logging::LoggingConfig;
@@ -99,6 +103,8 @@ pub struct Config {
     pub logging: LoggingConfig,
     /// Authentication configuration
     pub auth: AuthConfig,
+    /// The Aeron link to vex-core
+    pub core: CoreLinkConfig,
 }
 
 impl Config {
@@ -187,7 +193,10 @@ impl Config {
         config_dir: Option<PathBuf>,
         overrides: config::Environment,
     ) -> Result<Self, ConfigError> {
-        let config_dir = config_dir.unwrap_or_else(find_config_dir);
+        let config_dir = match config_dir {
+            Some(config_dir) => config_dir,
+            None => find_config_dir()?,
+        };
         let file = config_dir.join(environment.config_file_name());
 
         // Log what we're trying to load
@@ -313,6 +322,9 @@ impl Config {
     /// - Max connections cannot be 0
     /// - Connection timeout cannot be 0
     /// - Log level must be valid
+    /// - The `core` link settings must pass vex-core's own rules (distinct non-zero ports,
+    ///   gateway id below 16, an empty or signed 32-bit `auth_key`, non-empty `context_dir`), and
+    ///   `core.address` cannot be empty
     /// - Every `auth.server.trusted_proxies` entry must be an IP address or CIDR range
     /// - `auth.oauth.providers` may list only `google`, `github` and `twitter`
     ///
@@ -321,6 +333,7 @@ impl Config {
     /// - Cannot bind to localhost (127.0.0.1 or localhost)
     /// - Cannot use trace or debug logging levels
     /// - `auth.server.trusted_proxies` cannot be empty: production runs behind a load balancer
+    /// - `core.auth_key` cannot be empty, as vex-core requires
     ///
     /// ## Development Environment
     /// - Max connections should be reasonable (< 10000)
@@ -339,6 +352,23 @@ impl Config {
 
         // Validate logging configuration
         self.logging.validate()?;
+
+        // vex-core's own rules fail at startup rather than as a handshake timeout against a core
+        // that can never listen on such a pair of ports. They do not cover the address.
+        let link_error = if self.core.address.trim().is_empty() {
+            Some("address cannot be empty".to_string())
+        } else {
+            self.core
+                .networking()
+                .validate()
+                .err()
+                .map(|e| e.to_string())
+        };
+        if let Some(e) = link_error {
+            return Err(ConfigError::ValidationError(format!(
+                "Invalid vex-core link settings in [core]: {e}"
+            )));
+        }
 
         // Parsed here, before any network startup, though only AppState::new uses the result.
         if let Err(e) = self.auth.server.parsed_trusted_proxies() {
@@ -397,6 +427,17 @@ impl Config {
                     return Err(ConfigError::ValidationError(
                         "Production environment requires auth.server.trusted_proxies (the load \
                          balancer's addresses or CIDR ranges)"
+                            .to_string(),
+                    ));
+                }
+
+                // vex-core refuses to run without a key in production. Without one here the
+                // gateway would send a random credential and fail later with an opaque handshake
+                // REJECT whose cause only the core logs.
+                if self.core.auth_key.is_empty() {
+                    return Err(ConfigError::ValidationError(
+                        "Production environment requires core.auth_key (vex-core's gateway \
+                         authentication key)"
                             .to_string(),
                     ));
                 }
@@ -723,6 +764,14 @@ from_email = "gateway@example.com"
 [auth.otp]
 otp_length = 6
 email_verification_expiry_minutes = 15
+
+[core]
+gateway_id = 3
+auth_key = "-123456789"
+address = "core.internal"
+port = 3521
+control_port = 3522
+context_dir = "/var/lib/vex/aeron-gateway"
 "#,
         )
         .unwrap();
@@ -742,6 +791,12 @@ email_verification_expiry_minutes = 15
             config.auth.server.trusted_proxies,
             ["10.0.1.0/24", "10.0.2.0/24"]
         );
+        let link = config.core.networking();
+        assert_eq!(link.gateway_id, 3);
+        assert_eq!(link.gateway_authentication_key.as_i32(), Some(-123456789));
+        assert_eq!(link.core_address, "core.internal");
+        assert_eq!((link.core_port, link.core_control_port), (3521, 3522));
+        assert_eq!(link.context_dir, "/var/lib/vex/aeron-gateway");
     }
 
     #[test]
@@ -767,6 +822,7 @@ email_verification_expiry_minutes = 15
         // Test production validation
         config.environment = Environment::Production;
         config.auth.server.trusted_proxies = vec!["10.0.0.0/16".to_string()];
+        config.core.auth_key = "-123456789".into();
         config.server.host = "127.0.0.1".to_string();
         assert!(config.validate().is_err());
 
@@ -781,6 +837,7 @@ email_verification_expiry_minutes = 15
         config.environment = Environment::Production;
         config.server.host = "0.0.0.0".to_string();
         config.logging.level = "info".to_string();
+        config.core.auth_key = "-123456789".into();
         config.auth.server.trusted_proxies = Vec::new();
 
         let error = config.validate().unwrap_err();
@@ -856,6 +913,107 @@ email_verification_expiry_minutes = 15
         assert!(!config.logging.structured);
         // trusted_proxies is optional: absent, development trusts no proxy.
         assert!(config.auth.server.trusted_proxies.is_empty());
+        // The vex-core link: a production core's ports, no authentication.
+        let link = config.core.networking();
+        let core = vex_config::CoreNetworkingConfig::production_defaults();
+        assert_eq!(link.gateway_id, 1);
+        assert!(link.gateway_authentication_key.is_empty());
+        assert_eq!(link.core_address, "aeron-media-driver-core");
+        assert_eq!(
+            (link.core_port, link.core_control_port),
+            (core.initial_port, core.initial_control_port)
+        );
+        assert_eq!(link.context_dir, "/dev/shm/aeron");
+    }
+
+    #[test]
+    fn test_app_overrides_reach_every_core_link_key() {
+        let config = load_development_example(&[
+            ("APP__CORE__GATEWAY_ID", "7"),
+            ("APP__CORE__AUTH_KEY", "-123456789"),
+            ("APP__CORE__ADDRESS", "core.internal"),
+            ("APP__CORE__PORT", "40001"),
+            ("APP__CORE__CONTROL_PORT", "40002"),
+            ("APP__CORE__CONTEXT_DIR", "/dev/shm/aeron-gateway-7"),
+        ])
+        .unwrap();
+
+        let link = config.core.networking();
+        assert_eq!(link.gateway_id, 7);
+        assert_eq!(link.gateway_authentication_key.as_i32(), Some(-123456789));
+        assert_eq!(link.core_address, "core.internal");
+        assert_eq!((link.core_port, link.core_control_port), (40001, 40002));
+        assert_eq!(link.context_dir, "/dev/shm/aeron-gateway-7");
+    }
+
+    #[test]
+    fn test_malformed_core_link_settings_are_errors() {
+        // Not a value of the key's type.
+        for (name, value) in [
+            ("APP__CORE__PORT", "port"),
+            ("APP__CORE__PORT", "40001 "),
+            ("APP__CORE__PORT", "65536"),
+            ("APP__CORE__GATEWAY_ID", "-1"),
+        ] {
+            let result = load_development_example(&[(name, value)]);
+            assert!(
+                matches!(result, Err(ConfigError::LoadError(_))),
+                "{name}={value:?} must not load"
+            );
+        }
+
+        // A misspelt or retired name, such as one of the former single-word keys, names no key: an
+        // error that names the variable, never silently ignored in favour of the file's value.
+        for name in [
+            "APP__CORE__GATEWAYID",
+            "APP__CORE__AUTHKEY",
+            "APP__CORE__CONTROLPORT",
+            "APP__CORE__CONTEXTDIR",
+            "APP__CORE__CONTROL__PORT",
+        ] {
+            let error = load_development_example(&[(name, "1")]).unwrap_err();
+            assert!(
+                matches!(error, ConfigError::UnknownSettings(_))
+                    && error.to_string() == format!("Unknown configuration settings: {name}"),
+                "{name}: unexpected error: {error}"
+            );
+        }
+
+        // Rejected by vex-core's own rules, or by the address check they lack.
+        for (name, value) in [
+            ("APP__CORE__ADDRESS", " "),
+            ("APP__CORE__GATEWAY_ID", "16"),
+            ("APP__CORE__PORT", "0"),
+            ("APP__CORE__PORT", "3522"),
+            ("APP__CORE__AUTH_KEY", "not-a-key"),
+            ("APP__CORE__AUTH_KEY", "2147483648"),
+            ("APP__CORE__CONTEXT_DIR", ""),
+        ] {
+            let error = load_development_example(&[(name, value)]).unwrap_err();
+            assert!(
+                matches!(error, ConfigError::ValidationError(_))
+                    && error.to_string().contains("[core]"),
+                "{name}={value:?}: unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_production_requires_core_auth_key() {
+        let mut config = development_config();
+        config.environment = Environment::Production;
+        config.server.host = "0.0.0.0".to_string();
+        config.logging.level = "info".to_string();
+        config.auth.server.trusted_proxies = vec!["10.0.0.0/16".to_string()];
+
+        let error = config.validate().unwrap_err();
+        assert!(
+            error.to_string().contains("core.auth_key"),
+            "unexpected error: {error}"
+        );
+
+        config.core.auth_key = "-123456789".into();
+        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -1120,6 +1278,7 @@ email_verification_expiry_minutes = 15
         let mut production_config = development_config();
         production_config.environment = Environment::Production;
         production_config.auth.server.trusted_proxies = vec!["10.0.0.0/16".to_string()];
+        production_config.core.auth_key = "-123456789".into();
         production_config.server.port = 0;
         production_config.server.host = "0.0.0.0".to_string();
         production_config.logging.level = "info".to_string();
