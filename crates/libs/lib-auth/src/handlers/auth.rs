@@ -16,7 +16,33 @@ use crate::middleware::jwt_auth::AuthenticatedUser;
 use crate::models::user::{Model, UserStatus};
 use crate::repository::UserRepository;
 use crate::service::{EmailService, SessionService, TokenService};
+use lib_middleware::client_ip::client_ip;
 use std::sync::Arc;
+
+const LOGIN_RATE_LIMIT_SCOPE: &str = "login";
+// `client_ip` is the TCP peer unless the peer is a configured trusted proxy (TRUSTED_PROXIES),
+// so behind an unconfigured load balancer every client shares one IP bucket.
+// These loose limits are coarse flood guards.
+const LOGIN_IP_MAX_REQUESTS: u64 = 300;
+const LOGIN_IP_WINDOW_SECONDS: u64 = 60;
+const LOGIN_PRINCIPAL_MAX_REQUESTS: u64 = 5;
+const LOGIN_PRINCIPAL_WINDOW_SECONDS: u64 = 5 * 60;
+
+const SIGNUP_RATE_LIMIT_SCOPE: &str = "signup";
+const SIGNUP_IP_MAX_REQUESTS: u64 = 300;
+const SIGNUP_IP_WINDOW_SECONDS: u64 = 10 * 60;
+const SIGNUP_PRINCIPAL_MAX_REQUESTS: u64 = 5;
+const SIGNUP_PRINCIPAL_WINDOW_SECONDS: u64 = 15 * 60;
+
+const VERIFY_EMAIL_RATE_LIMIT_SCOPE: &str = "verify_email";
+const VERIFY_EMAIL_IP_MAX_REQUESTS: u64 = 600;
+const VERIFY_EMAIL_IP_WINDOW_SECONDS: u64 = 15 * 60;
+const VERIFY_EMAIL_PRINCIPAL_MAX_REQUESTS: u64 = 10;
+const VERIFY_EMAIL_PRINCIPAL_WINDOW_SECONDS: u64 = 15 * 60;
+
+fn normalized_principal(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
 
 /// Helper function to get cookie security configuration based on FRONTEND_URL
 /// Returns (is_secure, cookie_ttl) where:
@@ -32,13 +58,40 @@ fn get_cookie_config() -> (bool, i64) {
 
 // Signup handler
 pub async fn signup(
+    http_req: HttpRequest,
     req: web::Json<SignupRequest>,
     user_repo: web::Data<Arc<dyn UserRepository>>,
     email_service: web::Data<Arc<EmailService>>,
 ) -> Result<HttpResponse, AuthError> {
-    // Validate the request
+    email_service
+        .enforce_rate_limit(
+            SIGNUP_RATE_LIMIT_SCOPE,
+            &format!("ip:{}", client_ip(&http_req)),
+            SIGNUP_IP_MAX_REQUESTS,
+            SIGNUP_IP_WINDOW_SECONDS,
+        )
+        .await?;
+
+    // Validate the request before using its principals in Redis keys.
     req.validate()
         .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
+
+    email_service
+        .enforce_rate_limit(
+            SIGNUP_RATE_LIMIT_SCOPE,
+            &format!("email:{}", normalized_principal(&req.email)),
+            SIGNUP_PRINCIPAL_MAX_REQUESTS,
+            SIGNUP_PRINCIPAL_WINDOW_SECONDS,
+        )
+        .await?;
+    email_service
+        .enforce_rate_limit(
+            SIGNUP_RATE_LIMIT_SCOPE,
+            &format!("username:{}", normalized_principal(&req.username)),
+            SIGNUP_PRINCIPAL_MAX_REQUESTS,
+            SIGNUP_PRINCIPAL_WINDOW_SECONDS,
+        )
+        .await?;
 
     tracing::debug!("Signup request");
 
@@ -99,11 +152,38 @@ pub async fn signup(
 
 // Login handler
 pub async fn login(
+    http_req: HttpRequest,
     req: web::Json<LoginRequest>,
     user_repo: web::Data<Arc<dyn UserRepository>>,
     token_service: web::Data<Arc<TokenService>>,
     session_service: web::Data<Arc<SessionService>>,
+    email_service: web::Data<Arc<EmailService>>,
 ) -> Result<HttpResponse, AuthError> {
+    // Key the failure budget on (peer IP, email), not the email alone. A principal-only bucket
+    // lets an unauthenticated attacker exhaust a victim's budget from anywhere and lock them out
+    // of their own account -- the success path that would clear it is unreachable while locked
+    // (finding G3-2). The separate per-IP flood limit above still bounds a single source.
+    let login_principal = format!(
+        "email:{}|ip:{}",
+        normalized_principal(&req.email),
+        client_ip(&http_req)
+    );
+    email_service
+        .enforce_rate_limit(
+            LOGIN_RATE_LIMIT_SCOPE,
+            &format!("ip:{}", client_ip(&http_req)),
+            LOGIN_IP_MAX_REQUESTS,
+            LOGIN_IP_WINDOW_SECONDS,
+        )
+        .await?;
+    email_service
+        .check_login_failure_rate_limit(
+            &login_principal,
+            LOGIN_PRINCIPAL_MAX_REQUESTS,
+            LOGIN_PRINCIPAL_WINDOW_SECONDS,
+        )
+        .await?;
+
     // Validate the request
     req.validate()
         .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
@@ -111,10 +191,19 @@ pub async fn login(
     tracing::debug!("Login request");
 
     // Find user by email
-    let user = user_repo
-        .find_by_email(&req.email)
-        .await?
-        .ok_or(AuthError::InvalidCredentials)?;
+    let user = match user_repo.find_by_email(&req.email).await? {
+        Some(user) => user,
+        None => {
+            email_service
+                .record_login_authentication(
+                    &login_principal,
+                    false,
+                    LOGIN_PRINCIPAL_WINDOW_SECONDS,
+                )
+                .await?;
+            return Err(AuthError::InvalidCredentials);
+        }
+    };
     // PR #85: capture the token version immediately after the lookup and
     // BEFORE the bcrypt verification below, so a racing password change cannot
     // have a token minted at a version that outlives its revocation.
@@ -137,20 +226,56 @@ pub async fn login(
     }
 
     // Verify password
-    let password_hash = user
-        .password_hash
-        .clone()
-        .ok_or(AuthError::InvalidCredentials)?;
+    let password_hash = match user.password_hash.clone() {
+        Some(password_hash) => password_hash,
+        None => {
+            email_service
+                .record_login_authentication(
+                    &login_principal,
+                    false,
+                    LOGIN_PRINCIPAL_WINDOW_SECONDS,
+                )
+                .await?;
+            return Err(AuthError::InvalidCredentials);
+        }
+    };
 
-    if !tokio::task::spawn_blocking({
+    let login_lock_token = email_service
+        .acquire_login_inflight_lock(&login_principal)
+        .await?;
+    let authenticated = tokio::task::spawn_blocking({
         let p = req.password.clone();
         let h = password_hash.clone();
         move || verify(&p, &h)
     })
     .await
     .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
-    .map_err(|e| AuthError::Validation(format!("Password verification failed: {}", e)))?
-    {
+    .map_err(|e| AuthError::Validation(format!("Password verification failed: {}", e)));
+
+    let authenticated = match authenticated {
+        Ok(authenticated) => authenticated,
+        Err(error) => {
+            email_service
+                .release_login_inflight_lock(&login_principal, &login_lock_token)
+                .await?;
+            return Err(error);
+        }
+    };
+
+    let record_result = email_service
+        .record_login_authentication(
+            &login_principal,
+            authenticated,
+            LOGIN_PRINCIPAL_WINDOW_SECONDS,
+        )
+        .await;
+    let release_result = email_service
+        .release_login_inflight_lock(&login_principal, &login_lock_token)
+        .await;
+    record_result?;
+    release_result?;
+
+    if !authenticated {
         return Err(AuthError::InvalidCredentials);
     }
 
@@ -280,15 +405,34 @@ pub async fn refresh_token(
 
 // Verify email with OTP handler (public endpoint)
 pub async fn verify_email_with_otp(
+    http_req: HttpRequest,
     req: web::Json<VerifyEmailRequest>,
     user_repo: web::Data<Arc<dyn UserRepository>>,
     email_service: web::Data<Arc<EmailService>>,
     token_service: web::Data<Arc<TokenService>>,
     session_service: web::Data<Arc<SessionService>>,
 ) -> Result<HttpResponse, AuthError> {
-    // Validate the request
+    email_service
+        .enforce_rate_limit(
+            VERIFY_EMAIL_RATE_LIMIT_SCOPE,
+            &format!("ip:{}", client_ip(&http_req)),
+            VERIFY_EMAIL_IP_MAX_REQUESTS,
+            VERIFY_EMAIL_IP_WINDOW_SECONDS,
+        )
+        .await?;
+
+    // Validate the request before using its principal in a Redis key.
     req.validate()
         .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
+
+    email_service
+        .enforce_rate_limit(
+            VERIFY_EMAIL_RATE_LIMIT_SCOPE,
+            &format!("email:{}", normalized_principal(&req.email)),
+            VERIFY_EMAIL_PRINCIPAL_MAX_REQUESTS,
+            VERIFY_EMAIL_PRINCIPAL_WINDOW_SECONDS,
+        )
+        .await?;
 
     tracing::debug!("Email verification request with OTP");
 
@@ -578,15 +722,9 @@ pub async fn forgot_password(
 
     tracing::debug!("Forgot password request for email: {}", req.email);
 
-    // Check rate limit
-    if email_service
-        .check_password_reset_rate_limit(&req.email)
-        .await?
-    {
-        return Err(AuthError::Validation(
-            "Too many password reset requests. Please try again later.".to_string(),
-        ));
-    }
+    email_service
+        .enforce_password_reset_rate_limit(&req.email)
+        .await?;
 
     // Try to find user by email
     if let Ok(Some(user)) = user_repo.find_by_email(&req.email).await {
@@ -853,7 +991,22 @@ mod tests {
         assert!(versioned_blacklist_exists);
     }
 
+    use crate::config::EmailConfig;
     use async_trait::async_trait;
+    use lib_middleware::TrustedProxies;
+    use rsa::{
+        Generate, PrivateKey,
+        pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey, LineEnding},
+    };
+    use secrecy::SecretString;
+    use std::sync::{
+        OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct RejectIfCalledRepository {
+        find_by_email_calls: AtomicUsize,
+    }
 
     /// Serves a STALE user on `find_by_email` and the CURRENT one on `find_by_id`, modelling a
     /// password reset that commits between the two reads.
@@ -870,6 +1023,95 @@ mod tests {
 
         async fn find_by_email(&self, _email: &str) -> Result<Option<Model>, AuthError> {
             Ok(Some(self.stale.clone()))
+        }
+
+        async fn find_by_provider_id(
+            &self,
+            _provider: &str,
+            _provider_id: &str,
+        ) -> Result<Option<Model>, AuthError> {
+            unreachable!()
+        }
+
+        async fn create_user(&self, _user: &Model) -> Result<Model, AuthError> {
+            unreachable!()
+        }
+
+        async fn update_last_login(&self, _user_id: Uuid) -> Result<(), AuthError> {
+            Ok(())
+        }
+
+        async fn verify_email(&self, _user_id: Uuid) -> Result<(), AuthError> {
+            unreachable!()
+        }
+
+        async fn update_password(
+            &self,
+            _user_id: Uuid,
+            _password_hash: &str,
+        ) -> Result<(), AuthError> {
+            unreachable!()
+        }
+    }
+
+    struct LoginRepository {
+        user: Model,
+        find_by_email_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl UserRepository for RejectIfCalledRepository {
+        async fn find_by_id(&self, _user_id: Uuid) -> Result<Option<Model>, AuthError> {
+            unreachable!()
+        }
+
+        async fn find_by_email(&self, _email: &str) -> Result<Option<Model>, AuthError> {
+            self.find_by_email_calls.fetch_add(1, Ordering::SeqCst);
+            Err(AuthError::InternalError(
+                "repository must not be reached".to_string(),
+            ))
+        }
+
+        async fn find_by_provider_id(
+            &self,
+            _provider: &str,
+            _provider_id: &str,
+        ) -> Result<Option<Model>, AuthError> {
+            unreachable!()
+        }
+
+        async fn create_user(&self, _user: &Model) -> Result<Model, AuthError> {
+            unreachable!()
+        }
+
+        async fn update_last_login(&self, _user_id: Uuid) -> Result<(), AuthError> {
+            unreachable!()
+        }
+
+        async fn verify_email(&self, _user_id: Uuid) -> Result<(), AuthError> {
+            unreachable!()
+        }
+
+        async fn update_password(
+            &self,
+            _user_id: Uuid,
+            _password_hash: &str,
+        ) -> Result<(), AuthError> {
+            unreachable!()
+        }
+    }
+
+    #[async_trait]
+    impl UserRepository for LoginRepository {
+        async fn find_by_id(&self, _user_id: Uuid) -> Result<Option<Model>, AuthError> {
+            // The login path re-reads the user after capturing token_version, so that the hash it
+            // verifies is never older than the version it mints at (finding G3-1).
+            Ok(Some(self.user.clone()))
+        }
+
+        async fn find_by_email(&self, _email: &str) -> Result<Option<Model>, AuthError> {
+            self.find_by_email_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(self.user.clone()))
         }
 
         async fn find_by_provider_id(
@@ -919,45 +1161,284 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn login_verifies_the_password_hash_captured_after_the_token_version() {
-        // Finding G3-1. The login path reads the user, captures token_version, then re-reads the
-        // user so the hash it verifies is never OLDER than the version it will mint at. The
-        // repository serves a STALE hash on the first read (the old password) and the current
-        // hash on the re-read, so a login with the old password must fail. Without the re-read
-        // it would pass verification and mint at the post-reset version.
-        const OLD_PASSWORD: &str = "old-correct-horse";
-        const NEW_PASSWORD: &str = "new-correct-horse";
-        let redis_conn = create_test_redis_conn().await;
+    fn test_rsa_keys() -> (Arc<EncodingKey>, Arc<DecodingKey>) {
+        static KEYS: OnceLock<(Arc<EncodingKey>, Arc<DecodingKey>)> = OnceLock::new();
+
+        KEYS.get_or_init(|| {
+            let private_key = PrivateKey::generate();
+            let public_key = private_key.to_public_key();
+            let private_pem = private_key.to_pkcs1_pem(LineEnding::LF).unwrap();
+            let public_pem = public_key.to_pkcs1_pem(LineEnding::LF).unwrap();
+
+            (
+                Arc::new(EncodingKey::from_rsa_pem(private_pem.as_bytes()).unwrap()),
+                Arc::new(DecodingKey::from_rsa_pem(public_pem.as_bytes()).unwrap()),
+            )
+        })
+        .clone()
+    }
+
+    async fn test_services() -> (Arc<EmailService>, Arc<TokenService>, Arc<SessionService>) {
+        let client = redis::Client::open("redis://127.0.0.1:6379/").unwrap();
+        let conn = redis::aio::ConnectionManager::new(client).await.unwrap();
+        let email_config = EmailConfig {
+            smtp_host: "127.0.0.1".to_string(),
+            smtp_port: 2525,
+            smtp_username: "test".to_string(),
+            smtp_password: SecretString::new("test".to_string()),
+            from_email: "test@example.com".to_string(),
+        };
+        let email_service =
+            Arc::new(EmailService::new(&email_config, conn.clone(), 6, 15).unwrap());
         let jwt_config = Arc::new(JwtConfig {
             private_key_path: String::new(),
             public_key_path: String::new(),
-            access_token_ttl_minutes: 60,
-            refresh_token_ttl_days: 30,
-            issuer: "vex-gateway".to_string(),
-            audience: "vex-api".to_string(),
+            access_token_ttl_minutes: 15,
+            refresh_token_ttl_days: 1,
+            issuer: "test".to_string(),
+            audience: "test".to_string(),
         });
+        let (encoding_key, decoding_key) = test_rsa_keys();
         let token_service = Arc::new(TokenService::new(
             jwt_config,
-            redis_conn.clone(),
-            Arc::new(EncodingKey::from_secret(b"unused")),
-            Arc::new(DecodingKey::from_secret(b"unused")),
+            conn.clone(),
+            encoding_key,
+            decoding_key,
         ));
-        let session_service = Arc::new(SessionService::new(redis_conn, 3600));
-        let email = format!("{}@example.com", Uuid::new_v4());
-        let user_repo: Arc<dyn UserRepository> = Arc::new(RereadRepository {
-            stale: login_user(email.clone(), OLD_PASSWORD),
-            current: login_user(email.clone(), NEW_PASSWORD),
-        });
+        let session_service = Arc::new(SessionService::new(conn, 60));
 
-        let result = login(
+        (email_service, token_service, session_service)
+    }
+
+    async fn attempt_login(
+        email: &str,
+        password: &str,
+        peer_addr: &str,
+        user_repo: Arc<dyn UserRepository>,
+        email_service: Arc<EmailService>,
+        token_service: Arc<TokenService>,
+        session_service: Arc<SessionService>,
+    ) -> Result<HttpResponse, AuthError> {
+        login(
+            actix_web::test::TestRequest::default()
+                .peer_addr(peer_addr.parse().unwrap())
+                .to_http_request(),
             web::Json(LoginRequest {
-                email,
-                password: OLD_PASSWORD.to_string(),
+                email: email.to_string(),
+                password: password.to_string(),
             }),
             web::Data::new(user_repo),
             web::Data::new(token_service),
             web::Data::new(session_service),
+            web::Data::new(email_service),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn repeated_successful_logins_do_not_trip_principal_limit() {
+        const PASSWORD: &str = "correct-horse-battery-staple";
+        let (email_service, token_service, session_service) = test_services().await;
+        let email = format!("{}@example.com", Uuid::new_v4());
+        let repository = Arc::new(LoginRepository {
+            user: login_user(email.clone(), PASSWORD),
+            find_by_email_calls: AtomicUsize::new(0),
+        });
+        let user_repo: Arc<dyn UserRepository> = repository.clone();
+
+        for _ in 0..=LOGIN_PRINCIPAL_MAX_REQUESTS {
+            let response = attempt_login(
+                &email,
+                PASSWORD,
+                "198.51.100.10:12345",
+                user_repo.clone(),
+                email_service.clone(),
+                token_service.clone(),
+                session_service.clone(),
+            )
+            .await
+            .unwrap();
+            assert!(response.status().is_success());
+        }
+
+        assert_eq!(
+            repository.find_by_email_calls.load(Ordering::SeqCst),
+            (LOGIN_PRINCIPAL_MAX_REQUESTS + 1) as usize
+        );
+    }
+
+    #[tokio::test]
+    async fn consecutive_login_failures_trip_principal_limit() {
+        const PASSWORD: &str = "correct-horse-battery-staple";
+        let (email_service, token_service, session_service) = test_services().await;
+        let email = format!("{}@example.com", Uuid::new_v4());
+        let repository = Arc::new(LoginRepository {
+            user: login_user(email.clone(), PASSWORD),
+            find_by_email_calls: AtomicUsize::new(0),
+        });
+        let user_repo: Arc<dyn UserRepository> = repository.clone();
+
+        for _ in 0..LOGIN_PRINCIPAL_MAX_REQUESTS {
+            let result = attempt_login(
+                &email,
+                "incorrect-password",
+                "198.51.100.11:12345",
+                user_repo.clone(),
+                email_service.clone(),
+                token_service.clone(),
+                session_service.clone(),
+            )
+            .await;
+            assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+        }
+
+        let result = attempt_login(
+            &email,
+            PASSWORD,
+            "198.51.100.11:12345",
+            user_repo,
+            email_service,
+            token_service,
+            session_service,
+        )
+        .await;
+        assert!(matches!(result, Err(AuthError::RateLimited { .. })));
+        assert_eq!(
+            repository.find_by_email_calls.load(Ordering::SeqCst),
+            LOGIN_PRINCIPAL_MAX_REQUESTS as usize
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_login_resets_prior_failures() {
+        const PASSWORD: &str = "correct-horse-battery-staple";
+        let (email_service, token_service, session_service) = test_services().await;
+        let email = format!("{}@example.com", Uuid::new_v4());
+        let repository = Arc::new(LoginRepository {
+            user: login_user(email.clone(), PASSWORD),
+            find_by_email_calls: AtomicUsize::new(0),
+        });
+        let user_repo: Arc<dyn UserRepository> = repository;
+
+        for _ in 0..LOGIN_PRINCIPAL_MAX_REQUESTS - 1 {
+            let result = attempt_login(
+                &email,
+                "incorrect-password",
+                "198.51.100.12:12345",
+                user_repo.clone(),
+                email_service.clone(),
+                token_service.clone(),
+                session_service.clone(),
+            )
+            .await;
+            assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+        }
+
+        let response = attempt_login(
+            &email,
+            PASSWORD,
+            "198.51.100.12:12345",
+            user_repo.clone(),
+            email_service.clone(),
+            token_service.clone(),
+            session_service.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(response.status().is_success());
+
+        for _ in 0..LOGIN_PRINCIPAL_MAX_REQUESTS {
+            let result = attempt_login(
+                &email,
+                "incorrect-password",
+                "198.51.100.12:12345",
+                user_repo.clone(),
+                email_service.clone(),
+                token_service.clone(),
+                session_service.clone(),
+            )
+            .await;
+            assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+        }
+
+        let result = attempt_login(
+            &email,
+            PASSWORD,
+            "198.51.100.12:12345",
+            user_repo,
+            email_service,
+            token_service,
+            session_service,
+        )
+        .await;
+        assert!(matches!(result, Err(AuthError::RateLimited { .. })));
+    }
+
+    #[tokio::test]
+    async fn rejected_login_does_not_reach_password_verification() {
+        let (email_service, token_service, session_service) = test_services().await;
+        let email = format!("{}@example.com", Uuid::new_v4());
+        // The failure budget is keyed on (email, peer IP) so an attacker cannot lock a victim
+        // out from another address (finding G3-2); seed the same composite key the handler uses.
+        let principal = format!("email:{}|ip:127.0.0.1", normalized_principal(&email));
+        for _ in 0..LOGIN_PRINCIPAL_MAX_REQUESTS {
+            email_service
+                .record_login_authentication(&principal, false, LOGIN_PRINCIPAL_WINDOW_SECONDS)
+                .await
+                .unwrap();
+        }
+
+        let repository = Arc::new(RejectIfCalledRepository {
+            find_by_email_calls: AtomicUsize::new(0),
+        });
+        let user_repo: Arc<dyn UserRepository> = repository.clone();
+        let request = actix_web::test::TestRequest::default()
+            .peer_addr("127.0.0.1:12345".parse().unwrap())
+            .to_http_request();
+        let result = login(
+            request,
+            web::Json(LoginRequest {
+                email,
+                password: "correct-horse-battery-staple".to_string(),
+            }),
+            web::Data::new(user_repo),
+            web::Data::new(token_service),
+            web::Data::new(session_service),
+            web::Data::new(email_service),
+        )
+        .await;
+
+        assert!(matches!(result, Err(AuthError::RateLimited { .. })));
+        assert_eq!(repository.find_by_email_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn login_verifies_the_password_hash_captured_after_the_token_version() {
+        // Finding G3-1. The login path reads the user, captures token_version, then re-reads the
+        // user so the hash it verifies is never OLDER than the version it will mint at. This
+        // asserts the re-read actually happens and is what gets verified: the repository serves a
+        // STALE hash on the first read (the old password) and the current hash on the re-read, so
+        // a login with the old password must fail. Without the re-read it would succeed, and the
+        // token would be minted at the new version and survive the revocation.
+        const OLD_PASSWORD: &str = "old-correct-horse";
+        const NEW_PASSWORD: &str = "new-correct-horse";
+        let (email_service, token_service, session_service) = test_services().await;
+        let email = format!("{}@example.com", Uuid::new_v4());
+
+        let repository = Arc::new(RereadRepository {
+            stale: login_user(email.clone(), OLD_PASSWORD),
+            current: login_user(email.clone(), NEW_PASSWORD),
+        });
+        let user_repo: Arc<dyn UserRepository> = repository.clone();
+
+        let result = attempt_login(
+            &email,
+            OLD_PASSWORD,
+            "198.51.100.21:12345",
+            user_repo,
+            email_service.clone(),
+            token_service,
+            session_service,
         )
         .await;
 
@@ -966,5 +1447,249 @@ mod tests {
             "the password must be checked against the re-read hash, not the first read; got {:?}",
             result.err()
         );
+    }
+
+    #[tokio::test]
+    async fn exhausted_budget_for_one_ip_does_not_lock_out_another_ip() {
+        // Finding G3-2: with a principal-only failure bucket, an unauthenticated attacker could
+        // burn a victim's budget from anywhere and lock them out of their own account, because
+        // the success path that clears the bucket is unreachable while locked. Keying on
+        // (email, peer IP) means the attacker only ever locks out themselves.
+        const PASSWORD: &str = "correct-horse-battery-staple";
+        let (email_service, token_service, session_service) = test_services().await;
+        let email = format!("{}@example.com", Uuid::new_v4());
+
+        let repository = Arc::new(LoginRepository {
+            user: login_user(email.clone(), PASSWORD),
+            find_by_email_calls: AtomicUsize::new(0),
+        });
+
+        // Drive the attacker's failures THROUGH the handler, so the handler's own keying is what
+        // is under test. Seeding a bucket directly would still pass if the key reverted to email.
+        for _ in 0..LOGIN_PRINCIPAL_MAX_REQUESTS {
+            let user_repo: Arc<dyn UserRepository> = repository.clone();
+            let _ = attempt_login(
+                &email,
+                "wrong-password",
+                "203.0.113.9:12345",
+                user_repo,
+                email_service.clone(),
+                token_service.clone(),
+                session_service.clone(),
+            )
+            .await;
+        }
+
+        // The victim, from their own address with the correct password, must actually SUCCEED --
+        // not merely avoid a rate-limit error.
+        let user_repo: Arc<dyn UserRepository> = repository.clone();
+        let result = attempt_login(
+            &email,
+            PASSWORD,
+            "198.51.100.77:12345",
+            user_repo,
+            email_service.clone(),
+            token_service,
+            session_service,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "the victim must still be able to log in from their own address; got {:?}",
+            result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn clients_behind_a_trusted_proxy_get_separate_failure_budgets() {
+        // G96-t0 behind a load balancer: every client arrives from the proxy's address, so a
+        // budget keyed on the TCP peer collapses to per-email and the lockout DoS returns. With
+        // the proxy trusted, the key uses the client address the proxy forwarded.
+        const PASSWORD: &str = "correct-horse-battery-staple";
+        let (email_service, token_service, session_service) = test_services().await;
+        let email = format!("{}@example.com", Uuid::new_v4());
+        let repository = Arc::new(LoginRepository {
+            user: login_user(email.clone(), PASSWORD),
+            find_by_email_calls: AtomicUsize::new(0),
+        });
+        let trusted_proxies = web::Data::new(TrustedProxies::parse(&["10.0.0.0/8"]).unwrap());
+
+        let mut attempts =
+            vec![("203.0.113.9", "wrong-password"); LOGIN_PRINCIPAL_MAX_REQUESTS as usize + 1];
+        attempts.push(("198.51.100.77", PASSWORD));
+        let mut results = Vec::new();
+        for (forwarded_client, password) in attempts {
+            let user_repo: Arc<dyn UserRepository> = repository.clone();
+            results.push(
+                login(
+                    actix_web::test::TestRequest::default()
+                        .peer_addr("10.0.0.2:443".parse().unwrap())
+                        .insert_header(("X-Forwarded-For", forwarded_client))
+                        .app_data(trusted_proxies.clone())
+                        .to_http_request(),
+                    web::Json(LoginRequest {
+                        email: email.clone(),
+                        password: password.to_string(),
+                    }),
+                    web::Data::new(user_repo),
+                    web::Data::new(token_service.clone()),
+                    web::Data::new(session_service.clone()),
+                    web::Data::new(email_service.clone()),
+                )
+                .await,
+            );
+        }
+
+        let victim = results.pop().unwrap();
+        let attacker_over_budget = results.pop().unwrap();
+        assert!(
+            matches!(attacker_over_budget, Err(AuthError::RateLimited { .. })),
+            "the attacker's own forwarded address must exhaust its budget; got {:?}",
+            attacker_over_budget.err()
+        );
+        assert!(
+            victim.is_ok(),
+            "a different client behind the same proxy must still log in; got {:?}",
+            victim.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn occupied_login_inflight_lock_rejects_password_verification() {
+        const PASSWORD: &str = "correct-horse-battery-staple";
+        let (email_service, token_service, session_service) = test_services().await;
+        let email = format!("{}@example.com", Uuid::new_v4());
+        // The failure budget is keyed on (email, peer IP) so an attacker cannot lock a victim
+        // out from another address (finding G3-2); seed the same composite key the handler uses.
+        // Seed the lock under the SAME peer IP the attempt below uses: the principal is now
+        // (email, peer IP), so a lock held for a different address must not block this one.
+        let principal = format!("email:{}|ip:198.51.100.13", normalized_principal(&email));
+        let lock_token = email_service
+            .acquire_login_inflight_lock(&principal)
+            .await
+            .unwrap();
+        let repository = Arc::new(LoginRepository {
+            user: login_user(email.clone(), PASSWORD),
+            find_by_email_calls: AtomicUsize::new(0),
+        });
+        let user_repo: Arc<dyn UserRepository> = repository.clone();
+
+        let result = attempt_login(
+            &email,
+            "incorrect-password",
+            "198.51.100.13:12345",
+            user_repo,
+            email_service.clone(),
+            token_service,
+            session_service,
+        )
+        .await;
+
+        email_service
+            .release_login_inflight_lock(&principal, &lock_token)
+            .await
+            .unwrap();
+        assert!(matches!(result, Err(AuthError::RateLimited { .. })));
+        assert_eq!(repository.find_by_email_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn signup_validation_precedes_principal_rate_limits() {
+        let (email_service, _, _) = test_services().await;
+        let email = format!("{}@example.com", Uuid::new_v4());
+        let username = format!("{}{}", Uuid::new_v4(), "x".repeat(101));
+        let repository = Arc::new(RejectIfCalledRepository {
+            find_by_email_calls: AtomicUsize::new(0),
+        });
+        let user_repo: Arc<dyn UserRepository> = repository.clone();
+
+        let result = signup(
+            actix_web::test::TestRequest::default()
+                .peer_addr("203.0.113.201:12345".parse().unwrap())
+                .to_http_request(),
+            web::Json(SignupRequest {
+                email: email.clone(),
+                username: username.clone(),
+                password: "correct-horse-battery-staple".to_string(),
+            }),
+            web::Data::new(user_repo),
+            web::Data::new(email_service),
+        )
+        .await;
+
+        assert!(matches!(result, Err(AuthError::Validation(_))));
+        assert_eq!(repository.find_by_email_calls.load(Ordering::SeqCst), 0);
+
+        let client = redis::Client::open("redis://127.0.0.1:6379/").unwrap();
+        let mut conn = redis::aio::ConnectionManager::new(client).await.unwrap();
+        let ip_key_exists: bool = conn
+            .exists("rate_limit:auth:signup:ip:203.0.113.201")
+            .await
+            .unwrap();
+        let email_key_exists: bool = conn
+            .exists(format!("rate_limit:auth:signup:email:{}", email))
+            .await
+            .unwrap();
+        let username_key_exists: bool = conn
+            .exists(format!("rate_limit:auth:signup:username:{}", username))
+            .await
+            .unwrap();
+
+        assert!(ip_key_exists);
+        assert!(!email_key_exists);
+        assert!(!username_key_exists);
+    }
+
+    #[tokio::test]
+    async fn verify_email_validation_precedes_principal_rate_limit() {
+        let (email_service, token_service, session_service) = test_services().await;
+        let email = format!("{}{}@example.com", Uuid::new_v4().simple(), "x".repeat(40));
+        let repository = Arc::new(RejectIfCalledRepository {
+            find_by_email_calls: AtomicUsize::new(0),
+        });
+        let user_repo: Arc<dyn UserRepository> = repository.clone();
+
+        let result = verify_email_with_otp(
+            actix_web::test::TestRequest::default()
+                .peer_addr("203.0.113.202:12345".parse().unwrap())
+                .to_http_request(),
+            web::Json(VerifyEmailRequest {
+                email: email.clone(),
+                otp: "123456".to_string(),
+            }),
+            web::Data::new(user_repo),
+            web::Data::new(email_service),
+            web::Data::new(token_service),
+            web::Data::new(session_service),
+        )
+        .await;
+
+        assert!(matches!(result, Err(AuthError::Validation(_))));
+        assert_eq!(repository.find_by_email_calls.load(Ordering::SeqCst), 0);
+
+        let client = redis::Client::open("redis://127.0.0.1:6379/").unwrap();
+        let mut conn = redis::aio::ConnectionManager::new(client).await.unwrap();
+        let ip_key_exists: bool = conn
+            .exists("rate_limit:auth:verify_email:ip:203.0.113.202")
+            .await
+            .unwrap();
+        let email_key_exists: bool = conn
+            .exists(format!("rate_limit:auth:verify_email:email:{}", email))
+            .await
+            .unwrap();
+
+        assert!(ip_key_exists);
+        assert!(!email_key_exists);
+    }
+
+    #[test]
+    fn client_ip_uses_peer_address_not_forwarded_header() {
+        let request = actix_web::test::TestRequest::default()
+            .peer_addr("192.0.2.10:12345".parse().unwrap())
+            .insert_header(("X-Forwarded-For", "198.51.100.7"))
+            .to_http_request();
+
+        assert_eq!(client_ip(&request), "192.0.2.10");
     }
 }

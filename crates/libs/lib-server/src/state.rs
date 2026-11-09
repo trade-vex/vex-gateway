@@ -16,7 +16,7 @@ use lib_core::{
 };
 use lib_middleware::api_key::middleware::CacheConfig;
 use lib_middleware::{
-    ApiKeyMiddleware, SecurityType,
+    ApiKeyMiddleware, SecurityType, TrustedProxies,
     repository::api_key_repository::{ApiKeyRepository, PostgresApiKeyRepository},
 };
 use redis::aio::ConnectionManager;
@@ -62,6 +62,9 @@ pub struct AppState {
     // API key middleware for dynamic updates
     pub api_key_middleware: ApiKeyMiddleware,
 
+    // Proxies whose X-Forwarded-For is believed when resolving the client IP
+    pub trusted_proxies: TrustedProxies,
+
     // Correlation service for matching responses to requests
     pub correlation_service: Arc<CorrelationService>,
 
@@ -78,6 +81,7 @@ impl AppState {
         correlation_service: CorrelationService,
     ) -> Result<Arc<Self>, Box<dyn std::error::Error + Send + Sync>> {
         info!("Initializing App State");
+        let trusted_proxies = config.server.parsed_trusted_proxies()?;
 
         // Initialize database connection
         let db = Arc::new(Self::init_database(&config.database).await?);
@@ -188,6 +192,7 @@ impl AppState {
             session_service,
             gateway_publisher: Arc::new(gateway_publisher),
             api_key_middleware,
+            trusted_proxies,
             api_key_repository,
             portfolio_repository,
             trading_repository: trading_repo,
@@ -380,5 +385,26 @@ mod tests {
         let url = "not a valid url";
         let sanitized = AppState::sanitize_url(url);
         assert_eq!(sanitized, "<invalid-url>");
+    }
+
+    #[test]
+    fn development_without_trusted_proxies_uses_the_peer_ip() {
+        let mut config = lib_config::Config::load_development_defaults();
+        config.auth.server.trusted_proxies = Vec::new();
+        config
+            .validate()
+            .expect("development needs no trusted proxies");
+
+        // The same parse AppState::new applies to the configured list.
+        let trusted_proxies = config.auth.server.parsed_trusted_proxies().unwrap();
+        let req = actix_web::test::TestRequest::default()
+            .peer_addr("192.0.2.10:1234".parse().unwrap())
+            .append_header(("X-Forwarded-For", "203.0.113.20"))
+            .to_http_request();
+
+        assert_eq!(
+            trusted_proxies.client_ip(&req),
+            Some("192.0.2.10".parse().unwrap())
+        );
     }
 }

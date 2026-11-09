@@ -2,6 +2,7 @@ use crate::dto::auth_request_dto::{OAuthCallbackQuery, OAuthExchangeRequest, OAu
 use crate::dto::auth_response_dto::OAuthExchangeResponse;
 use crate::error::auth_error::AuthError;
 use crate::service::{
+    email_service::EmailService,
     oauth_service::{OAuthCallbackMeta, OAuthService},
     session_service::SessionService,
 };
@@ -11,6 +12,7 @@ use actix_web::{
     cookie::{Cookie, SameSite, time::Duration},
     web,
 };
+use lib_middleware::client_ip::client_ip;
 use serde_json;
 use std::sync::Arc;
 use tracing::error;
@@ -27,6 +29,13 @@ pub(crate) fn validate_callback_state_cookie(
     Ok(())
 }
 
+const OAUTH_INIT_RATE_LIMIT_SCOPE: &str = "oauth_initiate";
+const OAUTH_CALLBACK_RATE_LIMIT_SCOPE: &str = "oauth_callback";
+// `client_ip` honours X-Forwarded-For only from configured trusted proxies (TRUSTED_PROXIES).
+// This loose limit is a coarse flood guard.
+const OAUTH_IP_MAX_REQUESTS: u64 = 300;
+const OAUTH_IP_WINDOW_SECONDS: u64 = 5 * 60;
+
 /// Initiate OAuth flow
 /// GET /oauth/{provider}?platform=app|web&app_challenge=...
 ///
@@ -40,7 +49,17 @@ pub async fn initiate_oauth(
     provider: web::Path<String>,
     query: web::Query<OAuthInitQuery>,
     oauth_service: web::Data<Arc<OAuthService>>,
+    email_service: web::Data<Arc<EmailService>>,
 ) -> Result<HttpResponse, AuthError> {
+    email_service
+        .enforce_rate_limit(
+            OAUTH_INIT_RATE_LIMIT_SCOPE,
+            &format!("ip:{}", client_ip(&req)),
+            OAUTH_IP_MAX_REQUESTS,
+            OAUTH_IP_WINDOW_SECONDS,
+        )
+        .await?;
+
     let platform = query.platform.as_deref();
     let app_challenge = query.app_challenge.as_deref();
 
@@ -92,7 +111,17 @@ pub async fn handle_oauth_callback(
     query: web::Query<OAuthCallbackQuery>,
     oauth_service: web::Data<Arc<OAuthService>>,
     session_service: web::Data<Arc<SessionService>>,
+    email_service: web::Data<Arc<EmailService>>,
 ) -> Result<HttpResponse, AuthError> {
+    email_service
+        .enforce_rate_limit(
+            OAUTH_CALLBACK_RATE_LIMIT_SCOPE,
+            &format!("ip:{}", client_ip(&req)),
+            OAUTH_IP_MAX_REQUESTS,
+            OAUTH_IP_WINDOW_SECONDS,
+        )
+        .await?;
+
     // Validate that the OAuth code is present and non-empty
     let code = query
         .code

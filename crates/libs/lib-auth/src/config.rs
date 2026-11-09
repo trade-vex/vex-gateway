@@ -1,3 +1,4 @@
+use lib_middleware::TrustedProxies;
 use secrecy::SecretString;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -60,6 +61,19 @@ pub struct ServerConfig {
     pub base_url: String,
     pub port: u16,
     pub frontend_url: String,
+    /// Proxy addresses or CIDR ranges whose `X-Forwarded-For` is believed when resolving the
+    /// client IP for rate limits. Empty trusts none (the TCP peer is used); production requires
+    /// at least one (lib-config validation). Overridden by `TRUSTED_PROXIES` (comma-separated).
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
+}
+
+impl ServerConfig {
+    /// `trusted_proxies`, parsed. The error names an invalid entry by its position, never by its
+    /// value.
+    pub fn parsed_trusted_proxies(&self) -> Result<TrustedProxies, String> {
+        TrustedProxies::parse(&self.trusted_proxies)
+    }
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -140,6 +154,9 @@ impl AuthConfig {
         if let Ok(frontend_url) = env::var("FRONTEND_URL") {
             config.server.frontend_url = frontend_url;
         }
+        if let Some(trusted_proxies) = trusted_proxies_from_env() {
+            config.server.trusted_proxies = trusted_proxies;
+        }
 
         Ok(config)
     }
@@ -185,6 +202,7 @@ impl AuthConfig {
                 base_url: "http://localhost:8081".to_string(),
                 port: 8081,
                 frontend_url: "http://localhost:3000".to_string(),
+                trusted_proxies: Vec::new(),
             },
             otp: OtpConfig {
                 otp_length: 6,
@@ -314,8 +332,21 @@ impl ServerConfig {
                 .parse()?,
             frontend_url: env::var("FRONTEND_URL")
                 .unwrap_or_else(|_| "http://localhost:3000".to_string()),
+            trusted_proxies: trusted_proxies_from_env().unwrap_or_default(),
         })
     }
+}
+
+/// `TRUSTED_PROXIES`, a comma-separated list of proxy addresses or CIDR ranges, if set.
+pub fn trusted_proxies_from_env() -> Option<Vec<String>> {
+    env::var("TRUSTED_PROXIES").ok().map(|value| {
+        value
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_string)
+            .collect()
+    })
 }
 
 impl EmailConfig {

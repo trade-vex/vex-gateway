@@ -14,8 +14,17 @@ use secrecy::ExposeSecret;
 const OTP_KEY_PREFIX: &str = "otp:verification:";
 const PASSWORD_RESET_OTP_PREFIX: &str = "otp:password_reset:";
 const PASSWORD_RESET_TOKEN_PREFIX: &str = "password_reset:";
-const RATE_LIMIT_PASSWORD_RESET_PREFIX: &str = "rate_limit:password_reset:";
-const RATE_LIMIT_OTP_VERIFY_PREFIX: &str = "rate_limit:otp_verify:";
+const AUTH_RATE_LIMIT_PREFIX: &str = "rate_limit:auth:";
+const LOGIN_INFLIGHT_PREFIX: &str = "auth_rl:login_inflight:";
+const LOGIN_INFLIGHT_TTL_SECONDS: u64 = 5;
+const OTP_VERIFY_ATTEMPT_PREFIX: &str = "otp:verification_attempts:";
+const OTP_VERIFY_MAX_ATTEMPTS: u64 = 5;
+const PASSWORD_RESET_RATE_LIMIT_SCOPE: &str = "password_reset";
+const PASSWORD_RESET_MAX_REQUESTS: u64 = 3;
+const PASSWORD_RESET_WINDOW_SECONDS: u64 = 60 * 60;
+const PASSWORD_RESET_OTP_RATE_LIMIT_SCOPE: &str = "password_reset_otp";
+const PASSWORD_RESET_OTP_MAX_REQUESTS: u64 = 5;
+const PASSWORD_RESET_OTP_WINDOW_SECONDS: u64 = 15 * 60;
 
 #[derive(Clone)]
 pub struct EmailService {
@@ -137,8 +146,12 @@ impl EmailService {
             key,
             expiry_seconds_u64
         );
-        let _: () = conn
+        let attempt_key = format!("{}{}", OTP_VERIFY_ATTEMPT_PREFIX, email);
+        let _: () = redis::pipe()
+            .atomic()
             .set_ex(&key, otp, expiry_seconds_u64)
+            .del(attempt_key)
+            .query_async(&mut conn)
             .await
             .map_err(|e| {
                 tracing::error!("Failed to store OTP in Redis: {}", e);
@@ -361,24 +374,234 @@ The Team"#,
         let mut conn = self.conn.clone();
 
         let key = format!("{}{}", OTP_KEY_PREFIX, email);
+        let attempt_key = format!("{}{}", OTP_VERIFY_ATTEMPT_PREFIX, email);
+        let result: (u8, u64, i64) = redis::Script::new(
+            r#"
+local otp = redis.call('GET', KEYS[1])
+if not otp then
+    return {0, 0, 0}
+end
 
-        let stored_otp: Option<String> = conn
-            .get(&key)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get OTP: {}", e)))?;
+if otp == ARGV[1] then
+    redis.call('DEL', KEYS[1], KEYS[2])
+    return {1, 0, 0}
+end
 
-        match stored_otp {
-            Some(otp) if otp == submitted_otp => {
-                // Delete OTP after successful verification
-                let _: () = conn
-                    .del(&key)
-                    .await
-                    .map_err(|e| AuthError::Redis(format!("Failed to delete OTP: {}", e)))?;
-                Ok(())
-            }
-            Some(_) => Err(AuthError::InvalidOtp),
-            None => Err(AuthError::OtpExpired),
+local ttl = redis.call('TTL', KEYS[1])
+local attempts = redis.call('INCR', KEYS[2])
+if attempts == 1 and ttl > 0 then
+    redis.call('EXPIRE', KEYS[2], ttl)
+end
+
+if attempts >= tonumber(ARGV[2]) then
+    redis.call('DEL', KEYS[1])
+    return {3, attempts, ttl}
+end
+
+return {2, attempts, ttl}
+"#,
+        )
+        .key(&key)
+        .key(&attempt_key)
+        .arg(submitted_otp)
+        .arg(OTP_VERIFY_MAX_ATTEMPTS)
+        .invoke_async(&mut conn)
+        .await
+        .map_err(|e| AuthError::Redis(format!("Failed to verify OTP: {}", e)))?;
+
+        match result.0 {
+            0 => Err(AuthError::OtpExpired),
+            1 => Ok(()),
+            2 => Err(AuthError::InvalidOtp),
+            3 => Err(AuthError::RateLimited {
+                retry_after_seconds: result.2.max(1) as u64,
+            }),
+            _ => Err(AuthError::InternalError(
+                "Unexpected OTP verification result".to_string(),
+            )),
         }
+    }
+
+    /// Enforce a fixed-window Redis-backed rate limit.
+    /// Redis failures are returned to the handler so authentication fails closed.
+    pub async fn enforce_rate_limit(
+        &self,
+        scope: &str,
+        identity: &str,
+        max_requests: u64,
+        window_seconds: u64,
+    ) -> Result<(), AuthError> {
+        let mut conn = self.conn.clone();
+        let key = format!(
+            "{}{}:{}",
+            AUTH_RATE_LIMIT_PREFIX,
+            scope,
+            identity.trim().to_ascii_lowercase()
+        );
+        let result = redis::Script::new(
+            r#"
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+local ttl = redis.call('TTL', KEYS[1])
+return {count, ttl}
+"#,
+        )
+        .key(key)
+        .arg(window_seconds)
+        .invoke_async(&mut conn)
+        .await;
+
+        Self::rate_limit_result(result, max_requests, window_seconds)
+    }
+
+    /// Reject a login before password verification when its failure budget is exhausted.
+    pub async fn check_login_failure_rate_limit(
+        &self,
+        identity: &str,
+        max_failures: u64,
+        window_seconds: u64,
+    ) -> Result<(), AuthError> {
+        let mut conn = self.conn.clone();
+        let key = format!(
+            "{}login:{}",
+            AUTH_RATE_LIMIT_PREFIX,
+            identity.trim().to_ascii_lowercase()
+        );
+        let result: redis::RedisResult<(u64, i64)> = redis::Script::new(
+            r#"
+local count = tonumber(redis.call('GET', KEYS[1]) or '0')
+local ttl = redis.call('TTL', KEYS[1])
+return {count, ttl}
+"#,
+        )
+        .key(key)
+        .invoke_async(&mut conn)
+        .await;
+        let (count, ttl) = result.map_err(|e| {
+            AuthError::Redis(format!("Failed to check login failure rate limit: {}", e))
+        })?;
+
+        if count >= max_failures {
+            return Err(AuthError::RateLimited {
+                retry_after_seconds: if ttl > 0 { ttl as u64 } else { window_seconds },
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Reserve password verification for one request per login principal.
+    pub async fn acquire_login_inflight_lock(&self, identity: &str) -> Result<String, AuthError> {
+        let mut conn = self.conn.clone();
+        let key = format!(
+            "{}{}",
+            LOGIN_INFLIGHT_PREFIX,
+            identity.trim().to_ascii_lowercase()
+        );
+        let token = Uuid::new_v4().to_string();
+        let acquired: Option<String> = redis::cmd("SET")
+            .arg(key)
+            .arg(&token)
+            .arg("NX")
+            .arg("EX")
+            .arg(LOGIN_INFLIGHT_TTL_SECONDS)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| {
+                AuthError::Redis(format!("Failed to acquire login in-flight lock: {}", e))
+            })?;
+
+        if acquired.is_none() {
+            return Err(AuthError::RateLimited {
+                retry_after_seconds: LOGIN_INFLIGHT_TTL_SECONDS,
+            });
+        }
+
+        Ok(token)
+    }
+
+    /// Release a login reservation only if it is still owned by this request.
+    pub async fn release_login_inflight_lock(
+        &self,
+        identity: &str,
+        token: &str,
+    ) -> Result<(), AuthError> {
+        let mut conn = self.conn.clone();
+        let key = format!(
+            "{}{}",
+            LOGIN_INFLIGHT_PREFIX,
+            identity.trim().to_ascii_lowercase()
+        );
+        let _: u64 = redis::Script::new(
+            r#"
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+end
+return 0
+"#,
+        )
+        .key(key)
+        .arg(token)
+        .invoke_async(&mut conn)
+        .await
+        .map_err(|e| AuthError::Redis(format!("Failed to release login in-flight lock: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Atomically record a failed login or clear prior failures after authentication succeeds.
+    pub async fn record_login_authentication(
+        &self,
+        identity: &str,
+        authenticated: bool,
+        window_seconds: u64,
+    ) -> Result<(), AuthError> {
+        let mut conn = self.conn.clone();
+        let key = format!(
+            "{}login:{}",
+            AUTH_RATE_LIMIT_PREFIX,
+            identity.trim().to_ascii_lowercase()
+        );
+        let result: redis::RedisResult<u64> = redis::Script::new(
+            r#"
+if ARGV[2] == '1' then
+    return redis.call('DEL', KEYS[1])
+end
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return count
+"#,
+        )
+        .key(key)
+        .arg(window_seconds)
+        .arg(u8::from(authenticated))
+        .invoke_async(&mut conn)
+        .await;
+
+        result
+            .map(|_| ())
+            .map_err(|e| AuthError::Redis(format!("Failed to record login authentication: {}", e)))
+    }
+
+    fn rate_limit_result(
+        result: redis::RedisResult<(u64, i64)>,
+        max_requests: u64,
+        window_seconds: u64,
+    ) -> Result<(), AuthError> {
+        let (count, ttl) =
+            result.map_err(|e| AuthError::Redis(format!("Failed to enforce rate limit: {}", e)))?;
+
+        if count > max_requests {
+            return Err(AuthError::RateLimited {
+                retry_after_seconds: if ttl > 0 { ttl as u64 } else { window_seconds },
+            });
+        }
+
+        Ok(())
     }
 
     /// checking if OTP exists and is not expired
@@ -526,72 +749,26 @@ The Team"#,
         }
     }
 
-    /// Check rate limit for password reset requests
-    /// Returns true if rate limit is exceeded
-    pub async fn check_password_reset_rate_limit(&self, email: &str) -> Result<bool, AuthError> {
-        let mut conn = self.conn.clone();
-
-        let key = format!("{}{}", RATE_LIMIT_PASSWORD_RESET_PREFIX, email);
-        let count: Option<u64> = conn
-            .get(&key)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get rate limit: {}", e)))?;
-        let count = count.unwrap_or(0);
-
-        // Max 3 requests per hour
-        if count >= 3 {
-            return Ok(true);
-        }
-
-        // Increment counter
-        let _: () = conn
-            .incr(&key, 1)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to increment rate limit: {}", e)))?;
-
-        // Set TTL to 1 hour if this is the first request
-        if count == 0 {
-            let _: () = conn
-                .expire(&key, 3600)
-                .await
-                .map_err(|e| AuthError::Redis(format!("Failed to set rate limit TTL: {}", e)))?;
-        }
-
-        Ok(false)
+    /// Enforce the existing password-reset request limit.
+    pub async fn enforce_password_reset_rate_limit(&self, email: &str) -> Result<(), AuthError> {
+        self.enforce_rate_limit(
+            PASSWORD_RESET_RATE_LIMIT_SCOPE,
+            email,
+            PASSWORD_RESET_MAX_REQUESTS,
+            PASSWORD_RESET_WINDOW_SECONDS,
+        )
+        .await
     }
 
-    /// Check rate limit for OTP verification attempts
-    /// Returns true if rate limit is exceeded
-    async fn check_otp_verify_rate_limit(&self, email: &str) -> Result<bool, AuthError> {
-        let mut conn = self.conn.clone();
-
-        let key = format!("{}{}", RATE_LIMIT_OTP_VERIFY_PREFIX, email);
-        let count: Option<u64> = conn
-            .get(&key)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get rate limit: {}", e)))?;
-        let count = count.unwrap_or(0);
-
-        // Max 5 attempts per OTP lifetime is 15 min
-        if count >= 5 {
-            return Ok(true);
-        }
-
-        // Increment counter
-        let _: () = conn
-            .incr(&key, 1)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to increment rate limit: {}", e)))?;
-
-        // Set TTL to 15 min if this is the first attempt
-        if count == 0 {
-            let _: () = conn
-                .expire(&key, 900) // 15 minutes
-                .await
-                .map_err(|e| AuthError::Redis(format!("Failed to set rate limit TTL: {}", e)))?;
-        }
-
-        Ok(false)
+    /// Enforce the existing password-reset OTP verification limit.
+    async fn enforce_password_reset_otp_rate_limit(&self, email: &str) -> Result<(), AuthError> {
+        self.enforce_rate_limit(
+            PASSWORD_RESET_OTP_RATE_LIMIT_SCOPE,
+            email,
+            PASSWORD_RESET_OTP_MAX_REQUESTS,
+            PASSWORD_RESET_OTP_WINDOW_SECONDS,
+        )
+        .await
     }
 
     /// Store password reset OTP in Redis
@@ -718,13 +895,7 @@ The Team"#,
         email: &str,
         submitted_otp: &str,
     ) -> Result<(), AuthError> {
-        // Check rate limit
-        if self.check_otp_verify_rate_limit(email).await? {
-            return Err(AuthError::Validation(
-                "Too many OTP verification attempts. Please request a new password reset."
-                    .to_string(),
-            ));
-        }
+        self.enforce_password_reset_otp_rate_limit(email).await?;
 
         let mut conn = self.conn.clone();
 
@@ -744,7 +915,12 @@ The Team"#,
                     .map_err(|e| AuthError::Redis(format!("Failed to delete OTP: {}", e)))?;
 
                 // Clean up OTP verification rate limit since OTP is no longer valid
-                let rate_limit_key = format!("{}{}", RATE_LIMIT_OTP_VERIFY_PREFIX, email);
+                let rate_limit_key = format!(
+                    "{}{}:{}",
+                    AUTH_RATE_LIMIT_PREFIX,
+                    PASSWORD_RESET_OTP_RATE_LIMIT_SCOPE,
+                    email.trim().to_ascii_lowercase()
+                );
                 let _: () = conn
                     .del(&rate_limit_key)
                     .await
@@ -815,5 +991,83 @@ The Team"#,
             .map_err(|e| AuthError::Redis(format!("Failed to store reset token: {}", e)))?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::EmailConfig;
+    use secrecy::SecretString;
+
+    async fn email_service() -> EmailService {
+        let client = redis::Client::open("redis://127.0.0.1:6379/").unwrap();
+        let conn = ConnectionManager::new(client).await.unwrap();
+        let config = EmailConfig {
+            smtp_host: "127.0.0.1".to_string(),
+            smtp_port: 2525,
+            smtp_username: "test".to_string(),
+            smtp_password: SecretString::new("test".to_string()),
+            from_email: "test@example.com".to_string(),
+        };
+
+        EmailService::new(&config, conn, 6, 15).unwrap()
+    }
+
+    #[tokio::test]
+    async fn rate_limit_triggers_after_boundary() {
+        let service = email_service().await;
+        let identity = Uuid::new_v4().to_string();
+
+        for _ in 0..3 {
+            service
+                .enforce_rate_limit("test_boundary", &identity, 3, 60)
+                .await
+                .unwrap();
+        }
+
+        let result = service
+            .enforce_rate_limit("test_boundary", &identity, 3, 60)
+            .await;
+        assert!(matches!(
+            result,
+            Err(AuthError::RateLimited {
+                retry_after_seconds: 1..=60
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn verification_otp_is_invalidated_at_attempt_cap() {
+        let service = email_service().await;
+        let email = format!("{}@example.com", Uuid::new_v4());
+        service.store_otp(&email, "123456").await.unwrap();
+
+        for _ in 0..OTP_VERIFY_MAX_ATTEMPTS - 1 {
+            assert!(matches!(
+                service.verify_otp(&email, "000000").await,
+                Err(AuthError::InvalidOtp)
+            ));
+        }
+
+        assert!(matches!(
+            service.verify_otp(&email, "000000").await,
+            Err(AuthError::RateLimited { .. })
+        ));
+        assert!(matches!(
+            service.verify_otp(&email, "123456").await,
+            Err(AuthError::OtpExpired)
+        ));
+
+        service.store_otp(&email, "654321").await.unwrap();
+        service.verify_otp(&email, "654321").await.unwrap();
+    }
+
+    #[test]
+    fn redis_failure_rejects_rate_limited_operation() {
+        let redis_error = redis::RedisError::from((redis::ErrorKind::Io, "Redis unavailable"));
+        let result = EmailService::rate_limit_result(Err(redis_error), 5, 60);
+
+        assert!(matches!(result, Err(AuthError::Redis(_))));
     }
 }

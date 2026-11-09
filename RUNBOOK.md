@@ -77,6 +77,9 @@ LOCAL_ADDRESS=0.0.0.0
 
 # Frontend (for OAuth redirects)
 FRONTEND_URL=https://your-frontend-domain.com
+
+# Load balancer subnet CIDR ranges; required in production (see "Client IP Behind a Proxy")
+TRUSTED_PROXIES=10.0.1.0/24,10.0.2.0/24
 ```
 
 ---
@@ -100,9 +103,38 @@ Configuration is loaded from TOML files in the `config/` directory:
 ### Configuration Validation
 
 The service validates configuration on startup:
-- **Production**: Cannot bind to localhost, cannot use debug logging, port must be > 0
+- **Production**: Cannot bind to localhost, cannot use debug logging, port must be > 0,
+  `TRUSTED_PROXIES` must not be empty
 - **Development**: More lenient validation
 - **Testing**: Allows ephemeral ports (port 0)
+
+### Client IP Behind a Proxy
+
+Login, signup, email-verification and OAuth rate limits key on the client IP. By default that is
+the TCP peer, so behind a load balancer every client shares the balancer's address: one client's
+failed logins then lock that email out for everyone.
+
+Set `TRUSTED_PROXIES` (or `auth.server.trusted_proxies` in the TOML file) to the comma-separated
+addresses or CIDR ranges of the proxies in front of the gateway. Only for a request whose TCP peer
+is in that list is `X-Forwarded-For` read, from the right; the first hop that is not itself a
+trusted proxy is the client. List only proxies that append to `X-Forwarded-For`: a listed address
+that forwards a client's header unchanged lets that client choose its own IP. An invalid entry
+stops the gateway at startup.
+
+With `APP_ENV=production` the list is required: the gateway refuses to start when it is empty.
+Development and testing default to an empty list, so the TCP peer is the client.
+
+Production runs behind an AWS Application Load Balancer (ALB):
+
+- Set `TRUSTED_PROXIES` to the CIDR ranges of the ALB's subnets. ALB nodes take their addresses
+  from those subnets and the addresses change, so list the subnets, not node IPs.
+- The gateway's security group must accept inbound traffic only from the ALB's security group.
+  Anything else that could connect from inside those subnets would be trusted, and could set its
+  own `X-Forwarded-For` to choose its client IP.
+- Keep the ALB attribute `routing.http.xff_header_processing.mode` at `append` (the default).
+  `preserve` forwards the client's header unchanged and `remove` drops it.
+- Keep `routing.http.xff_client_port.enabled` at `false` (the default). With it on, the ALB appends
+  `ip:port`, which is not a bare IP, so every client resolves to the ALB's address.
 
 ### Generate JWT Keys
 

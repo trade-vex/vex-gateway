@@ -167,6 +167,9 @@ impl Config {
                 config.auth.server.frontend_url = frontend_url;
             }
         }
+        if let Some(trusted_proxies) = lib_auth::config::trusted_proxies_from_env() {
+            config.auth.server.trusted_proxies = trusted_proxies;
+        }
 
         // Log what we loaded before validation
         debug!("Loaded configuration before validation:");
@@ -270,11 +273,13 @@ impl Config {
     /// - Max connections cannot be 0
     /// - Connection timeout cannot be 0
     /// - Log level must be valid
+    /// - Every `auth.server.trusted_proxies` entry must be an IP address or CIDR range
     ///
     /// ## Production Environment
     /// - Server port cannot be 0 (must be explicitly configured)
     /// - Cannot bind to localhost (127.0.0.1 or localhost)
     /// - Cannot use trace or debug logging levels
+    /// - Trusted proxies (`TRUSTED_PROXIES`) cannot be empty: production runs behind a load balancer
     ///
     /// ## Development Environment
     /// - Max connections should be reasonable (< 10000)
@@ -293,6 +298,13 @@ impl Config {
 
         // Validate logging configuration
         self.logging.validate()?;
+
+        // Parsed here, before any network startup, though only AppState::new uses the result.
+        if let Err(e) = self.auth.server.parsed_trusted_proxies() {
+            return Err(ConfigError::ValidationError(format!(
+                "auth.server.trusted_proxies: {e}"
+            )));
+        }
 
         // Environment-specific validations
         match self.environment {
@@ -316,6 +328,16 @@ impl Config {
                 if log_level == "trace" || log_level == "debug" {
                     return Err(ConfigError::ValidationError(
                         "Production environment should not use trace or debug logging".to_string(),
+                    ));
+                }
+
+                // Behind the load balancer every TCP peer is the balancer, so without its
+                // addresses all clients would share one rate-limit key.
+                if self.auth.server.trusted_proxies.is_empty() {
+                    return Err(ConfigError::ValidationError(
+                        "Production environment requires TRUSTED_PROXIES (the load balancer's \
+                         addresses or CIDR ranges)"
+                            .to_string(),
                     ));
                 }
             }
@@ -453,12 +475,44 @@ mod tests {
 
         // Test production validation
         config.environment = Environment::Production;
+        config.auth.server.trusted_proxies = vec!["10.0.0.0/16".to_string()];
         config.server.host = "127.0.0.1".to_string();
         assert!(config.validate().is_err());
 
         config.server.host = "0.0.0.0".to_string();
         config.logging.level = "debug".to_string();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_production_requires_trusted_proxies() {
+        let mut config = Config::load_development_defaults();
+        config.environment = Environment::Production;
+        config.server.host = "0.0.0.0".to_string();
+        config.logging.level = "info".to_string();
+        config.auth.server.trusted_proxies = Vec::new();
+
+        let error = config.validate().unwrap_err();
+        assert!(
+            error.to_string().contains("TRUSTED_PROXIES"),
+            "unexpected error: {error}"
+        );
+
+        config.auth.server.trusted_proxies = vec!["10.0.0.0/16".to_string()];
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_invalid_trusted_proxy_stops_loading_without_showing_it() {
+        let mut config = Config::load_development_defaults();
+        config.auth.server.trusted_proxies =
+            vec!["10.0.0.0/8".to_string(), "proxy.internal".to_string()];
+
+        assert_eq!(
+            config.validate().unwrap_err().to_string(),
+            "Configuration validation failed: auth.server.trusted_proxies: entry 2 is not an IP \
+             address or CIDR range"
+        );
     }
 
     #[test]
@@ -491,6 +545,7 @@ mod tests {
         // Test that port 0 is rejected in production environment
         let mut production_config = Config::load_development_defaults();
         production_config.environment = Environment::Production;
+        production_config.auth.server.trusted_proxies = vec!["10.0.0.0/16".to_string()];
         production_config.server.port = 0;
         production_config.server.host = "0.0.0.0".to_string();
         production_config.logging.level = "info".to_string();
