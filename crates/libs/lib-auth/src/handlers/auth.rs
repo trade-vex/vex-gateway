@@ -310,7 +310,8 @@ pub async fn verify_email_with_otp(
             AuthError::Redis(format!("Failed to create session: {}", e))
         })?;
 
-    tracing::debug!("Session created successfully: {}", session_id);
+    // Never log the session id: it is a bearer credential (see combined_auth.rs).
+    tracing::debug!("Session created successfully");
 
     // Create session cookie
     let (is_secure, cookie_ttl) = get_cookie_config();

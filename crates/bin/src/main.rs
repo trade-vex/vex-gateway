@@ -6,7 +6,7 @@
 use lib_config::Config;
 use lib_server::{CorrelationHandler, CorrelationService};
 use tracing::{error, info};
-use tracing_subscriber::{filter::LevelFilter, fmt};
+use tracing_subscriber::{EnvFilter, filter::LevelFilter, fmt};
 use vex_config::GatewayNetworkingConfig;
 use vex_networking::client::VexGateway;
 
@@ -47,16 +47,22 @@ async fn main() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
-    // Initialize logging
-    fmt()
-        .with_max_level(
-            config
-                .logging
-                .level
-                .parse::<LevelFilter>()
-                .unwrap_or(LevelFilter::INFO),
-        )
-        .init();
+    // Initialize logging.
+    //
+    // The ORM and driver targets are capped at INFO regardless of the configured application
+    // level: at DEBUG/TRACE, SeaORM's instrumented query spans record the `Statement` arguments,
+    // which for an API-key insert are the plaintext key and its HMAC signing secret. That path
+    // bypasses the redacted `Debug` impls on ApiKeyConfig/KeyMaterial entirely, so the cap is the
+    // only thing keeping credentials out of the log (finding G1-1).
+    let app_level = config
+        .logging
+        .level
+        .parse::<LevelFilter>()
+        .unwrap_or(LevelFilter::INFO);
+    let filter = EnvFilter::new(format!(
+        "{app_level},sea_orm=info,sqlx=info,sqlx::query=warn"
+    ));
+    fmt().with_env_filter(filter).init();
 
     info!("Starting VEX Gateway Service");
 
