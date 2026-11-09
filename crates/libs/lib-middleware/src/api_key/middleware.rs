@@ -595,31 +595,6 @@ impl ApiKeyMiddleware {
             .ok_or(ApiKeyError::MissingApiKey)
     }
 
-    /// Extract client IP address
-    fn extract_client_ip(req: &HttpRequest) -> String {
-        // Check X-Forwarded-For header first (for proxies)
-        if let Some(forwarded) = req.headers().get("X-Forwarded-For") {
-            if let Ok(forwarded_str) = forwarded.to_str() {
-                if let Some(first_ip) = forwarded_str.split(',').next() {
-                    return first_ip.trim().to_string();
-                }
-            }
-        }
-
-        // Check X-Real-IP header (nginx)
-        if let Some(real_ip) = req.headers().get("X-Real-IP") {
-            if let Ok(real_ip_str) = real_ip.to_str() {
-                return real_ip_str.to_string();
-            }
-        }
-
-        // Fall back to connection info
-        req.connection_info()
-            .peer_addr()
-            .unwrap_or("unknown")
-            .to_string()
-    }
-
     /// Validate signature based on the API key's algorithm
     fn validate_signature(
         api_config: &ApiKeyConfig,
@@ -902,7 +877,7 @@ where
             }
 
             // Validate IP blacklist
-            let client_ip = ApiKeyMiddleware::extract_client_ip(req.request());
+            let client_ip = crate::client_ip::client_ip(req.request());
             if !api_config.is_ip_allowed(&client_ip) {
                 warn!(
                     "IP {} is blacklisted for API key: {}",
@@ -1162,5 +1137,54 @@ mod tests {
         let cache = store.l1_cache.write(API_KEY);
         assert!(cache.entries.peek(API_KEY).is_none());
         assert!(!cache.invalidation_epochs.contains_key(API_KEY));
+    }
+
+    use actix_web::test::TestRequest;
+    use std::net::SocketAddr;
+
+    #[test]
+    fn forged_forwarded_headers_do_not_change_ip_used_for_access_control() {
+        let request = TestRequest::default()
+            .peer_addr(SocketAddr::from(([192, 0, 2, 10], 12345)))
+            .insert_header(("X-Forwarded-For", "203.0.113.20"))
+            .insert_header(("X-Real-IP", "203.0.113.21"))
+            .to_http_request();
+
+        assert_eq!(crate::client_ip::client_ip(&request), "192.0.2.10");
+    }
+
+    #[actix_web::test]
+    async fn ip_blacklist_applies_to_the_client_behind_a_trusted_proxy() {
+        let api_key = ApiKeyConfig::new("proxied-key".to_string())
+            .with_hmac_secret("proxied-secret".to_string())
+            .with_permissions(vec![SecurityType::Trade])
+            .with_ip_blacklist(vec!["198.51.100.7".to_string()]);
+        let middleware = ApiKeyMiddleware::new()
+            .with_api_key(api_key)
+            .with_default_security(SecurityType::Trade);
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(
+                    crate::client_ip::TrustedProxies::parse(&["10.0.0.0/8"]).unwrap(),
+                ))
+                .wrap(middleware)
+                .default_service(web::to(|| async { actix_web::HttpResponse::Ok().finish() })),
+        )
+        .await;
+
+        let request = TestRequest::get()
+            .uri("/orders")
+            .peer_addr(SocketAddr::from(([10, 0, 0, 2], 443)))
+            .insert_header(("X-Forwarded-For", "198.51.100.7"))
+            .insert_header(("X-MBX-APIKEY", "proxied-key"))
+            .to_request();
+        let error = actix_web::test::try_call_service(&app, request)
+            .await
+            .expect_err("a blacklisted client must not get through its load balancer");
+
+        assert_eq!(
+            error.as_response_error().status_code(),
+            actix_web::http::StatusCode::FORBIDDEN
+        );
     }
 }

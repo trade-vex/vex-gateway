@@ -62,8 +62,9 @@ pub struct ServerConfig {
     pub port: u16,
     pub frontend_url: String,
     /// Proxy addresses or CIDR ranges whose `X-Forwarded-For` is believed when resolving the
-    /// client IP for rate limits. Empty trusts none (the TCP peer is used); production requires
-    /// at least one (lib-config validation). Overridden by `TRUSTED_PROXIES` (comma-separated).
+    /// client IP for rate limits and API-key IP checks. Empty trusts none (the TCP peer is used);
+    /// production requires at least one (lib-config validation). Overridden by `TRUSTED_PROXIES`
+    /// (comma-separated).
     #[serde(default)]
     pub trusted_proxies: Vec<String>,
 }
