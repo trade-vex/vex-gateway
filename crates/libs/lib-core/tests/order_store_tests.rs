@@ -21,6 +21,7 @@ use lib_core::model::orders::Model as OrderModel;
 use lib_core::model::user_balances::Model as UserBalanceModel;
 use lib_core::model::user_favorite_markets::Model as UserFavoriteMarketModel;
 use lib_core::repository::repository::{TradingError, TradingRepository};
+use redis::AsyncCommands;
 use std::sync::Arc;
 
 type Result<T> = std::result::Result<T, TradingError>;
@@ -473,14 +474,14 @@ async fn test_large_order_values() {
     let config = OrderCacheConfig { enabled: false };
 
     // Test with large price and size values (12 decimal places precision)
-    let large_price = 50_000_000_000_000_000i64; // 50,000 * 10^12
-    let large_size = 1_000_000_000_000i64; // 1.0 * 10^12
+    let large_price = 50_000_000_000_000_000_u64; // 50,000 * 10^12
+    let large_size = 1_000_000_000_000_u64; // 1.0 * 10^12
 
     let orders = vec![create_test_order(
         1,
         100,
-        large_price,
-        large_size,
+        large_price as i64,
+        large_size as i64,
         "buy",
         "Pending",
     )];
@@ -536,4 +537,55 @@ async fn test_concurrent_access() {
         let orders = handle.await.unwrap();
         assert_eq!(orders.len(), 2);
     }
+}
+
+#[tokio::test]
+async fn test_u64_order_magnitudes_survive_redis_round_trip() {
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6380".to_string());
+    let client = redis::Client::open(redis_url.clone()).expect("Redis URL should be valid");
+    let mut connection = match client.get_multiplexed_async_connection().await {
+        Ok(connection) => connection,
+        Err(error) => {
+            eprintln!("Skipping Redis round-trip test: unable to connect to {redis_url}: {error}");
+            return;
+        }
+    };
+    let order_id = 8_000_000_000_u64 + u64::from(std::process::id());
+    let user_id = 7_000_000_000_u64 + u64::from(std::process::id());
+    let key = format!("order:{order_id}");
+    let fields = [
+        ("market_id", "1".to_string()),
+        ("order_order_id", order_id.to_string()),
+        ("order_user_id", user_id.to_string()),
+        ("order_price", u64::MAX.to_string()),
+        ("order_size", u64::MAX.to_string()),
+        ("order_filled_size", (i64::MAX as u64 + 1).to_string()),
+        ("order_side", "Bid".to_string()),
+        ("order_time_in_force", "GTC".to_string()),
+        ("order_status", "Placed".to_string()),
+        ("order_timestamp", "1700000000".to_string()),
+    ];
+    let _: () = connection
+        .hset_multiple(&key, &fields)
+        .await
+        .expect("order hash should be written");
+
+    let store = OrderStore::with_redis_cache(OrderCacheConfig { enabled: true }, redis_url, None)
+        .await
+        .expect("order store should connect to Redis");
+    let order = store
+        .get_order_by_id(order_id, user_id)
+        .await
+        .expect("order should be read from Redis")
+        .expect("order row should not be dropped");
+
+    assert_eq!(order.order_price, u64::MAX);
+    assert_eq!(order.order_size, u64::MAX);
+    assert_eq!(order.order_filled_size, i64::MAX as u64 + 1);
+
+    let _: () = connection
+        .del(key)
+        .await
+        .expect("test order hash should be removed");
 }
