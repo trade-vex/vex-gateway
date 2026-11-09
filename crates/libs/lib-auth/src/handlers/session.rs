@@ -9,10 +9,9 @@ use std::sync::Arc;
 pub struct SessionInfo {
     pub user_id: uuid::Uuid,
     pub access_token: String,
-    pub refresh_token: String,
 }
 
-/// Get session info (tokens and user_id)
+/// Get session info (access token and non-sensitive metadata)
 /// GET /api/session/info
 pub async fn get_session_info(
     req: HttpRequest,
@@ -28,11 +27,10 @@ pub async fn get_session_info(
     // Get session data from Redis
     let session_data = session_service.get_session(&session_id).await?;
 
-    // Return tokens and user_id
+    // Return the access token handoff and non-sensitive session metadata
     let response = SessionInfo {
         user_id: session_data.user_id,
         access_token: session_data.access_token,
-        refresh_token: session_data.refresh_token,
     };
 
     Ok(HttpResponse::Ok().json(response))
@@ -89,4 +87,22 @@ pub async fn refresh_session_tokens(
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "message": "Token refreshed successfully"
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionInfo;
+
+    #[test]
+    fn session_info_omits_refresh_token() {
+        let response = SessionInfo {
+            user_id: uuid::Uuid::nil(),
+            access_token: "access-token".to_string(),
+        };
+
+        let json = serde_json::to_value(response).expect("SessionInfo should serialize");
+
+        assert_eq!(json["access_token"], "access-token");
+        assert!(json.get("refresh_token").is_none());
+    }
 }
