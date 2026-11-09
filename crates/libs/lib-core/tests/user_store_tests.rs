@@ -21,6 +21,8 @@ use lib_core::model::orders::Model as OrderModel;
 use lib_core::model::user_balances::Model as UserBalanceModel;
 use lib_core::model::user_favorite_markets::Model as UserFavoriteMarketModel;
 use lib_core::repository::repository::{TradingError, TradingRepository};
+use redis::AsyncCommands;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 type Result<T> = std::result::Result<T, TradingError>;
@@ -30,6 +32,7 @@ type Result<T> = std::result::Result<T, TradingError>;
 struct MockTradingRepository {
     balances: Vec<UserBalanceModel>,
     should_error: bool,
+    balance_reads: Arc<AtomicUsize>,
 }
 
 impl MockTradingRepository {
@@ -37,6 +40,7 @@ impl MockTradingRepository {
         Self {
             balances: Vec::new(),
             should_error: false,
+            balance_reads: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -54,6 +58,7 @@ impl MockTradingRepository {
 #[async_trait]
 impl TradingRepository for MockTradingRepository {
     async fn get_user_balances(&self, user_id: u64) -> Result<Vec<UserBalanceModel>> {
+        self.balance_reads.fetch_add(1, Ordering::SeqCst);
         if self.should_error {
             return Err(TradingError::Database("Mock database error".to_string()));
         }
@@ -312,16 +317,6 @@ async fn test_database_error_handling() {
 }
 
 #[tokio::test]
-async fn test_invalidate_operations() {
-    let config = UserBalanceCacheConfig { enabled: false }; // Cache disabled, so invalidation is no-op
-
-    let store = UserBalanceStore::new(config);
-
-    // Should not panic even with cache disabled
-    store.invalidate_user_balances(100).await;
-}
-
-#[tokio::test]
 async fn test_multiple_users() {
     let config = UserBalanceCacheConfig { enabled: false };
 
@@ -554,4 +549,199 @@ async fn test_timestamp_preservation() {
     let fetched_balances = result.unwrap();
     assert_eq!(fetched_balances.len(), 1);
     assert_eq!(fetched_balances[0].timestamp, 1700000000);
+}
+
+#[tokio::test]
+async fn unindexed_balances_are_read_from_the_repository_without_writing_redis() {
+    // The gateway only reads balances: with no asset index for the user, Redis has nothing it
+    // can enumerate, so the repository answers and the index is left for the Events Handler.
+    let redis_url = "redis://127.0.0.1:6379/14";
+    let client = redis::Client::open(redis_url).unwrap();
+    let mut conn = match redis::aio::ConnectionManager::new(client).await {
+        Ok(conn) => conn,
+        Err(error) => {
+            eprintln!("Skipping: unable to connect to {redis_url}: {error}");
+            return;
+        }
+    };
+    let user_id = (uuid::Uuid::new_v4().as_u128() as u64) & i64::MAX as u64;
+    let asset_set_key = format!("user:{}:balances", user_id);
+    let balance_key = format!("user:{}:asset:7:balance", user_id);
+
+    let _: usize = redis::cmd("HSET")
+        .arg(&balance_key)
+        .arg("user_id")
+        .arg(user_id)
+        .arg("asset_id")
+        .arg(7)
+        .arg("available")
+        .arg(700)
+        .arg("locked")
+        .arg(70)
+        .arg("total")
+        .arg(770)
+        .arg("timestamp")
+        .arg(1_700_000_007_i64)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+
+    let repository = Arc::new(MockTradingRepository::new().with_balances(vec![
+        create_test_balance(user_id as i64, 7, 1, 2, 3),
+        create_test_balance(user_id as i64, 11, 4, 5, 9),
+    ]));
+    let balance_reads = repository.balance_reads.clone();
+    let store = UserBalanceStore::with_redis_cache(
+        UserBalanceCacheConfig { enabled: true },
+        redis_url.to_string(),
+        Some(repository),
+    )
+    .await
+    .unwrap();
+
+    let mut balances = store.get_user_balances(user_id).await.unwrap();
+    balances.sort_by_key(|balance| balance.asset_id);
+
+    assert_eq!(balances.len(), 2);
+    assert_eq!(balances[0].available, 1);
+    assert_eq!(balances[1].available, 4);
+    assert_eq!(balance_reads.load(Ordering::SeqCst), 1);
+    let indexed: Vec<String> = conn.smembers(&asset_set_key).await.unwrap();
+    assert!(indexed.is_empty(), "a read must not write the asset index");
+
+    let _: usize = conn.del(&[&asset_set_key, &balance_key]).await.unwrap();
+}
+
+#[tokio::test]
+async fn cache_hit_does_not_query_the_repository() {
+    // Finding G86-t0. With an indexed asset whose hash is cached, the request must be answered
+    // from Redis alone; the database is read only once that hash goes missing.
+    let redis_url = "redis://127.0.0.1:6379/14";
+    let client = redis::Client::open(redis_url).unwrap();
+    let mut conn = match redis::aio::ConnectionManager::new(client).await {
+        Ok(conn) => conn,
+        Err(error) => {
+            eprintln!("Skipping: unable to connect to {redis_url}: {error}");
+            return;
+        }
+    };
+    let user_id = (uuid::Uuid::new_v4().as_u128() as u64) & i64::MAX as u64;
+    let asset_set_key = format!("user:{}:balances", user_id);
+    let balance_key = format!("user:{}:asset:7:balance", user_id);
+
+    let _: usize = redis::cmd("HSET")
+        .arg(&balance_key)
+        .arg("user_id")
+        .arg(user_id)
+        .arg("asset_id")
+        .arg(7)
+        .arg("available")
+        .arg(700)
+        .arg("locked")
+        .arg(0)
+        .arg("total")
+        .arg(700)
+        .arg("timestamp")
+        .arg(1_700_000_000_i64)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let _: usize = conn.sadd(&asset_set_key, "7").await.unwrap();
+
+    let repository = Arc::new(
+        MockTradingRepository::new().with_balances(vec![create_test_balance(
+            user_id as i64,
+            7,
+            1,
+            2,
+            3,
+        )]),
+    );
+    let balance_reads = repository.balance_reads.clone();
+    let store = UserBalanceStore::with_redis_cache(
+        UserBalanceCacheConfig { enabled: true },
+        redis_url.to_string(),
+        Some(repository),
+    )
+    .await
+    .unwrap();
+
+    let balances = store.get_user_balances(user_id).await.unwrap();
+    assert_eq!(balances.len(), 1);
+    assert_eq!(balances[0].available, 700);
+    assert_eq!(
+        balance_reads.load(Ordering::SeqCst),
+        0,
+        "a full cache hit must not query the repository"
+    );
+
+    // The indexed hash disappears: now the repository must fill the gap.
+    let _: usize = conn.del(&balance_key).await.unwrap();
+    let balances = store.get_user_balances(user_id).await.unwrap();
+    assert_eq!(balances.len(), 1);
+    assert_eq!(balances[0].available, 1);
+    assert_eq!(balance_reads.load(Ordering::SeqCst), 1);
+
+    let _: usize = conn.del(&[&asset_set_key, &balance_key]).await.unwrap();
+}
+
+#[tokio::test]
+async fn an_indexed_asset_without_a_hash_sends_the_whole_read_to_the_repository() {
+    // Two indexed assets, one hash missing: the repository answers for every asset rather than
+    // being merged with what Redis has, so the caller never gets a mix of two sources.
+    let redis_url = "redis://127.0.0.1:6379/14";
+    let client = redis::Client::open(redis_url).unwrap();
+    let mut conn = match redis::aio::ConnectionManager::new(client).await {
+        Ok(conn) => conn,
+        Err(error) => {
+            eprintln!("Skipping: unable to connect to {redis_url}: {error}");
+            return;
+        }
+    };
+    let user_id = (uuid::Uuid::new_v4().as_u128() as u64) & i64::MAX as u64;
+    let asset_set_key = format!("user:{}:balances", user_id);
+    let cached_key = format!("user:{}:asset:7:balance", user_id);
+
+    let _: usize = redis::cmd("HSET")
+        .arg(&cached_key)
+        .arg("user_id")
+        .arg(user_id)
+        .arg("asset_id")
+        .arg(7)
+        .arg("available")
+        .arg(700)
+        .arg("locked")
+        .arg(0)
+        .arg("total")
+        .arg(700)
+        .arg("timestamp")
+        .arg(1_700_000_000_i64)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let _: usize = conn.sadd(&asset_set_key, &["7", "11"]).await.unwrap();
+
+    let repository = Arc::new(MockTradingRepository::new().with_balances(vec![
+        create_test_balance(user_id as i64, 7, 1, 2, 3),
+        create_test_balance(user_id as i64, 11, 4, 5, 9),
+    ]));
+    let store = UserBalanceStore::with_redis_cache(
+        UserBalanceCacheConfig { enabled: true },
+        redis_url.to_string(),
+        Some(repository),
+    )
+    .await
+    .unwrap();
+
+    let mut balances = store.get_user_balances(user_id).await.unwrap();
+    balances.sort_by_key(|balance| balance.asset_id);
+
+    assert_eq!(balances.len(), 2);
+    assert_eq!(
+        balances[0].available, 1,
+        "asset 7 must come from the repository too"
+    );
+    assert_eq!(balances[1].available, 4);
+
+    let _: usize = conn.del(&[&asset_set_key, &cached_key]).await.unwrap();
 }

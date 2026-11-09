@@ -71,96 +71,86 @@ impl UserBalanceStore {
     }
 
     /// Get user balances from cache: user:{user_id}:asset:{asset_id}:balance hashes
+    ///
+    /// Read-only. The Events Handler owns the per-user asset index `user:{user_id}:balances` and
+    /// the balance hashes; the gateway never writes either. The cache answers only when the index
+    /// is non-empty and every indexed hash parses. Otherwise (nothing cached for the user, an
+    /// indexed hash missing, or a Redis error) the repository answers alone, so an inconsistent
+    /// cache never yields a silently incomplete balance set.
     pub async fn get_user_balances(
         &self,
         user_id: u64,
     ) -> Result<Vec<UserBalanceModel>, TradingError> {
-        // Cache: Scan for user:{user_id}:asset:*:balance keys, then fetch each hash
         if self.config.enabled {
             if let Some(cache) = &self.cache {
-                let pattern = format!("user:{}:asset:*:balance", user_id);
-
-                // Use SCAN to find all balance keys for this user
-                match cache.scan_keys(&pattern).await {
-                    Ok(keys) if !keys.is_empty() => {
-                        debug!(
-                            "User balances cache hit for user: {} ({} assets)",
-                            user_id,
-                            keys.len()
-                        );
-
-                        let mut balances = Vec::new();
-                        // Fetch each balance hash
-                        for key in keys {
-                            match cache.hgetall_string(&key).await {
-                                Ok(hash) if !hash.is_empty() => {
-                                    if let Some(balance) = Self::parse_balance_hash(hash) {
-                                        balances.push(balance);
-                                    }
-                                }
-                                _ => continue,
-                            }
-                        }
-
-                        if !balances.is_empty() {
-                            return Ok(balances);
-                        }
-                    }
-                    Ok(_) => {
-                        debug!("User balances cache miss for user: {}", user_id);
-                    }
-                    Err(e) => {
-                        warn!("User balances cache error for user {}: {}", user_id, e);
-                    }
+                if let Some(balances) = Self::cached_balances(cache, user_id).await {
+                    debug!(
+                        "User balances cache hit for user: {} ({} assets)",
+                        user_id,
+                        balances.len()
+                    );
+                    return Ok(balances);
                 }
             }
         }
 
         // Database fallback
         if let Some(repo) = &self.trading_repo {
-            match repo.get_user_balances(user_id).await {
-                Ok(balances) => {
-                    debug!("Database hit for user balances: {}", user_id);
-                    return Ok(balances);
-                }
-                Err(e) => {
-                    return Err(e);
-                }
-            }
+            let balances = repo.get_user_balances(user_id).await?;
+            debug!("Database hit for user balances: {}", user_id);
+            return Ok(balances);
         }
 
         debug!("User balances not found: {}", user_id);
         Ok(vec![])
     }
 
-    pub async fn invalidate_user_balances(&self, user_id: u64) {
-        if !self.config.enabled {
-            return;
-        }
+    /// The user's complete cached balance set: SMEMBERS of the asset index, then every indexed
+    /// hash in one pipelined round trip. `None` when the cache cannot answer on its own.
+    async fn cached_balances(cache: &RedisDb, user_id: u64) -> Option<Vec<UserBalanceModel>> {
+        let asset_set_key = format!("user:{}:balances", user_id);
+        let asset_ids = match cache.smembers_string(&asset_set_key).await {
+            Ok(asset_ids) if !asset_ids.is_empty() => asset_ids,
+            Ok(_) => {
+                debug!("User balances cache miss for user: {}", user_id);
+                return None;
+            }
+            Err(error) => {
+                warn!("User balances cache error for user {}: {}", user_id, error);
+                return None;
+            }
+        };
 
-        if let Some(cache) = &self.cache {
-            let pattern = format!("user:{}:asset:*:balance", user_id);
+        let balance_keys: Vec<String> = asset_ids
+            .iter()
+            .map(|asset_id| format!("user:{}:asset:{}:balance", user_id, asset_id))
+            .collect();
+        let hashes = match cache.hgetall_strings(&balance_keys).await {
+            Ok(hashes) => hashes,
+            Err(error) => {
+                warn!(
+                    "Failed to get balance hashes for user {}: {}",
+                    user_id, error
+                );
+                return None;
+            }
+        };
 
-            // Scan for all balance keys
-            match cache.scan_keys(&pattern).await {
-                Ok(keys) => {
-                    // Delete each balance hash
-                    for key in &keys {
-                        if let Err(e) = cache.del_key(key).await {
-                            warn!("Failed to delete balance hash {}: {}", key, e);
-                        }
-                    }
-                    debug!(
-                        "Invalidated {} balance(s) for user: {}",
-                        keys.len(),
-                        user_id
+        let mut balances = Vec::with_capacity(hashes.len());
+        for (balance_key, hash) in balance_keys.iter().zip(hashes) {
+            match Self::parse_balance_hash(hash) {
+                Some(balance) => balances.push(balance),
+                None => {
+                    warn!(
+                        "Balance hash {} is missing or malformed although {} lists it; \
+                         reading balances from the database",
+                        balance_key, asset_set_key
                     );
-                }
-                Err(e) => {
-                    warn!("Failed to scan balance keys for user {}: {}", user_id, e);
+                    return None;
                 }
             }
         }
+        Some(balances)
     }
 
     /// Convert UserBalanceModel to UserBalanceResponse with scaling applied

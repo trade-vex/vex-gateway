@@ -20,8 +20,10 @@ use actix_web::{web, App, HttpResponse, HttpServer, Result};
 use common::{OrderCommand, OrderCommandType, Side, Status, TimeInForce, UserBalance};
 use lib_core::{
     generate_client_order_id, wait_for_response, CorrelationService, OrderCacheConfig, OrderStore,
-    OrdersListResponse, Publisher, UserBalanceCacheConfig, UserBalanceStore,
+    OrdersListResponse, PostgresTradingRepository, Publisher, UserBalanceCacheConfig,
+    UserBalanceStore,
 };
+use sea_orm::{Database, DatabaseConnection};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -368,6 +370,16 @@ fn spawn_test_server(
     format!("http://127.0.0.1:{}", port)
 }
 
+async fn init_database() -> Option<Arc<DatabaseConnection>> {
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgresql://postgres:postgres@localhost:5432/trading_db".to_string());
+
+    match Database::connect(&database_url).await {
+        Ok(db) => Some(Arc::new(db)),
+        Err(_) => None,
+    }
+}
+
 // ==================== STRESS TEST ====================
 
 #[tokio::test]
@@ -380,6 +392,7 @@ async fn test_high_frequency_stress_test() {
     // Setup
     let redis_url =
         std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6380".to_string());
+    let db = init_database().await;
 
     // Initialize VEX Gateway
     let mut gateway_config = vex_config::GatewayNetworkingConfig::development_defaults();
@@ -399,18 +412,39 @@ async fn test_high_frequency_stress_test() {
         .start(handler)
         .expect("Failed to start VexGateway");
 
-    let balance_store = UserBalanceStore::with_redis_cache(
-        UserBalanceCacheConfig { enabled: true },
-        redis_url.clone(),
-        None,
-    )
-    .await
-    .expect("Failed to create UserBalanceStore");
+    let balance_store = if let Some(ref db_conn) = db {
+        let trading_repo = Arc::new(PostgresTradingRepository::new(db_conn.clone()));
+        UserBalanceStore::with_redis_cache(
+            UserBalanceCacheConfig { enabled: true },
+            redis_url.clone(),
+            Some(trading_repo),
+        )
+        .await
+        .expect("Failed to create UserBalanceStore")
+    } else {
+        UserBalanceStore::with_redis_cache(
+            UserBalanceCacheConfig { enabled: true },
+            redis_url.clone(),
+            None,
+        )
+        .await
+        .expect("Failed to create UserBalanceStore")
+    };
 
-    let order_store =
+    let order_store = if let Some(ref db_conn) = db {
+        let trading_repo = Arc::new(PostgresTradingRepository::new(db_conn.clone()));
+        OrderStore::with_redis_cache(
+            OrderCacheConfig { enabled: true },
+            redis_url.clone(),
+            Some(trading_repo),
+        )
+        .await
+        .expect("Failed to create OrderStore")
+    } else {
         OrderStore::with_redis_cache(OrderCacheConfig { enabled: true }, redis_url.clone(), None)
             .await
-            .expect("Failed to create OrderStore");
+            .expect("Failed to create OrderStore")
+    };
 
     let server_address =
         spawn_test_server(publisher, correlation_service, balance_store, order_store);
