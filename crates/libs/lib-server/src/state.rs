@@ -7,9 +7,9 @@ use jsonwebtoken::{DecodingKey, EncodingKey};
 use lib_auth::config::{AuthConfig, JwtConfig, OAuthProviderConfig, RedisConfig};
 use lib_auth::repository::{PostgresUserRepository, UserRepository};
 use lib_auth::service::{EmailService, OAuthService, SessionService, TokenService};
-use lib_core::CorrelationService;
 use lib_core::Publisher;
 use lib_core::repository::repository::{ClickHousePortfolioRepository, PortfolioRepository};
+use lib_core::{CorrelationService, OrderIdempotencyStore};
 use lib_core::{
     OrderCacheConfig, OrderStore, PostgresTradingRepository, TradingRepository,
     UserBalanceCacheConfig, UserBalanceStore, cache::scaling_cache::ScalingCache,
@@ -68,6 +68,9 @@ pub struct AppState {
     // Correlation service for matching responses to requests
     pub correlation_service: Arc<CorrelationService>,
 
+    // Short-lived order placement outcomes keyed by client idempotency key
+    pub order_idempotency_store: Arc<OrderIdempotencyStore>,
+
     // Trading stores for balances and orders
     pub balance_store: UserBalanceStore,
     pub order_store: OrderStore,
@@ -88,6 +91,7 @@ impl AppState {
 
         // Initialize Redis connection
         let redis_conn = Self::init_redis(&config.redis).await?;
+        let order_idempotency_store = Arc::new(OrderIdempotencyStore::new(redis_conn.clone()));
 
         // Initialize HTTP client
         let http_client = Self::init_http_client()?;
@@ -197,6 +201,7 @@ impl AppState {
             portfolio_repository,
             trading_repository: trading_repo,
             correlation_service: Arc::new(correlation_service),
+            order_idempotency_store,
             balance_store,
             order_store,
         }))

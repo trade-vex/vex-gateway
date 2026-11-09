@@ -293,6 +293,31 @@ grep "timeout" logs/app.log
 - Increase timeout (currently 5 seconds hardcoded)
 - Check network latency between gateway and core
 
+### Stranded Order Idempotency Claims
+
+**Symptom**: Repeated order requests with the same idempotency key return `408` with
+`status: "outcome_unknown"` and the same `client_order_id`, but open orders and order history never
+show the order.
+
+**Cause**: The gateway may have stopped after claiming
+`vex:order-idempotency:<user_id>:<key>` and before publishing the order. The in-flight claim is kept
+for 24 hours to prevent a retry from publishing a duplicate order.
+
+A claim the gateway gives back because the engine executed nothing (busy, or the publish failed)
+is not stranded: a release marker replaces it for 60 seconds, a request already waiting on it gets
+a `503` for why it was released (busy, with `Retry-After: 1`, or `Matching engine unavailable`),
+and the retry claims the key as usual.
+
+**Remedy**:
+1. Reconcile the returned `client_order_id` against open orders, order history, and gateway/core
+   logs.
+2. Only after confirming that the order was never published, remove the exact stranded claim:
+   ```bash
+   redis-cli -u "$REDIS_URL" DEL "vex:order-idempotency:<user_id>:<key>"
+   ```
+3. The client may submit the order again after the claim is removed. If publication cannot be
+   ruled out, do not delete the claim; deleting it could allow a duplicate order.
+
 ### Authentication Failures
 
 **Symptom**: 401 Unauthorized responses
@@ -391,15 +416,17 @@ grep -i "memory\|oom" logs/app.log
    ```
 
 2. **Service Impact**
+   - Every JWT-authenticated request gets 503 (`service_unavailable`): the token revocation
+     checks read Redis.
+   - **Order placement fails**: every order's idempotency claim is kept in Redis, so nothing is
+     sent to the engine. An order that gets past authentication is answered 503 (`Order was not
+     sent because idempotency storage is unavailable`).
    - OAuth flows will fail (state storage)
    - Session refresh may fail
-   - API key caching will be slower (falls back to database)
-   - **Order placement should still work**
 
 3. **Mitigation**
    - Restart Redis
    - Switch to backup Redis if available
-   - Service will log errors but core functionality may continue
 
 ### VEX Core is Down
 
@@ -506,6 +533,21 @@ grep -i "memory\|oom" logs/app.log
    ```
 
 ### Order Request Format
+
+Every order carries an `Idempotency-Key` header, one key per logical order: not empty, at most 128
+bytes, no control characters. Without one the gateway answers 400. A retry with the same key and
+body gets the first attempt's answer instead of placing a second order; the same key with a
+different body gets 409.
+
+```bash
+curl -X POST http://localhost:8081/api/order \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: <unique-logical-order-key>" \
+  -d '{"price": 5000000, "volume": 100, "market_id": 1, "side": "Bid", "time_in_force": "Gtc", "order_type": "Limit"}'
+```
+
+The body:
 
 ```json
 {

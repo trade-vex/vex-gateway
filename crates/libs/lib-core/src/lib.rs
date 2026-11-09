@@ -2,6 +2,7 @@ pub mod cache;
 pub mod correlation;
 pub mod dto;
 pub mod model;
+pub mod order_idempotency;
 pub mod repository;
 
 pub use dto::trading::{
@@ -21,6 +22,11 @@ pub use cache::order_store::{OrderCacheConfig, OrderStore};
 
 pub use correlation::{
     generate_client_order_id, wait_for_response, CorrelationService, ResponseError,
+};
+
+pub use order_idempotency::{
+    CompletionWait, IdempotentOrderOutcome, OrderClaim, OrderIdempotencyError,
+    OrderIdempotencyStore, ReleaseReason,
 };
 
 // Type alias for the Publisher from vex-networking
