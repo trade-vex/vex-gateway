@@ -2,13 +2,14 @@
 //!
 //! Application factory for creating the Actix-web application
 
-use actix_web::{App, web};
+use actix_web::{App, middleware::from_fn, web};
 use lib_api::routes;
 use lib_auth::middleware::jwt_auth::JwtAuthentication;
 use lib_middleware::ApiKeyStore;
 use std::sync::Arc;
 
 use crate::combined_auth::CombinedAuthMiddleware;
+use crate::edge;
 use crate::state::AppState;
 
 /// Application factory that creates the Actix-web application with all routes and middleware
@@ -42,6 +43,9 @@ pub fn create_app(
     );
 
     App::new()
+        // Outermost, so that every response carries the security headers and the request id:
+        // 404s and the errors the auth middleware returns included
+        .wrap(from_fn(edge::middleware))
         .app_data(web::Data::new(app_state.clone()))
         .app_data(web::Data::new(app_state.trusted_proxies.clone()))
         .app_data(web::Data::new(api_key_store))
