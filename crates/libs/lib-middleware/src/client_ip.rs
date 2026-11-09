@@ -1,9 +1,11 @@
-//! Client IP resolution for rate-limit keys and IP access control.
+//! Client IP and scheme resolution behind trusted proxies: the client IP keys rate limits and IP
+//! access control, the scheme decides whether cookies are `Secure`.
 //!
 //! The client is the TCP peer unless that peer is a configured trusted proxy (the load balancer or
 //! reverse proxy in front of the gateway). Only then is `X-Forwarded-For` read, from the right,
 //! past every trusted hop: the first untrusted hop is the address a trusted proxy saw connect.
-//! Entries further left are whatever the client wrote, so they are never used.
+//! Entries further left are whatever the client wrote, so they are never used. Likewise only a
+//! trusted peer's `X-Forwarded-Proto` is believed.
 
 use actix_web::{web, HttpRequest};
 use ipnet::IpNet;
@@ -53,19 +55,49 @@ impl TrustedProxies {
         Some(client)
     }
 
+    /// Whether `req` reached the gateway over HTTPS. When the TCP peer is a trusted proxy, its
+    /// `X-Forwarded-Proto` decides: the last value, which that proxy wrote. Otherwise, or when it
+    /// sent none, the connection's own scheme decides (TLS on the gateway's listener).
+    pub fn is_https(&self, req: &HttpRequest) -> bool {
+        let peer_is_trusted = req
+            .peer_addr()
+            .is_some_and(|peer| self.is_trusted(peer.ip().to_canonical()));
+        let forwarded_proto = req
+            .headers()
+            .get_all("x-forwarded-proto")
+            .flat_map(|value| value.to_str().unwrap_or("").split(','))
+            .last();
+
+        match forwarded_proto {
+            Some(proto) if peer_is_trusted => proto.trim().eq_ignore_ascii_case("https"),
+            _ => req.app_config().secure(),
+        }
+    }
+
     fn is_trusted(&self, ip: IpAddr) -> bool {
         self.0.iter().any(|network| network.contains(&ip))
     }
 }
 
+/// The [`TrustedProxies`] registered as app data. Without one, no proxy is trusted.
+fn registered(req: &HttpRequest) -> &TrustedProxies {
+    static NONE: TrustedProxies = TrustedProxies(Vec::new());
+    req.app_data::<web::Data<TrustedProxies>>()
+        .map_or(&NONE, |trusted_proxies| trusted_proxies.get_ref())
+}
+
 /// The client IP for rate-limit keys and IP access control, resolved with the [`TrustedProxies`]
 /// registered as app data. Without one, no proxy is trusted.
 pub fn client_ip(req: &HttpRequest) -> String {
-    let resolved = match req.app_data::<web::Data<TrustedProxies>>() {
-        Some(trusted_proxies) => trusted_proxies.client_ip(req),
-        None => TrustedProxies::default().client_ip(req),
-    };
-    resolved.map_or_else(|| "unknown".to_string(), |ip| ip.to_string())
+    registered(req)
+        .client_ip(req)
+        .map_or_else(|| "unknown".to_string(), |ip| ip.to_string())
+}
+
+/// Whether `req` used HTTPS (see [`TrustedProxies::is_https`]), judged with the
+/// [`TrustedProxies`] registered as app data. Without one, no proxy is trusted.
+pub fn is_https(req: &HttpRequest) -> bool {
+    registered(req).is_https(req)
 }
 
 #[cfg(test)]
@@ -138,6 +170,61 @@ mod tests {
         let req = request("[::ffff:10.0.0.2]:1234", &["198.51.100.7"]);
 
         assert_eq!(resolve(&proxies(&["10.0.0.0/8"]), &req), "198.51.100.7");
+    }
+
+    fn forwarded_proto(peer: &str, values: &[&str]) -> HttpRequest {
+        let mut request = TestRequest::default().peer_addr(peer.parse().unwrap());
+        for value in values {
+            request = request.append_header(("X-Forwarded-Proto", *value));
+        }
+        request.to_http_request()
+    }
+
+    #[test]
+    fn forwarded_proto_is_believed_only_from_a_trusted_peer() {
+        let trusted = proxies(&["10.0.0.0/8"]);
+
+        // A client connecting directly over plain HTTP cannot claim HTTPS, under either header.
+        let direct = forwarded_proto("192.0.2.10:1234", &["https"]);
+        assert!(!trusted.is_https(&direct));
+        assert!(!TrustedProxies::default().is_https(&direct));
+        let rfc7239 = TestRequest::default()
+            .peer_addr("10.0.0.2:1234".parse().unwrap())
+            .insert_header(("Forwarded", "proto=https"))
+            .to_http_request();
+        assert!(!trusted.is_https(&rfc7239));
+
+        assert!(trusted.is_https(&forwarded_proto("10.0.0.2:1234", &["https"])));
+        assert!(trusted.is_https(&forwarded_proto("[::ffff:10.0.0.2]:1234", &["HTTPS"])));
+        assert!(!trusted.is_https(&forwarded_proto("10.0.0.2:1234", &["http"])));
+        // Without the header the gateway's own (plain) connection decides.
+        assert!(!trusted.is_https(&forwarded_proto("10.0.0.2:1234", &[])));
+    }
+
+    #[test]
+    fn trusted_peer_forwarded_proto_is_read_from_the_right() {
+        let trusted = proxies(&["10.0.0.0/8"]);
+
+        // The proxy appended what it saw after a value the client wrote.
+        assert!(!trusted.is_https(&forwarded_proto("10.0.0.2:1234", &["https, http"])));
+        assert!(!trusted.is_https(&forwarded_proto("10.0.0.2:1234", &["https", "http"])));
+        assert!(trusted.is_https(&forwarded_proto("10.0.0.2:1234", &["http, https"])));
+    }
+
+    #[test]
+    fn is_https_uses_the_trusted_proxies_registered_as_app_data() {
+        let forwarded = || {
+            TestRequest::default()
+                .peer_addr("10.0.0.2:1234".parse().unwrap())
+                .insert_header(("X-Forwarded-Proto", "https"))
+        };
+
+        assert!(!is_https(&forwarded().to_http_request()));
+        assert!(is_https(
+            &forwarded()
+                .app_data(web::Data::new(proxies(&["10.0.0.0/8"])))
+                .to_http_request()
+        ));
     }
 
     #[test]

@@ -46,27 +46,18 @@ APP_ENV=production ./target/release/gateway
 
 ### Environment Variables
 
-See `.env.example` for all available environment variables. Key variables:
+Key variables the gateway reads (it does not read a `.env` file). `APP_ENV` selects the
+environment and so `config/<APP_ENV>.toml`, whose `environment` key must name the same
+environment. Database, Redis, JWT, email, OAuth and trusted-proxy settings come from the
+configuration file's `auth.*` sections (see [Configuration](#configuration)); no dedicated variable
+overrides them, only the `APP__` layer of [Configuration Precedence](#configuration-precedence).
 
 ```bash
 # Application
 APP_ENV=production
-APP_SERVER_HOST=0.0.0.0
-APP_SERVER_PORT=8081
-
-# Database
-DATABASE_URL=postgresql://user:pass@host:5432/dbname
-DATABASE_MAX_CONNECTIONS=10
-
-# Redis
-REDIS_URL=redis://host:port
-REDIS_MAX_CONNECTIONS=10
-
-# JWT
-JWT_PRIVATE_KEY_PATH=/path/to/private_key.pem
-JWT_PUBLIC_KEY_PATH=/path/to/public_key.pem
-JWT_ISSUER=vex-gateway-prod
-JWT_AUDIENCE=vex-api-prod
+APP__SERVER__HOST=0.0.0.0
+APP__SERVER__PORT=8081
+APP__AUTH__SERVER__TRUSTED_PROXIES=10.0.1.0/24,10.0.2.0/24
 
 # VEX Core
 CONTEXT_DIR=/dev/shm/aeron
@@ -74,12 +65,6 @@ CORE_ADDRESS=aeron-media-driver-core
 CORE_PORT=40123
 CORE_CONTROL_PORT=40123
 LOCAL_ADDRESS=0.0.0.0
-
-# Frontend (for OAuth redirects)
-FRONTEND_URL=https://your-frontend-domain.com
-
-# Load balancer subnet CIDR ranges; required in production (see "Client IP Behind a Proxy")
-TRUSTED_PROXIES=10.0.1.0/24,10.0.2.0/24
 ```
 
 ---
@@ -90,23 +75,51 @@ TRUSTED_PROXIES=10.0.1.0/24,10.0.2.0/24
 
 Configuration is loaded from TOML files in the `config/` directory:
 
-- `config/development.toml` - Development settings
+- `config/development.toml` - Development settings; `scripts/setup_dev.sh` creates it from the
+  committed `config/development.toml.example`
 - `config/testing.toml` - Testing settings
-- `config/production.toml` - Production settings (gitignored)
+- `config/production.toml` - Production settings
+
+The three environment files are gitignored. The selected environment's file must exist: without
+it the gateway does not start.
 
 ### Configuration Precedence
 
 1. Environment-specific TOML file
-2. Environment variables (with `APP_` prefix)
-3. Development defaults (if config files missing)
+2. Environment variables `APP__<SECTION>__<KEY>`, named like vex-core's `VEX__` variables: the key
+   path in upper case with `__` between its levels. `APP__SERVER__PORT` overrides `server.port`
+   and `APP__AUTH__SERVER__TRUSTED_PROXIES` overrides `auth.server.trusted_proxies`. A list takes
+   comma-separated values (`10.0.1.0/24,10.0.2.0/24`). `APP_ENV` and `APP_CONFIG_DIR`, with a
+   single `_`, are not overrides.
+
+An `APP__` variable that names no key stops the gateway, and the error names the variable; so does
+a key in the file that no setting reads. A missing required setting, a malformed file or an invalid
+value stops the gateway in every environment, development included. Only optional settings have
+defaults. The error never shows a value, so a secret set in the wrong place stays out of the log.
+It names the setting (its variable, or its key and the file) and what the setting expects; for a
+section or list given a single value (`APP__AUTH__DATABASE=…` instead of
+`APP__AUTH__DATABASE__URL=…`) it names only what was expected. An `APP__` variable whose name
+or value is not UTF-8 also stops the gateway, and the error names it. Apart from `APP_ENV` and
+`APP_CONFIG_DIR`, the configuration reads no other variable, so another program's variable,
+whatever it holds, cannot stop the gateway.
+
+The `config` library converts the values leniently, and the gateway keeps its rules. A numeric
+setting reads `true`, `yes` and `on` as 1 and `false`, `no` and `off` as 0. In the file a decimal
+is rounded (`port = 8080.6` is 8081, and a negative decimal is 0 for a setting that cannot be
+negative), while in a variable it is an error. A boolean setting reads `1`, `yes` and `on` as true
+and `0`, `no` and `off` as false, and in the file any non-zero number as true. Key names are not
+case-sensitive. A variable's value reaches a text setting verbatim; an empty variable sets an empty
+value and cannot unset an optional setting.
 
 ### Configuration Validation
 
 The service validates configuration on startup:
 - **Production**: Cannot bind to localhost, cannot use debug logging, port must be > 0,
-  `TRUSTED_PROXIES` must not be empty
+  `auth.server.trusted_proxies` must not be empty
 - **Development**: More lenient validation
 - **Testing**: Allows ephemeral ports (port 0)
+- **Every environment**: `auth.oauth.providers` may list only `google`, `github` and `twitter`;
+  another provider stops the gateway at startup, and the error names it
 
 ### Client IP Behind a Proxy
 
@@ -114,20 +127,22 @@ Login, signup, email-verification and OAuth rate limits, and API-key IP blacklis
 client IP. By default that is the TCP peer, so behind a load balancer every client shares the
 balancer's address: one client's failed logins then lock that email out for everyone.
 
-Set `TRUSTED_PROXIES` (or `auth.server.trusted_proxies` in the TOML file) to the comma-separated
-addresses or CIDR ranges of the proxies in front of the gateway. Only for a request whose TCP peer
-is in that list is `X-Forwarded-For` read, from the right; the first hop that is not itself a
-trusted proxy is the client. List only proxies that append to `X-Forwarded-For`: a listed address
-that forwards a client's header unchanged lets that client choose its own IP. An invalid entry
-stops the gateway at startup.
+Set `auth.server.trusted_proxies` in the TOML file, or `APP__AUTH__SERVER__TRUSTED_PROXIES`
+(comma-separated), to the addresses or CIDR ranges of the proxies in front of the gateway. Only for
+a request whose TCP peer is in that list is `X-Forwarded-For` read, from the right; the first hop
+that is not itself a trusted proxy is the client. List only proxies that append to
+`X-Forwarded-For`: a listed address that forwards a client's header unchanged lets that client
+choose its own IP. An invalid entry stops the gateway at startup, before it connects to vex-core.
+The error gives the entry's position in the list, never its value; empty items of a
+comma-separated value are skipped and not counted.
 
 With `APP_ENV=production` the list is required: the gateway refuses to start when it is empty.
 Development and testing default to an empty list, so the TCP peer is the client.
 
 Production runs behind an AWS Application Load Balancer (ALB):
 
-- Set `TRUSTED_PROXIES` to the CIDR ranges of the ALB's subnets. ALB nodes take their addresses
-  from those subnets and the addresses change, so list the subnets, not node IPs.
+- Set `auth.server.trusted_proxies` to the CIDR ranges of the ALB's subnets. ALB nodes take their
+  addresses from those subnets and the addresses change, so list the subnets, not node IPs.
 - The gateway's security group must accept inbound traffic only from the ALB's security group.
   Anything else that could connect from inside those subnets would be trusted, and could set its
   own `X-Forwarded-For` to choose its client IP.
@@ -135,6 +150,10 @@ Production runs behind an AWS Application Load Balancer (ALB):
   `preserve` forwards the client's header unchanged and `remove` drops it.
 - Keep `routing.http.xff_client_port.enabled` at `false` (the default). With it on, the ALB appends
   `ip:port`, which is not a bare IP, so every client resolves to the ALB's address.
+- Terminate HTTPS at the ALB and keep the `X-Forwarded-Proto` header it sets: the gateway marks
+  session cookies `Secure` when a trusted proxy's `X-Forwarded-Proto` (its last value) is `https`,
+  or when the connection to the gateway itself uses TLS. From any other peer the header is
+  ignored.
 
 ### Redis Eviction Policy
 
@@ -237,7 +256,9 @@ ls -la config/production.toml
 ```
 
 **Solutions**:
-- Verify `config/production.toml` exists (or use environment variables)
+- Verify `config/production.toml` exists: the gateway does not start without the selected
+  environment's file, and the error names the path it expected. `APP__` variables only override
+  settings in it.
 - Check port is not already in use
 - Verify environment variables are set correctly
 - Check file permissions for JWT keys
@@ -248,17 +269,13 @@ ls -la config/production.toml
 
 **Diagnosis**:
 ```bash
-# Test database connection
-psql $DATABASE_URL -c "SELECT 1"
-
-# Check connection pool settings
-echo $DATABASE_MAX_CONNECTIONS
+# Test the database connection with the configured auth.database.url
+psql "<auth.database.url>" -c "SELECT 1"
 ```
 
 **Solutions**:
-- Verify `DATABASE_URL` is correct
+- Verify `auth.database.url` is correct
 - Check PostgreSQL is running: `pg_isready`
-- Increase `DATABASE_MAX_CONNECTIONS` if needed
 - Check network connectivity to database host
 
 ### Redis Connection Failures
@@ -267,15 +284,15 @@ echo $DATABASE_MAX_CONNECTIONS
 
 **Diagnosis**:
 ```bash
-# Test Redis connection
-redis-cli -u $REDIS_URL ping
+# Test the Redis connection with the configured auth.redis.url
+redis-cli -u "<auth.redis.url>" ping
 
 # Check Redis is running
-redis-cli -u $REDIS_URL INFO server
+redis-cli -u "<auth.redis.url>" INFO server
 ```
 
 **Solutions**:
-- Verify `REDIS_URL` is correct
+- Verify `auth.redis.url` is correct (API-key signature replay protection uses the same Redis)
 - Check Redis is running
 - Verify network connectivity
 - Check Redis max connections limit
@@ -338,7 +355,7 @@ and the retry claims the key as usual.
    logs.
 2. Only after confirming that the order was never published, remove the exact stranded claim:
    ```bash
-   redis-cli -u "$REDIS_URL" DEL "vex:order-idempotency:<user_id>:<key>"
+   redis-cli -u "<auth.redis.url>" DEL "vex:order-idempotency:<user_id>:<key>"
    ```
 3. The client may submit the order again after the claim is removed. If publication cannot be
    ruled out, do not delete the claim; deleting it could allow a duplicate order.
@@ -349,18 +366,15 @@ and the retry claims the key as usual.
 
 **Diagnosis**:
 ```bash
-# Check JWT keys exist
-ls -la $JWT_PRIVATE_KEY_PATH $JWT_PUBLIC_KEY_PATH
-
-# Verify JWT configuration
-echo $JWT_ISSUER $JWT_AUDIENCE
+# Check the JWT keys at auth.jwt.private_key_path and auth.jwt.public_key_path exist
+ls -la "<auth.jwt.private_key_path>" "<auth.jwt.public_key_path>"
 
 # Test token generation (if you have test script)
 ```
 
 **Solutions**:
 - Verify JWT keys exist and are readable
-- Check `JWT_ISSUER` and `JWT_AUDIENCE` match token claims
+- Check `auth.jwt.issuer` and `auth.jwt.audience` match token claims
 - Verify token hasn't expired
 - Check Redis is accessible (for session validation)
 
@@ -437,7 +451,7 @@ grep -i "memory\|oom" logs/app.log
 
 1. **Check Redis Status**
    ```bash
-   redis-cli -u $REDIS_URL ping
+   redis-cli -u "<auth.redis.url>" ping
    ```
 
 2. **Service Impact**

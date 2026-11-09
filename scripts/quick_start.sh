@@ -17,7 +17,7 @@ echo ""
 
 echo "🚀 Server Commands:"
 echo "  ./scripts/start_server.sh     - Start the server"
-echo "  cargo run --bin gateway       - Start server directly"
+echo "  APP_ENV=development cargo run --bin gateway - Start server directly"
 echo ""
 
 echo "🧪 Testing Commands:"

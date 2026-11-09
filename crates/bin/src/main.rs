@@ -24,22 +24,10 @@ use vex_networking::client::VexGateway;
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     // Load configuration
-    let config = match Config::load_auto() {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            eprintln!("Failed to load configuration: {}", e);
-            // In production, fail fast instead of silently using dev defaults
-            let env = std::env::var("APP_ENV").unwrap_or_else(|_| "development".to_string());
-            if env.eq_ignore_ascii_case("production") {
-                return Err(std::io::Error::other(format!(
-                    "Configuration load failed in production: {}",
-                    e
-                )));
-            }
-            eprintln!("Falling back to development defaults.");
-            Config::load_development_defaults()
-        }
-    };
+    let config = Config::load_auto().map_err(|e| {
+        eprintln!("Failed to load configuration: {e}");
+        std::io::Error::other(e.to_string())
+    })?;
 
     // Validate configuration before using any config values
     if let Err(e) = config.validate() {
@@ -91,7 +79,6 @@ async fn main() -> std::io::Result<()> {
             tracing::warn!("Invalid CORE_CONTROL_PORT, defaulting to 40123: {}", e);
             40123
         });
-    info!("GATEWAY CONFIG 00005: {:?}", gateway_config);
     let mut gateway_client = VexGateway::new(gateway_config)
         .map_err(|e| std::io::Error::other(format!("Failed to initialize VexGateway: {}", e)))?;
 

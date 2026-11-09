@@ -16,11 +16,12 @@ use crate::middleware::jwt_auth::AuthenticatedUser;
 use crate::models::user::{Model, UserStatus};
 use crate::repository::UserRepository;
 use crate::service::{EmailService, SessionService, TokenService};
-use lib_middleware::client_ip::client_ip;
+use lib_middleware::client_ip::{client_ip, is_https};
 use std::sync::Arc;
 
 const LOGIN_RATE_LIMIT_SCOPE: &str = "login";
-// `client_ip` is the TCP peer unless the peer is a configured trusted proxy (TRUSTED_PROXIES),
+// `client_ip` is the TCP peer unless the peer is a configured trusted proxy
+// (`auth.server.trusted_proxies`),
 // so behind an unconfigured load balancer every client shares one IP bucket.
 // These loose limits are coarse flood guards.
 const LOGIN_IP_MAX_REQUESTS: u64 = 300;
@@ -44,14 +45,12 @@ fn normalized_principal(value: &str) -> String {
     value.trim().to_ascii_lowercase()
 }
 
-/// Helper function to get cookie security configuration based on FRONTEND_URL
-/// Returns (is_secure, cookie_ttl) where:
-/// - is_secure: true if FRONTEND_URL starts with "https://", false otherwise
+/// Session cookie attributes for `req`. Returns (is_secure, cookie_ttl) where:
+/// - is_secure: the request used HTTPS: a TLS connection, or `X-Forwarded-Proto: https` from a
+///   trusted proxy (`is_https`), the same rule the OAuth handlers apply to their cookies
 /// - cookie_ttl: cookie time-to-live in seconds (24 hours)
-fn get_cookie_config() -> (bool, i64) {
-    let is_secure = std::env::var("FRONTEND_URL")
-        .unwrap_or_else(|_| "http://localhost:8081".to_string())
-        .starts_with("https://");
+fn get_cookie_config(req: &HttpRequest) -> (bool, i64) {
+    let is_secure = is_https(req);
     let cookie_ttl = 24 * 3600;
     (is_secure, cookie_ttl)
 }
@@ -299,7 +298,7 @@ pub async fn login(
         .await?;
 
     // Create session cookie
-    let (is_secure, cookie_ttl) = get_cookie_config();
+    let (is_secure, cookie_ttl) = get_cookie_config(&http_req);
 
     let session_cookie = actix_web::cookie::Cookie::build("session_id", session_id)
         .path("/")
@@ -341,7 +340,7 @@ pub async fn logout(
     }
 
     // Create cookie to delete the session cookie
-    let (is_secure, _cookie_ttl) = get_cookie_config();
+    let (is_secure, _cookie_ttl) = get_cookie_config(&req);
 
     let delete_session_cookie = actix_web::cookie::Cookie::build("session_id", "")
         .path("/")
@@ -478,7 +477,7 @@ pub async fn verify_email_with_otp(
     tracing::debug!("Session created successfully");
 
     // Create session cookie
-    let (is_secure, cookie_ttl) = get_cookie_config();
+    let (is_secure, cookie_ttl) = get_cookie_config(&http_req);
 
     let session_cookie = actix_web::cookie::Cookie::build("session_id", session_id)
         .path("/")
@@ -875,6 +874,39 @@ mod tests {
         redis::aio::ConnectionManager::new(client)
             .await
             .expect("Failed to create test Redis connection manager")
+    }
+
+    #[test]
+    fn session_cookie_is_secure_exactly_when_the_request_used_https() {
+        let forwarded_https = || {
+            actix_web::test::TestRequest::default()
+                .peer_addr("10.0.0.2:12345".parse().unwrap())
+                .insert_header(("X-Forwarded-Proto", "https"))
+        };
+        let load_balancer = || {
+            actix_web::web::Data::new(
+                lib_middleware::TrustedProxies::parse(&["10.0.0.0/8"]).unwrap(),
+            )
+        };
+
+        // Behind the load balancer TLS ends there, and its X-Forwarded-Proto carries the scheme.
+        let behind_tls = forwarded_https()
+            .app_data(load_balancer())
+            .to_http_request();
+        assert!(get_cookie_config(&behind_tls).0);
+
+        // Any other peer's header is ignored: this plain-HTTP request did not use HTTPS.
+        let untrusted = forwarded_https().to_http_request();
+        assert!(!get_cookie_config(&untrusted).0);
+        let direct = actix_web::test::TestRequest::default()
+            .peer_addr("192.0.2.10:12345".parse().unwrap())
+            .insert_header(("X-Forwarded-Proto", "https"))
+            .app_data(load_balancer())
+            .to_http_request();
+        assert!(!get_cookie_config(&direct).0);
+
+        let plain = actix_web::test::TestRequest::default().to_http_request();
+        assert!(!get_cookie_config(&plain).0);
     }
 
     #[tokio::test]

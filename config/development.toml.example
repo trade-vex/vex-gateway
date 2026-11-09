@@ -1,0 +1,51 @@
+# Local development configuration for the docker-compose services used by scripts/.
+# scripts/setup_dev.sh copies this file to config/development.toml (gitignored); edit the copy.
+# Every setting below is required unless marked optional. Run from the repository root.
+environment = "development"
+
+[server]
+host = "127.0.0.1"
+port = 8081
+
+[logging]
+level = "debug"
+structured = false
+colored = true
+
+[auth.jwt]
+private_key_path = "crates/libs/lib-auth/src/keys/private_key.pem"
+public_key_path = "crates/libs/lib-auth/src/keys/public_key.pem"
+access_token_ttl_minutes = 60
+refresh_token_ttl_days = 30
+issuer = "vex-gateway-dev"
+audience = "vex-api-dev"
+
+[auth.database]
+url = "postgresql://postgres:postgres123@localhost:5432/trading_db"
+max_connections = 10
+
+[auth.redis]
+url = "redis://127.0.0.1:6380"
+max_connections = 10
+
+[auth.oauth]
+providers = {}
+redirect_base = "http://localhost:8081"
+
+[auth.server]
+base_url = "http://localhost:8081"
+port = 8081
+frontend_url = "http://localhost:3000"
+# Optional; empty means clients connect directly. Required in production.
+# trusted_proxies = ["10.0.1.0/24"]
+
+[auth.email]
+smtp_host = "smtp.example.com"
+smtp_port = 587
+smtp_username = "user@example.com"
+smtp_password = "password"
+from_email = "noreply@example.com"
+
+[auth.otp]
+otp_length = 6
+email_verification_expiry_minutes = 15

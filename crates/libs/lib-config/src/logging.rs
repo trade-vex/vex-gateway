@@ -34,8 +34,8 @@ impl LoggingConfig {
         let level = self.level.trim().to_lowercase();
         if !valid_levels.contains(&level.as_str()) {
             return Err(ConfigError::ValidationError(format!(
-                "Invalid log level: {}. Must be one of: {:?}",
-                level, valid_levels
+                "logging.level must be one of: {}",
+                valid_levels.join(", ")
             )));
         }
         Ok(())
