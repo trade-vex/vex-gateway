@@ -6,10 +6,12 @@ edition = "2021"
 [dependencies]
 actix-web = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-serde_json = "1.0"
 uuid = { version = "1", features = ["v4", "serde"] }
 futures-util = "0.3"
 
 # Internal dependencies
 lib-auth = { path = "../lib-auth" }
 lib-middleware = { path = "../lib-middleware" }
+
+[dev-dependencies]
+serde_json = "1.0"

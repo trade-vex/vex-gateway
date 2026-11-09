@@ -2391,6 +2391,7 @@ dependencies = [
  "lib-config",
  "lib-core",
  "lib-middleware",
+ "lib-utils",
  "num_cpus",
  "redis",
  "reqwest",

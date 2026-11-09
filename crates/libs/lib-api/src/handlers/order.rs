@@ -541,7 +541,6 @@ pub async fn place_order(
 ) -> HttpResponse {
     let start = Instant::now();
 
-    // Extract user ID from JWT
     let user_id = uuid_to_u64(auth_user.0);
     let idempotency_key = match request
         .headers()
