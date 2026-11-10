@@ -661,7 +661,7 @@ pub trait SqlDb: Send + Sync + Clone + 'static {
 /// - Connection management
 ///
 /// ## Example Usage
-/// ```rust
+/// ```rust,no_run
 /// use lib_db::traits::BasicKvStore;
 /// use lib_db::redis::RedisDb;
 /// use lib_db::error::Result;
@@ -708,7 +708,7 @@ pub trait BasicKvStore: Send + Sync + Clone + 'static {
     /// * `Err(DbError::Connection)` - Connection failed
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,no_run
     /// use lib_db::redis::RedisDb;
     /// use lib_db::traits::BasicKvStore;
     /// use lib_db::error::Result;
@@ -738,7 +738,7 @@ pub trait BasicKvStore: Send + Sync + Clone + 'static {
     /// * `Err(DbError::Connection)` - Connection error
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,no_run
     /// use lib_db::traits::BasicKvStore;
     /// use lib_db::redis::RedisDb;
     /// use lib_db::error::Result;
@@ -775,7 +775,7 @@ pub trait BasicKvStore: Send + Sync + Clone + 'static {
     /// * `Err(DbError::Connection)` - Connection error
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,no_run
     /// use lib_db::traits::BasicKvStore;
     /// use lib_db::redis::RedisDb;
     /// use lib_db::error::Result;
@@ -872,7 +872,7 @@ pub trait BasicKvStore: Send + Sync + Clone + 'static {
 /// - **Consul** - Different health check mechanism
 ///
 /// ## Example Usage
-/// ```rust
+/// ```rust,no_run
 /// use lib_db::traits::{BasicKvStore, AdvancedKvStore};
 /// use lib_db::redis::RedisDb;
 /// use lib_db::error::Result;
@@ -949,7 +949,7 @@ pub trait AdvancedKvStore: BasicKvStore {
     /// * `Err(DbError::Unsupported)` - Store doesn't support batch operations
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,no_run
     /// use lib_db::traits::{BasicKvStore, AdvancedKvStore};
     /// use lib_db::redis::RedisDb;
     /// use lib_db::error::Result;
@@ -987,7 +987,7 @@ pub trait AdvancedKvStore: BasicKvStore {
     /// * `Err(DbError::Unsupported)` - Store doesn't support batch operations
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,no_run
     /// use lib_db::traits::{BasicKvStore, AdvancedKvStore};
     /// use lib_db::redis::RedisDb;
     /// use lib_db::error::Result;
@@ -1050,7 +1050,7 @@ pub trait AdvancedKvStore: BasicKvStore {
 /// - **Consul** - No increment, different CAS (modify index-based)
 ///
 /// ## Example Usage
-/// ```rust
+/// ```rust,no_run
 /// use lib_db::traits::{BasicKvStore, AtomicKvStore};
 /// use lib_db::redis::RedisDb;
 /// use lib_db::error::Result;
@@ -1106,7 +1106,7 @@ pub trait AtomicKvStore: BasicKvStore {
     /// * `Err(DbError::Unsupported)` - Store doesn't support increment
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,no_run
     /// use lib_db::traits::{BasicKvStore, AtomicKvStore};
     /// use lib_db::redis::RedisDb;
     /// use lib_db::error::Result;
@@ -1138,7 +1138,7 @@ pub trait AtomicKvStore: BasicKvStore {
     /// * `Err(DbError::Unsupported)` - Store doesn't support NX operations
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,no_run
     /// use lib_db::traits::{BasicKvStore, AtomicKvStore};
     /// use lib_db::redis::RedisDb;
     /// use lib_db::error::Result;
@@ -1183,7 +1183,7 @@ pub trait AtomicKvStore: BasicKvStore {
     /// * `Err(DbError::Unsupported)` - Store doesn't support CAS operations
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,no_run
     /// use lib_db::traits::{BasicKvStore, AtomicKvStore};
     /// use lib_db::redis::RedisDb;
     /// use lib_db::error::Result;
@@ -1225,7 +1225,7 @@ pub trait AtomicKvStore: BasicKvStore {
 /// - **Consul** - No TTL concept
 ///
 /// ## Example Usage
-/// ```rust
+/// ```rust,no_run
 /// use lib_db::traits::{BasicKvStore, ExpiringKvStore};
 /// use lib_db::redis::RedisDb;
 /// use lib_db::error::Result;
@@ -1277,7 +1277,7 @@ pub trait ExpiringKvStore: BasicKvStore {
     /// * `Err(DbError::Unsupported)` - Store doesn't support expiration
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,no_run
     /// use lib_db::traits::{BasicKvStore, ExpiringKvStore};
     /// use lib_db::redis::RedisDb;
     /// use lib_db::error::Result;
@@ -1354,7 +1354,7 @@ pub trait ExpiringKvStore: BasicKvStore {
 /// - **Consul** - Partial (no increment, different CAS, no TTL)
 ///
 /// ## Example Usage
-/// ```rust
+/// ```rust,no_run
 /// use lib_db::traits::{KvStore, BasicKvStore, AdvancedKvStore, AtomicKvStore, ExpiringKvStore};
 /// use lib_db::redis::RedisDb;
 /// use lib_db::error::Result;

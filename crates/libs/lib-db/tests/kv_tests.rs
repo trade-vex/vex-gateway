@@ -198,9 +198,15 @@ async fn test_full_operations<T: KvStore>(kv: &T) -> Result<()> {
 mod redis_tests {
     use super::*;
 
+    /// The tests' Redis: `REDIS_URL`, or the default local port when it is unset. CI sets
+    /// `REDIS_URL` to its Redis service.
+    fn redis_url() -> String {
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string())
+    }
+
     #[tokio::test]
     async fn test_redis_kv_basic_operations() -> Result<()> {
-        if let Ok(kv) = RedisDb::connect("redis://localhost:6379").await {
+        if let Ok(kv) = RedisDb::connect(&redis_url()).await {
             test_basic_operations(&kv).await
         } else {
             println!("Redis not available - skipping test");
@@ -210,7 +216,7 @@ mod redis_tests {
 
     #[tokio::test]
     async fn test_redis_kv_advanced_operations() -> Result<()> {
-        if let Ok(kv) = RedisDb::connect("redis://localhost:6379").await {
+        if let Ok(kv) = RedisDb::connect(&redis_url()).await {
             test_advanced_operations(&kv).await
         } else {
             println!("Redis not available - skipping test");
@@ -220,7 +226,7 @@ mod redis_tests {
 
     #[tokio::test]
     async fn test_redis_kv_atomic_operations() -> Result<()> {
-        if let Ok(kv) = RedisDb::connect("redis://localhost:6379").await {
+        if let Ok(kv) = RedisDb::connect(&redis_url()).await {
             test_atomic_operations(&kv).await
         } else {
             println!("Redis not available - skipping test");
@@ -230,7 +236,7 @@ mod redis_tests {
 
     #[tokio::test]
     async fn test_redis_kv_full_operations() -> Result<()> {
-        if let Ok(kv) = RedisDb::connect("redis://localhost:6379").await {
+        if let Ok(kv) = RedisDb::connect(&redis_url()).await {
             test_full_operations(&kv).await
         } else {
             println!("Redis not available - skipping test");
@@ -240,7 +246,7 @@ mod redis_tests {
 
     #[tokio::test]
     async fn test_redis_kv_generic_operations() -> Result<()> {
-        if let Ok(kv) = RedisDb::connect("redis://localhost:6379").await {
+        if let Ok(kv) = RedisDb::connect(&redis_url()).await {
             // Test that generic functions work with any BasicKvStore
             let cache_data = vec![1, 2, 3, 4, 5];
             kv.set("cache:data", &cache_data).await?;

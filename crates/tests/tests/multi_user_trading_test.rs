@@ -563,8 +563,7 @@ async fn test_multi_user_trading_scenario() {
         .start(handler)
         .expect("Failed to start VexGateway");
 
-    let redis_url =
-        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6380".to_string());
+    let redis_url = tests::redis_url();
     let db = init_database().await;
 
     let balance_store = if let Some(ref db_conn) = db {

@@ -1359,15 +1359,6 @@ mod tests {
             .as_millis() as u64
     }
 
-    /// The test Redis that signed requests record their signatures in (CI sets `REDIS_URL`).
-    async fn test_replay_store() -> redis::aio::ConnectionManager {
-        let redis_url =
-            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
-        redis::aio::ConnectionManager::new(redis::Client::open(redis_url).unwrap())
-            .await
-            .expect("replay-protection tests need Redis")
-    }
-
     #[actix_web::test]
     async fn rejects_replayed_signed_request() {
         let secret = "replay-test-secret";
@@ -1377,7 +1368,7 @@ mod tests {
         let middleware = ApiKeyMiddleware::new()
             .with_api_key(api_key)
             .with_default_security(SecurityType::Trade)
-            .with_replay_store(test_replay_store().await);
+            .with_replay_store(crate::test_redis().await);
         let app = actix_test::init_service(
             App::new()
                 .wrap(middleware)
@@ -1429,7 +1420,7 @@ mod tests {
 
     #[actix_web::test]
     async fn replay_guard_keeps_distinct_base64_signatures_separate() {
-        let replay_store = test_replay_store().await;
+        let replay_store = crate::test_redis().await;
         let key_material = KeyMaterial::RsaPublicKey(String::new());
         let unique_suffix = general_purpose::STANDARD.encode(uuid::Uuid::new_v4().as_bytes());
         let first_signature = format!("AAAA{unique_suffix}");
@@ -1500,7 +1491,7 @@ mod tests {
         let api_key = ApiKeyConfig::new("future-replay-test-key".to_string())
             .with_hmac_secret(secret.to_string())
             .with_permissions(vec![SecurityType::Trade]);
-        let replay_store = test_replay_store().await;
+        let replay_store = crate::test_redis().await;
         let middleware = ApiKeyMiddleware::new()
             .with_api_key(api_key)
             .with_default_security(SecurityType::Trade)
@@ -1855,7 +1846,7 @@ mod tests {
             Ok::<_, Error>(req.into_response(HttpResponse::Ok().finish()))
         });
         let service = secured_middleware()
-            .with_replay_store(test_replay_store().await)
+            .with_replay_store(crate::test_redis().await)
             .new_transform(downstream)
             .await
             .unwrap();

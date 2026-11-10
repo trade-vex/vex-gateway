@@ -25,6 +25,8 @@ use redis::AsyncCommands;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+mod common;
+
 type Result<T> = std::result::Result<T, TradingError>;
 
 /// Mock TradingRepository for testing
@@ -555,8 +557,8 @@ async fn test_timestamp_preservation() {
 async fn unindexed_balances_are_read_from_the_repository_without_writing_redis() {
     // The gateway only reads balances: with no asset index for the user, Redis has nothing it
     // can enumerate, so the repository answers and the index is left for the Events Handler.
-    let redis_url = "redis://127.0.0.1:6379/14";
-    let client = redis::Client::open(redis_url).unwrap();
+    let redis_url = common::redis_url();
+    let client = redis::Client::open(redis_url.as_str()).unwrap();
     let mut conn = match redis::aio::ConnectionManager::new(client).await {
         Ok(conn) => conn,
         Err(error) => {
@@ -593,7 +595,7 @@ async fn unindexed_balances_are_read_from_the_repository_without_writing_redis()
     let balance_reads = repository.balance_reads.clone();
     let store = UserBalanceStore::with_redis_cache(
         UserBalanceCacheConfig { enabled: true },
-        redis_url.to_string(),
+        redis_url,
         Some(repository),
     )
     .await
@@ -616,8 +618,8 @@ async fn unindexed_balances_are_read_from_the_repository_without_writing_redis()
 async fn cache_hit_does_not_query_the_repository() {
     // Finding G86-t0. With an indexed asset whose hash is cached, the request must be answered
     // from Redis alone; the database is read only once that hash goes missing.
-    let redis_url = "redis://127.0.0.1:6379/14";
-    let client = redis::Client::open(redis_url).unwrap();
+    let redis_url = common::redis_url();
+    let client = redis::Client::open(redis_url.as_str()).unwrap();
     let mut conn = match redis::aio::ConnectionManager::new(client).await {
         Ok(conn) => conn,
         Err(error) => {
@@ -660,7 +662,7 @@ async fn cache_hit_does_not_query_the_repository() {
     let balance_reads = repository.balance_reads.clone();
     let store = UserBalanceStore::with_redis_cache(
         UserBalanceCacheConfig { enabled: true },
-        redis_url.to_string(),
+        redis_url,
         Some(repository),
     )
     .await
@@ -689,8 +691,8 @@ async fn cache_hit_does_not_query_the_repository() {
 async fn an_indexed_asset_without_a_hash_sends_the_whole_read_to_the_repository() {
     // Two indexed assets, one hash missing: the repository answers for every asset rather than
     // being merged with what Redis has, so the caller never gets a mix of two sources.
-    let redis_url = "redis://127.0.0.1:6379/14";
-    let client = redis::Client::open(redis_url).unwrap();
+    let redis_url = common::redis_url();
+    let client = redis::Client::open(redis_url.as_str()).unwrap();
     let mut conn = match redis::aio::ConnectionManager::new(client).await {
         Ok(conn) => conn,
         Err(error) => {
@@ -727,7 +729,7 @@ async fn an_indexed_asset_without_a_hash_sends_the_whole_read_to_the_repository(
     ]));
     let store = UserBalanceStore::with_redis_cache(
         UserBalanceCacheConfig { enabled: true },
-        redis_url.to_string(),
+        redis_url,
         Some(repository),
     )
     .await
@@ -748,8 +750,7 @@ async fn an_indexed_asset_without_a_hash_sends_the_whole_read_to_the_repository(
 
 #[tokio::test]
 async fn test_u64_balances_survive_redis_round_trip() {
-    let redis_url =
-        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6380".to_string());
+    let redis_url = common::redis_url();
     let client = redis::Client::open(redis_url.clone()).expect("Redis URL should be valid");
     let mut connection = match client.get_multiplexed_async_connection().await {
         Ok(connection) => connection,
