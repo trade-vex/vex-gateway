@@ -2,6 +2,7 @@ pub mod api_key;
 pub mod client_ip;
 pub mod metrics;
 pub mod models;
+pub mod rate_limit;
 pub mod repository;
 
 pub use api_key::{

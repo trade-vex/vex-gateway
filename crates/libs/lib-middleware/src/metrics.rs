@@ -74,11 +74,36 @@ impl AuthMethod {
     }
 }
 
+/// The rate-limit budget (`[rate_limit]`) a refused request was over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RateLimitBudget {
+    /// Placing orders: `rate_limit.orders`.
+    Orders,
+    /// Every other route without a limit of its own, cancelling orders included:
+    /// `rate_limit.general`.
+    General,
+}
+
+impl RateLimitBudget {
+    /// In declaration order, which [`rate_limited`] indexes by.
+    const ALL: [Self; 2] = [Self::Orders, Self::General];
+
+    /// The budget's name: its `budget` label here, and its part of the rate limiter's Redis keys
+    /// and log lines.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Orders => "orders",
+            Self::General => "general",
+        }
+    }
+}
+
 struct Metrics {
     registry: Registry,
     orders: [IntCounter; EngineOutcome::ALL.len()],
     cancels: [IntCounter; EngineOutcome::ALL.len()],
     auth_failures: [IntCounter; AuthMethod::ALL.len()],
+    rate_limited: [IntCounter; RateLimitBudget::ALL.len()],
 }
 
 static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
@@ -105,6 +130,13 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
             "Requests the gateway refused to authenticate, by credential method",
             "method",
             AuthMethod::ALL.map(AuthMethod::label),
+        ),
+        rate_limited: family(
+            &registry,
+            "vex_gateway_rate_limited_total",
+            "Requests the gateway refused over a rate-limit budget, by budget",
+            "budget",
+            RateLimitBudget::ALL.map(RateLimitBudget::label),
         ),
         registry,
     }
@@ -141,6 +173,11 @@ pub fn auth_failures(method: AuthMethod) -> &'static IntCounter {
     &METRICS.auth_failures[method as usize]
 }
 
+/// The count of requests refused over `budget`.
+pub fn rate_limited(budget: RateLimitBudget) -> &'static IntCounter {
+    &METRICS.rate_limited[budget as usize]
+}
+
 /// Every counter, in the Prometheus text format ([`CONTENT_TYPE`]).
 pub fn render() -> prometheus::Result<String> {
     TextEncoder::new().encode_to_string(&METRICS.registry.gather())
@@ -168,6 +205,7 @@ mod tests {
             "vex_gateway_orders_total",
             "vex_gateway_cancels_total",
             "vex_gateway_auth_failures_total",
+            "vex_gateway_rate_limited_total",
         ] {
             assert!(
                 text.contains(&format!("# TYPE {family} counter\n")),
@@ -182,6 +220,11 @@ mod tests {
         for method in ["jwt", "api_key", "login"] {
             rendered(&format!(
                 "vex_gateway_auth_failures_total{{method=\"{method}\"}}"
+            ));
+        }
+        for budget in ["orders", "general"] {
+            rendered(&format!(
+                "vex_gateway_rate_limited_total{{budget=\"{budget}\"}}"
             ));
         }
     }
@@ -207,6 +250,15 @@ mod tests {
             );
             let before = rendered(&series);
             auth_failures(method).inc();
+            assert_eq!(rendered(&series), before + 1, "{series}");
+        }
+        for budget in RateLimitBudget::ALL {
+            let series = format!(
+                "vex_gateway_rate_limited_total{{budget=\"{}\"}}",
+                budget.label()
+            );
+            let before = rendered(&series);
+            rate_limited(budget).inc();
             assert_eq!(rendered(&series), before + 1, "{series}");
         }
     }

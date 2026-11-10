@@ -51,6 +51,19 @@ fn unauthorized(
     Ok(ServiceResponse::new(req, response).map_into_boxed_body())
 }
 
+/// The 503 of a request refused because Redis, which it depends on, cannot answer:
+/// `{"error":{"code":"service_unavailable","message":<message>,"status":503}}`. This middleware
+/// refuses with it, and so does the gateway's rate limit.
+pub fn service_unavailable(message: &str) -> HttpResponse {
+    HttpResponse::ServiceUnavailable().json(serde_json::json!({
+        "error": {
+            "code": "service_unavailable",
+            "message": message,
+            "status": 503
+        }
+    }))
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AuthenticatedUser {
     pub user_id: Uuid,
@@ -343,13 +356,9 @@ where
                                 Err(_) => {
                                     // Redis failure - fail closed with service unavailable
                                     let (req, _) = req.into_parts();
-                                    let response = HttpResponse::ServiceUnavailable().json(serde_json::json!({
-                                        "error": {
-                                            "code": "service_unavailable",
-                                            "message": "Authentication service temporarily unavailable",
-                                            "status": 503
-                                        }
-                                    }));
+                                    let response = service_unavailable(
+                                        "Authentication service temporarily unavailable",
+                                    );
                                     Ok(ServiceResponse::new(req, response).map_into_boxed_body())
                                 }
                             }
@@ -458,14 +467,8 @@ where
                                                                     e
                                                                 );
                                                                 let (req, _) = req.into_parts();
-                                                                let response = HttpResponse::ServiceUnavailable().json(
-                                                                    serde_json::json!({
-                                                                        "error": {
-                                                                            "code": "service_unavailable",
-                                                                            "message": "Authentication service temporarily unavailable",
-                                                                            "status": 503
-                                                                        }
-                                                                    }),
+                                                                let response = service_unavailable(
+                                                                    "Authentication service temporarily unavailable",
                                                                 );
                                                                 return Ok(ServiceResponse::new(
                                                                     req, response,

@@ -16,13 +16,13 @@ use crate::middleware::jwt_auth::AuthenticatedUser;
 use crate::models::user::{Model, UserStatus};
 use crate::repository::UserRepository;
 use crate::service::{EmailService, SessionService, TokenService};
-use lib_middleware::client_ip::{client_ip, is_https};
+use lib_middleware::client_ip::{client_ip_key, is_https};
 use lib_middleware::metrics::{self, AuthMethod};
 use std::sync::Arc;
 
 const LOGIN_RATE_LIMIT_SCOPE: &str = "login";
-// `client_ip` is the TCP peer unless the peer is a configured trusted proxy
-// (`auth.server.trusted_proxies`),
+// The IP limits key on `client_ip_key`: the TCP peer unless the peer is a configured trusted
+// proxy (`auth.server.trusted_proxies`), and an IPv6 client by its /64,
 // so behind an unconfigured load balancer every client shares one IP bucket.
 // These loose limits are coarse flood guards.
 const LOGIN_IP_MAX_REQUESTS: u64 = 300;
@@ -72,7 +72,7 @@ pub async fn signup(
     email_service
         .enforce_rate_limit(
             SIGNUP_RATE_LIMIT_SCOPE,
-            &format!("ip:{}", client_ip(&http_req)),
+            &client_ip_key(&http_req),
             SIGNUP_IP_MAX_REQUESTS,
             SIGNUP_IP_WINDOW_SECONDS,
         )
@@ -170,14 +170,14 @@ pub async fn login(
     // of their own account -- the success path that would clear it is unreachable while locked
     // (finding G3-2). The separate per-IP flood limit above still bounds a single source.
     let login_principal = format!(
-        "email:{}|ip:{}",
+        "email:{}|{}",
         normalized_principal(&req.email),
-        client_ip(&http_req)
+        client_ip_key(&http_req)
     );
     email_service
         .enforce_rate_limit(
             LOGIN_RATE_LIMIT_SCOPE,
-            &format!("ip:{}", client_ip(&http_req)),
+            &client_ip_key(&http_req),
             LOGIN_IP_MAX_REQUESTS,
             LOGIN_IP_WINDOW_SECONDS,
         )
@@ -421,7 +421,7 @@ pub async fn verify_email_with_otp(
     email_service
         .enforce_rate_limit(
             VERIFY_EMAIL_RATE_LIMIT_SCOPE,
-            &format!("ip:{}", client_ip(&http_req)),
+            &client_ip_key(&http_req),
             VERIFY_EMAIL_IP_MAX_REQUESTS,
             VERIFY_EMAIL_IP_WINDOW_SECONDS,
         )
@@ -659,6 +659,10 @@ pub async fn resend_verification_email(
         .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
 
     tracing::debug!("Resend verification email request for: {}", req.email);
+
+    email_service
+        .enforce_resend_verification_rate_limit(&req.email)
+        .await?;
 
     // check if user exists by email
     let user = user_repo.find_by_email(&req.email).await?;
@@ -1556,6 +1560,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_ipv6_client_has_one_failure_budget_for_its_whole_64() {
+        // An IPv6 client is usually given a /64 and can send from any address in it: a budget per
+        // address would give it a fresh one with each.
+        const PASSWORD: &str = "correct-horse-battery-staple";
+        let (email_service, token_service, session_service) = test_services().await;
+        let email = format!("{}@example.com", Uuid::new_v4());
+        let repository = Arc::new(LoginRepository {
+            user: login_user(email.clone(), PASSWORD),
+            find_by_email_calls: AtomicUsize::new(0),
+        });
+
+        let mut results = Vec::new();
+        for host in 1..=LOGIN_PRINCIPAL_MAX_REQUESTS + 1 {
+            let user_repo: Arc<dyn UserRepository> = repository.clone();
+            results.push(
+                attempt_login(
+                    &email,
+                    "wrong-password",
+                    &format!("[2001:db8:113:64::{host:x}]:12345"),
+                    user_repo,
+                    email_service.clone(),
+                    token_service.clone(),
+                    session_service.clone(),
+                )
+                .await,
+            );
+        }
+
+        let over_budget = results.pop().unwrap();
+        assert!(
+            matches!(over_budget, Err(AuthError::RateLimited { .. })),
+            "a new address in the same /64 must not get a new budget; got {:?}",
+            over_budget.err()
+        );
+    }
+
+    #[tokio::test]
     async fn occupied_login_inflight_lock_rejects_password_verification() {
         const PASSWORD: &str = "correct-horse-battery-staple";
         let (email_service, token_service, session_service) = test_services().await;
@@ -1621,8 +1662,7 @@ mod tests {
         assert!(matches!(result, Err(AuthError::Validation(_))));
         assert_eq!(repository.find_by_email_calls.load(Ordering::SeqCst), 0);
 
-        let client = redis::Client::open("redis://127.0.0.1:6379/").unwrap();
-        let mut conn = redis::aio::ConnectionManager::new(client).await.unwrap();
+        let mut conn = create_test_redis_conn().await;
         let ip_key_exists: bool = conn
             .exists("rate_limit:auth:signup:ip:203.0.113.201")
             .await
@@ -1668,8 +1708,7 @@ mod tests {
         assert!(matches!(result, Err(AuthError::Validation(_))));
         assert_eq!(repository.find_by_email_calls.load(Ordering::SeqCst), 0);
 
-        let client = redis::Client::open("redis://127.0.0.1:6379/").unwrap();
-        let mut conn = redis::aio::ConnectionManager::new(client).await.unwrap();
+        let mut conn = create_test_redis_conn().await;
         let ip_key_exists: bool = conn
             .exists("rate_limit:auth:verify_email:ip:203.0.113.202")
             .await
@@ -1683,14 +1722,53 @@ mod tests {
         assert!(!email_key_exists);
     }
 
+    #[tokio::test]
+    async fn resend_verification_is_limited_per_email_before_the_lookup() {
+        let (email_service, _, _) = test_services().await;
+        let repository = Arc::new(RejectIfCalledRepository {
+            find_by_email_calls: AtomicUsize::new(0),
+        });
+        let resend = |email: &str| {
+            let user_repo: Arc<dyn UserRepository> = repository.clone();
+            resend_verification_email(
+                web::Json(CheckEmailRequest {
+                    email: email.to_string(),
+                }),
+                web::Data::new(user_repo),
+                web::Data::new(email_service.clone()),
+            )
+        };
+        let email = format!("{}@example.com", Uuid::new_v4());
+
+        // Three an hour per email reach the lookup, which this repository fails.
+        for _ in 0..3 {
+            assert!(matches!(
+                resend(&email).await,
+                Err(AuthError::InternalError(_))
+            ));
+        }
+        assert!(matches!(
+            resend(&email).await,
+            Err(AuthError::RateLimited { .. })
+        ));
+        assert_eq!(repository.find_by_email_calls.load(Ordering::SeqCst), 3);
+
+        // Another email has a limit of its own.
+        let other_email = format!("{}@example.com", Uuid::new_v4());
+        assert!(matches!(
+            resend(&other_email).await,
+            Err(AuthError::InternalError(_))
+        ));
+    }
+
     #[test]
-    fn client_ip_uses_peer_address_not_forwarded_header() {
+    fn client_ip_key_uses_peer_address_not_forwarded_header() {
         let request = actix_web::test::TestRequest::default()
             .peer_addr("192.0.2.10:12345".parse().unwrap())
             .insert_header(("X-Forwarded-For", "198.51.100.7"))
             .to_http_request();
 
-        assert_eq!(client_ip(&request), "192.0.2.10");
+        assert_eq!(client_ip_key(&request), "ip:192.0.2.10");
     }
 
     /// Serves one password user and accepts its password update.

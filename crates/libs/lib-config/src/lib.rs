@@ -48,6 +48,7 @@
 //! export APP__AUTH__SERVER__TRUSTED_PROXIES=10.0.1.0/24  # auth.server.trusted_proxies
 //! export APP__CORE__AUTH_KEY=123456                      # core.auth_key
 //! export APP__METRICS__BIND=0.0.0.0:9091                 # metrics.bind
+//! export APP__RATE_LIMIT__ORDERS__MAX_REQUESTS=600       # rate_limit.orders.max_requests
 //! ```
 //!
 //! # Configuration Discovery
@@ -63,6 +64,7 @@ pub mod environment;
 mod error;
 pub mod logging;
 mod metrics;
+mod rate_limit;
 pub mod server;
 pub mod util;
 
@@ -73,6 +75,7 @@ pub use environment::Environment;
 pub use error::ConfigError;
 pub use logging::LoggingConfig;
 pub use metrics::MetricsConfig;
+pub use rate_limit::RateLimitConfig;
 pub use server::ServerConfig;
 
 use config::Source;
@@ -114,6 +117,8 @@ pub struct Config {
     pub clickhouse: ClickHouseConfig,
     /// The internal listener that serves the Prometheus metrics
     pub metrics: MetricsConfig,
+    /// The API's rate limits per caller
+    pub rate_limit: RateLimitConfig,
 }
 
 impl Config {
@@ -334,6 +339,7 @@ impl Config {
     ///   `core.address` cannot be empty
     /// - Every `auth.server.trusted_proxies` entry must be an IP address or CIDR range
     /// - `metrics.bind` must be an IP address and a port
+    /// - Every `rate_limit` setting must be greater than 0
     /// - `auth.oauth.providers` may list only `google`, `github` and `twitter`
     /// - With an OAuth provider configured, `auth.oauth.frontend_url_web` and `frontend_url_app`
     ///   must be set
@@ -387,6 +393,8 @@ impl Config {
 
         // Parsed here, before any network startup, though only the metrics listener uses it.
         let metrics_bind = self.metrics.socket_addr()?;
+
+        self.rate_limit.validate()?;
 
         // OAuthService knows the scopes and user-info endpoint of these providers only; any other
         // would load, then fail at its callback.
@@ -621,7 +629,15 @@ fn load_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lib_middleware::rate_limit::Limit;
     use std::fs;
+
+    fn limit(max_requests: u64, window_seconds: u64) -> Limit {
+        Limit {
+            max_requests,
+            window_seconds,
+        }
+    }
 
     /// The committed development example (config/development.toml.example), loaded as a
     /// development.toml through the real loader.
@@ -737,6 +753,14 @@ port = 8081
 [metrics]
 bind = "0.0.0.0:9091"
 
+[rate_limit.orders]
+max_requests = 300
+window_seconds = 10
+
+[rate_limit.general]
+max_requests = 1200
+window_seconds = 60
+
 [logging]
 level = "info"
 
@@ -796,6 +820,8 @@ url = "http://clickhouse.internal:8123"
             config.metrics.socket_addr().unwrap(),
             "0.0.0.0:9091".parse().unwrap()
         );
+        assert_eq!(config.rate_limit.orders, limit(300, 10));
+        assert_eq!(config.rate_limit.general, limit(1200, 60));
         assert_eq!(config.logging.level, "info");
         assert_eq!(
             config.auth.database.url,
@@ -971,6 +997,8 @@ url = "http://clickhouse.internal:8123"
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 8081);
         assert_eq!(config.metrics.bind, "127.0.0.1:9091");
+        assert_eq!(config.rate_limit.orders, limit(100, 10));
+        assert_eq!(config.rate_limit.general, limit(600, 60));
         assert_eq!(config.logging.level, "debug");
         // trusted_proxies is optional: absent, development trusts no proxy. So is [auth.server],
         // which holds nothing else.
@@ -1149,6 +1177,47 @@ url = "http://clickhouse.internal:8123"
                 "Configuration validation failed: metrics.bind must be an IP address and a port, \
                  such as 127.0.0.1:9091",
                 "{bind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rate_limits_are_required_and_must_be_greater_than_0() {
+        let config = load_development_example(&[
+            ("APP__RATE_LIMIT__ORDERS__MAX_REQUESTS", "50"),
+            ("APP__RATE_LIMIT__ORDERS__WINDOW_SECONDS", "1"),
+            ("APP__RATE_LIMIT__GENERAL__MAX_REQUESTS", "5000"),
+            ("APP__RATE_LIMIT__GENERAL__WINDOW_SECONDS", "300"),
+        ])
+        .unwrap();
+        assert_eq!(config.rate_limit.orders, limit(50, 1));
+        assert_eq!(config.rate_limit.general, limit(5000, 300));
+
+        // No built-in default: without the section, or one of its keys, the configuration does
+        // not load.
+        let section = "[rate_limit.general]\nmax_requests = 600\nwindow_seconds = 60\n";
+        let (result, _) = load_edited_example(section, "");
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Failed to load configuration: missing field `general`"
+        );
+        let (result, _) = load_edited_example("window_seconds = 10\n", "");
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Failed to load configuration: missing field `window_seconds`"
+        );
+
+        // A setting of 0 stops loading, and the error names it.
+        for key in [
+            "rate_limit.orders.max_requests",
+            "rate_limit.orders.window_seconds",
+            "rate_limit.general.max_requests",
+            "rate_limit.general.window_seconds",
+        ] {
+            let error = load_development_example(&[(&variable(key), "0")]).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("Configuration validation failed: {key} must be greater than 0")
             );
         }
     }
