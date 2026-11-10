@@ -274,6 +274,15 @@ tail -f logs/app.log
 # Logs appear in terminal
 ```
 
+Every response carries an `X-Request-Id` header: the client's own when it sent one of 1 to 64
+characters of `[A-Za-z0-9-]`, otherwise a new UUID. What the gateway logs while handling the
+request carries `request{request_id=<id>}`, at any log level, so the id a client reports finds that
+request's log lines:
+
+```bash
+grep 'request_id=<id>' logs/app.log
+```
+
 ---
 
 ## Troubleshooting

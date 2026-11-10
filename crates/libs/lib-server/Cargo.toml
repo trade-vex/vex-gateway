@@ -39,3 +39,4 @@ rusteron-archive = "=0.1.157"
 [dev-dependencies]
 lib-utils = {path = "../lib-utils"}
 rsa = "0.10"
+tracing-subscriber = {workspace = true}
