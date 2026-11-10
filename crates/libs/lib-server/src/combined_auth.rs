@@ -282,6 +282,8 @@ mod tests {
         config::JwtConfig, dto::jwt_response_dto::AppClaims,
         middleware::jwt_auth::AuthenticatedUser, service::TokenService,
     };
+    use lib_middleware::SignatureVerifier;
+    use lib_utils::AuthenticatedUserId;
     use redis::AsyncCommands;
     use rsa::{
         Generate, PrivateKey,
@@ -469,5 +471,57 @@ mod tests {
             .del(format!("blacklist:{}", old_jti))
             .await
             .expect("test blacklist cleanup must succeed");
+    }
+
+    #[actix_web::test]
+    async fn signed_api_key_request_acts_as_the_key_owner() {
+        let redis_conn = redis_connection().await;
+        let owner = Uuid::new_v4();
+        let secret = "owner-test-secret";
+        let api_key_middleware = ApiKeyMiddleware::new()
+            .with_api_key(ApiKeyConfig {
+                user_id: Some(owner),
+                ..ApiKeyConfig::new("owner-test-key".to_string())
+                    .with_hmac_secret(secret.to_string())
+                    .with_permissions(vec![SecurityType::Trade])
+            })
+            .with_default_security(SecurityType::Trade)
+            .with_replay_store(redis_conn.clone());
+        let jwt_middleware = JwtAuthentication::new(
+            DecodingKey::from_secret(b"unused-test-secret"),
+            "vex-gateway".to_string(),
+            "api".to_string(),
+            redis_conn.clone(),
+        );
+        let session_service = Arc::new(SessionService::new(redis_conn, 300));
+        let middleware =
+            CombinedAuthMiddleware::new(jwt_middleware, api_key_middleware, session_service);
+        // The extractors `place_order` takes: the caller's identity and the signed JSON body.
+        let app = test::init_service(App::new().wrap(middleware).route(
+            "/order",
+            web::post().to(
+                |user: AuthenticatedUserId, _order: web::Json<serde_json::Value>| async move {
+                    user.0.to_string()
+                },
+            ),
+        ))
+        .await;
+
+        let order = r#"{"market_id":1,"side":"Buy","price":100,"volume":10}"#;
+        let query = format!("timestamp={}", Utc::now().timestamp_millis());
+        let payload =
+            SignatureVerifier::build_request_payload("POST", "/order", &query, order, false);
+        let signature =
+            SignatureVerifier::generate_hmac(&payload, secret).expect("test request must sign");
+        let request = test::TestRequest::post()
+            .uri(&format!("/order?{query}&signature={signature}"))
+            .insert_header(("X-MBX-APIKEY", "owner-test-key"))
+            .insert_header(("content-type", "application/json"))
+            .set_payload(order)
+            .to_request();
+        let response = test::call_service(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(test::read_body(response).await, owner.to_string());
     }
 }
