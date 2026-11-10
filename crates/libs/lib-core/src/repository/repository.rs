@@ -428,25 +428,25 @@ impl TradingRepository for PostgresTradingRepository {
 
 /// ClickHouse-backed Portfolio Repository
 ///
-/// Data model (ClickHouse):
-/// - `trading.equity_per_minute(user_id, minute, equity_quote)`
-///   ReplacingMergeTree with last-per-minute equity valued in configured quote asset.
-/// - `trading.user_cashflow_per_minute(user_id, minute, cashflow_quote)`
-///   SummingMergeTree aggregating deposits (+) and withdrawals (-) per minute.
-/// - `trading.trade_events(ts, price, size_base, maker_user_id, taker_user_id, ...)`
-///   Raw trade feed for computing user volume.
+/// It reads only the read model's views (`readmodel/migrations/clickhouse`), which read their
+/// tables through `FINAL`, so that copies of an event count once, and scale vex-core's integers
+/// to decimals as `ScalingCache` does:
+/// - `balances_per_minute(user_id, asset_id, minute, total)`: each asset's last balance per minute;
+/// - `asset_prices_per_minute(asset_id, quote_asset_id, minute, price)`: each market's last trade
+///   price per minute, as its base asset's price in its quote asset;
+/// - `deposits` and `withdrawals(user_id, asset_id, ts, amount)`;
+/// - `trade_volumes(ts, maker_user_id, taker_user_id, volume)`: each fill's price times size.
 ///
 /// Metrics computed:
 /// - balance (now): last ASOF-valued equity at or before `now`
 /// - balance_24h_ago: last ASOF-valued equity at or before `now - 24h`
 /// - pnl_7d: equity(now) - equity(now - 7d) - cashflow(7d)
 /// - max_drawdown_1m: peak-to-trough decline over ASOF equity in the last 30 days
-/// - volume_24h: sum(price * size_base) where user is maker or taker in last 24h
+/// - volume_24h: sum of `trade_volumes.volume` where user is maker or taker in last 24h
 ///
 /// Notes:
 /// - Time parameters are passed as Unix seconds and wrapped with ClickHouse `toDateTime(?)`
-/// - Equity, cashflow, and volume are stored as Decimal(38,12); we read them directly as textual
-///   decimals from ClickHouse and parse without applying any manual scaling.
+/// - Amounts, prices and volumes are `Decimal(38, 18)`, read as text and parsed.
 pub struct ClickHousePortfolioRepository {
     ch: ClickHouseClient,
     schema: String,
@@ -497,10 +497,10 @@ impl ClickHousePortfolioRepository {
         // 1. Fetch ALL balance updates for this user up to end_ts
         let balance_sql = format!(
             "SELECT asset_id, CAST(toUnixTimestamp(minute) AS Int64) as ts, toString(total)
-             FROM {} FINAL
+             FROM {}
              WHERE user_id = ? AND minute <= toDateTime(?)
              ORDER BY minute ASC",
-            self.table("balances_last_per_min")
+            self.table("balances_per_minute")
         );
 
         let balance_rows: Vec<(u16, i64, String)> = self
@@ -515,11 +515,11 @@ impl ClickHousePortfolioRepository {
         // 2. Fetch ALL price updates up to end_ts
         let price_sql = format!(
             "SELECT asset_id, CAST(toUnixTimestamp(minute) AS Int64) as ts, toString(price)
-             FROM {} FINAL
+             FROM {}
              WHERE quote_asset_id = ?
                AND minute <= toDateTime(?)
              ORDER BY minute ASC",
-            self.table("asset_prices_last_per_min")
+            self.table("asset_prices_per_minute")
         );
 
         let price_rows: Vec<(u16, i64, String)> = self
@@ -602,24 +602,21 @@ impl ClickHousePortfolioRepository {
     ) -> Result<BTreeMap<i64, Decimal>> {
         let quote_asset_id = Self::QUOTE_ASSET_ID;
 
-        // 1. Fetch Raw Flows (Deposits +, Withdrawals -)
+        // 1. Fetch Raw Flows (Deposits +, Withdrawals -), in time order: the running total below
+        // depends on it. ORDER BY sorts the whole UNION ALL only from outside it.
         let flow_sql = format!(
-            "SELECT
-                CAST(toUnixTimestamp(ts) as Int64) as t,
-                asset_id, 
-                toString(amount) as amt
-             FROM {} 
-             WHERE user_id = ? AND ts > toDateTime(?) AND ts <= toDateTime(?)
-             UNION ALL
-             SELECT 
-                CAST(toUnixTimestamp(ts) as Int64) as t,
-                asset_id, 
-                toString(amount * -1) as amt
-             FROM {} 
-             WHERE user_id = ? AND ts > toDateTime(?) AND ts <= toDateTime(?)
+            "SELECT t, asset_id, amt FROM (
+                SELECT CAST(toUnixTimestamp(ts) as Int64) as t, asset_id, toString(amount) as amt
+                FROM {}
+                WHERE user_id = ? AND ts > toDateTime(?) AND ts <= toDateTime(?)
+                UNION ALL
+                SELECT CAST(toUnixTimestamp(ts) as Int64) as t, asset_id, toString(-amount) as amt
+                FROM {}
+                WHERE user_id = ? AND ts > toDateTime(?) AND ts <= toDateTime(?)
+             )
              ORDER BY t ASC",
-            self.table("deposit_events"),
-            self.table("withdrawal_events")
+            self.table("deposits"),
+            self.table("withdrawals")
         );
 
         let flow_rows: Vec<(i64, u16, String)> = self
@@ -640,10 +637,10 @@ impl ClickHousePortfolioRepository {
         // matches equity valuation.
         let price_sql = format!(
             "SELECT asset_id, CAST(toUnixTimestamp(minute) AS Int64), toString(price)
-             FROM {} FINAL
+             FROM {}
              WHERE quote_asset_id = ? AND minute <= toDateTime(?)
              ORDER BY minute ASC",
-            self.table("asset_prices_last_per_min")
+            self.table("asset_prices_per_minute")
         );
 
         let price_rows: Vec<(u16, i64, String)> = self
@@ -776,10 +773,10 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
 
         // 4. Volume (Still simple SQL is fine)
         let volume_query = format!(
-            "SELECT toString(toDecimal128(coalesce(sum(CAST(price * size_base AS Decimal(38, 12))), 0), 12)) 
-             FROM {} WHERE ts >= toDateTime(?) AND ts <= toDateTime(?) 
+            "SELECT toString(sum(volume))
+             FROM {} WHERE ts >= toDateTime(?) AND ts <= toDateTime(?)
                AND (maker_user_id = ? OR taker_user_id = ?)",
-            self.table("trade_events")
+            self.table("trade_volumes")
         );
         let vol_str: String = self
             .ch

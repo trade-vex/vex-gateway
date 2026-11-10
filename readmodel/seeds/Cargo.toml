@@ -5,10 +5,10 @@ edition = "2024"
 publish = false
 
 [dependencies]
+common = { workspace = true }
 config = { workspace = true }
 vex-config = { workspace = true }
 
 [dev-dependencies]
-common = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

@@ -1,0 +1,15 @@
+<!-- The test stack's ClickHouse: HTTPS on 8443 and no plain HTTP, with the certificate that
+     compose.yml copies in, and no user without a password, as a managed server may have it. -->
+<clickhouse>
+    <allow_no_password>0</allow_no_password>
+    <http_port remove="remove"/>
+    <https_port>8443</https_port>
+    <openSSL>
+        <server>
+            <certificateFile>/etc/clickhouse-server/tls/clickhouse.crt</certificateFile>
+            <privateKeyFile>/etc/clickhouse-server/tls/clickhouse.key</privateKeyFile>
+            <verificationMode>none</verificationMode>
+            <disableProtocols>sslv2,sslv3,tlsv1,tlsv1_1</disableProtocols>
+        </server>
+    </openSSL>
+</clickhouse>

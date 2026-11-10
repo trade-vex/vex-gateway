@@ -137,7 +137,9 @@ login is redirected to, and refuses to start without them:
 
 `clickhouse.url` (required, no default) is the ClickHouse HTTP endpoint the portfolio and
 balance-chart endpoints read from, such as `http://clickhouse.internal:8123`. Override it with
-`APP__CLICKHOUSE__URL`.
+`APP__CLICKHOUSE__URL`. The gateway reads only the read model's ClickHouse views, in the database
+`trading` ([Read Model](#read-model)). Its ClickHouse client speaks plain HTTP only, not HTTPS, so
+this endpoint must be reachable only from the gateway's private network.
 
 ### VEX Core Connection
 
@@ -230,15 +232,20 @@ The gateway's Postgres database holds the gateway's own tables (`users`, `api_ke
 `user_favorite_markets`, and `markets` and `assets`, which mirror vex-core's symbol configuration)
 and the `trading` schema: vex-core's Kafka events, which Kafka Connect writes there. The gateway
 may only read `trading`: `GET /api/balances` reads `trading.balances`, and `GET /api/orders/open`
-and `/api/orders/history` read `trading.orders`, as fresh as the connectors' lag. Redis holds only
-the gateway's own state (sessions, tokens, OTP and OAuth state, rate limits, API-key signatures,
-order idempotency claims). Everything for the read model lives in `readmodel/`:
+and `/api/orders/history` read `trading.orders`, as fresh as the connectors' lag. ClickHouse holds
+the same events for the portfolio and balance-chart endpoints, which Kafka Connect writes there
+too; the gateway may only read its views. Redis holds only the gateway's own state (sessions,
+tokens, OTP and OAuth state, rate limits, API-key signatures, order idempotency claims).
+Everything for both lives in `readmodel/`:
 
-- `migrations/postgres/`: the schema, as forward-only plain SQL migrations for golang-migrate.
-- `seeds/`: `readmodel-seeds`, which writes the `markets` and `assets` rows from a vex-core
-  configuration file, and `development.sql`, its output for the vex-core rev `Cargo.lock` pins.
+- `migrations/postgres/`, `migrations/clickhouse/`: the schemas, as forward-only plain SQL
+  migrations for golang-migrate.
+- `seeds/`: `readmodel-seeds`, which writes the `markets` and `assets` rows, for Postgres or
+  ClickHouse, from a vex-core configuration file, and `development.sql` and
+  `development.clickhouse.sql`, its output for the vex-core rev `Cargo.lock` pins.
 - `connect/`: the Connect worker image (`Dockerfile`, `worker.properties`), one JDBC sink
-  connector per `trading` table (`connectors/*.json`) and `apply-connectors.sh`.
+  connector per `trading` table and one ClickHouse sink connector for every topic
+  (`connectors/*.json`), and `apply-connectors.sh`.
 - `tests/`: the read model's test stack and tests.
 
 In `trading`, each latest-state table (`balances`, `orders`, `orderbook`) holds one row per key and
@@ -249,6 +256,18 @@ each history table (`balance_events`, `order_events`, `cancel_events`, `trade_ev
 delivered out of order change nothing. vex-core's `u64` values are stored with the same bits in
 `BIGINT` columns: read them as `i64` and decode with `as u64`; in SQL, `trading.u64(column)` gives
 the unsigned value.
+
+In ClickHouse, each topic has a raw table (`balance_events`, `order_events`, `orderbook_events`,
+`cancel_events`, `trade_events`, `deposit_events`, `withdrawal_events`) whose columns are those of
+the Postgres tables, with every proto integer a `UInt64`, plus `ts`, the time `event_ts` names.
+Each is a `ReplacingMergeTree` keyed by the event's key and `event_ts`, which keeps one copy of an
+event, the last one written, once its parts merge; until then the copies are stored too, so read
+the tables through `FINAL`. Materialized views keep each minute's last balance and last trade price
+(`balances_last_per_min`, `market_prices_last_per_min`). The gateway reads only five views, which
+read through `FINAL` and scale vex-core's integers to decimals with the `assets` and `markets` rows
+as the gateway's `ScalingCache` does: `balances_per_minute`, `asset_prices_per_minute`,
+`deposits`, `withdrawals` and `trade_volumes`. Every view and materialized view runs as
+`readmodel_owner`, a user nobody can log in as.
 
 ### Bringing Up an Environment
 
@@ -270,6 +289,27 @@ In this order:
    `REVOKE` for the schema's owner or a superuser to run first. A refused migration changes
    nothing, but golang-migrate marks its version dirty: once the cause is fixed, force the
    version back to the one before it (`migrate … force -- -1` for the first) and run `up` again.
+
+   Then ClickHouse's, on **ClickHouse 26.3 or later**, on an LTS release line ClickHouse still
+   supports (CI runs 26.8), into the database `trading`, which the deploy has created and the
+   gateway reads, as a user with access management. First, once per server, create the user that
+   owns the views, with a random password that nobody keeps: the migrations set its `HOST NONE`
+   whatever it had, so nobody can log in as it, and fail if it does not exist. They create the
+   roles `readmodel_connect` and `readmodel_gateway` themselves.
+   ```sql
+   CREATE USER IF NOT EXISTS readmodel_owner IDENTIFIED WITH sha256_password BY '<random>' HOST NONE;
+   ```
+   ```bash
+   SSL_CERT_FILE=<CA file> migrate -path readmodel/migrations/clickhouse \
+     -database "clickhouse://<host>:<secure native port, 9440 by default>?username=<user>&password=<secret>&database=trading&secure=true&x-multi-statement=true" up
+   ```
+   `secure=true` makes golang-migrate use TLS and verify the server's certificate, and its host
+   name, against the CA in `SSL_CERT_FILE` (the system's CAs without it). `x-multi-statement=true`
+   is required: the files hold several statements. They refuse a server older than 26.3. A failed
+   ClickHouse migration may have created some of its objects: drop the database's tables, force
+   the version back and run `up` again. golang-migrate takes the password only inside its
+   `-database` URL, on its command line, for ClickHouse as for Postgres (`<owner URL>`): run both
+   migrations where no other user can read the host's process list.
 3. **Login roles,** once per server. The migrations create only the group roles (see
    [Roles](#read-model-roles)); the deploy creates one login for Connect and one for the gateway,
    with passwords from its secret store:
@@ -277,13 +317,48 @@ In this order:
    CREATE ROLE readmodel_connect_login LOGIN PASSWORD '<secret>' IN ROLE readmodel_connect;
    CREATE ROLE readmodel_gateway_login LOGIN PASSWORD '<secret>' IN ROLE readmodel_gateway;
    ```
-   The gateway's `auth.database.url` uses the gateway login.
-4. **Seeds,** on every deploy, from the configuration file vex-core runs with. The output upserts
-   every configured market and asset and deactivates the others, so applying it again is harmless:
+   The gateway's `auth.database.url` uses the gateway login. Likewise in ClickHouse, where a user
+   has every role granted to it by default; grant these users nothing else, and let each in only
+   from its service's hosts (`HOST IP`), since the gateway's password crosses its network in plain
+   HTTP ([ClickHouse](#clickhouse)):
+   ```sql
+   CREATE USER readmodel_connect_login IDENTIFIED WITH sha256_password BY '<secret>'
+     HOST IP '<Connect's subnet>';
+   GRANT readmodel_connect TO readmodel_connect_login;
+   CREATE USER readmodel_gateway_login IDENTIFIED WITH sha256_password BY '<secret>'
+     HOST IP '<the gateway's subnet>';
+   GRANT readmodel_gateway TO readmodel_gateway_login;
+   ```
+   No migration holds a password: every secret comes from the deploy's secret store.
+4. **Seeds,** on every deploy, from the configuration file vex-core runs with. The Postgres
+   output upserts every configured market and asset and deactivates the others, so applying it
+   again is harmless:
    ```bash
-   cargo run --release -p readmodel-seeds -- <vex-core config file> \
+   cargo run --release -p readmodel-seeds -- postgres <vex-core config file> \
      | psql "<owner URL>" -v ON_ERROR_STOP=1
    ```
+   The ClickHouse output writes every configured row again, which replaces the stored one, and
+   keeps the rows of markets and assets that left the configuration, since their history still
+   needs their scales. clickhouse-client reads the user, its password and the CA from a YAML file
+   (named `*.yaml`) that only the deploy may read, so that the secret stays off the command line:
+   ```yaml
+   user: <user>
+   password: <secret>
+   openSSL:
+     client:
+       caConfig: <CA file>
+       extendedVerification: true
+   ```
+   ```bash
+   cargo run --release -p readmodel-seeds -- clickhouse <vex-core config file> \
+     | clickhouse-client --config-file <that file> --host <host> --secure \
+       --database <database> --multiquery
+   ```
+   `--secure` makes it use TLS, on the secure native port (9440 by default), and accept only a
+   certificate that the CA in `caConfig` signed. `extendedVerification: true` makes it also check
+   that the certificate names `<host>`: clickhouse-client 26.8 skips that check without it.
+   ClickHouse's views leave out a balance, deposit, withdrawal, price or trade whose asset or
+   market has no seeded row, so seed before the first event of a new market.
    Only the file's `symbols` section is read, with vex-config's own types and validation, so the
    generator needs neither vex-core's environment nor its secrets. vex-core's markets must
    therefore be in that file, never set through `VEX__SYMBOLS__…` environment overrides.
@@ -303,10 +378,28 @@ In this order:
      `server` is a bare `host:port` and `database` a bare database name, with no `?`, `&` or other
      URL parameter: both are pasted into each connector's JDBC URL ahead of its fixed
      `sslmode=verify-full`, which a parameter there could override.
+   - `clickhouse.properties`, from which the ClickHouse connector reaches ClickHouse's HTTPS
+     interface:
+     ```properties
+     hostname=<host>
+     port=<HTTPS port, 8443 by default>
+     database=<database>
+     username=readmodel_connect_login
+     password=<secret>
+     ```
+     `hostname` and `database` are bare too: the connector pastes them into its URL ahead of its
+     fixed `sslrootcert`, which a parameter there could override.
    - `postgres-ca.pem`: the certificate, in PEM, of the CA that signed Postgres' server
      certificate, or a bundle of them. On Amazon RDS, that is the RDS CA bundle, for the region
      (`https://truststore.pki.rds.amazonaws.com/<region>/<region>-bundle.pem`) or global
      (`https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem`).
+   - `clickhouse-ca.pem`: likewise for ClickHouse's certificate. The ClickHouse connector has
+     `ssl=true` and `jdbcConnectionProperties=?sslrootcert=/etc/vex-connect/clickhouse-ca.pem`
+     fixed in its file: it uses HTTPS and connects only to a server whose certificate that CA
+     signed for `hostname` (the sink verifies both by default; no setting in the file turns that
+     off). The gateway cannot use HTTPS ([ClickHouse](#clickhouse)), so ClickHouse serves both:
+     `https_port` for Connect and `http_port` for the gateway, which only the gateway's private
+     network may reach.
 
    Every connector's JDBC URL is `server` and `database` with
    `?sslmode=verify-full&sslrootcert=/etc/vex-connect/postgres-ca.pem&loginTimeout=10&socketTimeout=15`,
@@ -337,7 +430,9 @@ In this order:
    and the files in `/etc/vex-connect`.
 6. **vex-core.** Every start replays its journal, and re-publishes the events of the commands
    that its last run may not have delivered: the connectors absorb the copies.
-7. **The gateway,** with the gateway login.
+7. **The gateway,** with the gateway login. It must also read ClickHouse's views as ClickHouse's
+   gateway login, but has no setting for ClickHouse credentials yet and connects as the server's
+   `default` user: point it at a production ClickHouse only once it has them.
 
 ### Read Model Roles
 
@@ -349,12 +444,24 @@ In this order:
 Only the owner runs migrations and seeds, and only the owner creates objects, in schema `public`
 too.
 
+In ClickHouse:
+
+| Role or user | May |
+|---|---|
+| `readmodel_connect` (role) | `INSERT` into the seven raw tables, which also lets the sink describe them. Nothing else. |
+| `readmodel_gateway` (role) | `SELECT` on the five views. Nothing else: every read the gateway makes goes through `FINAL` and is scaled. |
+| `readmodel_owner` (user) | Owns every view and materialized view, which run with its privileges (`SQL SECURITY DEFINER`): `SELECT` on the tables they read, `INSERT` into the per-minute tables. The deploy creates it; the migrations set its `HOST NONE`, so nobody can log in as it. |
+
+Roles and users belong to the server, not to a database: migrating a second database on the same
+server grants the same roles on its tables, so a login holding `readmodel_gateway` reads the views
+of every read-model database there. Give each environment its own ClickHouse server.
+
 If the Kafka cluster enforces ACLs, Connect's principal needs the following. The worker has no
 principal of its own until it authenticates (step 5 of
 [Bringing Up an Environment](#bringing-up-an-environment)):
 
-- `Read` on the seven event topics, and on the consumer groups prefixed `connect-pg-` (each
-  connector's group is `connect-<connector name>`);
+- `Read` on the seven event topics, and on the consumer groups prefixed `connect-pg-` and the
+  group `connect-clickhouse` (each connector's group is `connect-<connector name>`);
 - `Read` on the worker group `vex-readmodel-connect`;
 - `Create`, `Describe`, `DescribeConfigs`, `Read` and `Write` on the topics prefixed
   `vex-readmodel-connect-`, its internal topics.
@@ -428,30 +535,49 @@ nothing.
 A trace with `is missing fields (...) and auto-evolution is disabled` means vex-core publishes a
 field that has no column: apply the migration that adds it, then restart.
 
+The ClickHouse connector (`clickhouse`) retries, for as long as it takes, a ClickHouse it cannot
+reach, a connection refused, reset or timed out included (`retryOnSocketException=true`), and a
+certificate that does not verify, which the sink reports as a failed connection: the task stays
+`RUNNING`, writes nothing, logs `RetriableException from SinkTask` with the cause, and carries on
+by itself once ClickHouse, or its certificate, is back. Any other failure fails its task: a
+missing raw table or privilege, a record without a field for one of a raw table's columns
+(`Data schema validation failed`). **A field that has no column in ClickHouse fails nothing: the
+sink drops it.** Only `readmodel/tests/run.py` catches that, so a new `trading.proto` field ships
+with its ClickHouse column, as with Postgres. A materialized view whose owner lacks a privilege
+fails the sink's insert before it writes anything, the raw table included.
+
 A log entry or trace with `SSL error: ... PKIX path` means `/etc/vex-connect/postgres-ca.pem` does
-not hold the CA that signed Postgres' certificate. A wrong or outdated CA file usually gives
+not hold the CA that signed Postgres' certificate (for the ClickHouse connector, `clickhouse-ca.pem`
+and ClickHouse's). A wrong or outdated CA file usually gives
 `PKIX path building failed: ... unable to find valid certification path to requested target`; a
 different CA with the same name as the right one gives `PKIX path validation failed: ... Path does
 not chain with any of the trust anchors`. One with `The hostname <host> could not be verified`
-means the certificate does not name the host in `server`. Fix the file, the certificate or
-`server`; restart the connector if its tasks failed.
+means the certificate does not name the host in `server` (for ClickHouse,
+`doesn't match any of the subject alternative names` and `hostname`). Fix the file, the
+certificate or `server`; restart the connector if its tasks failed.
 
 ### Schema Changes
 
 - A migration is a new file, `<next number>_<name>.up.sql`. Never edit one that has been applied.
-- A new `trading.proto` field needs its column, deployed before the vex-core that publishes it.
+- A new `trading.proto` field needs its column, in Postgres and in its ClickHouse raw table,
+  deployed before the vex-core that publishes it.
 - A new `trading` table needs its `keep_newer` trigger, its grants to `readmodel_connect` and
   `readmodel_gateway`, and a connector file.
+- A new ClickHouse view states `DEFINER = readmodel_owner SQL SECURITY DEFINER`, reads its tables
+  through `FINAL`, and is granted to `readmodel_gateway`, with `readmodel_owner` granted what it
+  reads. A ClickHouse view without the clause runs with the rights of its reader.
 - `python3 readmodel/tests/run.py` checks all of these, and that the latest-state tables hold the
-  engine's state after a restart of vex-core, a Kafka outage and a `kill -9` of vex-core. It needs
-  Docker and openssl, and runs the stack with the vex-core rev `Cargo.lock` pins, its topics from
-  that rev's `deploy/kafka/topics.toml`; CI runs it (the "Read model" job, which keeps
-  the images' layers in the GitHub Actions cache) on pushes to `main` and `develop` and on pull
-  requests that change `readmodel/`, `Cargo.lock`, the gateway's repository or model code, or
-  `ci.yml`.
+  engine's state, and every Postgres and ClickHouse table what Kafka holds, after a restart of
+  vex-core, a Kafka outage and a `kill -9` of vex-core. It needs Docker and openssl, and runs the
+  stack with the vex-core rev `Cargo.lock` pins, its topics from that rev's
+  `deploy/kafka/topics.toml`; CI runs it (the "Read model" job, which keeps the images' layers in
+  the GitHub Actions cache) on pushes to `main` and `develop` and on pull requests that change
+  `readmodel/`, `Cargo.lock`, the gateway's repository or model code, or `ci.yml`.
 - After re-pinning vex-core, `cargo test -p readmodel-seeds` fails if its `config.dev.yaml` changed;
   regenerate the development seeds with
-  `cargo run -p readmodel-seeds -- <vex-core checkout>/config.dev.yaml > readmodel/seeds/development.sql`.
+  `cargo run -p readmodel-seeds -- postgres <vex-core checkout>/config.dev.yaml > readmodel/seeds/development.sql`
+  and
+  `cargo run -p readmodel-seeds -- clickhouse <vex-core checkout>/config.dev.yaml > readmodel/seeds/development.clickhouse.sql`.
 
 ---
 

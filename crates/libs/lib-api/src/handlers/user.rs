@@ -399,17 +399,16 @@ pub async fn get_order_history(
 /// Requires valid JWT token in Authorization header: `Bearer <token>`
 ///
 /// # Data Sources (ClickHouse)
-/// - `trading.equity_per_minute(user_id, minute, equity_quote)`
-///   ReplacingMergeTree with per-minute equity valued in configured quote asset.
-/// - `trading.trade_events(ts, market_id, price, size_base, maker_user_id, taker_user_id, ...)`
-///   Raw trades for user volume aggregation.
+/// The read model's views, read by `ClickHousePortfolioRepository` (lib-core), which lists them.
 ///
 /// # Metrics
-/// - `balance` (now): last ASOF-valued `equity_quote` at or before current time
-/// - `balance_24h_ago`: last ASOF-valued `equity_quote` at or before now - 24h
-/// - `pnl_7d`: `equity(now) - equity(now - 7d) - cashflow(7d)` with cashflow priced via ASOF joins
-/// - `max_drawdown_1m`: max peak-to-trough drawdown of ASOF-valued equity over last 30d using `runningMax`
-/// - `volume_24h`: sum(`price * size_base`) priced per trade for `ts in (now-24h, now]`
+/// - `balance` (now): last ASOF-valued equity at or before current time
+/// - `balance_24h_ago`: last ASOF-valued equity at or before now - 24h
+/// - `pnl_7d`: `equity(now) - equity(now - 7d) - cashflow(7d)`, each flow valued at its asset's
+///   ASOF price (the latest price when there is none at or before the flow)
+/// - `max_drawdown_1m`: max peak-to-trough drawdown of ASOF-valued equity over last 30d
+/// - `volume_24h`: sum of `trade_volumes.volume`, each fill's price times size in its quote asset,
+///   for `ts in [now-24h, now]`
 ///
 /// The handler is backend-agnostic and uses the injected `PortfolioRepository` which is
 /// implemented against ClickHouse in production.
@@ -468,7 +467,7 @@ pub async fn get_portfolio_overview(
 /// Get balance chart
 ///
 /// Returns account balance over time with different resolutions.
-/// Uses ClickHouse equity_per_minute table to compute balance series.
+/// Computes the balance series from ClickHouse.
 ///
 /// # Endpoint
 /// `GET /api/balance-chart?resolution={resolution}`
@@ -480,8 +479,7 @@ pub async fn get_portfolio_overview(
 /// Requires valid JWT token in Authorization header: `Bearer <token>`
 ///
 /// # Data Sources (ClickHouse)
-/// - `trading.equity_per_minute(user_id, minute, equity_quote)`
-///   Per-minute equity valued in configured quote asset.
+/// The read model's views, read by `ClickHousePortfolioRepository` (lib-core), which lists them.
 ///
 /// # Response
 /// Returns [`BalanceChartResponse`] containing balance time series.
@@ -552,7 +550,7 @@ pub async fn get_balance_chart(
 /// Get PnL chart
 ///
 /// Returns profit & loss time series with different resolutions.
-/// Uses ClickHouse equity_per_minute and cashflow tables to compute PnL series.
+/// Computes the PnL series from ClickHouse.
 ///
 /// # Endpoint
 /// `GET /api/pnl-chart?resolution={resolution}`
@@ -564,10 +562,7 @@ pub async fn get_balance_chart(
 /// Requires valid JWT token in Authorization header: `Bearer <token>`
 ///
 /// # Data Sources (ClickHouse)
-/// - `trading.equity_per_minute(user_id, minute, equity_quote)`
-///   Per-minute equity valued in configured quote asset.
-/// - `trading.user_cashflow_per_minute(user_id, minute, cashflow_quote)`
-///   Per-minute cashflow for accounting PnL calculation.
+/// The read model's views, read by `ClickHousePortfolioRepository` (lib-core), which lists them.
 ///
 /// # Response
 /// Returns [`PnlChartResponse`] containing PnL time series.
