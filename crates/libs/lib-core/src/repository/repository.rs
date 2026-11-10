@@ -1,8 +1,5 @@
-use crate::model::orders::{ActiveModel as OrderActiveModel, Model as OrderModel};
-use crate::model::user_balances::{
-    ActiveModel as UserBalanceActiveModel, Column as UserBalanceColumn,
-    Entity as UserBalanceEntity, Model as UserBalanceModel,
-};
+use crate::model::orders::Model as OrderModel;
+use crate::model::user_balances::Model as UserBalanceModel;
 use crate::model::user_favorite_markets::{
     ActiveModel as UserFavoriteMarketActiveModel, Column as UserFavoriteMarketColumn,
     Entity as UserFavoriteMarketEntity, Model as UserFavoriteMarketModel,
@@ -21,14 +18,12 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub enum TradingError {
     Database(String),
-    NotFound,
 }
 
 impl std::fmt::Display for TradingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TradingError::Database(msg) => write!(f, "Database error: {}", msg),
-            TradingError::NotFound => write!(f, "Not found"),
         }
     }
 }
@@ -43,16 +38,14 @@ impl From<DbErr> for TradingError {
 
 pub type Result<T> = std::result::Result<T, TradingError>;
 
+/// The gateway's reads of the read model's `trading` schema, which only Kafka Connect writes (each
+/// one query), and its favourite markets.
 #[async_trait]
 pub trait TradingRepository: Send + Sync {
-    // Balance operations
+    /// The user's balance of every asset, from `trading.balances`, by asset.
     async fn get_user_balances(&self, user_id: u64) -> Result<Vec<UserBalanceModel>>;
-    async fn get_user_balance(&self, user_id: u64) -> Result<Option<UserBalanceModel>>;
-    async fn update_user_balance(&self, user_id: u64, available: u64, locked: u64) -> Result<()>;
-    async fn create_user_balance(&self, user_id: u64, available: u64, locked: u64) -> Result<()>;
 
-    // Order operations
-    async fn get_open_orders(&self, user_id: u64) -> Result<Vec<OrderModel>>;
+    // Orders, from `trading.orders`; a page holds the most recently changed first.
     async fn get_open_orders_paginated(
         &self,
         user_id: u64,
@@ -61,10 +54,6 @@ pub trait TradingRepository: Send + Sync {
         market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>>;
     async fn count_open_orders(&self, user_id: u64, market_id: Option<u32>) -> Result<u64>;
-    async fn get_order_by_id(&self, order_id: u64, user_id: u64) -> Result<Option<OrderModel>>;
-    async fn create_order(&self, order: OrderModel) -> Result<u64>;
-    async fn count_user_orders(&self, user_id: u64) -> Result<u64>;
-    async fn get_order_history(&self, user_id: u64) -> Result<Vec<OrderModel>>;
     async fn get_order_history_paginated(
         &self,
         user_id: u64,
@@ -181,98 +170,58 @@ impl PostgresTradingRepository {
         Self { db }
     }
 
-    fn latest_orders_statement(
+    /// `SELECT <select>` over the user's rows of `trading.orders` (one per order) that match
+    /// `status_filter` and, if given, `market_id`; with `page`, `(offset, limit)`, that page of
+    /// them, the most recently changed first. The index on `(order_user_id, event_ts)` serves it.
+    fn orders_statement(
+        select: &str,
         user_id: u64,
         status_filter: &str,
         market_id: Option<u32>,
-        pagination: Option<(u64, u64)>,
+        page: Option<(u64, u64)>,
     ) -> Statement {
-        let mut values = vec![(user_id as i64).into()];
+        let mut values: Vec<Value> = vec![(user_id as i64).into()];
         let mut sql = format!(
-            r#"
-            WITH latest_orders AS (
-                SELECT orders_events.*,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY order_user_id, order_order_id
-                           -- Rank by the event's own timestamp, never its insert id. vex-core's
-                           -- event-ordering contract (KafkaEventsHandler): the timestamp is a
-                           -- strictly increasing per-command engine clock, and a command emits at
-                           -- most one event per key holding the key's state after that command, so
-                           -- the greatest timestamp is the latest state. Kafka and insert order are
-                           -- not engine order; id is a tie-break that should never fire.
-                           ORDER BY order_timestamp DESC, id DESC
-                       ) AS event_rank
-                FROM trading.orders_events
-                WHERE order_user_id = $1
-            )
-            SELECT id, market_id, order_order_id, order_user_id, order_price, order_size,
-                   order_filled_size, order_side, order_time_in_force, order_status,
-                   order_timestamp, created_at
-            FROM latest_orders
-            WHERE event_rank = 1 AND ({status_filter})
-            "#
+            "SELECT {select} FROM trading.orders WHERE order_user_id = $1 AND ({status_filter})"
         );
-
         if let Some(market_id) = market_id {
-            values.push((market_id as i32).into());
+            values.push(i64::from(market_id).into());
             sql.push_str(&format!(" AND market_id = ${}", values.len()));
         }
-
-        sql.push_str(" ORDER BY order_timestamp DESC, id DESC");
-
-        if let Some((offset, limit)) = pagination {
+        if let Some((offset, limit)) = page {
             values.push((offset as i64).into());
-            let offset_parameter = values.len();
             values.push((limit as i64).into());
-            let limit_parameter = values.len();
+            // order_order_id breaks ties: one command can change several of a user's orders.
             sql.push_str(&format!(
-                " OFFSET ${offset_parameter} LIMIT ${limit_parameter}"
+                " ORDER BY event_ts DESC, order_order_id DESC OFFSET ${} LIMIT ${}",
+                values.len() - 1,
+                values.len()
             ));
         }
-
         Statement::from_sql_and_values(DbBackend::Postgres, sql, values)
     }
 
-    fn latest_orders_count_statement(
+    async fn orders_page(
+        &self,
         user_id: u64,
         status_filter: &str,
         market_id: Option<u32>,
-    ) -> Statement {
-        let mut values = vec![(user_id as i64).into()];
-        let mut sql = format!(
-            r#"
-            WITH latest_orders AS (
-                SELECT market_id,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY order_user_id, order_order_id
-                           -- Rank by the event's own timestamp, never its insert id. vex-core's
-                           -- event-ordering contract (KafkaEventsHandler): the timestamp is a
-                           -- strictly increasing per-command engine clock, and a command emits at
-                           -- most one event per key holding the key's state after that command, so
-                           -- the greatest timestamp is the latest state. Kafka and insert order are
-                           -- not engine order; id is a tie-break that should never fire.
-                           ORDER BY order_timestamp DESC, id DESC
-                       ) AS event_rank,
-                       order_status,
-                       order_time_in_force
-                FROM trading.orders_events
-                WHERE order_user_id = $1
-            )
-            SELECT COUNT(*) AS count
-            FROM latest_orders
-            WHERE event_rank = 1 AND ({status_filter})
-            "#
-        );
-
-        if let Some(market_id) = market_id {
-            values.push((market_id as i32).into());
-            sql.push_str(&format!(" AND market_id = ${}", values.len()));
-        }
-
-        Statement::from_sql_and_values(DbBackend::Postgres, sql, values)
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<OrderModel>> {
+        OrderModel::find_by_statement(Self::orders_statement(
+            ORDER_COLUMNS,
+            user_id,
+            status_filter,
+            market_id,
+            Some((offset, limit)),
+        ))
+        .all(&*self.db)
+        .await
+        .map_err(Into::into)
     }
 
-    async fn count_latest_orders(
+    async fn count_orders(
         &self,
         user_id: u64,
         status_filter: &str,
@@ -280,10 +229,12 @@ impl PostgresTradingRepository {
     ) -> Result<u64> {
         let row = self
             .db
-            .query_one(Self::latest_orders_count_statement(
+            .query_one(Self::orders_statement(
+                "COUNT(*) AS count",
                 user_id,
                 status_filter,
                 market_id,
+                None,
             ))
             .await?
             .ok_or_else(|| TradingError::Database("Order count returned no row".to_string()))?;
@@ -291,6 +242,10 @@ impl PostgresTradingRepository {
         Ok(count as u64)
     }
 }
+
+/// The columns of [`OrderModel`].
+const ORDER_COLUMNS: &str = "order_order_id, order_user_id, order_price, order_size, \
+    order_filled_size, order_side, order_time_in_force, order_status, event_ts, market_id";
 
 // Status and time-in-force values are vex-core's protobuf enum value names (trading.proto
 // `Status`, `TimeInForce`), which the Kafka Connect sink writes verbatim.
@@ -310,80 +265,9 @@ impl TradingRepository for PostgresTradingRepository {
     async fn get_user_balances(&self, user_id: u64) -> Result<Vec<UserBalanceModel>> {
         UserBalanceModel::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"
-            WITH latest_balances AS (
-                SELECT balances_events.*,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY user_id, asset_id
-                           -- Same contract as the order events above: one balance event per
-                           -- (user, asset) per command, ranked by the engine timestamp.
-                           ORDER BY timestamp DESC, id DESC
-                       ) AS event_rank
-                FROM trading.balances_events
-                WHERE user_id = $1
-            )
-            SELECT id, user_id, asset_id, available, locked, total, timestamp, created_at
-            FROM latest_balances
-            WHERE event_rank = 1
-            ORDER BY timestamp DESC, id DESC
-            "#,
+            "SELECT user_id, asset_id, available, locked, total, event_ts \
+             FROM trading.balances WHERE user_id = $1 ORDER BY asset_id",
             [(user_id as i64).into()],
-        ))
-        .all(&*self.db)
-        .await
-        .map_err(Into::into)
-    }
-
-    async fn get_user_balance(&self, user_id: u64) -> Result<Option<UserBalanceModel>> {
-        UserBalanceEntity::find()
-            .filter(UserBalanceColumn::UserId.eq(user_id as i64))
-            .order_by_desc(UserBalanceColumn::Id)
-            .one(&*self.db)
-            .await
-            .map_err(Into::into)
-    }
-
-    async fn update_user_balance(&self, user_id: u64, available: u64, locked: u64) -> Result<()> {
-        let total = available + locked;
-
-        // Insert new balance event (this is an event log table, not mutable state)
-        let balance = UserBalanceActiveModel {
-            user_id: Set(user_id as i64),
-            asset_id: Set(0), // Default asset, adjust as needed
-            available: Set(available as i64),
-            locked: Set(locked as i64),
-            total: Set(total as i64),
-            timestamp: Set(chrono::Utc::now().timestamp()),
-            ..Default::default()
-        };
-
-        balance.insert(&*self.db).await?;
-        Ok(())
-    }
-
-    async fn create_user_balance(&self, user_id: u64, available: u64, locked: u64) -> Result<()> {
-        let total = available + locked;
-
-        let balance = UserBalanceActiveModel {
-            user_id: Set(user_id as i64),
-            asset_id: Set(0), // Default asset, adjust as needed
-            available: Set(available as i64),
-            locked: Set(locked as i64),
-            total: Set(total as i64),
-            timestamp: Set(chrono::Utc::now().timestamp()),
-            ..Default::default()
-        };
-
-        balance.insert(&*self.db).await?;
-        Ok(())
-    }
-
-    async fn get_open_orders(&self, user_id: u64) -> Result<Vec<OrderModel>> {
-        OrderModel::find_by_statement(Self::latest_orders_statement(
-            user_id,
-            OPEN_ORDER_FILTER,
-            None,
-            None,
         ))
         .all(&*self.db)
         .await
@@ -397,74 +281,13 @@ impl TradingRepository for PostgresTradingRepository {
         limit: u64,
         market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>> {
-        OrderModel::find_by_statement(Self::latest_orders_statement(
-            user_id,
-            OPEN_ORDER_FILTER,
-            market_id,
-            Some((offset, limit)),
-        ))
-        .all(&*self.db)
-        .await
-        .map_err(Into::into)
-    }
-
-    async fn count_open_orders(&self, user_id: u64, market_id: Option<u32>) -> Result<u64> {
-        self.count_latest_orders(user_id, OPEN_ORDER_FILTER, market_id)
+        self.orders_page(user_id, OPEN_ORDER_FILTER, market_id, offset, limit)
             .await
     }
 
-    async fn get_order_by_id(&self, order_id: u64, user_id: u64) -> Result<Option<OrderModel>> {
-        OrderModel::find_by_statement(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r#"
-            SELECT id, market_id, order_order_id, order_user_id, order_price, order_size,
-                   order_filled_size, order_side, order_time_in_force, order_status,
-                   order_timestamp, created_at
-            FROM trading.orders_events
-            WHERE order_order_id = $1 AND order_user_id = $2
-            ORDER BY order_timestamp DESC, id DESC
-            LIMIT 1
-            "#,
-            [(order_id as i64).into(), (user_id as i64).into()],
-        ))
-        .one(&*self.db)
-        .await
-        .map_err(Into::into)
-    }
-
-    async fn create_order(&self, order: OrderModel) -> Result<u64> {
-        let active_model = OrderActiveModel {
-            market_id: Set(order.market_id),
-            order_order_id: Set(order.order_order_id),
-            order_user_id: Set(order.order_user_id),
-            order_price: Set(order.order_price),
-            order_size: Set(order.order_size),
-            order_filled_size: Set(order.order_filled_size),
-            order_side: Set(order.order_side.to_string()),
-            order_time_in_force: Set(order.order_time_in_force),
-            order_status: Set(order.order_status),
-            order_timestamp: Set(order.order_timestamp),
-            ..Default::default()
-        };
-
-        let result = active_model.insert(&*self.db).await?;
-        Ok(result.order_order_id as u64)
-    }
-
-    async fn count_user_orders(&self, user_id: u64) -> Result<u64> {
-        self.count_latest_orders(user_id, "TRUE", None).await
-    }
-
-    async fn get_order_history(&self, user_id: u64) -> Result<Vec<OrderModel>> {
-        OrderModel::find_by_statement(Self::latest_orders_statement(
-            user_id,
-            HISTORY_ORDER_FILTER,
-            None,
-            None,
-        ))
-        .all(&*self.db)
-        .await
-        .map_err(Into::into)
+    async fn count_open_orders(&self, user_id: u64, market_id: Option<u32>) -> Result<u64> {
+        self.count_orders(user_id, OPEN_ORDER_FILTER, market_id)
+            .await
     }
 
     async fn get_order_history_paginated(
@@ -474,19 +297,12 @@ impl TradingRepository for PostgresTradingRepository {
         limit: u64,
         market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>> {
-        OrderModel::find_by_statement(Self::latest_orders_statement(
-            user_id,
-            HISTORY_ORDER_FILTER,
-            market_id,
-            Some((offset, limit)),
-        ))
-        .all(&*self.db)
-        .await
-        .map_err(Into::into)
+        self.orders_page(user_id, HISTORY_ORDER_FILTER, market_id, offset, limit)
+            .await
     }
 
     async fn count_order_history(&self, user_id: u64, market_id: Option<u32>) -> Result<u64> {
-        self.count_latest_orders(user_id, HISTORY_ORDER_FILTER, market_id)
+        self.count_orders(user_id, HISTORY_ORDER_FILTER, market_id)
             .await
     }
 

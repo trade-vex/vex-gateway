@@ -9,7 +9,7 @@ bring up an environment, the roles, and what to do when a connector fails.
 | `migrations/postgres/` | The schema: forward-only golang-migrate migrations, plain SQL. |
 | `seeds/` | `readmodel-seeds`, which writes the `markets` and `assets` rows from the `symbols` section of a vex-core configuration file, read and validated by vex-config, and `development.sql`, its output for the pinned vex-core's `config.dev.yaml`. |
 | `connect/` | The Connect worker image, its configuration, one JDBC sink connector per `trading` table and `apply-connectors.sh`. |
-| `tests/` | `run.py` and the stack it runs (`compose.yml`): the migration, schema, coverage and end-to-end tests, with real traffic through vex-core from `traffic/`. |
+| `tests/` | `run.py` and the stack it runs (`compose.yml`): the migration, schema, coverage and end-to-end tests, with real traffic through vex-core from `traffic/`, the topics from vex-core's `deploy/kafka/topics.toml`, and the acceptance tests: after a restart of vex-core, a Kafka outage and a `kill -9` of vex-core, the latest-state tables hold the engine's state. |
 
 ```bash
 python3 readmodel/tests/run.py       # needs Docker and openssl; minutes once the images are built

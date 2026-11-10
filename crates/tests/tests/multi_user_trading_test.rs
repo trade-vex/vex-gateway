@@ -20,9 +20,10 @@
 
 use actix_web::{App, HttpResponse, HttpServer, Result, web};
 use common::{OrderCommand, OrderCommandType, Side, Status, TimeInForce, UserBalance};
+use lib_core::cache::scaling_cache::ScalingCache;
 use lib_core::{
-    BalancesListResponse, CorrelationService, OrderCacheConfig, OrderStore, OrdersListResponse,
-    PostgresTradingRepository, Publisher, UserBalanceCacheConfig, UserBalanceStore,
+    BalancesListResponse, CorrelationService, OrderStore, OrdersListResponse,
+    PostgresTradingRepository, Publisher, TradingRepository, UserBalanceStore,
     generate_client_order_id, wait_for_response,
 };
 use rust_decimal::Decimal;
@@ -265,10 +266,11 @@ async fn test_cancel_order(
 async fn test_get_balances(
     user_id: web::Path<u64>,
     balance_store: web::Data<Arc<UserBalanceStore>>,
+    trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
     let user_id = *user_id;
 
-    match balance_store.get_user_balances(user_id).await {
+    match trading_repo.get_user_balances(user_id).await {
         Ok(balances) => {
             let total_assets = balances.len();
             let balance_responses: Vec<_> = balances
@@ -293,20 +295,18 @@ async fn test_get_balances(
 async fn test_get_open_orders(
     user_id: web::Path<u64>,
     order_store: web::Data<Arc<OrderStore>>,
+    trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
     let user_id = *user_id;
 
     println!("🔍 test_get_open_orders: user_id={}", user_id);
 
-    match order_store.get_user_orders(user_id).await {
+    match trading_repo
+        .get_open_orders_paginated(user_id, 0, 100, None)
+        .await
+    {
         Ok(orders) => {
             println!("   OrderStore returned {} orders", orders.len());
-            for (idx, order) in orders.iter().enumerate() {
-                println!(
-                    "   Order {}: id={}, user={}, status from model field (if any)",
-                    idx, order.order_order_id, order.order_user_id
-                );
-            }
 
             let total = orders.len();
             let order_responses: Vec<_> = orders
@@ -340,6 +340,7 @@ fn spawn_test_server(
     correlation_service: CorrelationService,
     balance_store: UserBalanceStore,
     order_store: OrderStore,
+    trading_repo: Arc<dyn TradingRepository>,
 ) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to bind random port");
     let port = listener.local_addr().unwrap().port();
@@ -355,6 +356,7 @@ fn spawn_test_server(
             .app_data(web::Data::new(correlation_service.clone()))
             .app_data(web::Data::new(balance_store.clone()))
             .app_data(web::Data::new(order_store.clone()))
+            .app_data(web::Data::new(trading_repo.clone()))
             .route("/test/faucet/deposit", web::post().to(test_deposit_funds))
             .route("/test/order/place", web::post().to(test_place_order))
             .route("/test/order/cancel", web::post().to(test_cancel_order))
@@ -526,7 +528,7 @@ async fn check_orders(
 
         // Assert order belongs to this user
         assert_eq!(
-            order.user_id, user_id as i64,
+            order.user_id, user_id,
             "Order {} belongs to user {} but queried for user {}",
             order.order_id, order.user_id, user_id
         );
@@ -563,46 +565,22 @@ async fn test_multi_user_trading_scenario() {
         .start(handler)
         .expect("Failed to start VexGateway");
 
-    let redis_url =
-        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6380".to_string());
     let db = init_database().await;
 
-    let balance_store = if let Some(ref db_conn) = db {
-        let trading_repo = Arc::new(PostgresTradingRepository::new(db_conn.clone()));
-        UserBalanceStore::with_redis_cache(
-            UserBalanceCacheConfig { enabled: true },
-            redis_url.clone(),
-            Some(trading_repo),
-        )
-        .await
-        .expect("Failed to create UserBalanceStore")
-    } else {
-        UserBalanceStore::with_redis_cache(
-            UserBalanceCacheConfig { enabled: true },
-            redis_url.clone(),
-            None,
-        )
-        .await
-        .expect("Failed to create UserBalanceStore")
-    };
+    let db = db.expect("balances and orders are read from the read model's Postgres");
+    // Never loaded, so it knows no market: the test compares the core's integers.
+    let scaling_cache = Arc::new(ScalingCache::new(db.clone()));
+    let trading_repo: Arc<dyn TradingRepository> = Arc::new(PostgresTradingRepository::new(db));
+    let balance_store = UserBalanceStore::new(scaling_cache.clone());
+    let order_store = OrderStore::new(scaling_cache);
 
-    let order_store = if let Some(ref db_conn) = db {
-        let trading_repo = Arc::new(PostgresTradingRepository::new(db_conn.clone()));
-        OrderStore::with_redis_cache(
-            OrderCacheConfig { enabled: true },
-            redis_url.clone(),
-            Some(trading_repo),
-        )
-        .await
-        .expect("Failed to create OrderStore")
-    } else {
-        OrderStore::with_redis_cache(OrderCacheConfig { enabled: true }, redis_url.clone(), None)
-            .await
-            .expect("Failed to create OrderStore")
-    };
-
-    let server_address =
-        spawn_test_server(publisher, correlation_service, balance_store, order_store);
+    let server_address = spawn_test_server(
+        publisher,
+        correlation_service,
+        balance_store,
+        order_store,
+        trading_repo,
+    );
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let client = reqwest::Client::new();
@@ -1005,21 +983,12 @@ async fn test_multi_user_trading_scenario() {
     );
     henry_orders.push(henry_order_resp.order_id);
 
-    println!("\n⏳ Waiting 5s for orders to sync to Redis/DB...");
-    println!("   (Orders are Placed in VEX Core, waiting for Kafka consumer to write to Redis/DB)");
+    println!("\n⏳ Waiting 5s for the orders to reach the read model...");
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    // Print manual verification commands
-    println!("\n🔍 DEBUG: If orders not found, manually check:");
-    println!("   docker exec vex-kafka-pipeline-redis-1 redis-cli -p 6379 KEYS 'order:*'");
+    println!("\n🔍 DEBUG: If orders are not found, check the read model:");
     println!(
-        "   docker exec vex-kafka-pipeline-redis-1 redis-cli -p 6379 KEYS 'user:10001:orders'"
-    );
-    println!(
-        "   docker exec vex-kafka-pipeline-redis-1 redis-cli -p 6379 SMEMBERS user:10001:orders"
-    );
-    println!(
-        "   docker exec -it vex-kafka-pipeline-postgres-1 psql -U postgres -d trading_db -c \"SELECT * FROM trading.orders_events WHERE order_user_id = 10001;\""
+        "   psql \"$DATABASE_URL\" -c \"SELECT * FROM trading.orders WHERE order_user_id = 10001;\""
     );
     println!();
 
@@ -1066,21 +1035,14 @@ async fn test_multi_user_trading_scenario() {
             alice_orders_list.total
         );
         println!("   Expected order IDs: {:?}", alice_orders);
-        println!("   Run these commands to debug:");
+        println!("   Check the read model:");
         println!(
-            "   docker exec vex-kafka-pipeline-redis-1 redis-cli -p 6379 SMEMBERS user:10001:orders"
-        );
-        println!(
-            "   docker exec vex-kafka-pipeline-redis-1 redis-cli -p 6379 HGETALL order:{}",
-            alice_orders[0]
-        );
-        println!(
-            "   Check Kafka consumer logs: docker-compose logs trading-events-consumer | grep 10001"
+            "   psql \"$DATABASE_URL\" -c \"SELECT * FROM trading.orders WHERE order_user_id = 10001;\""
         );
     }
     assert_eq!(
         alice_orders_list.total, 3,
-        "Alice should have 3 SELL orders, but has {}. Orders may not have synced to Redis/DB yet.",
+        "Alice should have 3 SELL orders, but has {}. Orders may not have reached the read model yet.",
         alice_orders_list.total
     );
 

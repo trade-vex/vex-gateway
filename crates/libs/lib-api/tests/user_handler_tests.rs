@@ -23,7 +23,6 @@ use lib_api::handlers::user::{
 use lib_core::{
     BalancePoint, PnlResolution, PortfolioMetrics, PortfolioRepository,
     ToggleFavoriteMarketRequest,
-    cache::{order_store::OrderCacheConfig, user_store::UserBalanceCacheConfig},
     model::{
         orders::Model as OrderModel, user_balances::Model as UserBalanceModel,
         user_favorite_markets::Model as UserFavoriteMarketModel,
@@ -82,39 +81,6 @@ async fn create_schema_database(server: &DatabaseConnection) -> String {
         }
     }
 
-    // PostgresTradingRepository still ranks the raw events of these tables, which the read
-    // model's schema does not have.
-    db.execute_unprepared(
-        r#"
-        CREATE TABLE trading.orders_events (
-            id BIGSERIAL PRIMARY KEY,
-            market_id INTEGER NOT NULL,
-            order_order_id BIGINT NOT NULL,
-            order_user_id BIGINT NOT NULL,
-            order_price BIGINT NOT NULL,
-            order_size BIGINT NOT NULL,
-            order_filled_size BIGINT NOT NULL,
-            order_side TEXT NOT NULL,
-            order_time_in_force TEXT NOT NULL,
-            order_status TEXT NOT NULL,
-            order_timestamp BIGINT NOT NULL,
-            created_at TIMESTAMP NULL
-        );
-
-        CREATE TABLE trading.balances_events (
-            id BIGSERIAL PRIMARY KEY,
-            user_id BIGINT NOT NULL,
-            asset_id INTEGER NOT NULL,
-            available BIGINT NOT NULL,
-            locked BIGINT NOT NULL,
-            total BIGINT NOT NULL,
-            timestamp BIGINT NOT NULL,
-            created_at TIMESTAMP NULL
-        );
-        "#,
-    )
-    .await
-    .unwrap();
     url.into()
 }
 
@@ -131,20 +97,13 @@ async fn require_database() -> Option<DatabaseConnection> {
 
 /// Cleanup test data for a specific user
 async fn cleanup_test_data(db: &DatabaseConnection, user_id: u64) {
-    // Clean up in reverse dependency order
+    let user_id = user_id as i64;
     let cleanup_queries = vec![
-        format!(
-            "DELETE FROM user_favorite_markets WHERE user_id = {}",
-            user_id
-        ),
-        format!(
-            "DELETE FROM trading.orders_events WHERE order_user_id = {}",
-            user_id
-        ),
-        format!(
-            "DELETE FROM trading.balances_events WHERE user_id = {}",
-            user_id
-        ),
+        format!("DELETE FROM user_favorite_markets WHERE user_id = {user_id}"),
+        format!("DELETE FROM trading.orders WHERE order_user_id = {user_id}"),
+        format!("DELETE FROM trading.order_events WHERE order_user_id = {user_id}"),
+        format!("DELETE FROM trading.balances WHERE user_id = {user_id}"),
+        format!("DELETE FROM trading.balance_events WHERE user_id = {user_id}"),
     ];
 
     for query in cleanup_queries {
@@ -171,7 +130,7 @@ fn create_authenticated_user_id(uuid: Uuid) -> AuthenticatedUserId {
     AuthenticatedUserId(uuid)
 }
 
-/// Insert test balance data
+/// Insert a user's latest balance of an asset, stamped now.
 async fn insert_test_balance(
     db: &DatabaseConnection,
     user_id: u64,
@@ -181,30 +140,37 @@ async fn insert_test_balance(
 ) -> Result<(), sea_orm::DbErr> {
     let total = available + locked;
     let timestamp = Utc::now().timestamp();
-
-    insert_test_balance_at(db, user_id, asset_id, available, locked, total, timestamp).await
+    insert_balance_row(
+        db,
+        "trading.balances",
+        user_id,
+        asset_id,
+        available,
+        locked,
+        total,
+        timestamp,
+    )
+    .await
 }
 
+/// Insert a user's balance of an asset, as Kafka Connect would: `table` is `trading.balances` or
+/// its history, `trading.balance_events`. `u64` values are stored with the same bits.
 #[allow(clippy::too_many_arguments)]
-async fn insert_test_balance_at(
+async fn insert_balance_row(
     db: &DatabaseConnection,
+    table: &str,
     user_id: u64,
     asset_id: i32,
     available: u64,
     locked: u64,
     total: u64,
-    timestamp: i64,
+    event_ts: i64,
 ) -> Result<(), sea_orm::DbErr> {
-    // Note: created_at is optional, so we'll set it to NULL to avoid type mismatch issues
-    // The table uses TIMESTAMP but SeaORM expects TIMESTAMPTZ for DateTime<Utc>
     let sql = format!(
-        r#"
-        INSERT INTO trading.balances_events (user_id, asset_id, available, locked, total, timestamp, created_at)
-        VALUES ({}, {}, {}, {}, {}, {}, NULL)
-        "#,
-        user_id, asset_id, available, locked, total, timestamp
+        "INSERT INTO {table} (user_id, asset_id, available, locked, total, event_ts) \
+         VALUES ({}, {asset_id}, {}, {}, {}, {event_ts})",
+        user_id as i64, available as i64, locked as i64, total as i64,
     );
-
     db.execute_unprepared(&sql).await?;
     Ok(())
 }
@@ -221,37 +187,61 @@ async fn insert_test_order(
     side: &str,
     status: &str,
 ) -> Result<(), sea_orm::DbErr> {
-    let timestamp = Utc::now().timestamp();
-
-    insert_test_order_at(
-        db, order_id, user_id, market_id, price, size, side, status, timestamp,
+    insert_order_row(
+        db,
+        "trading.orders",
+        OrderRow {
+            order_id,
+            user_id,
+            market_id,
+            price,
+            size,
+            filled: 0,
+            side,
+            time_in_force: "TIF_GTC",
+            status,
+            event_ts: Utc::now().timestamp(),
+        },
     )
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn insert_test_order_at(
-    db: &DatabaseConnection,
+/// An order as Kafka Connect writes it to `trading.orders` or its history, `trading.order_events`.
+/// Side, time in force and status are vex-core's enum names (SIDE_*, TIF_*, STATUS_*).
+struct OrderRow<'a> {
     order_id: u64,
     user_id: u64,
     market_id: i32,
     price: u64,
     size: u64,
-    side: &str,
-    status: &str,
-    timestamp: i64,
-) -> Result<(), sea_orm::DbErr> {
-    // Note: created_at is optional; order_filled_size defaults to 0 for open/history tests.
-    // Side, time in force and status are vex-core's enum names (SIDE_*, TIF_*, STATUS_*).
-    let sql = format!(
-        r#"
-        INSERT INTO trading.orders_events 
-        (market_id, order_order_id, order_user_id, order_price, order_size, order_filled_size, order_side, order_time_in_force, order_status, order_timestamp, created_at)
-        VALUES ({}, {}, {}, {}, {}, 0, '{}', 'TIF_GTC', '{}', {}, NULL)
-        "#,
-        market_id, order_id, user_id, price, size, side, status, timestamp
-    );
+    filled: u64,
+    side: &'a str,
+    time_in_force: &'a str,
+    status: &'a str,
+    event_ts: i64,
+}
 
+/// Inserts `order` into `table`, with `u64` values stored with the same bits.
+async fn insert_order_row(
+    db: &DatabaseConnection,
+    table: &str,
+    order: OrderRow<'_>,
+) -> Result<(), sea_orm::DbErr> {
+    let sql = format!(
+        "INSERT INTO {table} (order_order_id, order_user_id, order_price, order_size, \
+         order_filled_size, order_side, order_time_in_force, order_status, event_ts, market_id) \
+         VALUES ({}, {}, {}, {}, {}, '{}', '{}', '{}', {}, {})",
+        order.order_id as i64,
+        order.user_id as i64,
+        order.price as i64,
+        order.size as i64,
+        order.filled as i64,
+        order.side,
+        order.time_in_force,
+        order.status,
+        order.event_ts,
+        order.market_id,
+    );
     db.execute_unprepared(&sql).await?;
     Ok(())
 }
@@ -300,58 +290,6 @@ impl TradingRepository for ErrorMockTradingRepository {
         Ok(vec![])
     }
 
-    async fn get_user_balance(
-        &self,
-        _user_id: u64,
-    ) -> lib_core::repository::repository::Result<Option<UserBalanceModel>> {
-        if self.should_error("get_user_balance") {
-            return Err(TradingError::Database(
-                "Database connection failed".to_string(),
-            ));
-        }
-        Ok(None)
-    }
-
-    async fn update_user_balance(
-        &self,
-        _user_id: u64,
-        _available: u64,
-        _locked: u64,
-    ) -> lib_core::repository::repository::Result<()> {
-        if self.should_error("update_user_balance") {
-            return Err(TradingError::Database(
-                "Database connection failed".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    async fn create_user_balance(
-        &self,
-        _user_id: u64,
-        _available: u64,
-        _locked: u64,
-    ) -> lib_core::repository::repository::Result<()> {
-        if self.should_error("create_user_balance") {
-            return Err(TradingError::Database(
-                "Database connection failed".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    async fn get_open_orders(
-        &self,
-        _user_id: u64,
-    ) -> lib_core::repository::repository::Result<Vec<OrderModel>> {
-        if self.should_error("get_open_orders") {
-            return Err(TradingError::Database(
-                "Database connection failed".to_string(),
-            ));
-        }
-        Ok(vec![])
-    }
-
     async fn get_open_orders_paginated(
         &self,
         _user_id: u64,
@@ -378,55 +316,6 @@ impl TradingRepository for ErrorMockTradingRepository {
             ));
         }
         Ok(self.total_count)
-    }
-
-    async fn get_order_by_id(
-        &self,
-        _order_id: u64,
-        _user_id: u64,
-    ) -> lib_core::repository::repository::Result<Option<OrderModel>> {
-        if self.should_error("get_order_by_id") {
-            return Err(TradingError::Database(
-                "Database connection failed".to_string(),
-            ));
-        }
-        Ok(None)
-    }
-
-    async fn create_order(
-        &self,
-        _order: OrderModel,
-    ) -> lib_core::repository::repository::Result<u64> {
-        if self.should_error("create_order") {
-            return Err(TradingError::Database(
-                "Database connection failed".to_string(),
-            ));
-        }
-        Ok(0)
-    }
-
-    async fn count_user_orders(
-        &self,
-        _user_id: u64,
-    ) -> lib_core::repository::repository::Result<u64> {
-        if self.should_error("count_user_orders") {
-            return Err(TradingError::Database(
-                "Database connection failed".to_string(),
-            ));
-        }
-        Ok(0)
-    }
-
-    async fn get_order_history(
-        &self,
-        _user_id: u64,
-    ) -> lib_core::repository::repository::Result<Vec<OrderModel>> {
-        if self.should_error("get_order_history") {
-            return Err(TradingError::Database(
-                "Database connection failed".to_string(),
-            ));
-        }
-        Ok(vec![])
     }
 
     async fn get_order_history_paginated(
@@ -525,7 +414,9 @@ impl TradingRepository for ErrorMockTradingRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lib_core::cache::{order_store::OrderStore, user_store::UserBalanceStore};
+    use lib_core::cache::{
+        order_store::OrderStore, scaling_cache::ScalingCache, user_store::UserBalanceStore,
+    };
     use std::sync::Mutex;
     use tracing::{
         Event, Metadata, Subscriber,
@@ -534,6 +425,12 @@ mod tests {
     };
 
     const DATABASE_DETAIL: &str = "SELECT secret FROM api_keys";
+
+    /// A scaling cache that knows no market or asset: the stores built on it answer the stored
+    /// integers, which the tests compare.
+    fn unscaled() -> Arc<ScalingCache> {
+        Arc::new(ScalingCache::new(Arc::new(DatabaseConnection::default())))
+    }
 
     struct ErrorPortfolioRepository;
 
@@ -606,10 +503,7 @@ mod tests {
     async fn test_extreme_page_returns_empty_page_without_overflow() {
         let user = create_authenticated_user_id(create_test_user());
         let repo = Arc::new(ErrorMockTradingRepository::new());
-        let order_store = Arc::new(OrderStore::with_repository(
-            OrderCacheConfig::default(),
-            repo.clone(),
-        ));
+        let order_store = Arc::new(OrderStore::new(unscaled()));
 
         let open_response = get_open_orders(
             user.clone(),
@@ -658,10 +552,7 @@ mod tests {
     async fn test_has_next_is_false_at_max_page() {
         let user = create_authenticated_user_id(create_test_user());
         let repo = Arc::new(ErrorMockTradingRepository::new().with_total_count(1_000_001));
-        let order_store = Arc::new(OrderStore::with_repository(
-            OrderCacheConfig::default(),
-            repo.clone(),
-        ));
+        let order_store = Arc::new(OrderStore::new(unscaled()));
 
         let open_response = get_open_orders(
             user.clone(),
@@ -742,76 +633,97 @@ mod tests {
         );
     }
 
+    /// A user above `i64::MAX`, whose id the `BIGINT` user columns hold with the same bits, as
+    /// `uuid_to_u64` gives half of all users.
+    fn user_above_i64_max() -> (Uuid, u64) {
+        let user = Uuid::from_u128(u128::from(uuid_to_u64(create_test_user()) | 1 << 63));
+        (user, uuid_to_u64(user))
+    }
+
+    fn order_ids(orders: &[OrderModel]) -> Vec<i64> {
+        orders.iter().map(|order| order.order_order_id).collect()
+    }
+
     #[tokio::test]
-    async fn test_postgres_order_queries_use_latest_event_per_order() {
+    async fn test_postgres_orders_come_from_the_latest_state_table() {
         let Some(db) = require_database().await else {
             return;
         };
-        let user_id = uuid_to_u64(create_test_user()) & i64::MAX as u64;
-        let timestamp = Utc::now().timestamp();
-
+        let (_, user_id) = user_above_i64_max();
         cleanup_test_data(&db, user_id).await;
 
-        for status in ["STATUS_PLACED", "STATUS_PARTIALLY_FILLED", "STATUS_FILLED"] {
-            insert_test_order_at(
-                &db, 91001, user_id, 65538, 5_000_000, 100, "SIDE_BID", status, timestamp,
-            )
-            .await
-            .unwrap();
-        }
-        for status in ["STATUS_PLACED", "STATUS_FILLED"] {
-            insert_test_order_at(
-                &db, 91002, user_id, 65538, 5_100_000, 200, "SIDE_ASK", status, timestamp,
-            )
-            .await
-            .unwrap();
-        }
-        for status in ["STATUS_PLACED", "STATUS_PARTIALLY_FILLED"] {
-            insert_test_order_at(
-                &db, 91003, user_id, 65539, 3_000_000, 150, "SIDE_BID", status, timestamp,
-            )
-            .await
-            .unwrap();
+        // trading.orders holds each order's latest state; its history must not leak in.
+        for (order_id, market_id, status, event_ts) in [
+            (91001, 65538, "STATUS_FILLED", 3),
+            (91002, 65538, "STATUS_PLACED", 2),
+            (91003, 65539, "STATUS_PARTIALLY_FILLED", 1),
+            (91004, 65539, "STATUS_CANCELLED", 4),
+        ] {
+            let row = |status, event_ts| OrderRow {
+                order_id,
+                user_id,
+                market_id,
+                price: 5_000_000,
+                size: 100,
+                filled: 0,
+                side: "SIDE_BID",
+                time_in_force: "TIF_GTC",
+                status,
+                event_ts,
+            };
+            insert_order_row(&db, "trading.orders", row(status, event_ts))
+                .await
+                .unwrap();
+            insert_order_row(&db, "trading.order_events", row("STATUS_PLACED", 0))
+                .await
+                .unwrap();
         }
 
         let repo = PostgresTradingRepository::new(Arc::new(db.clone()));
+        let open = repo
+            .get_open_orders_paginated(user_id, 0, 10, None)
+            .await
+            .unwrap();
+        // The most recently changed first.
+        assert_eq!(order_ids(&open), [91002, 91003]);
+        assert!(
+            open.iter()
+                .all(|order| order.order_user_id as u64 == user_id)
+        );
+        assert_eq!(repo.count_open_orders(user_id, None).await.unwrap(), 2);
         let history = repo
             .get_order_history_paginated(user_id, 0, 10, None)
             .await
             .unwrap();
-        let transitioned: Vec<_> = history
-            .iter()
-            .filter(|order| order.order_order_id == 91001)
-            .collect();
-
-        assert_eq!(transitioned.len(), 1);
-        assert_eq!(transitioned[0].order_status, "STATUS_FILLED");
+        assert_eq!(order_ids(&history), [91004, 91001, 91003]);
         assert_eq!(repo.count_order_history(user_id, None).await.unwrap(), 3);
-        assert_eq!(history.len(), 3);
-        assert_eq!(repo.count_user_orders(user_id).await.unwrap(), 3);
-        assert_eq!(repo.get_order_history(user_id).await.unwrap().len(), 3);
-        assert_eq!(
-            repo.get_order_by_id(91001, user_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .order_status,
-            "STATUS_FILLED"
-        );
 
-        let open_orders = repo
-            .get_open_orders_paginated(user_id, 0, 10, None)
+        // A market and a page of one.
+        let open_in_market = repo
+            .get_open_orders_paginated(user_id, 0, 10, Some(65539))
             .await
             .unwrap();
-        assert_eq!(open_orders.len(), 1);
-        assert_eq!(open_orders[0].order_order_id, 91003);
-        assert_eq!(repo.count_open_orders(user_id, None).await.unwrap(), 1);
-        assert_eq!(repo.get_open_orders(user_id).await.unwrap().len(), 1);
-        assert!(
-            !open_orders
-                .iter()
-                .any(|order| order.order_order_id == 91002)
+        assert_eq!(order_ids(&open_in_market), [91003]);
+        assert_eq!(
+            repo.count_open_orders(user_id, Some(65539)).await.unwrap(),
+            1
         );
+        let history_in_market = repo
+            .get_order_history_paginated(user_id, 0, 10, Some(65538))
+            .await
+            .unwrap();
+        assert_eq!(order_ids(&history_in_market), [91001]);
+        assert_eq!(
+            repo.count_order_history(user_id, Some(65538))
+                .await
+                .unwrap(),
+            1
+        );
+        let second = repo
+            .get_order_history_paginated(user_id, 1, 1, None)
+            .await
+            .unwrap();
+        assert_eq!(order_ids(&second), [91001]);
 
         cleanup_test_data(&db, user_id).await;
     }
@@ -822,60 +734,218 @@ mod tests {
             return;
         };
         let user_id = uuid_to_u64(create_test_user()) & i64::MAX as u64;
-        let timestamp = Utc::now().timestamp();
-
         cleanup_test_data(&db, user_id).await;
 
         // The engine cancels an IOC remainder, so a partially filled IOC order is not open.
         for (order_id, time_in_force) in [(92001, "TIF_IOC"), (92002, "TIF_GTC")] {
-            let sql = format!(
-                r#"
-                INSERT INTO trading.orders_events
-                (market_id, order_order_id, order_user_id, order_price, order_size, order_filled_size, order_side, order_time_in_force, order_status, order_timestamp, created_at)
-                VALUES (65538, {order_id}, {user_id}, 5000000, 100, 40, 'SIDE_BID', '{time_in_force}', 'STATUS_PARTIALLY_FILLED', {timestamp}, NULL)
-                "#
-            );
-            db.execute_unprepared(&sql).await.unwrap();
+            let order = OrderRow {
+                order_id,
+                user_id,
+                market_id: 65538,
+                price: 5_000_000,
+                size: 100,
+                filled: 40,
+                side: "SIDE_BID",
+                time_in_force,
+                status: "STATUS_PARTIALLY_FILLED",
+                event_ts: Utc::now().timestamp(),
+            };
+            insert_order_row(&db, "trading.orders", order)
+                .await
+                .unwrap();
         }
 
         let repo = PostgresTradingRepository::new(Arc::new(db.clone()));
-        let open_orders = repo.get_open_orders(user_id).await.unwrap();
-        assert_eq!(open_orders.len(), 1);
-        assert_eq!(open_orders[0].order_order_id, 92002);
+        let open_orders = repo
+            .get_open_orders_paginated(user_id, 0, 10, None)
+            .await
+            .unwrap();
+        assert_eq!(order_ids(&open_orders), [92002]);
         assert_eq!(repo.count_open_orders(user_id, None).await.unwrap(), 1);
 
         cleanup_test_data(&db, user_id).await;
     }
 
     #[tokio::test]
-    async fn test_postgres_balances_use_latest_event_per_asset() {
+    async fn test_postgres_balances_come_from_the_latest_state_table() {
         let Some(db) = require_database().await else {
             return;
         };
-        let user_id = uuid_to_u64(create_test_user()) & i64::MAX as u64;
-        let timestamp = Utc::now().timestamp();
-
+        let (_, user_id) = user_above_i64_max();
         cleanup_test_data(&db, user_id).await;
-        insert_test_balance_at(&db, user_id, 1, 1_000, 100, 1_100, timestamp)
+
+        // trading.balances holds each asset's latest balance; its history must not leak in.
+        insert_balance_row(&db, "trading.balances", user_id, 2, 2_000, 0, 2_000, 20)
             .await
             .unwrap();
-        insert_test_balance_at(&db, user_id, 1, 700, 400, 1_100, timestamp)
+        insert_balance_row(&db, "trading.balances", user_id, 1, 700, 400, 1_100, 10)
             .await
             .unwrap();
-        insert_test_balance_at(&db, user_id, 2, 2_000, 0, 2_000, timestamp)
+        for (asset_id, available, event_ts) in [(1, 1_000, 5), (1, 900, 30), (3, 50, 1)] {
+            insert_balance_row(
+                &db,
+                "trading.balance_events",
+                user_id,
+                asset_id,
+                available,
+                0,
+                available,
+                event_ts,
+            )
             .await
             .unwrap();
+        }
 
         let repo = PostgresTradingRepository::new(Arc::new(db.clone()));
         let balances = repo.get_user_balances(user_id).await.unwrap();
 
-        assert_eq!(balances.len(), 2);
-        let asset = balances
+        let rows: Vec<_> = balances
             .iter()
-            .find(|balance| balance.asset_id == 1)
+            .map(|balance| {
+                (
+                    balance.user_id as u64,
+                    balance.asset_id,
+                    balance.available,
+                    balance.locked,
+                )
+            })
+            .collect();
+        assert_eq!(rows, [(user_id, 1, 700, 400), (user_id, 2, 2_000, 0)]);
+
+        cleanup_test_data(&db, user_id).await;
+    }
+
+    /// GET /balances, /orders/open and /orders/history, routed as the gateway routes them and
+    /// with the scaling cache the gateway loads, answer from the read model's Postgres tables
+    /// alone, with `u64` values above `i64::MAX` exact.
+    #[tokio::test]
+    async fn test_http_endpoints_serve_the_read_model() {
+        use actix_web::{App, HttpMessage, dev::Service, test};
+        use lib_auth::middleware::jwt_auth::AuthenticatedUser;
+        use rust_decimal::Decimal;
+
+        let Some(db) = require_database().await else {
+            return;
+        };
+        let (user, user_id) = user_above_i64_max();
+        cleanup_test_data(&db, user_id).await;
+
+        // 10 ETH (asset 3, 10^18 units each: above i64::MAX) and 1 USD available, 0.5 locked.
+        let ten_eth = 10_000_000_000_000_000_000_u64;
+        insert_balance_row(&db, "trading.balances", user_id, 3, ten_eth, 0, ten_eth, 7)
+            .await
             .unwrap();
-        assert_eq!(asset.available, 700);
-        assert_eq!(asset.locked, 400);
+        insert_balance_row(
+            &db,
+            "trading.balances",
+            user_id,
+            1,
+            1_000_000,
+            500_000,
+            1_500_000,
+            8,
+        )
+        .await
+        .unwrap();
+        // A bid for 2 ETH at 2,500 USD on ETH/USD (65539, quote_scale_k 10), 0.5 ETH filled, and
+        // a filled one; both order ids above i64::MAX.
+        let (open_id, filled_id) = ((1_u64 << 63) + 5, (1_u64 << 63) + 6);
+        for (order_id, status, filled, event_ts) in [
+            (
+                open_id,
+                "STATUS_PARTIALLY_FILLED",
+                500_000_000_000_000_000,
+                9,
+            ),
+            (filled_id, "STATUS_FILLED", 2_000_000_000_000_000_000, 10),
+        ] {
+            let order = OrderRow {
+                order_id,
+                user_id,
+                market_id: 65539,
+                price: 25_000,
+                size: 2_000_000_000_000_000_000,
+                filled,
+                side: "SIDE_BID",
+                time_in_force: "TIF_GTC",
+                status,
+                event_ts,
+            };
+            insert_order_row(&db, "trading.orders", order)
+                .await
+                .unwrap();
+        }
+
+        let db = Arc::new(db);
+        let scaling_cache = Arc::new(ScalingCache::new(db.clone()));
+        scaling_cache.load_all().await.unwrap();
+        let trading_repo: Arc<dyn TradingRepository> =
+            Arc::new(PostgresTradingRepository::new(db.clone()));
+        let app = test::init_service(
+            App::new()
+                // What the auth middleware leaves for the handlers.
+                .wrap_fn(move |request, service| {
+                    request
+                        .extensions_mut()
+                        .insert(AuthenticatedUser { user_id: user });
+                    service.call(request)
+                })
+                .app_data(web::Data::new(Arc::new(UserBalanceStore::new(
+                    scaling_cache.clone(),
+                ))))
+                .app_data(web::Data::new(Arc::new(OrderStore::new(scaling_cache))))
+                .app_data(web::Data::new(trading_repo))
+                .configure(lib_api::routes::user_route::configure),
+        )
+        .await;
+        let get = |uri: &'static str| {
+            let app = &app;
+            async move {
+                let response =
+                    test::call_service(app, test::TestRequest::get().uri(uri).to_request()).await;
+                assert_eq!(response.status(), 200, "GET {uri}");
+                test::read_body_json::<serde_json::Value, _>(response).await
+            }
+        };
+        let decimal = |value: &serde_json::Value| -> Decimal {
+            serde_json::from_value(value.clone()).unwrap()
+        };
+
+        let balances = get("/balances").await;
+        assert_eq!(balances["total_assets"], 2);
+        let (usd, eth) = (&balances["balances"][0], &balances["balances"][1]);
+        assert_eq!(usd["user_id"], user_id.to_string());
+        assert_eq!(usd["asset_id"], 1);
+        assert_eq!(decimal(&usd["available"]), Decimal::ONE);
+        assert_eq!(decimal(&usd["locked"]), Decimal::new(5, 1));
+        assert_eq!(usd["timestamp"], 8);
+        assert_eq!(eth["asset_id"], 3);
+        assert_eq!(decimal(&eth["available"]), Decimal::TEN);
+        assert_eq!(decimal(&eth["total"]), Decimal::TEN);
+
+        let open = get("/orders/open").await;
+        assert_eq!(open["total"], 1);
+        let order = &open["orders"][0];
+        assert_eq!(order["order_id"], open_id.to_string());
+        assert_eq!(order["user_id"], user_id.to_string());
+        assert_eq!(order["market_id"], 65539);
+        assert_eq!(decimal(&order["price"]), Decimal::from(2_500));
+        // What remains: 1.5 ETH.
+        assert_eq!(decimal(&order["size"]), Decimal::new(15, 1));
+        assert_eq!(order["status"], "PartiallyFilled");
+        assert_eq!(order["timestamp"], 9);
+
+        let history = get("/orders/history").await;
+        assert_eq!(history["total"], 2);
+        let ids: Vec<_> = history["orders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|order| order["order_id"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(ids, [filled_id.to_string(), open_id.to_string()]);
+        assert_eq!(decimal(&history["orders"][0]["size"]), Decimal::TWO);
+        assert_eq!(decimal(&history["orders"][1]["filled"]), Decimal::new(5, 1));
 
         cleanup_test_data(&db, user_id).await;
     }
@@ -901,15 +971,17 @@ mod tests {
 
         // Setup stores
         let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
-        let balance_store = Arc::new(UserBalanceStore::with_repository(
-            UserBalanceCacheConfig::default(),
-            trading_repo.clone(),
-        ));
+        let balance_store = Arc::new(UserBalanceStore::new(unscaled()));
 
         let authenticated_user = create_authenticated_user_id(user);
 
         // Call handler
-        let result = get_balances(authenticated_user, web::Data::new(balance_store.clone())).await;
+        let result = get_balances(
+            authenticated_user,
+            web::Data::new(balance_store),
+            web::Data::new(trading_repo as Arc<dyn TradingRepository>),
+        )
+        .await;
 
         match result {
             Ok(response) => {
@@ -954,14 +1026,16 @@ mod tests {
         cleanup_test_data(&db, user_id).await;
 
         let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
-        let balance_store = Arc::new(UserBalanceStore::with_repository(
-            UserBalanceCacheConfig::default(),
-            trading_repo.clone(),
-        ));
+        let balance_store = Arc::new(UserBalanceStore::new(unscaled()));
 
         let authenticated_user = create_authenticated_user_id(user);
 
-        let result = get_balances(authenticated_user, web::Data::new(balance_store.clone())).await;
+        let result = get_balances(
+            authenticated_user,
+            web::Data::new(balance_store),
+            web::Data::new(trading_repo as Arc<dyn TradingRepository>),
+        )
+        .await;
 
         match result {
             Ok(response) => {
@@ -1033,10 +1107,7 @@ mod tests {
         .unwrap(); // Should not appear
 
         let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
-        let order_store = Arc::new(OrderStore::with_repository(
-            OrderCacheConfig::default(),
-            trading_repo.clone(),
-        ));
+        let order_store = Arc::new(OrderStore::new(unscaled()));
 
         let authenticated_user = create_authenticated_user_id(user);
         let query = web::Query(OrdersQuery {
@@ -1103,10 +1174,7 @@ mod tests {
         }
 
         let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
-        let order_store = Arc::new(OrderStore::with_repository(
-            OrderCacheConfig::default(),
-            trading_repo.clone(),
-        ));
+        let order_store = Arc::new(OrderStore::new(unscaled()));
 
         let authenticated_user = create_authenticated_user_id(user);
         let query = web::Query(OrdersQuery {
@@ -1244,10 +1312,7 @@ mod tests {
         .unwrap();
 
         let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
-        let order_store = Arc::new(OrderStore::with_repository(
-            OrderCacheConfig::default(),
-            trading_repo.clone(),
-        ));
+        let order_store = Arc::new(OrderStore::new(unscaled()));
 
         let authenticated_user = create_authenticated_user_id(user);
         let query = web::Query(OrdersQuery {
@@ -1372,10 +1437,7 @@ mod tests {
         .unwrap(); // Should not appear
 
         let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
-        let order_store = Arc::new(OrderStore::with_repository(
-            OrderCacheConfig::default(),
-            trading_repo.clone(),
-        ));
+        let order_store = Arc::new(OrderStore::new(unscaled()));
 
         let authenticated_user = create_authenticated_user_id(user);
         let query = web::Query(OrdersQuery {
@@ -1490,10 +1552,7 @@ mod tests {
         .unwrap();
 
         let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
-        let order_store = Arc::new(OrderStore::with_repository(
-            OrderCacheConfig::default(),
-            trading_repo.clone(),
-        ));
+        let order_store = Arc::new(OrderStore::new(unscaled()));
 
         let authenticated_user = create_authenticated_user_id(user);
         let query = web::Query(OrdersQuery {
@@ -1621,10 +1680,7 @@ mod tests {
         .unwrap(); // Market 65538
 
         let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
-        let order_store = Arc::new(OrderStore::with_repository(
-            OrderCacheConfig::default(),
-            trading_repo.clone(),
-        ));
+        let order_store = Arc::new(OrderStore::new(unscaled()));
 
         let authenticated_user = create_authenticated_user_id(user);
         let query = web::Query(OrdersQuery {
@@ -1730,10 +1786,7 @@ mod tests {
         .unwrap(); // Market 65538
 
         let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
-        let order_store = Arc::new(OrderStore::with_repository(
-            OrderCacheConfig::default(),
-            trading_repo.clone(),
-        ));
+        let order_store = Arc::new(OrderStore::new(unscaled()));
 
         let authenticated_user = create_authenticated_user_id(user);
         let query = web::Query(OrdersQuery {
@@ -1995,12 +2048,14 @@ mod tests {
         // Create mock repository that returns error
         let mock_repo =
             Arc::new(ErrorMockTradingRepository::new().with_error_on("get_user_balances"));
-        let balance_store = Arc::new(UserBalanceStore::with_repository(
-            UserBalanceCacheConfig::default(),
-            mock_repo.clone(),
-        ));
+        let balance_store = Arc::new(UserBalanceStore::new(unscaled()));
 
-        let result = get_balances(authenticated_user, web::Data::new(balance_store.clone())).await;
+        let result = get_balances(
+            authenticated_user,
+            web::Data::new(balance_store),
+            web::Data::new(mock_repo as Arc<dyn TradingRepository>),
+        )
+        .await;
 
         match result {
             Ok(response) => {
@@ -2035,10 +2090,7 @@ mod tests {
         // Create mock repository that returns error on count_open_orders
         let mock_repo =
             Arc::new(ErrorMockTradingRepository::new().with_error_on("count_open_orders"));
-        let order_store = Arc::new(OrderStore::with_repository(
-            OrderCacheConfig::default(),
-            mock_repo.clone(),
-        ));
+        let order_store = Arc::new(OrderStore::new(unscaled()));
 
         let query = web::Query(OrdersQuery {
             page: Some(1),
@@ -2087,10 +2139,7 @@ mod tests {
         // Create mock repository that returns error on get_open_orders_paginated
         let mock_repo =
             Arc::new(ErrorMockTradingRepository::new().with_error_on("get_open_orders_paginated"));
-        let order_store = Arc::new(OrderStore::with_repository(
-            OrderCacheConfig::default(),
-            mock_repo.clone(),
-        ));
+        let order_store = Arc::new(OrderStore::new(unscaled()));
 
         let query = web::Query(OrdersQuery {
             page: Some(1),
@@ -2134,10 +2183,7 @@ mod tests {
         // Create mock repository that returns error on count_order_history
         let mock_repo =
             Arc::new(ErrorMockTradingRepository::new().with_error_on("count_order_history"));
-        let order_store = Arc::new(OrderStore::with_repository(
-            OrderCacheConfig::default(),
-            mock_repo.clone(),
-        ));
+        let order_store = Arc::new(OrderStore::new(unscaled()));
 
         let query = web::Query(OrdersQuery {
             page: Some(1),
@@ -2187,10 +2233,7 @@ mod tests {
         let mock_repo = Arc::new(
             ErrorMockTradingRepository::new().with_error_on("get_order_history_paginated"),
         );
-        let order_store = Arc::new(OrderStore::with_repository(
-            OrderCacheConfig::default(),
-            mock_repo.clone(),
-        ));
+        let order_store = Arc::new(OrderStore::new(unscaled()));
 
         let query = web::Query(OrdersQuery {
             page: Some(1),

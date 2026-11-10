@@ -2,15 +2,16 @@
 //!
 //! This test verifies the complete flow:
 //! 1. Place order via order handler (without auth for testing)
-//! 2. Wait for vex-core to process and Kafka to sync to Redis/DB
+//! 2. Wait for vex-core's events to reach the read model's Postgres through Kafka Connect
 //! 3. Fetch balances via user handler - verify balance updates
 //! 4. Fetch orders via user handler - verify order is stored correctly
 
 use actix_web::{App, HttpResponse, HttpServer, Result, web};
 use common::{OrderCommand, OrderCommandType, Side, Status, TimeInForce, UserBalance};
+use lib_core::cache::scaling_cache::ScalingCache;
 use lib_core::{
-    BalancesListResponse, CorrelationService, OrderCacheConfig, OrderStore, OrdersListResponse,
-    PostgresTradingRepository, Publisher, ResponseError, UserBalanceCacheConfig, UserBalanceStore,
+    BalancesListResponse, CorrelationService, OrderStore, OrdersListResponse,
+    PostgresTradingRepository, Publisher, ResponseError, TradingRepository, UserBalanceStore,
     generate_client_order_id, wait_for_response,
 };
 use sea_orm::{Database, DatabaseConnection};
@@ -257,21 +258,16 @@ async fn test_place_order(
 async fn test_get_balances(
     user_id: web::Path<u64>,
     balance_store: web::Data<Arc<UserBalanceStore>>,
+    trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
     let user_id = *user_id;
 
     println!("🔍 DEBUG get_balances:");
     println!("   User ID (u64): {}", user_id);
 
-    match balance_store.get_user_balances(user_id).await {
+    match trading_repo.get_user_balances(user_id).await {
         Ok(balances) => {
             println!("   ✓ Retrieved {} balances from store", balances.len());
-            for (idx, balance) in balances.iter().enumerate() {
-                println!(
-                    "   Balance {}: user_id={}, asset_id={}, available={}, locked={}",
-                    idx, balance.user_id, balance.asset_id, balance.available, balance.locked
-                );
-            }
 
             let total_assets = balances.len();
             let balance_responses: Vec<lib_core::dto::trading::UserBalanceResponse> = balances
@@ -301,26 +297,19 @@ async fn test_get_balances(
 async fn test_get_open_orders(
     user_id: web::Path<u64>,
     order_store: web::Data<Arc<OrderStore>>,
+    trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
     let user_id = *user_id;
 
     println!("🔍 DEBUG get_open_orders:");
     println!("   User ID (u64): {}", user_id);
 
-    match order_store.get_user_orders(user_id).await {
+    match trading_repo
+        .get_open_orders_paginated(user_id, 0, 100, None)
+        .await
+    {
         Ok(orders) => {
             println!("   ✓ Retrieved {} orders from store", orders.len());
-            for (idx, order) in orders.iter().enumerate() {
-                println!(
-                    "   Order {}: order_id={}, user_id={}, market_id={}, price={}, size={}",
-                    idx,
-                    order.order_order_id,
-                    order.order_user_id,
-                    order.market_id,
-                    order.order_price,
-                    order.order_size
-                );
-            }
 
             let total = orders.len();
             let order_responses: Vec<_> = orders
@@ -351,21 +340,6 @@ async fn test_get_open_orders(
     }
 }
 
-/// Debug endpoint to check Redis keys
-async fn test_debug_redis(
-    _balance_store: web::Data<Arc<UserBalanceStore>>,
-    _order_store: web::Data<Arc<OrderStore>>,
-) -> Result<HttpResponse> {
-    println!("\n🔍 DEBUG: Checking Redis/DB state...");
-
-    // Try to access internal Redis connection for debugging
-    // This is a simplified version - in production you'd have proper debug endpoints
-
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "message": "Check server logs for debug output"
-    })))
-}
-
 // ==================== Test Server Setup ====================
 
 fn spawn_test_server(
@@ -373,6 +347,7 @@ fn spawn_test_server(
     correlation_service: CorrelationService,
     balance_store: UserBalanceStore,
     order_store: OrderStore,
+    trading_repo: Arc<dyn TradingRepository>,
 ) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to bind random port");
     let port = listener.local_addr().unwrap().port();
@@ -388,6 +363,7 @@ fn spawn_test_server(
             .app_data(web::Data::new(correlation_service.clone()))
             .app_data(web::Data::new(balance_store.clone()))
             .app_data(web::Data::new(order_store.clone()))
+            .app_data(web::Data::new(trading_repo.clone()))
             // Faucet/Deposit endpoint
             .route("/test/faucet/deposit", web::post().to(test_deposit_funds))
             // Order endpoints
@@ -401,8 +377,6 @@ fn spawn_test_server(
                 "/test/user/{user_id}/orders",
                 web::get().to(test_get_open_orders),
             )
-            // Debug endpoint
-            .route("/test/debug/redis", web::get().to(test_debug_redis))
     })
     .listen(listener)
     .expect("Failed to bind address")
@@ -427,10 +401,7 @@ async fn init_database() -> Option<Arc<DatabaseConnection>> {
             Some(Arc::new(db))
         }
         Err(e) => {
-            println!(
-                "✗ Database connection failed (continuing with Redis-only): {}",
-                e
-            );
+            println!("✗ Database connection failed: {}", e);
             None
         }
     }
@@ -480,66 +451,25 @@ async fn test_user_balance_and_order_retrieval() {
         gateway_client.gateway_id()
     );
 
-    // 4. Initialize Redis
-    println!("\n4️⃣  Connecting to Redis");
-    // Use your Docker setup: Redis on port 6380 (mapped from container's 6379)
-    let redis_url =
-        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6380".to_string());
-    println!("   🔗 {}", redis_url);
-
-    // 5. Initialize Database
-    println!("\n5️⃣  Connecting to Database");
+    // 4. Initialize Database: balances and orders come from the read model
+    println!("\n4️⃣  Connecting to Database");
     let db = init_database().await;
+    let db = db.expect("balances and orders are read from the read model's Postgres");
+    // Never loaded, so it knows no market: the test compares the core's integers.
+    let scaling_cache = Arc::new(ScalingCache::new(db.clone()));
+    let trading_repo: Arc<dyn TradingRepository> = Arc::new(PostgresTradingRepository::new(db));
+    let balance_store = UserBalanceStore::new(scaling_cache.clone());
+    let order_store = OrderStore::new(scaling_cache);
 
-    // 6. Create stores with Redis and DB
-    println!("\n6️⃣  Initializing data stores");
-    let balance_store = if let Some(ref db_conn) = db {
-        let trading_repo = Arc::new(PostgresTradingRepository::new(db_conn.clone()));
-        UserBalanceStore::with_redis_cache(
-            UserBalanceCacheConfig { enabled: true },
-            redis_url.clone(),
-            Some(trading_repo),
-        )
-        .await
-        .expect("Failed to create UserBalanceStore")
-    } else {
-        UserBalanceStore::with_redis_cache(
-            UserBalanceCacheConfig { enabled: true },
-            redis_url.clone(),
-            None,
-        )
-        .await
-        .expect("Failed to create UserBalanceStore")
-    };
-
-    let order_store = if let Some(ref db_conn) = db {
-        let trading_repo = Arc::new(PostgresTradingRepository::new(db_conn.clone()));
-        OrderStore::with_redis_cache(
-            OrderCacheConfig { enabled: true },
-            redis_url.clone(),
-            Some(trading_repo),
-        )
-        .await
-        .expect("Failed to create OrderStore")
-    } else {
-        OrderStore::with_redis_cache(OrderCacheConfig { enabled: true }, redis_url.clone(), None)
-            .await
-            .expect("Failed to create OrderStore")
-    };
-
-    println!(
-        "   ✓ Balance store: Redis + {}",
-        if db.is_some() { "DB" } else { "Cache-only" }
+    // 5. Spawn test server
+    println!("\n5️⃣  Starting test HTTP server");
+    let server_address = spawn_test_server(
+        publisher,
+        correlation_service,
+        balance_store,
+        order_store,
+        trading_repo,
     );
-    println!(
-        "   ✓ Order store: Redis + {}",
-        if db.is_some() { "DB" } else { "Cache-only" }
-    );
-
-    // 7. Spawn test server
-    println!("\n7️⃣  Starting test HTTP server");
-    let server_address =
-        spawn_test_server(publisher, correlation_service, balance_store, order_store);
     println!("   🌐 {}", server_address);
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -624,8 +554,8 @@ async fn test_user_balance_and_order_retrieval() {
     println!("   Status: {}", quote_deposit_response.status);
     println!("   Message: {}", quote_deposit_response.message);
 
-    // Wait for deposits to be processed and synced to Redis/DB via Kafka
-    println!("\n⏳ Waiting 15s for deposits to be processed and synced to Redis/DB via Kafka...");
+    // Wait for the deposits to reach the read model
+    println!("\n⏳ Waiting 15s for the deposits to reach the read model...");
     tokio::time::sleep(Duration::from_secs(15)).await;
 
     // ==================== TEST 2: CHECK BALANCES AFTER DEPOSIT ====================
@@ -637,21 +567,14 @@ async fn test_user_balance_and_order_retrieval() {
     println!("🔍 Debug Info:");
     println!("   User ID (u64): {}", test_user_id);
     println!("\n📋 Manual Verification Commands (run these to check data):");
-    println!("   # Check all keys in Redis:");
-    println!("   docker exec vex-kafka-pipeline-redis-1 redis-cli -p 6379 KEYS '*'");
-    println!("\n   # Check keys for this user:");
-    println!(
-        "   docker exec vex-kafka-pipeline-redis-1 redis-cli -p 6379 KEYS '*{}*'",
-        test_user_id
-    );
     println!("\n   # Check balances in Postgres:");
     println!(
-        "   docker exec -it vex-kafka-pipeline-postgres-1 psql -U postgres -d trading_db -c \"SELECT * FROM trading.balances_events WHERE user_id = {} ORDER BY timestamp DESC LIMIT 10;\"",
+        "   psql \"$DATABASE_URL\" -c \"SELECT * FROM trading.balances WHERE trading.u64(user_id) = {};\"",
         test_user_id
     );
     println!("\n   # Check orders in Postgres:");
     println!(
-        "   docker exec -it vex-kafka-pipeline-postgres-1 psql -U postgres -d trading_db -c \"SELECT * FROM trading.orders_events WHERE order_user_id = {} ORDER BY order_timestamp DESC LIMIT 10;\"",
+        "   psql \"$DATABASE_URL\" -c \"SELECT * FROM trading.orders WHERE trading.u64(order_user_id) = {} ORDER BY event_ts DESC LIMIT 10;\"",
         test_user_id
     );
     println!();
@@ -762,9 +685,9 @@ async fn test_user_balance_and_order_retrieval() {
         return;
     }
 
-    // Wait for Kafka consumer to sync order data to Redis/DB
-    println!("\n⏳ Waiting 15s for Kafka consumer to sync PLACED order to Redis/DB...");
-    println!("   (Rejected orders are NOT synced - that's correct behavior)");
+    // Wait for the order to reach the read model
+    println!("\n⏳ Waiting 15s for the PLACED order to reach the read model...");
+    println!("   (vex-core publishes no events for a rejected order)");
     tokio::time::sleep(Duration::from_secs(15)).await;
 
     // ==================== TEST 4: GET BALANCES AFTER ORDER ====================
@@ -839,7 +762,7 @@ async fn test_user_balance_and_order_retrieval() {
             println!("      Price: {}", order.price);
             println!("      Size: {}", order.size);
 
-            if u64::try_from(order.order_id).unwrap_or(0) == placed_order_id {
+            if order.order_id == placed_order_id {
                 println!("      ✓ THIS IS OUR PLACED ORDER!");
                 found_our_order = true;
             }

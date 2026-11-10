@@ -4,7 +4,9 @@
 Checks that apply-connectors.sh retries a request Connect refuses while it rebalances, a bounded
 number of times, and no other, and that one put() of a connector blocks for less than the sink
 consumers' max.poll.interval.ms. Then builds and starts readmodel/tests/compose.yml with vex-core
-at the rev Cargo.lock pins, and with Postgres serving TLS under a throwaway CA, and checks:
+at the rev Cargo.lock pins, journaling to its Aeron Archive, with its topics as that rev's
+deploy/kafka/topics.toml declares them, and with Postgres serving TLS under a throwaway CA, and
+checks:
 - the migrations refuse a database in which roles other than its owner may create in schema
   public, apply to an empty database, and a second run is a no-op;
 - the seeds apply, twice;
@@ -17,7 +19,10 @@ at the rev Cargo.lock pins, and with Postgres serving TLS under a throwaway CA, 
   cuts off its statement, no later than check_put_bound assumes, and its login that gets no answer,
   and retries its refused logins, every topic lands in its tables, a latest-state row holds its
   key's greatest event_ts, u64 values above i64::MAX keep their bits, replaying an out-of-order
-  and duplicated suffix changes no table, Connect reaches Postgres over TLS only, a connector
+  and duplicated suffix changes no table, every latest-state row is the engine's state after a
+  restart of the core with a gateway connected, which replays its journal, after a Kafka outage
+  while orders flow, and after a kill -9 of the core with events queued behind paused brokers
+  (check_acceptance), Connect reaches Postgres over TLS only, a connector
   refuses a server certificate its CA did not sign or that names another host and resumes by
   itself once the right one is back, and a field without a column stops its connector, skipping
   nothing, until the migration adds the column and a restart resumes it.
@@ -29,7 +34,9 @@ stack at the end, also on failure. In GitHub Actions, with the Actions runtime e
     python3 readmodel/tests/run.py
 """
 
+import contextlib
 import http.server
+import itertools
 import json
 import os
 import re
@@ -39,6 +46,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 import urllib.request
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -49,7 +57,9 @@ READMODEL = ROOT / "readmodel"
 TESTS = READMODEL / "tests"
 CORE_REPOSITORY = "https://github.com/trade-vex/vex-core"
 
-# vex-core's topics and the trading.proto message each carries (vex-core processors/src/events.rs).
+# vex-core's event topics and the trading.proto message each carries (vex-core
+# processors/src/events.rs). The topics themselves, with their partitions and settings, come from
+# the pinned vex-core's deploy/kafka/topics.toml (apply_topics).
 TOPIC_MESSAGES = {
     "balances": "BalanceEvent",
     "orders": "OrderEvent",
@@ -61,7 +71,7 @@ TOPIC_MESSAGES = {
 }
 # trading.proto's other messages: Order is nested in OrderEvent; order-book levels travel as JSON.
 NOT_EVENTS = {"Order", "OrderbookLevel"}
-PARTITIONS = 3
+BROKERS = ("redpanda-0", "redpanda-1", "redpanda-2")
 # The column type of each proto field type (design doc §3.4). A type missing here has none yet.
 COLUMN_TYPES = {
     "TYPE_UINT64": "bigint",
@@ -117,11 +127,17 @@ WHALE = 3
 ETH = 3
 WHALE_ETH = 10**19
 CATCH_UP_SECONDS = 180
+# How long one rpk call may run before it is killed (Stack.rpk). Each ends within seconds, but one
+# can hang: a consume begun as the brokers came back from a pause waited 14 minutes, while a fresh
+# one ended at once.
+RPK_SECONDS = 30
 # How long Postgres is out after the traffic, counted from when it hangs: within what the
 # connectors ride out.
 OUTAGE_SECONDS = 90
 # How long the JDBC sink waits for the check of a cached connection (CachedConnectionProvider).
 VALIDITY_CHECK_SECONDS = 5
+# How long the core gets to stop: its pipeline drain, and its 20 s delivery grace.
+STOP_SECONDS = 60
 
 
 def main():
@@ -154,11 +170,12 @@ def test(stack, core):
     check_apply_retries()
     check_put_bound()
     step("build the images")
-    stack.compose("--profile", "tools", "build", "connect", "core", "traffic", capture=False)
+    stack.compose(
+        "--profile", "tools", "build", "connect", "aeron-archive", "core", "traffic", capture=False
+    )
     step("start Redpanda and Postgres")
-    stack.compose("up", "--detach", "--wait", "redpanda-0", "redpanda-1", "redpanda-2", "postgres")
-    # The brokers do not create topics: every topic exists, with a fixed partition count.
-    stack.rpk("topic", "create", *TOPIC_MESSAGES, f"--partitions={PARTITIONS}", "--replicas=3")
+    stack.compose("up", "--detach", "--wait", *BROKERS, "postgres")
+    apply_topics(stack, core)
 
     check_migrations(stack)
     check_seeds(stack)
@@ -177,6 +194,7 @@ def test(stack, core):
     check_tables_hold_the_topics(stack, connectors, descriptor)
     check_u64_round_trip(stack, connectors)
     check_replayed_suffix_changes_nothing(stack, connectors)
+    check_acceptance(stack, connectors, descriptor)
     check_tls(stack, connectors)
     check_skew(stack, connectors, core)
 
@@ -217,6 +235,44 @@ def make_certificates(directory):
     certificate("postgres", "postgres", ca="ca")
     certificate("untrusted", "postgres", ca="rogue-ca")
     certificate("wrong-name", "impostor", ca="ca")
+
+
+def apply_topics(stack, core):
+    """Creates vex-core's topics and sets its subjects' compatibility as the pinned core's
+    deploy/kafka/topics.toml declares them, as its `cargo xtask kafka apply` does in every
+    environment: the one source of truth for them, since the brokers create no topic. Keeps each
+    event topic's partition count in stack.partitions."""
+    step("create vex-core's topics from its deploy/kafka/topics.toml")
+    declared = tomllib.loads((core / "deploy" / "kafka" / "topics.toml").read_text())
+    events, delivered = declared["event_topics"], declared["delivered_topic"]
+    # A setting this function does not know of would be left out silently.
+    expect(
+        (set(declared), set(events), set(delivered))
+        == (
+            {"replication_factor", "event_topics", "delivered_topic"},
+            {"partitions", "config", "subject_compatibility"},
+            {"name", "partitions", "config"},
+        ),
+        f"topics.toml declares more than run.py applies: {declared}",
+    )
+    expect(
+        set(events["partitions"]) == set(TOPIC_MESSAGES),
+        f"vex-core publishes to {sorted(events['partitions'])}: map each to its message in "
+        "TOPIC_MESSAGES",
+    )
+    topics = [(topic, count, events["config"]) for topic, count in events["partitions"].items()]
+    topics.append((delivered["name"], delivered["partitions"], delivered["config"]))
+    for topic, count, config in topics:
+        stack.rpk(
+            "topic", "create", topic, f"--partitions={count}",
+            f"--replicas={declared['replication_factor']}",
+            *(f"--topic-config={key}={value}" for key, value in config.items()),
+        )
+    stack.rpk(
+        "registry", "compatibility-level", "set", *(f"{topic}-value" for topic in TOPIC_MESSAGES),
+        f"--level={events['subject_compatibility']}",
+    )
+    stack.partitions = events["partitions"]
 
 
 def check_apply_retries():
@@ -454,7 +510,7 @@ def drive_traffic_through_an_outage(stack, connectors):
     for name in connectors:
         wait_for_tasks(stack, name, lambda states: states == {"PAUSED"})
     stack.compose("up", "--detach", "--wait", "core")
-    stack.compose("run", "--rm", "traffic", capture=False)
+    stack.compose("run", "--rm", "traffic", "coverage", capture=False)
 
     step("lock the trading tables and resume the connectors: each one's upserts wait")
     # So that every connector has a statement in flight when Postgres hangs, each begun a moment
@@ -613,21 +669,29 @@ def wait_until_caught_up(stack, connectors, every_topic_published=False):
     has grown since the previous look. With `every_topic_published`, also until no topic is
     empty: vex-core publishes after it answers."""
     deadline = time.monotonic() + CATCH_UP_SECONDS
+    # Each connector's group reads every partition of its topic.
+    partitions = {
+        f"connect-{name}": stack.partitions[config["topics"]] for name, config in connectors.items()
+    }
     previous_ends = None
     while True:
         states = stack.connect("GET", "/connectors?expand=status")
         expect_no_failed_task(states)
-        group_names = [f"connect-{name}" for name in connectors]
-        groups = json.loads(stack.rpk("group", "describe", *group_names, "--format=json"))
+        try:
+            groups = json.loads(stack.rpk("group", "describe", *partitions, "--format=json"))
+            timed_out = []
+        except TimeoutError as error:
+            # Not caught up yet: the next look reads again.
+            groups, timed_out = [], [str(error)]
         ends = {
             (partition["topic"], partition["partition"]): partition["log_end_offset"]
             for group in groups
             for partition in group["partitions"]
         }
-        lagging = [
+        lagging = timed_out + [
             group["group_name"]
             for group in groups
-            if len(group["partitions"]) != PARTITIONS
+            if len(group["partitions"]) != partitions[group["group_name"]]
             or any(not committed_end(partition) for partition in group["partitions"])
         ] + [
             name
@@ -637,7 +701,8 @@ def wait_until_caught_up(stack, connectors, every_topic_published=False):
         empty = [
             topic
             for topic in TOPIC_MESSAGES
-            if every_topic_published and not any(ends.get((topic, p)) for p in range(PARTITIONS))
+            if every_topic_published
+            and not any(ends.get((topic, p)) for p in range(stack.partitions[topic]))
         ]
         if not lagging and not empty and ends == previous_ends:
             return
@@ -657,9 +722,17 @@ def committed_end(partition):
 
 
 def consume(stack, topic, value_format):
-    """Every record of `topic`, one line each: partition, key, value (in `value_format`)."""
-    lines = stack.rpk("topic", "consume", topic, "--offset=:end", *value_format).splitlines()
-    return [line.split("\t", 2) for line in lines]
+    """Every record of `topic`, one line each: partition, key, value (in `value_format`). A read
+    killed at RPK_SECONDS reads again, for up to CATCH_UP_SECONDS."""
+    deadline = time.monotonic() + CATCH_UP_SECONDS
+    while True:
+        try:
+            lines = stack.rpk("topic", "consume", topic, "--offset=:end", *value_format)
+            return [line.split("\t", 2) for line in lines.splitlines()]
+        except TimeoutError:
+            if time.monotonic() >= deadline:
+                raise
+            print(f"    reading {topic} timed out; reading it again", flush=True)
 
 
 def row_of(value, config, descriptor):
@@ -684,22 +757,36 @@ def row_of(value, config, descriptor):
     return row
 
 
+def published(stack, topic):
+    """Every event on `topic`, decoded to proto3 JSON, each partition in order."""
+    records = consume(stack, topic, ["--use-schema-registry=value", r"--format=%p\t%k\t%v\n"])
+    return [json.loads(value) for _, _, value in records]
+
+
+def rows_of(events, config, descriptor):
+    """The rows a connector's table holds after `events`, by primary key. A key's events share a
+    partition, in the order the sink reads them: the first copy of a (key, event_ts) stays, and a
+    latest-state row keeps the greatest event_ts."""
+    rows = {}
+    for row in (row_of(value, config, descriptor) for value in events):
+        key = key_of(row, config)
+        if key not in rows or row["event_ts"] > rows[key]["event_ts"]:
+            rows[key] = row
+    return rows
+
+
+def key_of(row, config):
+    """The primary key of a row of a connector's table."""
+    return tuple(row[column] for column in config["pk.fields"].split(","))
+
+
 def check_tables_hold_the_topics(stack, connectors, descriptor):
     step("every topic lands in its tables; a latest-state row holds its key's greatest event_ts")
-    events = {}
-    for topic in TOPIC_MESSAGES:
-        records = consume(stack, topic, ["--use-schema-registry=value", r"--format=%p\t%k\t%v\n"])
-        events[topic] = [json.loads(value) for _, _, value in records]
-        expect(events[topic], f"vex-core published nothing on {topic}")
+    events = {topic: published(stack, topic) for topic in TOPIC_MESSAGES}
+    for topic, published_events in events.items():
+        expect(published_events, f"vex-core published nothing on {topic}")
     for name, config in connectors.items():
-        primary_key = config["pk.fields"].split(",")
-        expected = {}
-        # A key's events share a partition, in the order the sink reads them: the first copy of
-        # a (key, event_ts) stays, and a latest-state row keeps the greatest event_ts.
-        for row in (row_of(value, config, descriptor) for value in events[config["topics"]]):
-            key = tuple(row[column] for column in primary_key)
-            if key not in expected or row["event_ts"] > expected[key]["event_ts"]:
-                expected[key] = row
+        expected = rows_of(events[config["topics"]], config, descriptor)
         rows = stack.json_rows(config["table.name.format"])
         expect(
             sorted(rows, key=canonical) == sorted(expected.values(), key=canonical),
@@ -765,6 +852,156 @@ def check_replayed_suffix_changes_nothing(stack, connectors):
         )
     wait_until_caught_up(stack, connectors)
     expect(stack.snapshot() == before, "the replayed suffix changed a table")
+
+
+def check_acceptance(stack, connectors, descriptor):
+    """The read model's acceptance (trade-vex/vex-core#189): every latest-state row is the
+    engine's state after a restart of the core with a gateway connected, which replays its
+    journal, after a Kafka outage while orders flow, and after a kill -9 of the core with events
+    queued behind paused brokers.
+    The engine's state is the ledger the traffic driver builds from the core's answers
+    (ledger_round), which Kafka's latest event per key must agree with (check_engine_state)."""
+    # Each round connects as a gateway of its own; gateway 1 drove the coverage traffic.
+    gateways = itertools.count(2)
+    ledger = {}
+
+    step("acceptance: orders flow, the core restarts and replays its journal, orders flow on")
+    # The core stops with the round's gateway connected, as production gateways always are, and
+    # starts at once.
+    with connected_round(stack, ledger, next(gateways)) as ledger:
+        stack.compose("stop", f"--timeout={STOP_SECONDS}", "core")
+    stack.compose("up", "--detach", "--wait", "core")
+    ledger = ledger_round(stack, ledger, next(gateways))
+    check_engine_state(stack, connectors, descriptor, ledger)
+
+    step("acceptance: Kafka is out while orders flow")
+    with brokers_paused(stack):
+        ledger = ledger_round(stack, ledger, next(gateways))
+    check_engine_state(stack, connectors, descriptor, ledger)
+
+    step("acceptance: kill -9 of the core with events queued behind paused brokers")
+    # Every command of the ledger publishes a balance: the latest is the last command's.
+    last_before = max(balance["timestamp"] for balance in ledger["balances"].values())
+    with brokers_paused(stack):
+        ledger = ledger_round(stack, ledger, next(gateways))
+        stack.compose("kill", "--signal=SIGKILL", "core")
+    # No command of the round was acknowledged, so the delivered watermark the core left is below
+    # all of them: its restart must re-publish them all.
+    watermark = delivered_watermark(stack)
+    expect(
+        watermark <= last_before,
+        f"the core left the watermark {watermark}, past the round's commands (after {last_before})",
+    )
+    # No wait for the driver to release the killed core's journal: the core waits for that itself
+    # (vex-core#201).
+    stack.compose("up", "--detach", "--wait", "core")
+    check_engine_state(stack, connectors, descriptor, ledger)
+
+
+@contextlib.contextmanager
+def connected_round(stack, ledger, gateway):
+    """Runs one round of the traffic driver's ledger against the running core, as gateway
+    `gateway`, and yields the ledger it continues: {topic: {Kafka key: event in proto3 JSON}},
+    the latest event per key of balances, orders and orderbook that the core's answers say it
+    published. The gateway stays connected until the block ends."""
+    driver = subprocess.Popen(
+        stack.command("run", "--rm", "--no-deps", "-T", "traffic", "ledger", str(gateway)),
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=stack.env,
+    )
+    try:
+        driver.stdin.write(json.dumps(ledger) + "\n")
+        driver.stdin.flush()
+        continued = driver.stdout.readline()
+        expect(continued, f"gateway {gateway}'s round wrote no ledger")
+        yield json.loads(continued)
+    finally:
+        driver.stdin.close()
+        status = driver.wait()
+    expect(status == 0, f"gateway {gateway}'s round exited {status}")
+
+
+def ledger_round(stack, ledger, gateway):
+    """One round of connected_round, whose gateway disconnects once it is done."""
+    with connected_round(stack, ledger, gateway) as continued:
+        return continued
+
+
+def check_engine_state(stack, connectors, descriptor, ledger):
+    """Every latest-state row is the engine's state, by the ledger: waits until Kafka's latest
+    event for each key in the ledger is the ledger's, then until the connectors have caught up,
+    and checks that the latest-state tables hold the ledger's rows, and every table what Kafka
+    holds."""
+    latest_state = {
+        config["topics"]: config
+        for config in connectors.values()
+        if "event_ts" not in config["pk.fields"].split(",")
+    }
+    expect(set(latest_state) == {"balances", "orders", "orderbook"}, sorted(latest_state))
+    engine = {
+        topic: rows_of(ledger[topic].values(), config, descriptor)
+        for topic, config in latest_state.items()
+    }
+    deadline = time.monotonic() + CATCH_UP_SECONDS
+    while True:
+        differing = {}
+        for topic, config in latest_state.items():
+            kafka = rows_of(published(stack, topic), config, descriptor)
+            keys = [key for key, row in engine[topic].items() if kafka.get(key) != row]
+            if keys:
+                differing[topic] = keys
+        if not differing:
+            break
+        expect(
+            time.monotonic() < deadline,
+            f"Kafka's latest events are not the engine's state for {differing}",
+        )
+        time.sleep(2)
+    wait_until_caught_up(stack, connectors)
+    for topic, config in latest_state.items():
+        table = config["table.name.format"]
+        stored = {key_of(row, config): row for row in stack.json_rows(table)}
+        rows = {key: stored.get(key) for key in engine[topic]}
+        expect(rows == engine[topic], f"{table} holds {rows}, the engine {engine[topic]}")
+    check_tables_hold_the_topics(stack, connectors, descriptor)
+
+
+@contextlib.contextmanager
+def brokers_paused(stack):
+    """Freezes every broker (docker pause) for the duration, then waits until they serve again
+    (wait_for_kafka)."""
+    stack.compose("pause", *BROKERS)
+    try:
+        yield
+    finally:
+        stack.compose("unpause", *BROKERS)
+    wait_for_kafka(stack)
+
+
+def wait_for_kafka(stack):
+    """Waits until every broker passes its healthcheck again (compose.yml: the cluster is healthy
+    and the Schema Registry answers). docker pause marks a broker unhealthy until then: Compose
+    starts no service that depends on it, and a read begun sooner can hang (RPK_SECONDS)."""
+    start = time.monotonic()
+    while True:
+        health = stack.compose("ps", "--format={{.Health}}", *BROKERS).split()
+        if health == ["healthy"] * len(BROKERS):
+            print(f"    the brokers serve again after {time.monotonic() - start:.1f} s", flush=True)
+            return
+        expect(
+            time.monotonic() < start + CATCH_UP_SECONDS,
+            f"the brokers are {health} after {CATCH_UP_SECONDS} s",
+        )
+        time.sleep(1)
+
+
+def delivered_watermark(stack):
+    """The delivered watermark the core wrote last to vex-core.delivered: a big-endian u64 under
+    the key w."""
+    records = consume(stack, "vex-core.delivered", [r"--format=%p\t%k\t%v{hex}\n"])
+    expect(records, "vex-core.delivered is empty")
+    _, key, value = records[-1]
+    expect(key == "w", f"vex-core.delivered holds key {key!r}")
+    return int(value, 16)
 
 
 def check_tls(stack, connectors):
@@ -906,6 +1143,8 @@ class Stack:
         self.project = f"vex-readmodel-{os.getpid()}"
         self.env = {**os.environ, "CORE_DIR": str(core), "CORE_REV": rev, "TLS_DIR": str(tls)}
         self.files = ["compose.yml"]
+        # Each event topic's partition count, from vex-core's topics.toml (apply_topics).
+        self.partitions = None
         # The Actions runtime, which ci.yml exposes to this step, reaches the Actions cache.
         if "ACTIONS_RUNTIME_TOKEN" in os.environ:
             self.files.append("compose.cache.yml")
@@ -967,7 +1206,12 @@ class Stack:
         )
 
     def rpk(self, *args, stdin=None):
-        return self.compose("exec", "-T", "redpanda-0", "rpk", *args, stdin=stdin)
+        """rpk in redpanda-0, killed there if it runs for RPK_SECONDS: run() then raises
+        TimeoutError."""
+        return self.compose(
+            "exec", "-T", "redpanda-0", "timeout", "--signal=KILL", str(RPK_SECONDS), "rpk", *args,
+            stdin=stdin,
+        )
 
     def connect_url(self):
         if self.url is None:
@@ -995,7 +1239,10 @@ def pinned_core_rev():
 
 
 def run(args, stdin=None, capture=True, check=True, stderr=subprocess.PIPE, env=None):
-    """Runs `args` and returns its output; fails on a non-zero exit unless `check` is false."""
+    """Runs `args` and returns its output; fails on a non-zero exit unless `check` is false: with
+    TimeoutError for exit status 137 (SIGKILL: Stack.rpk's bound, though the OOM killer gives it
+    too), and RuntimeError otherwise. Only Kafka reads catch TimeoutError (consume and
+    wait_until_caught_up)."""
     result = subprocess.run(
         args,
         input=stdin,
@@ -1006,7 +1253,8 @@ def run(args, stdin=None, capture=True, check=True, stderr=subprocess.PIPE, env=
     )
     if check and result.returncode != 0:
         output = (result.stdout or "") + (result.stderr or "")
-        raise RuntimeError(f"{' '.join(map(str, args))} exited {result.returncode}\n{output}")
+        failure = TimeoutError if result.returncode == 137 else RuntimeError
+        raise failure(f"{' '.join(map(str, args))} exited {result.returncode}\n{output}")
     return result.stdout or ""
 
 
