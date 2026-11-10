@@ -653,7 +653,8 @@ impl ClickHousePortfolioRepository {
         let price_sql = format!(
             "SELECT asset_id, CAST(toUnixTimestamp(minute) AS Int64) as ts, toString(price)
              FROM {} FINAL
-             WHERE quote_asset_id = ? AND minute <= toDateTime(?)
+             WHERE quote_asset_id = ?
+               AND minute <= toDateTime(?)
              ORDER BY minute ASC",
             self.table("asset_prices_last_per_min")
         );
