@@ -155,6 +155,47 @@ async fn require_database() -> Option<DatabaseConnection> {
     setup_test_db_with_schema().await.ok()
 }
 
+/// Set up the tables exercised by the latest-event repository tests.
+async fn require_latest_event_test_database() -> Option<DatabaseConnection> {
+    let db = require_database().await?;
+    let schema = r#"
+        CREATE SCHEMA IF NOT EXISTS trading;
+
+        CREATE TABLE IF NOT EXISTS trading.orders_events (
+            id BIGSERIAL PRIMARY KEY,
+            market_id INTEGER NOT NULL,
+            order_order_id BIGINT NOT NULL,
+            order_user_id BIGINT NOT NULL,
+            order_price BIGINT NOT NULL,
+            order_size BIGINT NOT NULL,
+            order_filled_size BIGINT NOT NULL,
+            order_side TEXT NOT NULL,
+            order_time_in_force TEXT NOT NULL,
+            order_status TEXT NOT NULL,
+            order_timestamp BIGINT NOT NULL,
+            created_at TIMESTAMP NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS trading.balances_events (
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            asset_id INTEGER NOT NULL,
+            available BIGINT NOT NULL,
+            locked BIGINT NOT NULL,
+            total BIGINT NOT NULL,
+            timestamp BIGINT NOT NULL,
+            created_at TIMESTAMP NULL
+        );
+    "#;
+
+    if let Err(error) = db.execute_unprepared(schema).await {
+        eprintln!("Skipping latest-event tests: failed to create test tables: {error}");
+        return None;
+    }
+
+    Some(db)
+}
+
 /// Cleanup test data for a specific user
 async fn cleanup_test_data(db: &DatabaseConnection, user_id: u64) {
     // Clean up in reverse dependency order
@@ -209,6 +250,19 @@ async fn insert_test_balance(
     let total = available + locked;
     let timestamp = Utc::now().timestamp();
 
+    insert_test_balance_at(db, user_id, asset_id, available, locked, total, timestamp).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_test_balance_at(
+    db: &DatabaseConnection,
+    user_id: u64,
+    asset_id: i32,
+    available: u64,
+    locked: u64,
+    total: u64,
+    timestamp: i64,
+) -> Result<(), sea_orm::DbErr> {
     // Note: created_at is optional, so we'll set it to NULL to avoid type mismatch issues
     // The table uses TIMESTAMP but SeaORM expects TIMESTAMPTZ for DateTime<Utc>
     let sql = format!(
@@ -237,12 +291,31 @@ async fn insert_test_order(
 ) -> Result<(), sea_orm::DbErr> {
     let timestamp = Utc::now().timestamp();
 
-    // Note: created_at is optional; order_filled_size defaults to 0 for open/history tests
+    insert_test_order_at(
+        db, order_id, user_id, market_id, price, size, side, status, timestamp,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_test_order_at(
+    db: &DatabaseConnection,
+    order_id: u64,
+    user_id: u64,
+    market_id: i32,
+    price: u64,
+    size: u64,
+    side: &str,
+    status: &str,
+    timestamp: i64,
+) -> Result<(), sea_orm::DbErr> {
+    // Note: created_at is optional; order_filled_size defaults to 0 for open/history tests.
+    // Side, time in force and status are vex-core's enum names (SIDE_*, TIF_*, STATUS_*).
     let sql = format!(
         r#"
         INSERT INTO trading.orders_events 
         (market_id, order_order_id, order_user_id, order_price, order_size, order_filled_size, order_side, order_time_in_force, order_status, order_timestamp, created_at)
-        VALUES ({}, {}, {}, {}, {}, 0, '{}', 'GTC', '{}', {}, NULL)
+        VALUES ({}, {}, {}, {}, {}, 0, '{}', 'TIF_GTC', '{}', {}, NULL)
         "#,
         market_id, order_id, user_id, price, size, side, status, timestamp
     );
@@ -735,6 +808,144 @@ mod tests {
                 .iter()
                 .any(|event| event.contains(DATABASE_DETAIL))
         );
+    }
+
+    #[tokio::test]
+    async fn test_postgres_order_queries_use_latest_event_per_order() {
+        let Some(db) = require_latest_event_test_database().await else {
+            return;
+        };
+        let user_id = uuid_to_u64(create_test_user()) & i64::MAX as u64;
+        let timestamp = Utc::now().timestamp();
+
+        cleanup_test_data(&db, user_id).await;
+
+        for status in ["STATUS_PLACED", "STATUS_PARTIALLY_FILLED", "STATUS_FILLED"] {
+            insert_test_order_at(
+                &db, 91001, user_id, 65538, 5_000_000, 100, "SIDE_BID", status, timestamp,
+            )
+            .await
+            .unwrap();
+        }
+        for status in ["STATUS_PLACED", "STATUS_FILLED"] {
+            insert_test_order_at(
+                &db, 91002, user_id, 65538, 5_100_000, 200, "SIDE_ASK", status, timestamp,
+            )
+            .await
+            .unwrap();
+        }
+        for status in ["STATUS_PLACED", "STATUS_PARTIALLY_FILLED"] {
+            insert_test_order_at(
+                &db, 91003, user_id, 65539, 3_000_000, 150, "SIDE_BID", status, timestamp,
+            )
+            .await
+            .unwrap();
+        }
+
+        let repo = PostgresTradingRepository::new(Arc::new(db.clone()));
+        let history = repo
+            .get_order_history_paginated(user_id, 0, 10, None)
+            .await
+            .unwrap();
+        let transitioned: Vec<_> = history
+            .iter()
+            .filter(|order| order.order_order_id == 91001)
+            .collect();
+
+        assert_eq!(transitioned.len(), 1);
+        assert_eq!(transitioned[0].order_status, "STATUS_FILLED");
+        assert_eq!(repo.count_order_history(user_id, None).await.unwrap(), 3);
+        assert_eq!(history.len(), 3);
+        assert_eq!(repo.count_user_orders(user_id).await.unwrap(), 3);
+        assert_eq!(repo.get_order_history(user_id).await.unwrap().len(), 3);
+        assert_eq!(
+            repo.get_order_by_id(91001, user_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .order_status,
+            "STATUS_FILLED"
+        );
+
+        let open_orders = repo
+            .get_open_orders_paginated(user_id, 0, 10, None)
+            .await
+            .unwrap();
+        assert_eq!(open_orders.len(), 1);
+        assert_eq!(open_orders[0].order_order_id, 91003);
+        assert_eq!(repo.count_open_orders(user_id, None).await.unwrap(), 1);
+        assert_eq!(repo.get_open_orders(user_id).await.unwrap().len(), 1);
+        assert!(
+            !open_orders
+                .iter()
+                .any(|order| order.order_order_id == 91002)
+        );
+
+        cleanup_test_data(&db, user_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_postgres_open_orders_exclude_partially_filled_ioc() {
+        let Some(db) = require_latest_event_test_database().await else {
+            return;
+        };
+        let user_id = uuid_to_u64(create_test_user()) & i64::MAX as u64;
+        let timestamp = Utc::now().timestamp();
+
+        cleanup_test_data(&db, user_id).await;
+
+        // The engine cancels an IOC remainder, so a partially filled IOC order is not open.
+        for (order_id, time_in_force) in [(92001, "TIF_IOC"), (92002, "TIF_GTC")] {
+            let sql = format!(
+                r#"
+                INSERT INTO trading.orders_events
+                (market_id, order_order_id, order_user_id, order_price, order_size, order_filled_size, order_side, order_time_in_force, order_status, order_timestamp, created_at)
+                VALUES (65538, {order_id}, {user_id}, 5000000, 100, 40, 'SIDE_BID', '{time_in_force}', 'STATUS_PARTIALLY_FILLED', {timestamp}, NULL)
+                "#
+            );
+            db.execute_unprepared(&sql).await.unwrap();
+        }
+
+        let repo = PostgresTradingRepository::new(Arc::new(db.clone()));
+        let open_orders = repo.get_open_orders(user_id).await.unwrap();
+        assert_eq!(open_orders.len(), 1);
+        assert_eq!(open_orders[0].order_order_id, 92002);
+        assert_eq!(repo.count_open_orders(user_id, None).await.unwrap(), 1);
+
+        cleanup_test_data(&db, user_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_postgres_balances_use_latest_event_per_asset() {
+        let Some(db) = require_latest_event_test_database().await else {
+            return;
+        };
+        let user_id = uuid_to_u64(create_test_user()) & i64::MAX as u64;
+        let timestamp = Utc::now().timestamp();
+
+        cleanup_test_data(&db, user_id).await;
+        insert_test_balance_at(&db, user_id, 1, 1_000, 100, 1_100, timestamp)
+            .await
+            .unwrap();
+        insert_test_balance_at(&db, user_id, 1, 700, 400, 1_100, timestamp)
+            .await
+            .unwrap();
+        insert_test_balance_at(&db, user_id, 2, 2_000, 0, 2_000, timestamp)
+            .await
+            .unwrap();
+
+        let repo = PostgresTradingRepository::new(Arc::new(db.clone()));
+        let balances = repo.get_user_balances(user_id).await.unwrap();
+
+        assert_eq!(balances.len(), 2);
+        let asset = balances
+            .iter()
+            .find(|balance| balance.asset_id == 1)
+            .unwrap();
+        assert_eq!(asset.available, 700);
+        assert_eq!(asset.locked, 400);
+
+        cleanup_test_data(&db, user_id).await;
     }
 
     #[tokio::test]
