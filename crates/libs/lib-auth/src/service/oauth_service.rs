@@ -84,6 +84,16 @@ use uuid::Uuid;
 
 use crate::models::user::{Model, UserStatus};
 use crate::repository::UserRepository;
+use crate::utils::generate_random_string;
+
+/// Longest username generated for an OAuth account, collision suffix included.
+const MAX_USERNAME_LEN: usize = 30;
+
+/// Length of the suffix that makes a taken username unique: '-' and 4 random characters.
+const USERNAME_SUFFIX_LEN: usize = 5;
+
+/// Suffixed usernames a new OAuth account tries after its own is taken, before sign-up fails.
+const USERNAME_SUFFIX_ATTEMPTS: usize = 5;
 
 /// A client built from provider metadata: the authorization endpoint is always present, while the
 /// token and user info endpoints may be absent from the metadata.
@@ -140,7 +150,8 @@ pub struct OAuthService {
 }
 
 impl OAuthService {
-    fn normalize_username_candidate(candidate: &str) -> String {
+    /// A username built from `candidate`, or `None` when no usable character is left.
+    fn normalize_username_candidate(candidate: &str) -> Option<String> {
         let lower = candidate.to_lowercase();
         // Map invalid chars to '-' and allow [a-z0-9._-]
         let mut out = String::with_capacity(lower.len());
@@ -166,98 +177,117 @@ impl OAuthService {
                 prev_dash = false;
             }
         }
-        // Trim leading/trailing '-'
-        let trimmed = collapsed.trim_matches('-').to_string();
-        // Enforce max length
-        let mut trimmed = if trimmed.len() > 30 {
-            trimmed[..30].to_string()
-        } else {
-            trimmed
-        };
-        // Ensure starts with alphanumeric
-        if trimmed.is_empty() {
-            "user".to_string()
-        } else if trimmed
-            .chars()
-            .next()
-            .map(|c| !c.is_ascii_alphanumeric())
-            .unwrap_or(true)
-        {
-            // First char is NOT alphanumeric, prepend "user-"
-            trimmed.insert_str(0, "user-");
-            trimmed
-        } else {
-            // First char IS alphanumeric, return trimmed
-            trimmed
+        // Trim leading/trailing '-'; a candidate with no ASCII letter or digit left (such as
+        // "___" or "...") is unusable
+        let trimmed = collapsed.trim_matches('-');
+        if !trimmed.chars().any(|c| c.is_ascii_alphanumeric()) {
+            return None;
         }
+        // Ensure starts with alphanumeric
+        let mut username = if trimmed.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+            trimmed.to_string()
+        } else {
+            format!("user-{trimmed}")
+        };
+        // Enforce max length; the username is ASCII, so any length is a char boundary. The cut
+        // can land on a '-', which is trimmed like the others.
+        username.truncate(MAX_USERNAME_LEN);
+        username.truncate(username.trim_end_matches('-').len());
+        Some(username)
     }
 
     fn email_local_part(email: &str) -> Option<String> {
         email.split('@').next().map(|s| s.to_string())
     }
 
-    fn generate_username(
-        provider: &str,
-        info: &crate::dto::auth_response_dto::OAuthUserInfo,
-    ) -> String {
+    /// The username a new account starts from: the first usable candidate in the provider's
+    /// order, and `"user"` only when none is usable.
+    fn generate_username(provider: &str, info: &OAuthUserInfo) -> String {
+        let handle = || {
+            info.username
+                .as_deref()
+                .and_then(Self::normalize_username_candidate)
+        };
+        let name = || Self::normalize_username_candidate(&info.name);
+        let email = || {
+            Self::email_local_part(&info.email)
+                .and_then(|local| Self::normalize_username_candidate(&local))
+        };
         match provider {
-            // GitHub: prefer handle (`login`) if provided in parsed info.username
-            "github" => {
-                if let Some(uname) = &info.username {
-                    let norm = Self::normalize_username_candidate(uname);
-                    if !norm.is_empty() {
-                        return norm;
-                    }
-                }
-                // fallback to display name, then email local-part
-                let from_name = Self::normalize_username_candidate(&info.name);
-                if !from_name.is_empty() {
-                    return from_name;
-                }
-                let from_email = Self::email_local_part(&info.email)
-                    .map(|s| Self::normalize_username_candidate(&s))
-                    .unwrap_or_default();
-                if !from_email.is_empty() {
-                    return from_email;
-                }
-                "user".to_string()
-            }
             // Google: prefer email local-part; fallback to name
-            "google" => {
-                if let Some(local) = Self::email_local_part(&info.email) {
-                    let norm = Self::normalize_username_candidate(&local);
-                    if !norm.is_empty() {
-                        return norm;
-                    }
+            "google" => email().or_else(name),
+            // GitHub (`login`) and other providers: prefer the handle, then the display name,
+            // then the email local-part
+            _ => handle().or_else(name).or_else(email),
+        }
+        .unwrap_or_else(|| "user".to_string())
+    }
+
+    /// `base` with a random suffix, for when another account already holds `base`. `base` is
+    /// shortened if needed to keep the result within `MAX_USERNAME_LEN`.
+    fn suffixed_username(base: &str) -> String {
+        // `base` is ASCII, so `keep` is a char boundary. Separators left at the cut are dropped,
+        // so the result never reads "abc.-x1y2".
+        let keep = base.len().min(MAX_USERNAME_LEN - USERNAME_SUFFIX_LEN);
+        let stem = base[..keep].trim_end_matches(['-', '.', '_']);
+        let suffix = generate_random_string(USERNAME_SUFFIX_LEN - 1).to_ascii_lowercase();
+        format!("{stem}-{suffix}")
+    }
+
+    /// The account for an OAuth login: the one already linked to the provider identity, or a new
+    /// one when the email is not registered yet.
+    ///
+    /// A new account's username must be unique (`ux_users_username`), and different people can
+    /// map to the same one. When the insert reports the username taken, it is retried with a
+    /// random suffix, `USERNAME_SUFFIX_ATTEMPTS` times at most, so the database constraint alone
+    /// decides; a separate existence check would race with concurrent sign-ups.
+    async fn find_or_create_user(
+        user_repo: &dyn UserRepository,
+        provider: &str,
+        info: &OAuthUserInfo,
+    ) -> Result<Model, AuthError> {
+        if let Some(existing_user) = user_repo
+            .find_by_provider_id(provider, &info.provider_id)
+            .await?
+        {
+            // Update last login timestamp for existing user
+            user_repo.update_last_login(existing_user.user_id).await?;
+            return Ok(existing_user);
+        }
+
+        // Check if user exists with same email but different provider
+        if user_repo.find_by_email(&info.email).await?.is_some() {
+            return Err(AuthError::EmailAlreadyExists);
+        }
+
+        let now = chrono::Utc::now();
+        let base_username = Self::generate_username(provider, info);
+        let mut new_user = Model {
+            user_id: Uuid::new_v4(),
+            email: info.email.clone(),
+            username: base_username.clone(),
+            password_hash: None, // OAuth users don't have passwords
+            auth_provider: provider.to_string(),
+            provider_id: Some(info.provider_id.clone()),
+            avatar_url: info.avatar_url.clone(),
+            email_verified: info.email_verified,
+            status: UserStatus::Active,
+            created_at: now,
+            updated_at: now,
+            last_login: Some(now),
+        };
+
+        for _ in 0..USERNAME_SUFFIX_ATTEMPTS {
+            match user_repo.create_user(&new_user).await {
+                Err(AuthError::UsernameAlreadyExists) => {
+                    new_user.username = Self::suffixed_username(&base_username);
                 }
-                let from_name = Self::normalize_username_candidate(&info.name);
-                if !from_name.is_empty() {
-                    return from_name;
-                }
-                "user".to_string()
-            }
-            _ => {
-                // Other providers: try username field, then name, then email local-part
-                if let Some(uname) = &info.username {
-                    let norm = Self::normalize_username_candidate(uname);
-                    if !norm.is_empty() {
-                        return norm;
-                    }
-                }
-                let from_name = Self::normalize_username_candidate(&info.name);
-                if !from_name.is_empty() {
-                    return from_name;
-                }
-                let from_email = Self::email_local_part(&info.email)
-                    .map(|s| Self::normalize_username_candidate(&s))
-                    .unwrap_or_default();
-                if !from_email.is_empty() {
-                    return from_email;
-                }
-                "user".to_string()
+                result => return result,
             }
         }
+        user_repo.create_user(&new_user).await
     }
+
     /// Creates a new OAuth service with pre-configured clients
     ///
     /// This performs async initialization including OIDC discovery for
@@ -663,11 +693,12 @@ impl OAuthService {
     /// - `CodeExchangeFailed`: Token exchange with provider failed
     /// - `UserInfoFetchFailed`: Could not fetch user info from provider
     /// - `EmailAlreadyExists`: Email is registered with different provider
+    /// - `UsernameAlreadyExists`: A new user's username and every suffixed retry were taken
     ///
     /// # Database Operations
     ///
     /// - For existing users: Updates `last_login` timestamp
-    /// - For new users: Creates user record with OAuth provider info
+    /// - For new users: Creates user record with OAuth provider info, under a unique username
     ///
     /// # Example
     ///
@@ -722,46 +753,7 @@ impl OAuthService {
         let user_info = self.get_user_info(provider, access_token_secret).await?;
 
         // Find or create user in database
-        let user = match self
-            .user_repo
-            .find_by_provider_id(provider, &user_info.provider_id)
-            .await?
-        {
-            Some(existing_user) => {
-                // Update last login timestamp for existing user
-                self.user_repo
-                    .update_last_login(existing_user.user_id)
-                    .await?;
-                existing_user
-            }
-            None => {
-                // Check if user exists with same email but different provider
-                if let Some(_existing_user) = self.user_repo.find_by_email(&user_info.email).await?
-                {
-                    return Err(AuthError::EmailAlreadyExists);
-                }
-
-                // Create new user record
-                let now = chrono::Utc::now();
-                let generated_username = Self::generate_username(provider, &user_info);
-                let new_user = Model {
-                    user_id: Uuid::new_v4(),
-                    email: user_info.email.clone(),
-                    username: generated_username,
-                    password_hash: None, // OAuth users don't have passwords
-                    auth_provider: provider.to_string(),
-                    provider_id: Some(user_info.provider_id.clone()),
-                    avatar_url: user_info.avatar_url.clone(),
-                    email_verified: user_info.email_verified,
-                    status: UserStatus::Active,
-                    created_at: now,
-                    updated_at: now,
-                    last_login: Some(now),
-                };
-
-                self.user_repo.create_user(&new_user).await?
-            }
-        };
+        let user = Self::find_or_create_user(self.user_repo.as_ref(), provider, &user_info).await?;
 
         // Generate JWT tokens for your application
         let tokens = self
@@ -1246,87 +1238,112 @@ mod tests {
         #[test]
         fn test_lowercase_conversion() {
             assert_eq!(
-                OAuthService::normalize_username_candidate("JohnDoe"),
-                "johndoe"
+                OAuthService::normalize_username_candidate("JohnDoe").as_deref(),
+                Some("johndoe")
             );
             assert_eq!(
-                OAuthService::normalize_username_candidate("UPPERCASE"),
-                "uppercase"
+                OAuthService::normalize_username_candidate("UPPERCASE").as_deref(),
+                Some("uppercase")
             );
         }
 
         #[test]
         fn test_invalid_chars_replaced_with_dash() {
             assert_eq!(
-                OAuthService::normalize_username_candidate("john@doe"),
-                "john-doe"
+                OAuthService::normalize_username_candidate("john@doe").as_deref(),
+                Some("john-doe")
             );
             assert_eq!(
-                OAuthService::normalize_username_candidate("user#name!"),
-                "user-name"
+                OAuthService::normalize_username_candidate("user#name!").as_deref(),
+                Some("user-name")
             );
         }
 
         #[test]
         fn test_allowed_chars_preserved() {
             assert_eq!(
-                OAuthService::normalize_username_candidate("john.doe"),
-                "john.doe"
+                OAuthService::normalize_username_candidate("john.doe").as_deref(),
+                Some("john.doe")
             );
             assert_eq!(
-                OAuthService::normalize_username_candidate("john_doe"),
-                "john_doe"
+                OAuthService::normalize_username_candidate("john_doe").as_deref(),
+                Some("john_doe")
             );
             assert_eq!(
-                OAuthService::normalize_username_candidate("john-doe"),
-                "john-doe"
+                OAuthService::normalize_username_candidate("john-doe").as_deref(),
+                Some("john-doe")
             );
             assert_eq!(
-                OAuthService::normalize_username_candidate("user123"),
-                "user123"
+                OAuthService::normalize_username_candidate("user123").as_deref(),
+                Some("user123")
             );
         }
 
         #[test]
         fn test_multiple_dashes_collapsed() {
             assert_eq!(
-                OAuthService::normalize_username_candidate("john@@doe"),
-                "john-doe"
+                OAuthService::normalize_username_candidate("john@@doe").as_deref(),
+                Some("john-doe")
             );
-            assert_eq!(OAuthService::normalize_username_candidate("a---b"), "a-b");
+            assert_eq!(
+                OAuthService::normalize_username_candidate("a---b").as_deref(),
+                Some("a-b")
+            );
         }
 
         #[test]
         fn test_leading_trailing_dashes_trimmed() {
-            assert_eq!(OAuthService::normalize_username_candidate("-john-"), "john");
             assert_eq!(
-                OAuthService::normalize_username_candidate("@username@"),
-                "username"
+                OAuthService::normalize_username_candidate("-john-").as_deref(),
+                Some("john")
+            );
+            assert_eq!(
+                OAuthService::normalize_username_candidate("@username@").as_deref(),
+                Some("username")
             );
         }
 
         #[test]
         fn test_max_length_enforced() {
             let long_name = "a".repeat(50);
-            let result = OAuthService::normalize_username_candidate(&long_name);
+            let result = OAuthService::normalize_username_candidate(&long_name).unwrap();
             assert_eq!(result.len(), 30);
+
+            // The cap includes the "user-" prefix.
+            let long_name = format!("_{}", "a".repeat(50));
+            let result = OAuthService::normalize_username_candidate(&long_name).unwrap();
+            assert_eq!(result, format!("user-_{}", "a".repeat(24)));
         }
 
         #[test]
-        fn test_empty_returns_user() {
-            assert_eq!(OAuthService::normalize_username_candidate(""), "user");
-            assert_eq!(OAuthService::normalize_username_candidate("@@@"), "user");
+        fn test_unusable_returns_none() {
+            assert_eq!(OAuthService::normalize_username_candidate(""), None);
+            assert_eq!(OAuthService::normalize_username_candidate("@@@"), None);
+            // A name with no ASCII letter or digit, such as one in a non-Latin script.
+            assert_eq!(OAuthService::normalize_username_candidate("名前"), None);
+            // Only separators.
+            assert_eq!(OAuthService::normalize_username_candidate("___"), None);
+            assert_eq!(OAuthService::normalize_username_candidate("..."), None);
+        }
+
+        #[test]
+        fn test_cut_at_a_dash_is_trimmed() {
+            let long_name = format!("{} {}", "a".repeat(29), "b".repeat(10));
+            assert_eq!(
+                OAuthService::normalize_username_candidate(&long_name),
+                Some("a".repeat(29))
+            );
         }
 
         #[test]
         fn test_non_alphanumeric_start_prepends_user() {
             assert_eq!(
-                OAuthService::normalize_username_candidate(".hidden"),
-                "user-.hidden"
+                OAuthService::normalize_username_candidate(".hidden").as_deref(),
+                Some("user-.hidden")
             );
             assert_eq!(
-                OAuthService::normalize_username_candidate("_underscore"),
-                "user-_underscore"
+                OAuthService::normalize_username_candidate("_underscore").as_deref(),
+                Some("user-_underscore")
             );
         }
     }
@@ -1400,16 +1417,15 @@ mod tests {
 
         #[test]
         fn test_github_with_invalid_name_and_email() {
-            // The name normalizes to "user", never to "", so the email local-part is not tried.
+            // An unusable name falls through to the email local-part.
             let info = make_user_info("@@@", "john@example.com", None);
-            assert_eq!(OAuthService::generate_username("github", &info), "user");
+            assert_eq!(OAuthService::generate_username("github", &info), "john");
         }
 
         #[test]
         fn test_github_with_valid_email_only() {
-            // An empty name also normalizes to "user", so the email local-part is not tried.
             let info = make_user_info("", "john@example.com", None);
-            assert_eq!(OAuthService::generate_username("github", &info), "user");
+            assert_eq!(OAuthService::generate_username("github", &info), "john");
         }
 
         #[test]
@@ -1419,10 +1435,16 @@ mod tests {
         }
 
         #[test]
+        fn test_google_with_invalid_email_uses_name() {
+            // The email local-part has no usable character, so the name is used.
+            let info = make_user_info("John Doe", "+++@gmail.com", None);
+            assert_eq!(OAuthService::generate_username("google", &info), "john-doe");
+        }
+
+        #[test]
         fn test_google_with_empty_email() {
-            // The local-part of "" is "", which normalizes to "user", so the name is not tried.
             let info = make_user_info("John Doe", "", None);
-            assert_eq!(OAuthService::generate_username("google", &info), "user");
+            assert_eq!(OAuthService::generate_username("google", &info), "john-doe");
         }
 
         #[test]
@@ -1435,11 +1457,198 @@ mod tests {
         }
 
         #[test]
+        fn test_unknown_provider_falls_back_to_email() {
+            // Unusable handle and name.
+            let info = make_user_info("@@@", "john@example.com", Some("!!!"));
+            assert_eq!(OAuthService::generate_username("twitter", &info), "john");
+        }
+
+        #[test]
         fn test_all_empty_returns_user() {
             let info = make_user_info("", "", None);
             assert_eq!(OAuthService::generate_username("github", &info), "user");
             assert_eq!(OAuthService::generate_username("google", &info), "user");
             assert_eq!(OAuthService::generate_username("twitter", &info), "user");
+        }
+    }
+
+    mod find_or_create_user {
+        use super::*;
+        use async_trait::async_trait;
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// Keeps users in memory and, like the users table, refuses a duplicate username or email.
+        #[derive(Default)]
+        struct MemoryUserRepository {
+            users: Mutex<Vec<Model>>,
+            create_calls: AtomicUsize,
+            /// Refuse every username, as if each one tried were taken.
+            all_usernames_taken: bool,
+        }
+
+        #[async_trait]
+        impl UserRepository for MemoryUserRepository {
+            async fn find_by_id(&self, _user_id: Uuid) -> Result<Option<Model>, AuthError> {
+                unreachable!()
+            }
+
+            async fn find_by_email(&self, email: &str) -> Result<Option<Model>, AuthError> {
+                let users = self.users.lock().unwrap();
+                Ok(users.iter().find(|user| user.email == email).cloned())
+            }
+
+            async fn find_by_provider_id(
+                &self,
+                provider: &str,
+                provider_id: &str,
+            ) -> Result<Option<Model>, AuthError> {
+                let users = self.users.lock().unwrap();
+                Ok(users
+                    .iter()
+                    .find(|user| {
+                        user.auth_provider == provider
+                            && user.provider_id.as_deref() == Some(provider_id)
+                    })
+                    .cloned())
+            }
+
+            async fn create_user(&self, new_user: &Model) -> Result<Model, AuthError> {
+                self.create_calls.fetch_add(1, Ordering::SeqCst);
+                let mut users = self.users.lock().unwrap();
+                if self.all_usernames_taken
+                    || users.iter().any(|user| user.username == new_user.username)
+                {
+                    return Err(AuthError::UsernameAlreadyExists);
+                }
+                if users.iter().any(|user| user.email == new_user.email) {
+                    return Err(AuthError::EmailAlreadyExists);
+                }
+                users.push(new_user.clone());
+                Ok(new_user.clone())
+            }
+
+            async fn update_last_login(&self, _user_id: Uuid) -> Result<(), AuthError> {
+                Ok(())
+            }
+
+            async fn verify_email(&self, _user_id: Uuid) -> Result<(), AuthError> {
+                unreachable!()
+            }
+
+            async fn update_password(
+                &self,
+                _user_id: Uuid,
+                _password_hash: &str,
+            ) -> Result<(), AuthError> {
+                unreachable!()
+            }
+        }
+
+        fn oauth_user(provider_id: &str, email: &str, handle: Option<&str>) -> OAuthUserInfo {
+            OAuthUserInfo {
+                provider_id: provider_id.to_string(),
+                email: email.to_string(),
+                email_verified: true,
+                name: "John Doe".to_string(),
+                avatar_url: None,
+                username: handle.map(|s| s.to_string()),
+            }
+        }
+
+        fn assert_suffixed(username: &str, base: &str) {
+            let suffix = username
+                .strip_prefix(base)
+                .and_then(|rest| rest.strip_prefix('-'))
+                .unwrap_or_else(|| panic!("{username:?} is not {base:?} with a suffix"));
+            assert_eq!(suffix.len(), USERNAME_SUFFIX_LEN - 1);
+            assert!(
+                suffix
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+            );
+        }
+
+        #[test]
+        fn test_suffixed_username_stays_within_the_length_cap() {
+            assert_suffixed(&OAuthService::suffixed_username("john"), "john");
+
+            let base = "a".repeat(MAX_USERNAME_LEN);
+            let suffixed = OAuthService::suffixed_username(&base);
+            assert_eq!(suffixed.len(), MAX_USERNAME_LEN);
+            assert_suffixed(&suffixed, &base[..MAX_USERNAME_LEN - USERNAME_SUFFIX_LEN]);
+
+            // A separator left at the cut is dropped before the suffix.
+            let keep = MAX_USERNAME_LEN - USERNAME_SUFFIX_LEN;
+            let base = format!("{}.{}", "a".repeat(keep - 1), "b".repeat(10));
+            assert_suffixed(
+                &OAuthService::suffixed_username(&base),
+                &"a".repeat(keep - 1),
+            );
+        }
+
+        #[tokio::test]
+        async fn test_taken_username_is_retried_with_a_suffix() {
+            let repo = MemoryUserRepository::default();
+            // A GitHub user already holds "john".
+            let holder = oauth_user("1", "jd@example.com", Some("john"));
+            OAuthService::find_or_create_user(&repo, "github", &holder)
+                .await
+                .unwrap();
+            repo.create_calls.store(0, Ordering::SeqCst);
+
+            let info = oauth_user("2", "john@acme.com", None);
+            let user = OAuthService::find_or_create_user(&repo, "google", &info)
+                .await
+                .unwrap();
+
+            assert_suffixed(&user.username, "john");
+            assert_eq!(repo.create_calls.load(Ordering::SeqCst), 2);
+        }
+
+        #[tokio::test]
+        async fn test_two_users_with_the_same_base_username_both_sign_up() {
+            let repo = MemoryUserRepository::default();
+            let first_info = oauth_user("1", "john@gmail.com", None);
+            let second_info = oauth_user("2", "john@acme.com", None);
+
+            let first = OAuthService::find_or_create_user(&repo, "google", &first_info)
+                .await
+                .unwrap();
+            let second = OAuthService::find_or_create_user(&repo, "google", &second_info)
+                .await
+                .unwrap();
+
+            assert_eq!(first.username, "john");
+            assert_suffixed(&second.username, "john");
+            assert_ne!(first.user_id, second.user_id);
+            assert_eq!(repo.users.lock().unwrap().len(), 2);
+
+            // Each one's next login finds their own account.
+            for (info, user) in [(&first_info, &first), (&second_info, &second)] {
+                let again = OAuthService::find_or_create_user(&repo, "google", info)
+                    .await
+                    .unwrap();
+                assert_eq!(again.user_id, user.user_id);
+            }
+            assert_eq!(repo.users.lock().unwrap().len(), 2);
+        }
+
+        #[tokio::test]
+        async fn test_sign_up_fails_once_the_suffix_retries_run_out() {
+            let repo = MemoryUserRepository {
+                all_usernames_taken: true,
+                ..Default::default()
+            };
+
+            let info = oauth_user("1", "john@acme.com", None);
+            let result = OAuthService::find_or_create_user(&repo, "google", &info).await;
+
+            assert!(matches!(result, Err(AuthError::UsernameAlreadyExists)));
+            assert_eq!(
+                repo.create_calls.load(Ordering::SeqCst),
+                1 + USERNAME_SUFFIX_ATTEMPTS
+            );
         }
     }
 
