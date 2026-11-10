@@ -7,6 +7,12 @@ environment = "development"
 host = "127.0.0.1"
 port = 8081
 
+# The internal listener for GET /metrics (Prometheus text format): an IP address and a port. Bind it
+# where only the metrics scraper reaches it, never the load balancer; production requires a port of
+# its own. Override with APP__METRICS__BIND.
+[metrics]
+bind = "127.0.0.1:9091"
+
 [logging]
 level = "debug"
 

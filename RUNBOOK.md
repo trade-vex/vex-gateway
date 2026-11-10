@@ -55,8 +55,8 @@ The gateway reads two environment variables by name, and does not read a `.env` 
   directory at or above its working directory.
 
 They choose the configuration file, so they cannot be set in it. Every other setting (server,
-logging, database, Redis, ClickHouse, JWT, email, OAuth, trusted proxies, the vex-core link) lives
-in that file (see [Configuration](#configuration)), and the `APP__` layer of
+metrics, logging, database, Redis, ClickHouse, JWT, email, OAuth, trusted proxies, the vex-core
+link) lives in that file (see [Configuration](#configuration)), and the `APP__` layer of
 [Configuration Precedence](#configuration-precedence) is the only way to override one:
 
 ```bash
@@ -64,6 +64,7 @@ APP_ENV=production
 APP__SERVER__HOST=0.0.0.0                                  # server.host
 APP__AUTH__SERVER__TRUSTED_PROXIES=10.0.1.0/24,10.0.2.0/24 # auth.server.trusted_proxies
 APP__CORE__AUTH_KEY=<signed 32-bit integer>                # core.auth_key, kept out of the file
+APP__METRICS__BIND=0.0.0.0:9091                            # metrics.bind
 ```
 
 ---
@@ -114,11 +115,13 @@ optional setting.
 
 The service validates configuration on startup:
 - **Production**: Cannot bind to localhost, cannot use debug logging, port must be > 0,
-  `auth.server.trusted_proxies` and `core.auth_key` must not be empty
+  `auth.server.trusted_proxies` and `core.auth_key` must not be empty, and `metrics.bind` needs a
+  port of its own (not 0, and not `server.port`)
 - **Development**: More lenient validation
 - **Testing**: Allows ephemeral ports (port 0)
 - **Every environment**: `auth.oauth.providers` may list only `google`, `github` and `twitter`;
-  another provider stops the gateway at startup, and the error names it
+  another provider stops the gateway at startup, and the error names it. `metrics.bind` must be an
+  IP address and a port
 
 ### OAuth Redirects
 
@@ -135,6 +138,50 @@ login is redirected to, and refuses to start without them:
 `clickhouse.url` (required, no default) is the ClickHouse HTTP endpoint the portfolio and
 balance-chart endpoints read from, such as `http://clickhouse.internal:8123`. Override it with
 `APP__CLICKHOUSE__URL`.
+
+### Metrics
+
+`metrics.bind` (required, no default) is the IP address and port of a second listener, internal
+to the gateway's process, that serves `GET /metrics` in the Prometheus text format and nothing
+else. The public listener (`server.host`, `server.port`) never serves `/metrics`. Override it with
+`APP__METRICS__BIND`. It takes an IP address, not a host name: `0.0.0.0:9091` in a container the
+scraper reaches by its address, `127.0.0.1:9091` for a scraper on the same host. With
+`APP_ENV=production` the gateway refuses to start when its port is 0 or `server.port`.
+
+The endpoint has no authentication, so keep it internal: do not put its port in the ALB's target
+group or listener rules, and let the gateway's security group accept that port only from the
+Prometheus scraper. The listener stops with the gateway; on SIGTERM it keeps answering while the
+public listener drains.
+
+Every series is reported from the first scrape, at 0 until its first count:
+
+| Metric | Label | Counts |
+|---|---|---|
+| `vex_gateway_orders_total` | `outcome` | Orders the gateway tried to send to the matching engine (`POST /api/order` past validation and the idempotency claim; a retry that replays or waits for an earlier attempt is not counted again) |
+| `vex_gateway_cancels_total` | `outcome` | Cancels the gateway tried to send to the matching engine (`POST /api/cancel`) |
+| `vex_gateway_auth_failures_total` | `method` | Requests the gateway refused to authenticate |
+
+`outcome` is one of:
+
+- `accepted`: the engine accepted it (200).
+- `rejected`: the engine rejected it (422).
+- `busy`: the engine was busy and executed nothing (503 with `Retry-After`).
+- `unavailable`: it never reached the engine: no core is connected (503 `Matching engine
+  unavailable`), or this gateway's publication failed (500).
+- `unknown`: it was sent but no answer came back: the wait timed out (408), or the answer was
+  lost (500).
+
+`method` is one of:
+
+- `jwt`: a bearer token, or a session cookie whose session holds one, refused with 401 (invalid,
+  expired or revoked, or an expired or unknown session).
+- `api_key`: an `X-MBX-APIKEY` request refused with a 4xx: an unknown, disabled or expired key, a
+  refused IP or permission, or a bad, stale or replayed signature. A 5xx, such as the replay store
+  being unreachable, is the gateway's fault and is not counted.
+- `login`: a `POST /api/login` refused for its email and password (401). A rate-limited or
+  unverified login is not counted.
+
+A request to a protected route without any credentials is not counted.
 
 ### VEX Core Connection
 
@@ -585,6 +632,10 @@ grep -i "memory\|oom" logs/app.log
 ---
 
 ## API Reference
+
+### Internal Endpoint (Metrics Listener Only)
+
+- `GET /metrics` - Prometheus counters, on `metrics.bind` only (see [Metrics](#metrics))
 
 ### Public Endpoints (No Authentication)
 

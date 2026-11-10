@@ -24,6 +24,9 @@ pkcs8 = { version = "0.10", features = ["pem"] }
 subtle = "2.5"
 tokio = { workspace = true }
 lru = "0.19"
+# The gateway's Prometheus counters (`metrics`). 0.13 fails cargo audit; only the text format is
+# served, so the protobuf encoder stays out.
+prometheus = { version = "0.14", default-features = false }
 
 # Database dependencies
 sea-orm = { workspace = true }

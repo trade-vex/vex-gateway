@@ -6,6 +6,7 @@ use futures_util::future::LocalBoxFuture;
 use lib_auth::middleware::jwt_auth::{JwtAuthentication, JwtAuthenticationMiddleware};
 use lib_auth::service::session_service::SessionService;
 use lib_middleware::api_key::middleware::{ApiKeyMiddleware, ApiKeyMiddlewareService};
+use lib_middleware::metrics::{self, AuthMethod};
 use std::{rc::Rc, sync::Arc};
 use tracing::error;
 
@@ -135,7 +136,13 @@ where
                 }
 
                 AuthType::ApiKey => {
-                    let response = api_key_service.call(req).await?;
+                    // The API-key check refuses with an error, never a response, and the routes
+                    // behind it answer with responses. A 5xx is the gateway's own fault.
+                    let response = api_key_service.call(req).await.inspect_err(|error| {
+                        if error.as_response_error().status_code().is_client_error() {
+                            metrics::auth_failures(AuthMethod::ApiKey).inc();
+                        }
+                    })?;
                     Ok(response.map_into_boxed_body())
                 }
 
@@ -167,6 +174,7 @@ where
                                         access_token
                                     ))
                                     .map_err(|_| {
+                                        metrics::auth_failures(AuthMethod::Jwt).inc();
                                         actix_web::error::ErrorUnauthorized("Invalid token format")
                                     })?,
                                 );
@@ -179,6 +187,7 @@ where
                             }
                             Err(e) => {
                                 tracing::warn!("Session auth: Invalid session: {}", e);
+                                metrics::auth_failures(AuthMethod::Jwt).inc();
                                 Err(actix_web::error::ErrorUnauthorized(
                                     "Invalid or expired session",
                                 ))
@@ -186,6 +195,7 @@ where
                         }
                     } else {
                         tracing::debug!("Session auth: No session_id cookie found");
+                        metrics::auth_failures(AuthMethod::Jwt).inc();
                         Err(actix_web::error::ErrorUnauthorized(
                             "Session cookie not found",
                         ))
@@ -357,6 +367,63 @@ mod tests {
             StatusCode::BAD_REQUEST
         );
         assert_eq!(error.to_string(), "Ambiguous authentication credentials");
+    }
+
+    #[actix_web::test]
+    async fn refused_credentials_are_counted_by_method() {
+        let redis_conn = redis_connection().await;
+        let jwt_middleware = JwtAuthentication::new(
+            DecodingKey::from_secret(b"unused-test-secret"),
+            "vex-gateway".to_string(),
+            "api".to_string(),
+            redis_conn.clone(),
+        );
+        // A route that needs a key, so that an unknown one is refused.
+        let api_key_middleware =
+            ApiKeyMiddleware::new().with_default_security(SecurityType::UserStream);
+        let session_service = Arc::new(SessionService::new(redis_conn, 300));
+        let app = test::init_service(
+            App::new()
+                .wrap(CombinedAuthMiddleware::new(
+                    jwt_middleware,
+                    api_key_middleware,
+                    session_service,
+                ))
+                .route("/protected", web::get().to(HttpResponse::Ok)),
+        )
+        .await;
+
+        let unknown_key = test::TestRequest::get()
+            .uri("/protected")
+            .insert_header(("X-MBX-APIKEY", "unknown-test-key"));
+        let unknown_session =
+            test::TestRequest::get()
+                .uri("/protected")
+                .cookie(actix_web::cookie::Cookie::new(
+                    "session_id",
+                    Uuid::new_v4().to_string(),
+                ));
+
+        for (method, request) in [
+            (AuthMethod::ApiKey, unknown_key),
+            (AuthMethod::Jwt, unknown_session),
+        ] {
+            let failures = metrics::auth_failures(method);
+            let before = failures.get();
+
+            let error = test::try_call_service(&app, request.to_request())
+                .await
+                .expect_err("unknown credentials must be refused");
+
+            assert_eq!(
+                error.as_response_error().status_code(),
+                StatusCode::UNAUTHORIZED,
+                "{method:?}"
+            );
+            // The counters are the process's, and other tests here refuse credentials
+            // concurrently, so the count can rise by more.
+            assert!(failures.get() > before, "{method:?}");
+        }
     }
 
     #[actix_web::test]

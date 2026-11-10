@@ -6,6 +6,7 @@ use actix_web::{
 };
 use futures_util::future::LocalBoxFuture;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, errors::ErrorKind};
+use lib_middleware::metrics::{self, AuthMethod};
 use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,25 @@ async fn refreshed_token_is_revoked(
         .get(crate::service::token_service::token_version_key(user_id))
         .await?;
     Ok(token_version < stored_version.unwrap_or_default())
+}
+
+/// Refuses the request's token with a 401 carrying `code` and `message`, and counts it as a JWT
+/// authentication failure. Every 401 of this middleware goes through here.
+fn unauthorized(
+    req: ServiceRequest,
+    code: &str,
+    message: &str,
+) -> Result<ServiceResponse<BoxBody>, Error> {
+    metrics::auth_failures(AuthMethod::Jwt).inc();
+    let (req, _) = req.into_parts();
+    let response = HttpResponse::Unauthorized().json(serde_json::json!({
+        "error": {
+            "code": code,
+            "message": message,
+            "status": 401
+        }
+    }));
+    Ok(ServiceResponse::new(req, response).map_into_boxed_body())
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -262,16 +282,7 @@ where
                                         jti,
                                     );
                                     // Token is blacklisted, short-circuit with an unauthorized response
-                                    let (req, _) = req.into_parts();
-                                    let response =
-                                        HttpResponse::Unauthorized().json(serde_json::json!({
-                                            "error": {
-                                                "code": "token_revoked",
-                                                "message": "Token has been revoked",
-                                                "status": 401
-                                            }
-                                        }));
-                                    Ok(ServiceResponse::new(req, response).map_into_boxed_body())
+                                    unauthorized(req, "token_revoked", "Token has been revoked")
                                 }
                                 Ok(false) => {
                                     tracing::debug!(
@@ -316,16 +327,11 @@ where
                                                     }
                                                 }
 
-                                                let (req, _) = req.into_parts();
-                                                let response = HttpResponse::Unauthorized().json(serde_json::json!({
-                                                    "error": {
-                                                        "code": "session_expired",
-                                                        "message": "Session expired due to inactivity",
-                                                        "status": 401
-                                                    }
-                                                }));
-                                                return Ok(ServiceResponse::new(req, response)
-                                                    .map_into_boxed_body());
+                                                return unauthorized(
+                                                    req,
+                                                    "session_expired",
+                                                    "Session expired due to inactivity",
+                                                );
                                             }
                                         }
                                     }
@@ -439,20 +445,11 @@ where
                                                                 tracing::warn!(
                                                                     "Refreshed token is revoked"
                                                                 );
-                                                                let (req, _) = req.into_parts();
-                                                                let response = HttpResponse::Unauthorized().json(
-                                                                serde_json::json!({
-                                                                    "error": {
-                                                                        "code": "token_revoked",
-                                                                        "message": "Token has been revoked",
-                                                                        "status": 401
-                                                                    }
-                                                                })
-                                                            );
-                                                                return Ok(ServiceResponse::new(
-                                                                    req, response,
-                                                                )
-                                                                .map_into_boxed_body());
+                                                                return unauthorized(
+                                                                    req,
+                                                                    "token_revoked",
+                                                                    "Token has been revoked",
+                                                                );
                                                             }
                                                             Ok(false) => {}
                                                             Err(e) => {
@@ -517,15 +514,11 @@ where
                             }
 
                             // If we get here, auto-refresh failed - return expired token error
-                            let (req, _) = req.into_parts();
-                            let response = HttpResponse::Unauthorized().json(serde_json::json!({
-                                "error": {
-                                    "code": "token_expired",
-                                    "message": "Token has expired and could not be refreshed",
-                                    "status": 401
-                                }
-                            }));
-                            Ok(ServiceResponse::new(req, response).map_into_boxed_body())
+                            unauthorized(
+                                req,
+                                "token_expired",
+                                "Token has expired and could not be refreshed",
+                            )
                         });
                     }
 
@@ -541,17 +534,7 @@ where
                         error_message
                     );
 
-                    return Box::pin(async move {
-                        let (req, _) = req.into_parts();
-                        let response = HttpResponse::Unauthorized().json(serde_json::json!({
-                            "error": {
-                                "code": error_code,
-                                "message": error_message,
-                                "status": 401
-                            }
-                        }));
-                        Ok(ServiceResponse::new(req, response).map_into_boxed_body())
-                    });
+                    return Box::pin(async move { unauthorized(req, error_code, error_message) });
                 }
             }
         } else {
@@ -560,15 +543,11 @@ where
 
         // No valid JWT found - return unauthorized
         Box::pin(async move {
-            let (req, _) = req.into_parts();
-            let response = HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": {
-                    "code": "unauthorized",
-                    "message": "Invalid or missing authentication token",
-                    "status": 401
-                }
-            }));
-            Ok(ServiceResponse::new(req, response).map_into_boxed_body())
+            unauthorized(
+                req,
+                "unauthorized",
+                "Invalid or missing authentication token",
+            )
         })
     }
 }
@@ -884,6 +863,39 @@ mod tests {
 
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn refused_tokens_are_counted_as_jwt_authentication_failures() {
+        let middleware = JwtAuthentication::new_with_algorithm(
+            DecodingKey::from_secret("test_secret".as_ref()),
+            "vex-gateway".to_string(),
+            "vex-api".to_string(),
+            Algorithm::HS256,
+            create_test_redis_conn().await,
+        );
+        let app = test::init_service(
+            App::new()
+                .wrap(middleware)
+                .route("/protected", web::get().to(protected_handler)),
+        )
+        .await;
+        let failures = metrics::auth_failures(AuthMethod::Jwt);
+
+        // A token that does not verify, and an empty one.
+        for authorization in ["Bearer invalid_token", "Bearer "] {
+            let before = failures.get();
+            let req = test::TestRequest::get()
+                .uri("/protected")
+                .insert_header(("Authorization", authorization))
+                .to_request();
+
+            let resp = test::call_service(&app, req).await;
+
+            assert_eq!(resp.status(), 401);
+            // The other tests here refuse tokens concurrently, so the count can rise by more.
+            assert!(failures.get() > before, "{authorization:?}");
+        }
     }
 
     #[tokio::test]
