@@ -1,0 +1,11 @@
+# The build needs the workspace's manifests and sources, and its toolchain file (whose rustfmt
+# rusteron's build script runs).
+*
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!crates
+!readmodel/seeds
+!readmodel/tests/traffic
+**/target
+**/*.pem

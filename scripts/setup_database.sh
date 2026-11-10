@@ -1,7 +1,9 @@
 #!/bin/bash
 
 # Database setup script for local development
-# This script sets up PostgreSQL database and runs migrations
+# Creates the database, applies the read model's migrations (readmodel/migrations/postgres) with
+# golang-migrate (https://github.com/golang-migrate/migrate) and seeds markets and assets from
+# vex-core's development configuration (readmodel/seeds/development.sql).
 
 set -e
 
@@ -34,19 +36,16 @@ createdb -h $DB_HOST -p $DB_PORT -U $DB_USER $DB_NAME 2>/dev/null || echo "Datab
 echo "✅ Database '$DB_NAME' is ready"
 
 # Run migrations
+if ! command -v migrate > /dev/null; then
+    echo "❌ golang-migrate is not installed: https://github.com/golang-migrate/migrate/tree/master/cmd/migrate"
+    exit 1
+fi
 echo "Running database migrations..."
+migrate -path readmodel/migrations/postgres \
+    -database "postgres://$DB_USER:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_NAME?sslmode=disable" up
 
-# Migration 1: Create users table
-echo "Running migration 001_create_users_table.sql..."
-psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f migrations/001_create_users_table.sql
-
-# Migration 2: Create API keys table
-echo "Running migration 002_create_api_keys_table.sql..."
-psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f migrations/002_create_api_keys_table.sql
-
-# Migration 3: Create trading tables
-echo "Running migration 003_create_trading_tables.sql..."
-psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f migrations/003_create_trading_tables.sql
+echo "Seeding markets and assets..."
+psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -v ON_ERROR_STOP=1 -q -f readmodel/seeds/development.sql
 
 echo "✅ All migrations completed successfully!"
 

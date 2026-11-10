@@ -1,0 +1,12 @@
+[package]
+name = "readmodel-traffic"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+common = { workspace = true }
+vex-config = { workspace = true }
+vex-networking = { workspace = true }
+# The version vex-networking pins, for its embedded media driver.
+rusteron-media-driver = "=0.1.157"

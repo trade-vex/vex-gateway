@@ -25,4 +25,4 @@ crates/libs/lib-auth/src/keys/
 /aeron-test-client
 
 *.sql
-!/migrations/*.sql
+!/readmodel/**/*.sql

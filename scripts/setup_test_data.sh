@@ -31,7 +31,7 @@ echo "✅ Database connection verified"
 
 # Create test user (with hashed password)
 echo "👤 Creating/updating test user..."
-psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME << EOF
+psql -v ON_ERROR_STOP=1 -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME << EOF
 -- Create test user with hashed password (password123)
 -- If user exists, update to verified and active status
 INSERT INTO users (
@@ -65,7 +65,7 @@ echo "✅ Test user ready (email: test@example.com, password: password123, verif
 
 # Create test API key
 echo "🔑 Creating/updating test API key..."
-psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME << EOF
+psql -v ON_ERROR_STOP=1 -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME << EOF
 -- Create test API key (update if exists)
 INSERT INTO api_keys (
     id,
@@ -103,30 +103,6 @@ EOF
 
 echo "✅ Test API key ready (key: test_api_key_12345, secret: test_secret_key_67890, enabled: true)"
 
-# Create test user balance in trading schema
-echo "💰 Creating test user balance..."
-psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME << EOF
--- Insert balance event for test user
--- Note: trading.balances_events uses BIGINT user_id (not UUID from users table)
-INSERT INTO trading.balances_events (
-    user_id,
-    asset_id,
-    available,
-    locked,
-    total,
-    timestamp
-) VALUES (
-    1,  -- test user_id (BIGINT, separate from UUID in users table)
-    1,  -- asset_id 1 (base currency)
-    1000000000000,  -- 1M with 6 decimal precision
-    0,              -- 0 locked
-    1000000000000,  -- 1M total
-    EXTRACT(EPOCH FROM NOW())::bigint * 1000  -- current timestamp in milliseconds
-) ON CONFLICT DO NOTHING;
-EOF
-
-echo "✅ Test user balance created (1,000,000 available for asset_id 1)"
-
 echo ""
 echo "🎉 Test data setup complete!"
 echo "=========================================="
@@ -139,12 +115,6 @@ echo "🔑 Test API Key:"
 echo "   API Key: test_api_key_12345"
 echo "   Secret: test_secret_key_67890"
 echo "   Permissions: trade, user_data"
-echo ""
-echo "💰 Test Balance:"
-echo "   User ID: 1"
-echo "   Asset ID: 1"
-echo "   Available: 1,000,000"
-echo "   Locked: 0"
 echo ""
 echo "🧪 Ready for testing!"
 echo "   Run: ./test_scripts/test_auth.sh"

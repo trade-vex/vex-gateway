@@ -3,10 +3,11 @@
 ## Table of Contents
 1. [Deployment](#deployment)
 2. [Configuration](#configuration)
-3. [Common Operations](#common-operations)
-4. [Troubleshooting](#troubleshooting)
-5. [Emergency Procedures](#emergency-procedures)
-6. [API Reference](#api-reference)
+3. [Read Model](#read-model)
+4. [Common Operations](#common-operations)
+5. [Troubleshooting](#troubleshooting)
+6. [Emergency Procedures](#emergency-procedures)
+7. [API Reference](#api-reference)
 
 ---
 
@@ -24,6 +25,8 @@
    - PostgreSQL client libraries
    - Redis client libraries
    - Aeron media driver (for VEX Core communication)
+   - [golang-migrate](https://github.com/golang-migrate/migrate) for the database schema
+     (see [Read Model](#read-model))
 
 ### Build
 
@@ -230,6 +233,230 @@ balance read is served from Postgres, which can lag Redis.
 openssl genrsa -out private_key.pem 2048
 openssl rsa -in private_key.pem -pubout -out public_key.pem
 ```
+
+---
+
+## Read Model
+
+The gateway's Postgres database holds the gateway's own tables (`users`, `api_keys`,
+`user_favorite_markets`, and `markets` and `assets`, which mirror vex-core's symbol configuration)
+and the `trading` schema: vex-core's Kafka events, which Kafka Connect writes there. The gateway
+may only read `trading`. Everything for it lives in `readmodel/`:
+
+- `migrations/postgres/`: the schema, as forward-only plain SQL migrations for golang-migrate.
+- `seeds/`: `readmodel-seeds`, which writes the `markets` and `assets` rows from a vex-core
+  configuration file, and `development.sql`, its output for the vex-core rev `Cargo.lock` pins.
+- `connect/`: the Connect worker image (`Dockerfile`, `worker.properties`), one JDBC sink
+  connector per `trading` table (`connectors/*.json`) and `apply-connectors.sh`.
+- `tests/`: the read model's test stack and tests.
+
+In `trading`, each latest-state table (`balances`, `orders`, `orderbook`) holds one row per key and
+each history table (`balance_events`, `order_events`, `cancel_events`, `trade_events`,
+`deposit_events`, `withdrawal_events`) one row per key and event timestamp (`event_ts`, vex-core's
+`timestamp` in nanoseconds). Every table's `keep_newer` trigger turns the connectors' upserts into
+"newer `event_ts` wins; of two copies of one event, the first stays", so duplicates and events
+delivered out of order change nothing. vex-core's `u64` values are stored with the same bits in
+`BIGINT` columns: read them as `i64` and decode with `as u64`; in SQL, `trading.u64(column)` gives
+the unsigned value.
+
+### Bringing Up an Environment
+
+In this order:
+
+1. **Topics.** vex-core's seven event topics (`balances`, `orders`, `orderbook`, `cancels`,
+   `trades`, `deposits`, `withdrawals`) exist before vex-core starts, with fixed partition counts
+   and replication factor 3. The brokers run with `auto.create.topics.enable=false`.
+2. **Migrations,** on PostgreSQL 15 or later, as the database owner, which needs `CREATEROLE` the
+   first time on a server:
+   ```bash
+   migrate -path readmodel/migrations/postgres -database "<owner URL>" up
+   ```
+   They refuse an older server, and a database in which roles other than its owner may create
+   objects in schema `public`, such as one upgraded from an older PostgreSQL; the error names the
+   `REVOKE` for the schema's owner or a superuser to run first. A refused migration changes
+   nothing, but golang-migrate marks its version dirty: once the cause is fixed, force the
+   version back to the one before it (`migrate … force -- -1` for the first) and run `up` again.
+3. **Login roles,** once per server. The migrations create only the group roles (see
+   [Roles](#read-model-roles)); the deploy creates one login for Connect and one for the gateway,
+   with passwords from its secret store:
+   ```sql
+   CREATE ROLE readmodel_connect_login LOGIN PASSWORD '<secret>' IN ROLE readmodel_connect;
+   CREATE ROLE readmodel_gateway_login LOGIN PASSWORD '<secret>' IN ROLE readmodel_gateway;
+   ```
+   The gateway's `auth.database.url` uses the gateway login.
+4. **Seeds,** on every deploy, from the configuration file vex-core runs with. The output upserts
+   every configured market and asset and deactivates the others, so applying it again is harmless:
+   ```bash
+   cargo run --release -p readmodel-seeds -- <vex-core config file> \
+     | psql "<owner URL>" -v ON_ERROR_STOP=1
+   ```
+   Only the file's `symbols` section is read, with vex-config's own types and validation, so the
+   generator needs neither vex-core's environment nor its secrets. vex-core's markets must
+   therefore be in that file, never set through `VEX__SYMBOLS__…` environment overrides.
+5. **Kafka Connect.** Run the image built from `readmodel/connect/Dockerfile` with
+   `KAFKA_BOOTSTRAP_SERVERS` and `SCHEMA_REGISTRY_URL` set; the worker fails to start without
+   them. **The worker connects to Kafka and to Schema Registry anonymously:** it has no
+   credentials for either, and talks to Kafka in plaintext. Their authentication waits for the
+   choice of the production Kafka platform and is a pre-production item. Mount two files into
+   `/etc/vex-connect`, from which the connectors reach Postgres:
+   - `postgres.properties`:
+     ```properties
+     server=<host>:<port>
+     database=<database>
+     user=readmodel_connect_login
+     password=<secret>
+     ```
+     `server` is a bare `host:port` and `database` a bare database name, with no `?`, `&` or other
+     URL parameter: both are pasted into each connector's JDBC URL ahead of its fixed
+     `sslmode=verify-full`, which a parameter there could override.
+   - `postgres-ca.pem`: the certificate, in PEM, of the CA that signed Postgres' server
+     certificate, or a bundle of them. On Amazon RDS, that is the RDS CA bundle, for the region
+     (`https://truststore.pki.rds.amazonaws.com/<region>/<region>-bundle.pem`) or global
+     (`https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem`).
+
+   Every connector's JDBC URL is `server` and `database` with
+   `?sslmode=verify-full&sslrootcert=/etc/vex-connect/postgres-ca.pem&loginTimeout=10&socketTimeout=15`,
+   fixed in its file: the connectors always use TLS, and connect only to a server whose
+   certificate that CA signed for the host in `server`, so `server` names the host as the
+   certificate does (on RDS, the instance's endpoint). No connector setting turns this off:
+   without the CA file, or against any other certificate, the connectors write nothing and their
+   tasks retry, then fail ([Connector Failures](#connector-failures)). Make Postgres refuse the
+   Connect login without TLS too (`hostssl` in `pg_hba.conf`; on RDS, `rds.force_ssl=1`).
+   `loginTimeout` bounds each login to 10 s, and `socketTimeout` each wait for an answer from
+   Postgres to 15 s, far longer than a write takes (under 50 ms for 500 rows in the test stack).
+   A wait that gets no answer closes the connection, and closing a TLS 1.3 connection waits up
+   to 15 s more, so a statement in flight when Postgres vanishes without closing the connection,
+   as in a failover or a network partition, fails after about 30 s instead of when TCP gives up,
+   about 15 minutes later. The URL has no other parameter, and never `reWriteBatchedInserts`,
+   which would fail every batch that holds one key twice.
+
+   The worker creates its internal topics (`vex-readmodel-connect-configs`, `-offsets`,
+   `-status`) with replication factor 3. Then apply the connectors, which creates or updates each
+   one from its file and deletes any connector without a file; a new connector starts from the
+   topic's earliest offset:
+   ```bash
+   readmodel/connect/apply-connectors.sh http://<connect>:8083
+   ```
+   Connect's REST API (port 8083) has no authentication: whoever reaches it can run a connector
+   with Connect's database login. Let only the deploy job and operators reach it (network
+   policy). Its config providers read nothing but `KAFKA_BOOTSTRAP_SERVERS`, `SCHEMA_REGISTRY_URL`
+   and the files in `/etc/vex-connect`.
+6. **vex-core.**
+7. **The gateway.** It still reads balances and orders from `trading.balances_events` and
+   `trading.orders_events`, which this schema does not have, so those endpoints fail until it
+   reads `trading.balances` and `trading.orders`.
+
+### Read Model Roles
+
+| Role | May |
+|---|---|
+| `readmodel_connect` | `SELECT`, `INSERT` and `UPDATE` on every `trading` table (an upsert needs all three). Nothing else. |
+| `readmodel_gateway` | `SELECT` on every `trading` table, so Postgres denies the gateway any write to it. `SELECT`, `INSERT`, `UPDATE` on `users` and `api_keys`; `SELECT`, `INSERT`, `DELETE` on `user_favorite_markets`; `SELECT` on `markets` and `assets`. |
+
+Only the owner runs migrations and seeds, and only the owner creates objects, in schema `public`
+too.
+
+If the Kafka cluster enforces ACLs, Connect's principal needs the following. The worker has no
+principal of its own until it authenticates (step 5 of
+[Bringing Up an Environment](#bringing-up-an-environment)):
+
+- `Read` on the seven event topics, and on the consumer groups prefixed `connect-pg-` (each
+  connector's group is `connect-<connector name>`);
+- `Read` on the worker group `vex-readmodel-connect`;
+- `Create`, `Describe`, `DescribeConfigs`, `Read` and `Write` on the topics prefixed
+  `vex-readmodel-connect-`, its internal topics.
+
+vex-core's principal needs `Write` and `Describe` on the seven event topics.
+
+### Connector Failures
+
+Every connector runs with `errors.tolerance=none` and no dead-letter queue: a record that cannot
+be converted, transformed or written fails its task, and since its offset is not committed,
+nothing after it is skipped either. Two kinds of error are retried first. Meanwhile the task stays
+`RUNNING`, writes nothing and its consumer lag grows:
+
+- **Postgres cannot be reached**: it is down, restarting, failing over or hung, or the TLS
+  handshake or the login fails. The task tries to connect `connection.attempts` (7) times,
+  `connection.backoff.ms` (30 s) apart, each login cut off after `loginTimeout` (10 s): it rides
+  out an outage of up to 3 minutes (7 attempts 30 s apart reach about 180 s), such as a restart
+  or an RDS Multi-AZ failover, and carries on by itself. Attempts 1 to 6 each log at `INFO`,
+  followed by the cause:
+  `[<connector>|task-<n>] Unable to connect to database on attempt <k>/7. Will retry in 30000 ms.`
+  The 7th fails the task: the worker logs it at `ERROR`, and it is the task's trace. The attempts
+  run inside one write, which blocks for at most 320 s (the sum is in `worker.properties`), less
+  than the sink consumers' `max.poll.interval.ms` (10 minutes, set in `worker.properties`), so the
+  consumer group keeps the task meanwhile.
+- **A statement fails** on an open connection: Postgres went away during a write or gave no
+  answer within `socketTimeout` (the statement fails about 30 s after it began, since closing the
+  TLS connection waits up to 15 s more; the cause is `SocketTimeoutException: Read timed out`), a
+  deadlock, a missing privilege. The task writes the batch again, over a new connection (tried as
+  above), up to `max.retries` (60) times, `retry.backoff.ms` (10 s) apart, and logs each failure
+  at `WARN`: `Write of <n> records failed, remainingRetries=<k>`. The sink and Connect log it at
+  `ERROR` too (`Error during write operation. Attempting rollback.`,
+  `RetriableException from SinkTask`), although the task carries on.
+
+When its retries run out, the task fails, with the last error in its trace. A record with a field
+that has no column fails its task at once.
+
+`socketTimeout` bounds waits for an answer, not writes. A batch written to a server that drops
+packets silently, as in a network partition or to the old primary of a failover, can fill the
+connection's send buffer, and the write then blocks until TCP gives up (`net.ipv4.tcp_retries2`
+on the Connect host; about 15 minutes with Linux defaults), longer than `max.poll.interval.ms`:
+the consumer group moves the task's partitions to the connector's other tasks meanwhile. No row is
+lost or doubled: no offset is committed past a write that has not succeeded, and the upserts are
+idempotent.
+
+`socketTimeout` also cuts off a statement that waits for a lock on a `trading` table, such as one
+held by a migration's `ALTER TABLE` or by `CREATE INDEX` without `CONCURRENTLY`. The task writes
+the batch again about every 40 s, and the backend of each statement it gave up waits on until it
+gets the lock, then rolls back, so a lock held for minutes piles up connections towards
+`max_connections`. Before such a migration, pause the connectors
+(`PUT /connectors/<name>/pause`, and `PUT /connectors/<name>/resume` after it), or keep its locks
+short (`lock_timeout`, `CREATE INDEX CONCURRENTLY`).
+
+**Alert on:** a task in state `FAILED` (`GET /connectors?expand=status`, or the JMX
+`connector-task-metrics` status), and consumer lag of the groups `connect-<connector name>`.
+Readers of `trading` are as fresh as that lag.
+
+**Recovery:** a task that is still retrying carries on once the cause is fixed. For a failed one,
+read its `trace` in `GET /connectors/<name>/status`, fix the cause, then restart the connector
+with all its tasks; they resume from the record that failed:
+
+```bash
+curl -X POST "http://<connect>:8083/connectors/<name>/restart?includeTasks=true"
+```
+
+Restart every task, not only the failed ones (`onlyFailed=true`): a failed task's partitions move
+to the connector's other tasks, which then fail on the same record, possibly just after the
+restart was planned, and a task that has not failed yet may still hold the table as it was before
+the fix. Restarting a healthy task only re-reads records since its last commit, which change
+nothing.
+
+A trace with `is missing fields (...) and auto-evolution is disabled` means vex-core publishes a
+field that has no column: apply the migration that adds it, then restart.
+
+A log entry or trace with `SSL error: ... PKIX path` means `/etc/vex-connect/postgres-ca.pem` does
+not hold the CA that signed Postgres' certificate. A wrong or outdated CA file usually gives
+`PKIX path building failed: ... unable to find valid certification path to requested target`; a
+different CA with the same name as the right one gives `PKIX path validation failed: ... Path does
+not chain with any of the trust anchors`. One with `The hostname <host> could not be verified`
+means the certificate does not name the host in `server`. Fix the file, the certificate or
+`server`; restart the connector if its tasks failed.
+
+### Schema Changes
+
+- A migration is a new file, `<next number>_<name>.up.sql`. Never edit one that has been applied.
+- A new `trading.proto` field needs its column, deployed before the vex-core that publishes it.
+- A new `trading` table needs its `keep_newer` trigger, its grants to `readmodel_connect` and
+  `readmodel_gateway`, and a connector file.
+- `python3 readmodel/tests/run.py` checks all of these. It needs Docker and openssl, and runs the
+  stack with the vex-core rev `Cargo.lock` pins; CI runs it (the "Read model" job, which keeps
+  the images' layers in the GitHub Actions cache) on pushes to `main` and `develop` and on pull
+  requests that change `readmodel/`, `Cargo.lock`, the gateway's repository or model code, or
+  `ci.yml`.
+- After re-pinning vex-core, `cargo test -p readmodel-seeds` fails if its `config.dev.yaml` changed;
+  regenerate the development seeds with
+  `cargo run -p readmodel-seeds -- <vex-core checkout>/config.dev.yaml > readmodel/seeds/development.sql`.
 
 ---
 

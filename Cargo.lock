@@ -2249,6 +2249,7 @@ dependencies = [
  "tokio",
  "tokio-test",
  "tracing",
+ "url",
  "uuid",
  "vex-config",
  "vex-networking",
@@ -3271,6 +3272,27 @@ name = "rand_core"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
+
+[[package]]
+name = "readmodel-seeds"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "config",
+ "serde_json",
+ "tempfile",
+ "vex-config",
+]
+
+[[package]]
+name = "readmodel-traffic"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "rusteron-media-driver",
+ "vex-config",
+ "vex-networking",
+]
 
 [[package]]
 name = "redis"
