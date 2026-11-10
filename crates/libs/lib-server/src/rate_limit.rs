@@ -157,15 +157,6 @@ mod tests {
     /// does.
     const TEST_KEY_OWNER: &str = "x-test-key-owner";
 
-    /// The test Redis (CI sets `REDIS_URL`).
-    async fn redis() -> ConnectionManager {
-        let redis_url =
-            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
-        ConnectionManager::new(redis::Client::open(redis_url).unwrap())
-            .await
-            .expect("rate-limit tests need Redis")
-    }
-
     /// Both budgets allow `max_requests` a minute.
     fn limits(max_requests: u64) -> RateLimitConfig {
         let limit = Limit {
@@ -274,7 +265,7 @@ mod tests {
 
     #[actix_web::test]
     async fn over_its_budget_a_caller_gets_429_with_the_rest_of_the_window() {
-        let app = test::init_service(app(redis().await, limits(2))).await;
+        let app = test::init_service(app(crate::test_redis().await, limits(2))).await;
         let user = Uuid::new_v4();
         let refused = metrics::rate_limited(RateLimitBudget::General);
         let refused_before = refused.get();
@@ -305,7 +296,7 @@ mod tests {
 
     #[actix_web::test]
     async fn a_user_shares_its_budgets_with_its_api_keys_and_not_with_other_users() {
-        let app = test::init_service(app(redis().await, limits(1))).await;
+        let app = test::init_service(app(crate::test_redis().await, limits(1))).await;
         let (user, other_user) = (Uuid::new_v4(), Uuid::new_v4());
 
         assert_eq!(
@@ -338,7 +329,7 @@ mod tests {
 
     #[actix_web::test]
     async fn a_user_over_the_orders_budget_can_still_cancel() {
-        let app = test::init_service(app(redis().await, limits(1))).await;
+        let app = test::init_service(app(crate::test_redis().await, limits(1))).await;
         let user = Uuid::new_v4();
         let refused = metrics::rate_limited(RateLimitBudget::Orders);
         let refused_before = refused.get();
@@ -375,7 +366,7 @@ mod tests {
 
     #[actix_web::test]
     async fn anonymous_callers_are_keyed_by_the_trusted_client_ip() {
-        let app = test::init_service(app(redis().await, limits(1))).await;
+        let app = test::init_service(app(crate::test_redis().await, limits(1))).await;
         let via_proxy = |client: IpAddr| {
             from_peer(
                 TestRequest::get().uri("/public"),
@@ -414,7 +405,7 @@ mod tests {
 
     #[actix_web::test]
     async fn an_ipv6_client_is_keyed_by_its_64() {
-        let app = test::init_service(app(redis().await, limits(1))).await;
+        let app = test::init_service(app(crate::test_redis().await, limits(1))).await;
         let network = Uuid::new_v4().as_u128() & !u128::from(u64::MAX);
         let public =
             |ip: u128| from_peer(TestRequest::get().uri("/public"), Ipv6Addr::from(ip).into());
@@ -438,7 +429,7 @@ mod tests {
 
     #[actix_web::test]
     async fn an_api_key_without_an_owner_is_refused_before_it_is_counted() {
-        let app = test::init_service(app(redis().await, limits(1))).await;
+        let app = test::init_service(app(crate::test_redis().await, limits(1))).await;
         let peer = fresh_ip();
         let ownerless_key = from_peer(TestRequest::get().uri("/other"), peer)
             .insert_header((TEST_KEY_OWNER, "none"));
@@ -461,7 +452,7 @@ mod tests {
 
     #[actix_web::test]
     async fn a_redis_error_refuses_the_request_with_the_json_503() {
-        let redis = redis().await;
+        let redis = crate::test_redis().await;
         let app = test::init_service(app(redis.clone(), limits(100))).await;
         let user = Uuid::new_v4();
         // INCR fails on a value that is not an integer.

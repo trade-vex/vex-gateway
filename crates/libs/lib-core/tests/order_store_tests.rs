@@ -25,6 +25,8 @@ use lib_core::repository::repository::{TradingError, TradingRepository};
 use redis::AsyncCommands;
 use std::sync::Arc;
 
+mod common;
+
 type Result<T> = std::result::Result<T, TradingError>;
 
 /// Mock TradingRepository for testing
@@ -555,8 +557,7 @@ async fn test_concurrent_access() {
 
 #[tokio::test]
 async fn test_u64_order_magnitudes_survive_redis_round_trip() {
-    let redis_url =
-        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6380".to_string());
+    let redis_url = common::redis_url();
     let client = redis::Client::open(redis_url.clone()).expect("Redis URL should be valid");
     let mut connection = match client.get_multiplexed_async_connection().await {
         Ok(connection) => connection,
@@ -607,8 +608,7 @@ async fn test_u64_order_magnitudes_survive_redis_round_trip() {
 #[tokio::test]
 async fn cached_orders_are_filtered_by_core_status_and_time_in_force_names() {
     // The Redis order hashes hold vex-core's protobuf enum value names (STATUS_*, TIF_*).
-    let redis_url =
-        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6380".to_string());
+    let redis_url = common::redis_url();
     let client = redis::Client::open(redis_url.clone()).expect("Redis URL should be valid");
     let mut connection = match client.get_multiplexed_async_connection().await {
         Ok(connection) => connection,

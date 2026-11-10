@@ -402,14 +402,9 @@ impl SessionService {
 mod tests {
     use super::*;
 
-    async fn test_connection() -> ConnectionManager {
-        let client = redis::Client::open("redis://127.0.0.1:6379/13").unwrap();
-        ConnectionManager::new(client).await.unwrap()
-    }
-
     #[tokio::test]
     async fn revocation_uses_user_index_and_preserves_other_users_sessions() {
-        let conn = test_connection().await;
+        let conn = crate::test_redis().await;
         let service = SessionService::new(conn.clone(), 60);
         let user_id = Uuid::new_v4();
         let other_user_id = Uuid::new_v4();

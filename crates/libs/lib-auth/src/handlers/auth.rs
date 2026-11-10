@@ -878,15 +878,6 @@ mod tests {
     use jsonwebtoken::{DecodingKey, EncodingKey};
     use redis::AsyncCommands;
 
-    async fn create_test_redis_conn() -> redis::aio::ConnectionManager {
-        let redis_url =
-            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
-        let client = redis::Client::open(redis_url).expect("Failed to create test Redis client");
-        redis::aio::ConnectionManager::new(client)
-            .await
-            .expect("Failed to create test Redis connection manager")
-    }
-
     #[test]
     fn session_cookie_is_secure_exactly_when_the_request_used_https() {
         let forwarded_https = || {
@@ -924,7 +915,7 @@ mod tests {
     async fn refresh_token_stops_working_after_logout() {
         let user_id = Uuid::new_v4();
         let refresh_token = Uuid::new_v4().to_string();
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let jwt_config = Arc::new(JwtConfig {
             private_key_path: String::new(),
             public_key_path: String::new(),
@@ -1153,10 +1144,7 @@ mod tests {
     }
 
     async fn test_services() -> (Arc<EmailService>, Arc<TokenService>, Arc<SessionService>) {
-        let redis_url =
-            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
-        let client = redis::Client::open(redis_url).unwrap();
-        let conn = redis::aio::ConnectionManager::new(client).await.unwrap();
+        let conn = crate::test_redis().await;
         let email_config = EmailConfig {
             smtp_host: "127.0.0.1".to_string(),
             smtp_port: 2525,
@@ -1662,7 +1650,7 @@ mod tests {
         assert!(matches!(result, Err(AuthError::Validation(_))));
         assert_eq!(repository.find_by_email_calls.load(Ordering::SeqCst), 0);
 
-        let mut conn = create_test_redis_conn().await;
+        let mut conn = crate::test_redis().await;
         let ip_key_exists: bool = conn
             .exists("rate_limit:auth:signup:ip:203.0.113.201")
             .await
@@ -1708,7 +1696,7 @@ mod tests {
         assert!(matches!(result, Err(AuthError::Validation(_))));
         assert_eq!(repository.find_by_email_calls.load(Ordering::SeqCst), 0);
 
-        let mut conn = create_test_redis_conn().await;
+        let mut conn = crate::test_redis().await;
         let ip_key_exists: bool = conn
             .exists("rate_limit:auth:verify_email:ip:203.0.113.202")
             .await

@@ -579,17 +579,6 @@ mod tests {
     use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    // Helper function to create a test Redis connection manager
-    async fn create_test_redis_conn() -> ConnectionManager {
-        // Use environment variable for Redis URL, fallback to localhost for local testing
-        let redis_url =
-            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
-        let client = redis::Client::open(redis_url).expect("Failed to create test Redis client");
-        ConnectionManager::new(client)
-            .await
-            .expect("Failed to create test Redis connection manager")
-    }
-
     // Test handler that requires authentication
     async fn protected_handler(user: AuthenticatedUser) -> HttpResponse {
         HttpResponse::Ok().json(json!({
@@ -650,7 +639,7 @@ mod tests {
     #[tokio::test]
     async fn auto_refresh_rejects_stale_token_version() {
         let user_id = Uuid::new_v4();
-        let mut conn = create_test_redis_conn().await;
+        let mut conn = crate::test_redis().await;
         let _: () = conn
             .set(
                 crate::service::token_service::token_version_key(user_id),
@@ -669,7 +658,7 @@ mod tests {
     #[tokio::test]
     async fn test_jwt_middleware_valid_token() {
         let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let middleware = JwtAuthentication::new_with_algorithm(
             decoding_key,
             "vex-gateway".to_string(),
@@ -710,7 +699,7 @@ mod tests {
     async fn test_jwt_middleware_current_token_version_works() {
         let user_id = Uuid::new_v4();
         let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let middleware = JwtAuthentication::new_with_algorithm(
             decoding_key,
             "vex-gateway".to_string(),
@@ -753,7 +742,7 @@ mod tests {
     async fn test_jwt_middleware_rejects_token_after_password_change_bump() {
         let user_id = Uuid::new_v4();
         let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let middleware = JwtAuthentication::new_with_algorithm(
             decoding_key,
             "vex-gateway".to_string(),
@@ -797,7 +786,7 @@ mod tests {
     #[tokio::test]
     async fn test_jwt_middleware_rejects_token_without_a_version() {
         let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let middleware = JwtAuthentication::new_with_algorithm(
             decoding_key,
             "vex-gateway".to_string(),
@@ -843,7 +832,7 @@ mod tests {
     #[tokio::test]
     async fn test_jwt_middleware_invalid_token() {
         let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let middleware = JwtAuthentication::new_with_algorithm(
             decoding_key,
             "vex-gateway".to_string(),
@@ -875,7 +864,7 @@ mod tests {
             "vex-gateway".to_string(),
             "vex-api".to_string(),
             Algorithm::HS256,
-            create_test_redis_conn().await,
+            crate::test_redis().await,
         );
         let app = test::init_service(
             App::new()
@@ -904,7 +893,7 @@ mod tests {
     #[tokio::test]
     async fn test_jwt_middleware_expired_token() {
         let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let middleware = JwtAuthentication::new_with_algorithm(
             decoding_key,
             "vex-gateway".to_string(),
@@ -938,7 +927,7 @@ mod tests {
     #[tokio::test]
     async fn test_jwt_middleware_missing_token() {
         let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let middleware = JwtAuthentication::new_with_algorithm(
             decoding_key,
             "vex-gateway".to_string(),
@@ -963,7 +952,7 @@ mod tests {
     #[tokio::test]
     async fn test_jwt_middleware_malformed_header() {
         let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let middleware = JwtAuthentication::new_with_algorithm(
             decoding_key,
             "vex-gateway".to_string(),
@@ -991,7 +980,7 @@ mod tests {
     #[tokio::test]
     async fn test_jwt_middleware_production_rs256() {
         let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let middleware = JwtAuthentication::new(
             decoding_key,
             "vex-gateway".to_string(),
@@ -1025,7 +1014,7 @@ mod tests {
     #[tokio::test]
     async fn test_jwt_middleware_blacklisted_token() {
         let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let middleware = JwtAuthentication::new_with_algorithm(
             decoding_key,
             "vex-gateway".to_string(),
@@ -1073,7 +1062,7 @@ mod tests {
     #[tokio::test]
     async fn test_jwt_middleware_blacklisted_token_does_not_execute_handler() {
         let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let middleware = JwtAuthentication::new_with_algorithm(
             decoding_key,
             "vex-gateway".to_string(),
@@ -1134,7 +1123,7 @@ mod tests {
     #[tokio::test]
     async fn test_jwt_middleware_valid_token_executes_handler() {
         let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let middleware = JwtAuthentication::new_with_algorithm(
             decoding_key,
             "vex-gateway".to_string(),

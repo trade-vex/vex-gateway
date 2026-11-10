@@ -999,10 +999,7 @@ mod tests {
     use secrecy::SecretString;
 
     async fn email_service() -> EmailService {
-        let redis_url =
-            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
-        let client = redis::Client::open(redis_url).unwrap();
-        let conn = ConnectionManager::new(client).await.unwrap();
+        let conn = crate::test_redis().await;
         let config = EmailConfig {
             smtp_host: "127.0.0.1".to_string(),
             smtp_port: 2525,

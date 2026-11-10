@@ -59,3 +59,14 @@ pub async fn initialize_server(
 
     Ok(metrics::alongside(server, metrics_listener)?)
 }
+
+/// A connection to the tests' Redis: `REDIS_URL`, or the default local port when it is unset. CI
+/// sets `REDIS_URL` to its Redis service.
+#[cfg(test)]
+async fn test_redis() -> redis::aio::ConnectionManager {
+    let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+    let client = redis::Client::open(url).expect("REDIS_URL must be a Redis URL");
+    redis::aio::ConnectionManager::new(client)
+        .await
+        .expect("these tests need the Redis at REDIS_URL")
+}

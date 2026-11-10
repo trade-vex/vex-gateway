@@ -53,22 +53,13 @@ mod tests {
     use redis::AsyncCommands;
     use uuid::Uuid;
 
-    /// The test Redis (CI sets `REDIS_URL`).
-    async fn redis() -> ConnectionManager {
-        let redis_url =
-            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
-        ConnectionManager::new(redis::Client::open(redis_url).unwrap())
-            .await
-            .expect("rate-limit tests need Redis")
-    }
-
     fn key() -> String {
         format!("rate_limit:test:{}", Uuid::new_v4())
     }
 
     #[tokio::test]
     async fn requests_over_the_limit_get_the_rest_of_the_window() {
-        let redis = redis().await;
+        let redis = crate::test_redis().await;
         let key = key();
         let limit = Limit {
             max_requests: 3,
@@ -96,7 +87,7 @@ mod tests {
 
     #[tokio::test]
     async fn each_key_has_its_own_window() {
-        let redis = redis().await;
+        let redis = crate::test_redis().await;
         let limit = Limit {
             max_requests: 1,
             window_seconds: 60,
@@ -110,7 +101,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_redis_error_is_returned() {
-        let redis = redis().await;
+        let redis = crate::test_redis().await;
         let key = key();
         // INCR fails on a value that is not an integer.
         let _: () = redis.clone().set_ex(&key, "not-a-count", 60).await.unwrap();

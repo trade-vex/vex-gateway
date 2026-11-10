@@ -260,14 +260,6 @@ impl TokenService {
 mod tests {
     use super::*;
 
-    async fn create_test_redis_conn() -> ConnectionManager {
-        let client = redis::Client::open("redis://127.0.0.1:6379/")
-            .expect("Failed to create test Redis client");
-        ConnectionManager::new(client)
-            .await
-            .expect("Failed to create test Redis connection manager")
-    }
-
     fn test_service(conn: ConnectionManager) -> TokenService {
         TokenService::new(
             Arc::new(JwtConfig {
@@ -287,7 +279,7 @@ mod tests {
     #[tokio::test]
     async fn minting_at_captured_login_version_fails_after_revocation() {
         let user_id = Uuid::new_v4();
-        let service = test_service(create_test_redis_conn().await);
+        let service = test_service(crate::test_redis().await);
 
         let captured_version = service.get_token_version(user_id).await.unwrap();
         service.bump_token_version(user_id).await.unwrap();
@@ -300,7 +292,7 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_record_without_a_version_is_rejected() {
-        let mut conn = create_test_redis_conn().await;
+        let mut conn = crate::test_redis().await;
         let service = test_service(conn.clone());
         let refresh_token = Uuid::new_v4().to_string();
         let jti = Uuid::new_v4().to_string();

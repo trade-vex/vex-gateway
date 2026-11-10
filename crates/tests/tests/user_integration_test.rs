@@ -482,9 +482,7 @@ async fn test_user_balance_and_order_retrieval() {
 
     // 4. Initialize Redis
     println!("\n4️⃣  Connecting to Redis");
-    // Use your Docker setup: Redis on port 6380 (mapped from container's 6379)
-    let redis_url =
-        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6380".to_string());
+    let redis_url = tests::redis_url();
     println!("   🔗 {}", redis_url);
 
     // 5. Initialize Database

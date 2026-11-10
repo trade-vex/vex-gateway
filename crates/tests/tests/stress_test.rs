@@ -391,8 +391,7 @@ async fn test_high_frequency_stress_test() {
     println!("╚═══════════════════════════════════════════════════════════════╝\n");
 
     // Setup
-    let redis_url =
-        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6380".to_string());
+    let redis_url = tests::redis_url();
     let db = init_database().await;
 
     // Initialize VEX Gateway
