@@ -11,6 +11,7 @@ thiserror = {workspace = true}
 tracing = {workspace = true}
 
 lib-auth = {path = "../lib-auth"}
+lib-middleware = {path = "../lib-middleware"}
 vex-config = {workspace = true}
 [dev-dependencies]
 tempfile = {workspace = true}

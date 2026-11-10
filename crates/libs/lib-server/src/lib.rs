@@ -13,6 +13,7 @@ mod combined_auth;
 mod correlation_handler;
 mod edge;
 mod metrics;
+mod rate_limit;
 mod state;
 
 pub use app::create_app;
@@ -21,6 +22,7 @@ pub use correlation_handler::CorrelationHandler;
 pub use lib_core::{
     CorrelationService, ResponseError, generate_client_order_id, wait_for_response,
 };
+pub use rate_limit::RateLimiter;
 pub use state::AppState;
 
 /// Initialize the HTTP server, and the internal metrics listener beside it. The returned future runs
@@ -37,6 +39,7 @@ pub async fn initialize_server(
     let app_state = AppState::new(
         &auth_config,
         &config.clickhouse,
+        config.rate_limit,
         gateway_publisher,
         correlation_service,
     )

@@ -2293,6 +2293,7 @@ version = "0.1.0"
 dependencies = [
  "config",
  "lib-auth",
+ "lib-middleware",
  "serde",
  "serde_ignored",
  "tempfile",

@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use crate::combined_auth::CombinedAuthMiddleware;
 use crate::edge;
+use crate::rate_limit;
 use crate::state::AppState;
 
 /// Application factory that creates the Actix-web application with all routes and middleware
@@ -59,6 +60,7 @@ pub fn create_app(
         .app_data(web::Data::new(app_state.gateway_publisher.clone()))
         .app_data(web::Data::new(app_state.correlation_service.clone()))
         .app_data(web::Data::new(app_state.order_idempotency_store.clone()))
+        .app_data(web::Data::new(app_state.rate_limiter.clone()))
         // Configure all routes under a single /api scope
         .service(
             web::scope("/api")
@@ -68,30 +70,43 @@ pub fn create_app(
                 .app_data(web::Data::new(Arc::new(app_state.token_service.clone())))
                 .app_data(web::Data::new(Arc::new(app_state.oauth_service.clone())))
                 .app_data(web::Data::new(Arc::new(app_state.session_service.clone())))
-                // Public routes (no authentication required)
-                .configure(lib_auth::configure_public_auth_services)
-                // Health check route
+                // Public routes (no authentication required). Those whose handlers limit no rate
+                // per client IP of their own draw on the general budget, keyed by the client IP.
+                .configure(|cfg| {
+                    lib_auth::configure_public_auth_services(cfg, |route| {
+                        route.wrap(from_fn(rate_limit::anonymous))
+                    })
+                })
+                // Health check route: not rate limited. The load balancer's probes stay out of
+                // the budgets, and it reads one atomic flag.
                 .configure(routes::health_check_route::configure)
-                // Protected routes with combined auth middleware
+                // Protected routes with combined auth middleware. Their rate limits are counted
+                // inside it, per user, once it has named the caller.
                 .service(
                     web::scope("")
                         .wrap(combined_auth_middleware)
-                        .configure(lib_auth::configure_protected_auth_services)
-                        // Session check route (requires authentication)
-                        .configure(routes::session_check_route::configure)
-                        // Configure API routes
-                        .service(
-                            web::scope("/api-key")
-                                .app_data(web::Data::new(app_state.api_key_repository.clone()))
-                                .configure(routes::api_key_routes::configure),
-                        )
+                        // Placing orders: the orders budget; cancelling: the general one.
+                        // Registered before the scope below, which matches every path.
+                        .configure(|cfg| routes::order_route::configure(cfg, rate_limit::per_user))
+                        // Every other protected route: the general budget
                         .service(
                             web::scope("")
+                                .wrap(from_fn(rate_limit::general))
                                 .app_data(web::Data::new(Arc::new(app_state.balance_store.clone())))
                                 .app_data(web::Data::new(Arc::new(app_state.order_store.clone())))
                                 .app_data(web::Data::new(app_state.portfolio_repository.clone()))
                                 .app_data(web::Data::new(app_state.trading_repository.clone()))
-                                .configure(routes::order_route::configure)
+                                .configure(lib_auth::configure_protected_auth_services)
+                                // Session check route (requires authentication)
+                                .configure(routes::session_check_route::configure)
+                                // Configure API routes
+                                .service(
+                                    web::scope("/api-key")
+                                        .app_data(web::Data::new(
+                                            app_state.api_key_repository.clone(),
+                                        ))
+                                        .configure(routes::api_key_routes::configure),
+                                )
                                 .configure(routes::user_route::configure),
                         ),
                 ),

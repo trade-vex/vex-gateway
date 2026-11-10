@@ -7,7 +7,7 @@ use jsonwebtoken::{DecodingKey, EncodingKey};
 use lib_auth::config::{AuthConfig, JwtConfig, RedisConfig};
 use lib_auth::repository::{PostgresUserRepository, UserRepository};
 use lib_auth::service::{EmailService, OAuthService, SessionService, TokenService};
-use lib_config::ClickHouseConfig;
+use lib_config::{ClickHouseConfig, RateLimitConfig};
 use lib_core::Publisher;
 use lib_core::repository::repository::{ClickHousePortfolioRepository, PortfolioRepository};
 use lib_core::{CorrelationService, OrderIdempotencyStore};
@@ -26,6 +26,8 @@ use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 use tracing::{debug, info};
 use url::Url;
+
+use crate::rate_limit::RateLimiter;
 
 /// Central application state containing all dependencies
 ///
@@ -67,6 +69,9 @@ pub struct AppState {
     // Short-lived order placement outcomes keyed by client idempotency key
     pub order_idempotency_store: Arc<OrderIdempotencyStore>,
 
+    // The API's rate limits, counted in Redis
+    pub rate_limiter: RateLimiter,
+
     // Trading stores for balances and orders
     pub balance_store: UserBalanceStore,
     pub order_store: OrderStore,
@@ -77,6 +82,7 @@ impl AppState {
     pub async fn new(
         config: &AuthConfig,
         clickhouse: &ClickHouseConfig,
+        rate_limits: RateLimitConfig,
         gateway_publisher: Publisher,
         correlation_service: CorrelationService,
     ) -> Result<Arc<Self>, Box<dyn std::error::Error + Send + Sync>> {
@@ -89,6 +95,7 @@ impl AppState {
         // Initialize Redis connection
         let redis_conn = Self::init_redis(&config.redis).await?;
         let order_idempotency_store = Arc::new(OrderIdempotencyStore::new(redis_conn.clone()));
+        let rate_limiter = RateLimiter::new(redis_conn.clone(), rate_limits);
 
         // Initialize HTTP client
         let http_client = Self::init_http_client()?;
@@ -193,6 +200,7 @@ impl AppState {
             trading_repository: trading_repo,
             correlation_service: Arc::new(correlation_service),
             order_idempotency_store,
+            rate_limiter,
             balance_store,
             order_store,
         }))

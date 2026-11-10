@@ -10,20 +10,29 @@ pub mod service;
 pub mod tests;
 pub mod utils;
 
-use actix_web::web;
+use actix_web::{Route, web};
 
 pub use config::AuthConfig;
 pub use error::auth_error::AuthError;
 
-/// Configure public routes for auth that don't require authentication
-pub fn configure_public_auth_services(cfg: &mut web::ServiceConfig) {
+/// Configure public routes for auth that don't require authentication.
+///
+/// Signup, login, email verification, and the OAuth redirect and callback limit their own rate per
+/// client IP (`EmailService::enforce_rate_limit`). Every other route is wrapped with
+/// `rate_limited`: the gateway's rate limit for anonymous callers, per client IP. The routes that
+/// send an email or check a code also limit their own rate per email: the password-reset request
+/// and code check, and the resend of the verification code.
+pub fn configure_public_auth_services(
+    cfg: &mut web::ServiceConfig,
+    rate_limited: fn(Route) -> Route,
+) {
     cfg
         // OAuth strategy routes (all public)
         .service(
             web::scope("/oauth")
                 .route(
                     "/providers",
-                    web::get().to(handlers::oauth::get_oauth_providers),
+                    rate_limited(web::get().to(handlers::oauth::get_oauth_providers)),
                 )
                 .route(
                     "/{provider}",
@@ -36,24 +45,27 @@ pub fn configure_public_auth_services(cfg: &mut web::ServiceConfig) {
                 // Mobile-only: exchange login_code + verifier for session_id
                 .route(
                     "/exchange",
-                    web::post().to(handlers::oauth::exchange_oauth_login_code),
+                    rate_limited(web::post().to(handlers::oauth::exchange_oauth_login_code)),
                 ),
         )
         // Public auth routes
         .route("/signup", web::post().to(handlers::auth::signup))
         .route("/login", web::post().to(handlers::auth::login))
-        .route("/refresh", web::post().to(handlers::auth::refresh_token))
+        .route(
+            "/refresh",
+            rate_limited(web::post().to(handlers::auth::refresh_token)),
+        )
         .route(
             "/session/refresh-tokens",
-            web::post().to(handlers::session::refresh_session_tokens),
+            rate_limited(web::post().to(handlers::session::refresh_session_tokens)),
         )
         .route(
             "/check-email",
-            web::post().to(handlers::auth::check_email_exists),
+            rate_limited(web::post().to(handlers::auth::check_email_exists)),
         )
         .route(
             "/resend-verification",
-            web::post().to(handlers::auth::resend_verification_email),
+            rate_limited(web::post().to(handlers::auth::resend_verification_email)),
         )
         .route(
             "/verify-email",
@@ -62,15 +74,15 @@ pub fn configure_public_auth_services(cfg: &mut web::ServiceConfig) {
         // Password reset routes
         .route(
             "/forgot-password",
-            web::post().to(handlers::auth::forgot_password),
+            rate_limited(web::post().to(handlers::auth::forgot_password)),
         )
         .route(
             "/verify-reset-otp",
-            web::post().to(handlers::auth::verify_reset_otp),
+            rate_limited(web::post().to(handlers::auth::verify_reset_otp)),
         )
         .route(
             "/reset-password",
-            web::post().to(handlers::auth::reset_password),
+            rate_limited(web::post().to(handlers::auth::reset_password)),
         );
 }
 
@@ -97,4 +109,66 @@ pub fn configure_protected_auth_services(cfg: &mut web::ServiceConfig) {
             "/session/refresh",
             web::post().to(handlers::session::refresh_session),
         );
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+    use actix_web::{
+        App, Error, HttpResponse,
+        body::MessageBody,
+        dev::{ServiceRequest, ServiceResponse},
+        http::{Method, StatusCode},
+        middleware::{Next, from_fn},
+        test,
+    };
+
+    /// Stands in for the gateway's rate limit: refuses every request with 429.
+    async fn refuse(
+        req: ServiceRequest,
+        _: Next<impl MessageBody>,
+    ) -> Result<ServiceResponse, Error> {
+        Ok(req.into_response(HttpResponse::TooManyRequests().finish()))
+    }
+
+    #[actix_web::test]
+    async fn exactly_the_public_routes_without_an_ip_limit_of_their_own_are_rate_limited() {
+        let app = test::init_service(App::new().configure(|cfg| {
+            configure_public_auth_services(cfg, |route| route.wrap(from_fn(refuse)))
+        }))
+        .await;
+
+        for (method, path, rate_limited) in [
+            (Method::GET, "/oauth/providers", true),
+            (Method::GET, "/oauth/google", false),
+            (Method::GET, "/oauth/google/callback", false),
+            (Method::POST, "/oauth/exchange", true),
+            (Method::POST, "/signup", false),
+            (Method::POST, "/login", false),
+            (Method::POST, "/refresh", true),
+            (Method::POST, "/session/refresh-tokens", true),
+            (Method::POST, "/check-email", true),
+            (Method::POST, "/resend-verification", true),
+            (Method::POST, "/verify-email", false),
+            (Method::POST, "/forgot-password", true),
+            (Method::POST, "/verify-reset-otp", true),
+            (Method::POST, "/reset-password", true),
+        ] {
+            let req = test::TestRequest::default()
+                .method(method.clone())
+                .uri(path)
+                .to_request();
+            // A route that is not wrapped reaches its handler, which fails to extract its input
+            // here: a 4xx or 5xx other than 429.
+            let status = match test::try_call_service(&app, req).await {
+                Ok(response) => response.status(),
+                Err(error) => error.error_response().status(),
+            };
+            assert_eq!(
+                status == StatusCode::TOO_MANY_REQUESTS,
+                rate_limited,
+                "{method} {path}: {status}"
+            );
+        }
+    }
 }
