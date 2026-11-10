@@ -7,7 +7,7 @@ use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 use uuid::Uuid;
 
-use crate::config::EmailConfig;
+use crate::config::{EmailConfig, OtpConfig, code_expiry_seconds};
 use crate::error::auth_error::AuthError;
 use secrecy::ExposeSecret;
 
@@ -33,22 +33,26 @@ pub struct EmailService {
     from_email: String,
     otp_length: usize,
     otp_expiry_minutes: i64,
+    password_reset_expiry_minutes: i64,
 }
 
 impl EmailService {
     pub fn new(
         email_config: &EmailConfig,
         conn: ConnectionManager,
-        otp_length: usize,
-        otp_expiry_minutes: i64,
+        otp_config: &OtpConfig,
     ) -> Result<Self, AuthError> {
         tracing::info!("Initializing EmailService with SMTP configuration");
         tracing::info!("SMTP Host: {}", email_config.smtp_host);
         tracing::info!("SMTP Port: {}", email_config.smtp_port);
         tracing::info!("SMTP Username: {}", email_config.smtp_username);
         tracing::info!("From Email: {}", email_config.from_email);
-        tracing::info!("OTP Length: {}", otp_length);
-        tracing::info!("OTP Expiry Minutes: {}", otp_expiry_minutes);
+        tracing::info!("OTP Length: {}", otp_config.otp_length);
+        tracing::info!(
+            "OTP Expiry Minutes: {} (email verification), {} (password reset)",
+            otp_config.email_verification_expiry_minutes,
+            otp_config.password_reset_expiry_minutes
+        );
 
         let creds = Credentials::new(
             email_config.smtp_username.clone(),
@@ -92,8 +96,18 @@ impl EmailService {
             smtp_transport,
             conn,
             from_email: email_config.from_email.clone(),
-            otp_length,
-            otp_expiry_minutes,
+            otp_length: otp_config.otp_length,
+            otp_expiry_minutes: otp_config.email_verification_expiry_minutes,
+            password_reset_expiry_minutes: otp_config.password_reset_expiry_minutes,
+        })
+    }
+
+    /// A code's Redis TTL: its lifetime setting in seconds. lib-config rejects a lifetime that has
+    /// none at load, so this fails only for a service built from a configuration it did not load.
+    fn expiry_seconds(minutes: i64) -> Result<u64, AuthError> {
+        code_expiry_seconds(minutes).ok_or_else(|| {
+            tracing::error!("Invalid OTP expiry minutes: {}", minutes);
+            AuthError::Validation("OTP expiry minutes must be positive".to_string())
         })
     }
 
@@ -114,32 +128,19 @@ impl EmailService {
     async fn store_otp(&self, email: &str, otp: &str) -> Result<(), AuthError> {
         tracing::debug!("Storing OTP in Redis for email: {}", email);
 
-        // Validate otp_expiry_minutes is positive
-        if self.otp_expiry_minutes <= 0 {
-            tracing::error!("Invalid OTP expiry minutes: {}", self.otp_expiry_minutes);
-            return Err(AuthError::Validation(
-                "OTP expiry minutes must be positive".to_string(),
-            ));
-        }
+        let expiry_seconds_u64 = Self::expiry_seconds(self.otp_expiry_minutes)?;
 
         tracing::debug!("Getting Redis connection from pool");
         let mut conn = self.conn.clone();
 
         let key = format!("{}{}", OTP_KEY_PREFIX, email);
-        let expiry_seconds = self.otp_expiry_minutes * 60;
 
         tracing::debug!("Redis key: {}", key);
         tracing::debug!(
             "OTP expiry: {} minutes ({} seconds)",
             self.otp_expiry_minutes,
-            expiry_seconds
+            expiry_seconds_u64
         );
-
-        // Convert to u64 using fallible conversion to handle overflow
-        let expiry_seconds_u64 = expiry_seconds.try_into().map_err(|_| {
-            tracing::error!("OTP expiry time is too large: {} seconds", expiry_seconds);
-            AuthError::Validation("OTP expiry time is too large".to_string())
-        })?;
 
         tracing::debug!(
             "Storing OTP in Redis with key: {} and expiry: {} seconds",
@@ -771,14 +772,10 @@ The Team"#,
 
     /// Store password reset OTP in Redis
     async fn store_password_reset_otp(&self, email: &str, otp: &str) -> Result<(), AuthError> {
+        let expiry_seconds_u64 = Self::expiry_seconds(self.password_reset_expiry_minutes)?;
         let mut conn = self.conn.clone();
 
         let key = format!("{}{}", PASSWORD_RESET_OTP_PREFIX, email);
-        // Password reset OTP expires in 15 min
-        let expiry_seconds = 15 * 60; // 15 minutes
-        let expiry_seconds_u64 = expiry_seconds
-            .try_into()
-            .map_err(|_| AuthError::Validation("OTP expiry time is too large".to_string()))?;
 
         let _: () = conn
             .set_ex(&key, otp, expiry_seconds_u64)
@@ -810,13 +807,13 @@ You requested to reset your password. Your verification code is:
 
 {}
 
-This code will expire in 15 minutes.
+This code will expire in {} minutes.
 
 If you didn't request this, please ignore this email.
 
 Best regards,
 The Team"#,
-            recipient_name, otp
+            recipient_name, otp, self.password_reset_expiry_minutes
         );
 
         let html_content = format!(
@@ -844,7 +841,7 @@ The Team"#,
             <p>Hello {},</p>
             <p>You requested to reset your password. Please use the verification code below:</p>
             <div class="otp">{}</div>
-            <p>This code will expire in <strong>15 minutes</strong>.</p>
+            <p>This code will expire in <strong>{} minutes</strong>.</p>
             <p>If you didn't request this, please ignore this email.</p>
         </div>
         <div class="footer">
@@ -853,7 +850,7 @@ The Team"#,
     </div>
 </body>
 </html>"#,
-            recipient_name, otp
+            recipient_name, otp, self.password_reset_expiry_minutes
         );
 
         let result = self
@@ -997,9 +994,13 @@ mod tests {
     use crate::config::EmailConfig;
     use secrecy::SecretString;
 
-    async fn email_service() -> EmailService {
-        let client = redis::Client::open("redis://127.0.0.1:6379/").unwrap();
-        let conn = ConnectionManager::new(client).await.unwrap();
+    /// A service on the test Redis (`REDIS_URL`, default local 6379) with these code settings.
+    async fn email_service_with(otp_config: &OtpConfig) -> EmailService {
+        let url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
+        let conn = ConnectionManager::new(redis::Client::open(url).unwrap())
+            .await
+            .unwrap();
         let config = EmailConfig {
             smtp_host: "127.0.0.1".to_string(),
             smtp_port: 2525,
@@ -1008,7 +1009,44 @@ mod tests {
             from_email: "test@example.com".to_string(),
         };
 
-        EmailService::new(&config, conn, 6, 15).unwrap()
+        EmailService::new(&config, conn, otp_config).unwrap()
+    }
+
+    async fn email_service() -> EmailService {
+        email_service_with(&OtpConfig {
+            otp_length: 6,
+            email_verification_expiry_minutes: 15,
+            password_reset_expiry_minutes: 15,
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn each_code_expires_after_its_own_lifetime_setting() {
+        let service = email_service_with(&OtpConfig {
+            otp_length: 6,
+            email_verification_expiry_minutes: 20,
+            password_reset_expiry_minutes: 7,
+        })
+        .await;
+        let email = format!("{}@example.com", Uuid::new_v4());
+        service.store_otp(&email, "123456").await.unwrap();
+        service
+            .store_password_reset_otp(&email, "654321")
+            .await
+            .unwrap();
+
+        let mut conn = service.conn.clone();
+        let verification_ttl: i64 = conn.ttl(format!("{OTP_KEY_PREFIX}{email}")).await.unwrap();
+        let reset_ttl: i64 = conn
+            .ttl(format!("{PASSWORD_RESET_OTP_PREFIX}{email}"))
+            .await
+            .unwrap();
+        assert!(
+            (20 * 60 - 5..=20 * 60).contains(&verification_ttl),
+            "{verification_ttl}"
+        );
+        assert!((7 * 60 - 5..=7 * 60).contains(&reset_ttl), "{reset_ttl}");
     }
 
     #[tokio::test]

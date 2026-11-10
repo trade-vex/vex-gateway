@@ -133,5 +133,19 @@ pub struct EmailConfig {
 #[derive(Deserialize, Debug, Clone)]
 pub struct OtpConfig {
     pub otp_length: usize,
+    /// How long an email-verification code is valid, in minutes.
     pub email_verification_expiry_minutes: i64,
+    /// How long a password-reset code is valid, in minutes. A setting of its own: a reset code
+    /// takes over the account, and its lifetime bounds how many guesses the fixed reset-code rate
+    /// limit allows per code, so tuning email verification must not lengthen it.
+    pub password_reset_expiry_minutes: i64,
+}
+
+/// A code lifetime setting in seconds, the TTL of the code in Redis: `None` unless the setting is
+/// a positive number of minutes whose seconds fit (lib-config validation).
+pub fn code_expiry_seconds(minutes: i64) -> Option<u64> {
+    minutes
+        .checked_mul(60)
+        .and_then(|seconds| u64::try_from(seconds).ok())
+        .filter(|&seconds| seconds > 0)
 }

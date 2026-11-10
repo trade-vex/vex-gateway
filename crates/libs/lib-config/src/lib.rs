@@ -47,6 +47,7 @@
 //! export APP__LOGGING__LEVEL=info                        # logging.level
 //! export APP__AUTH__SERVER__TRUSTED_PROXIES=10.0.1.0/24  # auth.server.trusted_proxies
 //! export APP__CORE__AUTH_KEY=123456                      # core.auth_key
+//! export APP__CLICKHOUSE__PASSWORD=<password>            # clickhouse.password
 //! ```
 //!
 //! # Configuration Discovery
@@ -73,7 +74,9 @@ pub use logging::LoggingConfig;
 pub use server::ServerConfig;
 
 use config::Source;
+use secrecy::ExposeSecret;
 use serde::Deserialize;
+use std::env::VarError;
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -84,7 +87,7 @@ use crate::util::find_config_dir;
 
 /// Re-export AuthConfig from lib-auth for convenience
 pub use lib_auth::config::AuthConfig;
-use lib_auth::config::OAUTH_PROVIDERS;
+use lib_auth::config::{code_expiry_seconds, OAUTH_PROVIDERS};
 
 /// Main configuration structure for the VEX Gateway Service.
 ///
@@ -180,10 +183,7 @@ impl Config {
                 continue;
             }
             let (Some(name), Ok(value)) = (name.to_str(), value.into_string()) else {
-                return Err(ConfigError::LoadError(format!(
-                    "{} is not valid UTF-8",
-                    name.to_string_lossy()
-                )));
+                return Err(not_utf8(&name.to_string_lossy()));
             };
             overrides.insert(name.to_string(), value);
         }
@@ -272,7 +272,8 @@ impl Config {
     ///
     /// Loads the environment selected by the `APP_ENV` environment variable.
     /// `APP_ENV` must be set explicitly, and a configuration that cannot be loaded or
-    /// validated is an error in every environment.
+    /// validated is an error in every environment. An `APP_ENV` that is not UTF-8 is an error
+    /// that says so and never shows the value.
     ///
     /// # Returns
     ///
@@ -291,7 +292,11 @@ impl Config {
     /// }
     /// ```
     pub fn load_auto() -> Result<Self, ConfigError> {
-        let app_env = std::env::var("APP_ENV").ok();
+        let app_env = match std::env::var("APP_ENV") {
+            Ok(app_env) => Some(app_env),
+            Err(VarError::NotPresent) => None,
+            Err(VarError::NotUnicode(_)) => return Err(not_utf8("APP_ENV")),
+        };
         Self::load_selected(app_env.as_deref(), None)
     }
 
@@ -331,6 +336,10 @@ impl Config {
     /// - `auth.oauth.providers` may list only `google`, `github` and `twitter`
     /// - With an OAuth provider configured, `auth.oauth.frontend_url_web` and `frontend_url_app`
     ///   must be set
+    /// - `auth.otp.email_verification_expiry_minutes` and `password_reset_expiry_minutes` must be
+    ///   positive
+    /// - `auth.otp.otp_length` must be 6 to 10 digits
+    /// - `clickhouse.user` cannot be empty, and `clickhouse.database` must be a plain identifier
     ///
     /// ## Production Environment
     /// - Server port cannot be 0 (must be explicitly configured)
@@ -338,6 +347,7 @@ impl Config {
     /// - Cannot use trace or debug logging levels
     /// - `auth.server.trusted_proxies` cannot be empty: production runs behind a load balancer
     /// - `core.auth_key` cannot be empty, as vex-core requires
+    /// - `clickhouse.password` cannot be empty
     ///
     /// ## Testing Environment
     /// - Port 0 is allowed for ephemeral port usage
@@ -412,6 +422,36 @@ impl Config {
             }
         }
 
+        // A code's lifetime is the TTL of its Redis key: without a positive one, every signup or
+        // password reset would fail when it stores its code.
+        let otp = &self.auth.otp;
+        for (key, minutes) in [
+            (
+                "email_verification_expiry_minutes",
+                otp.email_verification_expiry_minutes,
+            ),
+            (
+                "password_reset_expiry_minutes",
+                otp.password_reset_expiry_minutes,
+            ),
+        ] {
+            if code_expiry_seconds(minutes).is_none() {
+                return Err(ConfigError::ValidationError(format!(
+                    "auth.otp.{key} must be a positive number of minutes"
+                )));
+            }
+        }
+
+        // A length of 0 makes every code empty, which an empty submission would match; fewer than
+        // 6 digits is too easy to guess.
+        if !(6..=10).contains(&otp.otp_length) {
+            return Err(ConfigError::ValidationError(
+                "auth.otp.otp_length must be between 6 and 10 digits".to_string(),
+            ));
+        }
+
+        self.clickhouse.validate()?;
+
         // Environment-specific validations
         match self.environment {
             Environment::Production => {
@@ -455,6 +495,14 @@ impl Config {
                         "Production environment requires core.auth_key (vex-core's gateway \
                          authentication key)"
                             .to_string(),
+                    ));
+                }
+
+                // A production ClickHouse authenticates its users. Without a password the
+                // portfolio and balance-chart endpoints would fail at their first request.
+                if self.clickhouse.password.expose_secret().is_empty() {
+                    return Err(ConfigError::ValidationError(
+                        "Production environment requires clickhouse.password".to_string(),
                     ));
                 }
             }
@@ -529,6 +577,12 @@ fn unknown_settings(
     settings
 }
 
+/// The error for a variable whose name or value is not UTF-8. It names the variable and never shows
+/// the value.
+fn not_utf8(variable: &str) -> ConfigError {
+    ConfigError::LoadError(format!("{variable} is not valid UTF-8"))
+}
+
 /// The `APP__` variable that sets a key path.
 fn variable(key: &str) -> String {
     format!("APP__{}", key.to_uppercase().replace('.', "__"))
@@ -601,6 +655,7 @@ fn load_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use secrecy::SecretString;
     use std::fs;
 
     /// The committed development example (config/development.toml.example), loaded as a
@@ -702,12 +757,8 @@ mod tests {
         assert!(matches!(load(), Err(ConfigError::LoadError(_))));
     }
 
-    #[test]
-    fn test_explicit_production_loads_complete_configuration() {
-        let config_dir = tempfile::tempdir().unwrap();
-        fs::write(
-            config_dir.path().join("production.toml"),
-            r#"
+    /// A complete production configuration.
+    const PRODUCTION_TOML: &str = r#"
 environment = "production"
 
 [server]
@@ -748,6 +799,7 @@ from_email = "gateway@example.com"
 [auth.otp]
 otp_length = 6
 email_verification_expiry_minutes = 15
+password_reset_expiry_minutes = 10
 
 [core]
 gateway_id = 3
@@ -759,9 +811,32 @@ context_dir = "/var/lib/vex/aeron-gateway"
 
 [clickhouse]
 url = "http://clickhouse.internal:8123"
-"#,
+user = "gateway_reader"
+password = "configured-clickhouse-password"
+database = "vex_analytics"
+"#;
+
+    /// The production configuration with `line` replaced, loaded as `APP_ENV=production` selects
+    /// it, without `APP__` variables.
+    fn load_edited_production(line: &str, replacement: &str) -> Result<Config, ConfigError> {
+        let config_dir = tempfile::tempdir().unwrap();
+        assert_eq!(PRODUCTION_TOML.matches(line).count(), 1);
+        fs::write(
+            config_dir.path().join("production.toml"),
+            PRODUCTION_TOML.replace(line, replacement),
         )
         .unwrap();
+        Config::load_with(
+            Environment::Production,
+            Some(config_dir.path().to_path_buf()),
+            Config::app_overrides([]).unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_explicit_production_loads_complete_configuration() {
+        let config_dir = tempfile::tempdir().unwrap();
+        fs::write(config_dir.path().join("production.toml"), PRODUCTION_TOML).unwrap();
 
         let config =
             Config::load_selected(Some("production"), Some(config_dir.path().to_path_buf()))
@@ -784,7 +859,29 @@ url = "http://clickhouse.internal:8123"
         assert_eq!(link.core_address, "core.internal");
         assert_eq!((link.core_port, link.core_control_port), (3521, 3522));
         assert_eq!(link.context_dir, "/var/lib/vex/aeron-gateway");
+        assert_eq!(config.auth.otp.password_reset_expiry_minutes, 10);
         assert_eq!(config.clickhouse.url, "http://clickhouse.internal:8123");
+        assert_eq!(config.clickhouse.user, "gateway_reader");
+        assert_eq!(
+            config.clickhouse.password.expose_secret(),
+            "configured-clickhouse-password"
+        );
+        assert_eq!(config.clickhouse.database, "vex_analytics");
+    }
+
+    #[test]
+    fn test_production_requires_clickhouse_password() {
+        let error = load_edited_production(
+            r#"password = "configured-clickhouse-password""#,
+            r#"password = """#,
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, ConfigError::ValidationError(_))
+                && error.to_string().contains("clickhouse.password"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -835,6 +932,7 @@ url = "http://clickhouse.internal:8123"
         );
 
         config.auth.server.trusted_proxies = vec!["10.0.0.0/16".to_string()];
+        config.clickhouse.password = SecretString::new("configured".to_string());
         assert!(config.validate().is_ok());
     }
 
@@ -966,16 +1064,28 @@ url = "http://clickhouse.internal:8123"
         );
         assert_eq!(link.context_dir, "/dev/shm/aeron");
         assert_eq!(config.clickhouse.url, "http://localhost:8123");
+        assert_eq!(config.clickhouse.user, "default");
+        assert!(config.clickhouse.password.expose_secret().is_empty());
+        assert_eq!(config.clickhouse.database, "trading");
+        assert_eq!(config.auth.otp.password_reset_expiry_minutes, 15);
     }
 
     #[test]
-    fn test_clickhouse_url_is_required_and_overridable() {
-        let config = load_development_example(&[(
-            "APP__CLICKHOUSE__URL",
-            "http://clickhouse.internal:8123",
-        )])
+    fn test_clickhouse_settings_are_required_and_overridable() {
+        let secret = "0123-Sup3r-S3cret";
+        let config = load_development_example(&[
+            ("APP__CLICKHOUSE__URL", "http://clickhouse.internal:8123"),
+            ("APP__CLICKHOUSE__USER", "gateway_reader"),
+            ("APP__CLICKHOUSE__PASSWORD", secret),
+            ("APP__CLICKHOUSE__DATABASE", "vex_analytics"),
+        ])
         .unwrap();
         assert_eq!(config.clickhouse.url, "http://clickhouse.internal:8123");
+        assert_eq!(config.clickhouse.user, "gateway_reader");
+        // Verbatim, and never in the debug output of the configuration.
+        assert_eq!(config.clickhouse.password.expose_secret(), secret);
+        assert_eq!(config.clickhouse.database, "vex_analytics");
+        assert!(!format!("{config:?}").contains(secret));
 
         // A misspelt name is an error that names it, not ignored.
         let error = load_development_example(&[("APP__CLICKHOUSE__HTTP_URL", "http://other:8123")])
@@ -985,26 +1095,110 @@ url = "http://clickhouse.internal:8123"
             "Unknown configuration settings: APP__CLICKHOUSE__HTTP_URL"
         );
 
-        // No built-in default: without the section the configuration does not load.
-        let config_dir = tempfile::tempdir().unwrap();
-        let example = include_str!("../../../../config/development.toml.example");
-        let section = "[clickhouse]\nurl = \"http://localhost:8123\"\n";
-        assert_eq!(example.matches(section).count(), 1);
-        fs::write(
-            config_dir.path().join("development.toml"),
-            example.replace(section, ""),
-        )
+        // No built-in default: without any one of them the configuration does not load.
+        for (key, line) in [
+            ("url", "url = \"http://localhost:8123\"\n"),
+            ("user", "user = \"default\"\n"),
+            ("password", "password = \"\"\n"),
+            ("database", "database = \"trading\"\n"),
+        ] {
+            let (result, _) = load_edited_example(line, "");
+            let error = result.unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("Failed to load configuration: missing field `{key}`")
+            );
+        }
+    }
+
+    #[test]
+    fn test_clickhouse_user_and_database_are_validated() {
+        assert!(load_development_example(&[("APP__CLICKHOUSE__DATABASE", "_vex_2")]).is_ok());
+
+        for (name, value, key) in [
+            ("APP__CLICKHOUSE__USER", "", "clickhouse.user"),
+            ("APP__CLICKHOUSE__USER", " ", "clickhouse.user"),
+            ("APP__CLICKHOUSE__DATABASE", "", "clickhouse.database"),
+            (
+                "APP__CLICKHOUSE__DATABASE",
+                "vex-analytics",
+                "clickhouse.database",
+            ),
+            (
+                "APP__CLICKHOUSE__DATABASE",
+                "2026_trading",
+                "clickhouse.database",
+            ),
+            (
+                "APP__CLICKHOUSE__DATABASE",
+                "trading.x",
+                "clickhouse.database",
+            ),
+            (
+                "APP__CLICKHOUSE__DATABASE",
+                "trading; DROP",
+                "clickhouse.database",
+            ),
+        ] {
+            let error = load_development_example(&[(name, value)]).unwrap_err();
+            assert!(
+                matches!(error, ConfigError::ValidationError(_)) && error.to_string().contains(key),
+                "{name}={value:?}: unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_code_lifetimes_are_required_positive_and_overridable() {
+        let config = load_development_example(&[
+            ("APP__AUTH__OTP__EMAIL_VERIFICATION_EXPIRY_MINUTES", "30"),
+            ("APP__AUTH__OTP__PASSWORD_RESET_EXPIRY_MINUTES", "5"),
+        ])
         .unwrap();
-        let error = Config::load_with(
-            Environment::Development,
-            Some(config_dir.path().to_path_buf()),
-            Config::app_overrides([]).unwrap(),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(error, ConfigError::LoadError(_)) && error.to_string().contains("clickhouse"),
-            "unexpected error: {error}"
+        assert_eq!(config.auth.otp.email_verification_expiry_minutes, 30);
+        assert_eq!(config.auth.otp.password_reset_expiry_minutes, 5);
+
+        let (result, _) = load_edited_example("password_reset_expiry_minutes = 15\n", "");
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Failed to load configuration: missing field `password_reset_expiry_minutes`"
         );
+
+        // Not a positive number of minutes, or one whose seconds overflow.
+        for key in [
+            "email_verification_expiry_minutes",
+            "password_reset_expiry_minutes",
+        ] {
+            let name = variable(&format!("auth.otp.{key}"));
+            for minutes in ["0", "-15", &i64::MAX.to_string()] {
+                let error = load_development_example(&[(&name, minutes)]).unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "Configuration validation failed: auth.otp.{key} must be a positive \
+                         number of minutes"
+                    ),
+                    "{name}={minutes}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_code_length_is_bounded() {
+        let config = load_development_example(&[("APP__AUTH__OTP__OTP_LENGTH", "8")]).unwrap();
+        assert_eq!(config.auth.otp.otp_length, 8);
+
+        for length in ["0", "5", "11"] {
+            let error =
+                load_development_example(&[("APP__AUTH__OTP__OTP_LENGTH", length)]).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "Configuration validation failed: auth.otp.otp_length must be between 6 and 10 \
+                 digits",
+                "otp_length={length}"
+            );
+        }
     }
 
     #[test]
@@ -1094,6 +1288,7 @@ url = "http://clickhouse.internal:8123"
         );
 
         config.core.auth_key = "-123456789".into();
+        config.clickhouse.password = SecretString::new("configured".to_string());
         assert!(config.validate().is_ok());
     }
 

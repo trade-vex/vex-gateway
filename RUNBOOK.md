@@ -64,6 +64,7 @@ APP_ENV=production
 APP__SERVER__HOST=0.0.0.0                                  # server.host
 APP__AUTH__SERVER__TRUSTED_PROXIES=10.0.1.0/24,10.0.2.0/24 # auth.server.trusted_proxies
 APP__CORE__AUTH_KEY=<signed 32-bit integer>                # core.auth_key, kept out of the file
+APP__CLICKHOUSE__PASSWORD=<password>                       # clickhouse.password, kept out of the file
 ```
 
 ---
@@ -99,7 +100,8 @@ defaults. The error never shows a value, so a secret set in the wrong place stay
 It names the setting (its variable, or its key and the file) and what the setting expects; for a
 section or list given a single value (`APP__AUTH__DATABASE=…` instead of
 `APP__AUTH__DATABASE__URL=…`) it names only what was expected. An `APP__` variable whose name
-or value is not UTF-8 also stops the gateway, and the error names it. Apart from `APP_ENV` and
+or value is not UTF-8 also stops the gateway, and the error names it; so does an `APP_ENV` whose
+value is not UTF-8 (`APP_ENV is not valid UTF-8`). Apart from `APP_ENV` and
 `APP_CONFIG_DIR`, the configuration reads no other variable, so another program's variable,
 whatever it holds, cannot stop the gateway.
 
@@ -114,11 +116,13 @@ optional setting.
 
 The service validates configuration on startup:
 - **Production**: Cannot bind to localhost, cannot use debug logging, port must be > 0,
-  `auth.server.trusted_proxies` and `core.auth_key` must not be empty
+  `auth.server.trusted_proxies`, `core.auth_key` and `clickhouse.password` must not be empty
 - **Development**: More lenient validation
 - **Testing**: Allows ephemeral ports (port 0)
 - **Every environment**: `auth.oauth.providers` may list only `google`, `github` and `twitter`;
-  another provider stops the gateway at startup, and the error names it
+  another provider stops the gateway at startup, and the error names it. The code lifetimes in
+  `[auth.otp]` must be positive, `clickhouse.user` must not be empty, and `clickhouse.database`
+  must be a plain identifier
 
 ### OAuth Redirects
 
@@ -130,11 +134,31 @@ login is redirected to, and refuses to start without them:
 - `auth.oauth.frontend_url_app`: the mobile app's landing URL, usually a custom-scheme deep link
   such as `vex://oauth`. It receives only a one-time `login_code`.
 
+### Email Codes
+
+`[auth.otp]` sets the codes the gateway emails: `otp_length` digits (6 to 10, checked at load), valid for
+`email_verification_expiry_minutes` (signup email verification) or `password_reset_expiry_minutes`
+(password reset). Every key is required, and a lifetime that is not a positive number of minutes
+stops the gateway at startup. Keep the password-reset lifetime short: a reset code takes over the
+account, and its check allows 5 attempts per email per 15 minutes, so a longer-lived code can be
+guessed more often.
+
 ### ClickHouse
 
-`clickhouse.url` (required, no default) is the ClickHouse HTTP endpoint the portfolio and
-balance-chart endpoints read from, such as `http://clickhouse.internal:8123`. Override it with
-`APP__CLICKHOUSE__URL`.
+The `[clickhouse]` section holds the connection to the ClickHouse the portfolio and balance-chart
+endpoints read from. Every key is required, with no default, and `APP__CLICKHOUSE__<KEY>`
+overrides one:
+
+- `url` (`APP__CLICKHOUSE__URL`): the HTTP endpoint, such as `http://clickhouse.internal:8123`.
+- `user` (`APP__CLICKHOUSE__USER`): the user the gateway reads as. It must not be empty.
+- `password` (`APP__CLICKHOUSE__PASSWORD`): that user's password, never logged. Empty only for a
+  user without one, such as a local server's `default`: with `APP_ENV=production` the gateway
+  refuses to start when it is empty. To keep it out of the file, set `APP__CLICKHOUSE__PASSWORD`.
+- `database` (`APP__CLICKHOUSE__DATABASE`): the database holding the portfolio tables (`trading` in
+  the development example). Every query names it before the table, so it must be a plain
+  identifier: ASCII letters, digits and underscores, not starting with a digit.
+
+The gateway only reads from ClickHouse, so the user needs no more than `SELECT` on that database.
 
 ### VEX Core Connection
 
