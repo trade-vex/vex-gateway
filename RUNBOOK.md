@@ -527,12 +527,20 @@ grep -i "memory\|oom" logs/app.log
 
 2. **API Key with HMAC Signature**
    ```bash
-   # See API key middleware documentation for signature generation
-   curl -H "X-API-Key: <key_id>" \
-        -H "X-Signature: <hmac_signature>" \
-        -H "X-Timestamp: <unix_timestamp>" \
-        http://localhost:8081/api/balances
+   curl -H "X-MBX-APIKEY: <key_id>" \
+        'http://localhost:8081/api/balances?timestamp=<unix_time_ms>&signature=<signature>'
    ```
+
+   Every request uses exactly one construction: sign the UTF-8 bytes of
+   `ENC(method) LF ENC(path) LF SORTED_QUERY LF HEX(body)`. `ENC` is URL form
+   percent-encoding, `SORTED_QUERY` is the parsed query sorted by key and value and
+   form-encoded after removing only parameters whose decoded key is exactly `signature`, and
+   `HEX(body)` is lowercase hex of the raw body (with an exact `signature` form field removed
+   for form bodies). An empty query contributes an empty query component, and an empty body
+   contributes an empty body component; the construction does not branch on emptiness. Signed
+   requests with a duplicate decoded parameter name in the query or form body are rejected.
+   This scheme deliberately binds method and path and is therefore not Binance
+   signature-compatible.
 
 ### Order Request Format
 

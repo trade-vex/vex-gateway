@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use std::hash::{BuildHasher, RandomState};
 use std::sync::{RwLock, RwLockWriteGuard};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     pin::Pin,
     rc::Rc,
     sync::Arc,
@@ -670,31 +670,24 @@ impl ApiKeyMiddleware {
     /// Validate signature based on the API key's algorithm
     fn validate_signature(
         api_config: &ApiKeyConfig,
-        query_params: &HashMap<String, String>,
-        body_params: &HashMap<String, String>,
+        method: &str,
+        path: &str,
+        signature: &str,
         raw_query: &str,
         raw_body: &str,
+        body_is_form: bool,
     ) -> Result<(), ApiKeyError> {
-        let signature = query_params
-            .get("signature")
-            .or_else(|| body_params.get("signature"))
-            .ok_or(ApiKeyError::MissingSignature)?;
-
         let key_material = api_config.get_key_material().ok_or_else(|| {
             ApiKeyError::InvalidApiKey("No key material configured for signed endpoint".to_string())
         })?;
 
-        // Build payload based on whether we have mixed query/body or separate parameters
-        let payload = if !raw_query.is_empty() && !raw_body.is_empty() {
-            // Mixed case as per Binance example 3
-            SignatureVerifier::build_mixed_payload(raw_query, raw_body)
-        } else if !raw_body.is_empty() {
-            // JSON-only signed requests - use raw body as payload
-            SignatureVerifier::build_mixed_payload("", raw_body)
-        } else {
-            // Standard case - fall back to parsed parameters
-            SignatureVerifier::build_payload(query_params, body_params)
-        };
+        let payload = SignatureVerifier::build_request_payload(
+            method,
+            path,
+            raw_query,
+            raw_body,
+            body_is_form,
+        );
 
         // Verify signature based on algorithm
         let is_valid = match key_material {
@@ -731,15 +724,27 @@ impl ApiKeyMiddleware {
     }
 
     /// Parse query parameters from URL
-    fn parse_query_params(req: &HttpRequest) -> HashMap<String, String> {
-        req.uri()
-            .query()
-            .map(|q| {
-                url::form_urlencoded::parse(q.as_bytes())
-                    .into_owned()
-                    .collect()
-            })
-            .unwrap_or_default()
+    fn parse_query_params(req: &HttpRequest) -> Result<HashMap<String, String>, ApiKeyError> {
+        Self::parse_unique_form_params(req.uri().query().unwrap_or(""), "query")
+    }
+
+    fn parse_unique_form_params(
+        input: &str,
+        location: &str,
+    ) -> Result<HashMap<String, String>, ApiKeyError> {
+        let mut names = HashSet::new();
+        let mut params = HashMap::new();
+
+        for (key, value) in url::form_urlencoded::parse(input.as_bytes()) {
+            if !names.insert(key.clone().into_owned()) {
+                return Err(ApiKeyError::InvalidSignature(format!(
+                    "duplicate {location} parameter name: {key}"
+                )));
+            }
+            params.insert(key.into_owned(), value.into_owned());
+        }
+
+        Ok(params)
     }
 
     /// Get raw query string
@@ -765,7 +770,7 @@ impl ApiKeyMiddleware {
     /// Parse body parameters from different content types
     async fn parse_body_params(
         req: &mut ServiceRequest,
-    ) -> Result<(HashMap<String, String>, String), ApiKeyError> {
+    ) -> Result<(HashMap<String, String>, String, bool), ApiKeyError> {
         let content_type = req
             .headers()
             .get("content-type")
@@ -798,10 +803,9 @@ impl ApiKeyMiddleware {
         };
         req.set_payload(new_payload);
 
-        let body_params = if content_type.starts_with("application/x-www-form-urlencoded") {
-            url::form_urlencoded::parse(body_string.as_bytes())
-                .into_owned()
-                .collect()
+        let body_is_form = content_type.starts_with("application/x-www-form-urlencoded");
+        let body_params = if body_is_form {
+            Self::parse_unique_form_params(&body_string, "form body")?
         } else if content_type.starts_with("application/json") {
             // For JSON, we don't parse into form parameters for signature
             // The raw JSON string is used for signature verification
@@ -810,7 +814,7 @@ impl ApiKeyMiddleware {
             HashMap::new()
         };
 
-        Ok((body_params, body_string))
+        Ok((body_params, body_string, body_is_form))
     }
 
     /// Validate timestamp with proper Binance logic
@@ -991,10 +995,19 @@ where
 
             // For signed endpoints, validate signature and timestamp
             if api_config.requires_signature(required_security) {
-                let query_params = ApiKeyMiddleware::parse_query_params(req.request());
+                let query_params = match ApiKeyMiddleware::parse_query_params(req.request()) {
+                    Ok(params) => params,
+                    Err(e) => {
+                        error!("Failed to parse query: {}", e);
+                        return Err(actix_web::error::ErrorBadRequest(format!(
+                            "Failed to parse signed request: {}",
+                            e
+                        )));
+                    }
+                };
                 let raw_query = ApiKeyMiddleware::get_raw_query_string(req.request());
 
-                let (body_params, raw_body) =
+                let (body_params, raw_body, body_is_form) =
                     match ApiKeyMiddleware::parse_body_params(&mut req).await {
                         Ok(result) => result,
                         Err(e) => {
@@ -1025,13 +1038,22 @@ where
                     };
 
                 // Validate signature
-                if let Err(e) = ApiKeyMiddleware::validate_signature(
-                    &api_config,
-                    &query_params,
-                    &body_params,
-                    &raw_query,
-                    &raw_body,
-                ) {
+                let signature_result = query_params
+                    .get("signature")
+                    .or_else(|| body_params.get("signature"))
+                    .ok_or(ApiKeyError::MissingSignature)
+                    .and_then(|signature| {
+                        ApiKeyMiddleware::validate_signature(
+                            &api_config,
+                            req.method().as_str(),
+                            req.path(),
+                            signature,
+                            &raw_query,
+                            &raw_body,
+                            body_is_form,
+                        )
+                    });
+                if let Err(e) = signature_result {
                     error!("Signature validation failed: {}", e);
                     return Err(actix_web::error::ErrorBadRequest(format!(
                         "Signature validation failed: {}",
@@ -1350,7 +1372,15 @@ mod tests {
         .await;
         let timestamp = current_time_ms();
         let nonce = uuid::Uuid::new_v4();
-        let payload = format!("nonce={nonce}&recvWindow=5000&timestamp={timestamp}");
+        // PR #93 binds the signature to the method and path, so the fixture must be built
+        // through the canonical payload builder rather than signing the bare query string.
+        let payload = SignatureVerifier::build_request_payload(
+            "POST",
+            "/orders",
+            &format!("nonce={nonce}&recvWindow=5000&timestamp={timestamp}"),
+            "",
+            false,
+        );
         let lower_signature = SignatureVerifier::generate_hmac(&payload, secret).unwrap();
         let upper_signature = lower_signature.to_uppercase();
         let first_uri = format!(
@@ -1425,7 +1455,14 @@ mod tests {
         )
         .await;
         let timestamp = current_time_ms();
-        let payload = format!("timestamp={timestamp}");
+        // PR #93: signature must cover the method and path.
+        let payload = SignatureVerifier::build_request_payload(
+            "POST",
+            "/orders",
+            &format!("timestamp={timestamp}"),
+            "",
+            false,
+        );
         let signature = SignatureVerifier::generate_hmac(&payload, secret).unwrap();
         let uri = format!("/orders?timestamp={timestamp}&signature={signature}");
         let request = actix_test::TestRequest::post()
@@ -1470,8 +1507,14 @@ mod tests {
         )
         .is_ok());
         let nonce = uuid::Uuid::new_v4();
-        let payload =
-            format!("nonce={nonce}&recvWindow={effective_recv_window}&timestamp={timestamp}");
+        // PR #93: signature must cover the method and path.
+        let payload = SignatureVerifier::build_request_payload(
+            "POST",
+            "/orders",
+            &format!("nonce={nonce}&recvWindow={effective_recv_window}&timestamp={timestamp}"),
+            "",
+            false,
+        );
         let signature = SignatureVerifier::generate_hmac(&payload, secret).unwrap();
         let uri = format!(
             "/orders?timestamp={timestamp}&recvWindow={effective_recv_window}&nonce={nonce}&signature={signature}"
@@ -1541,5 +1584,190 @@ mod tests {
             true,
         )
         .is_err());
+    }
+
+    fn signed_request(method: &str, path: &str) -> (ApiKeyConfig, HashMap<String, String>, String) {
+        let secret = "test-secret";
+        let unsigned_query = "timestamp=1640995200000";
+        let payload =
+            SignatureVerifier::build_request_payload(method, path, unsigned_query, "", true);
+        let signature = SignatureVerifier::generate_hmac(&payload, secret).unwrap();
+        let query = format!("{unsigned_query}&signature={signature}");
+        let query_params = url::form_urlencoded::parse(query.as_bytes())
+            .into_owned()
+            .collect();
+        let config = ApiKeyConfig::new("test-key".to_string()).with_hmac_secret(secret.to_string());
+
+        (config, query_params, query)
+    }
+
+    fn signed_test_middleware() -> ApiKeyMiddleware {
+        let config = ApiKeyConfig::new("test-key".to_string())
+            .with_hmac_secret("test-secret".to_string())
+            .with_permissions(vec![SecurityType::Trade]);
+
+        ApiKeyMiddleware::new()
+            .with_api_key(config)
+            .with_default_security(SecurityType::Trade)
+    }
+
+    #[test]
+    fn signature_replay_on_different_path_is_rejected() {
+        let (config, query_params, raw_query) = signed_request("POST", "/api/order");
+
+        assert!(ApiKeyMiddleware::validate_signature(
+            &config,
+            "POST",
+            "/api/order",
+            query_params.get("signature").unwrap(),
+            &raw_query,
+            "",
+            true,
+        )
+        .is_ok());
+
+        let result = ApiKeyMiddleware::validate_signature(
+            &config,
+            "POST",
+            "/api/cancel",
+            query_params.get("signature").unwrap(),
+            &raw_query,
+            "",
+            true,
+        );
+
+        assert!(matches!(result, Err(ApiKeyError::InvalidSignature(_))));
+    }
+
+    #[test]
+    fn signature_replay_with_different_method_is_rejected() {
+        let (config, query_params, raw_query) = signed_request("POST", "/api/order");
+
+        assert!(ApiKeyMiddleware::validate_signature(
+            &config,
+            "POST",
+            "/api/order",
+            query_params.get("signature").unwrap(),
+            &raw_query,
+            "",
+            true,
+        )
+        .is_ok());
+
+        let result = ApiKeyMiddleware::validate_signature(
+            &config,
+            "DELETE",
+            "/api/order",
+            query_params.get("signature").unwrap(),
+            &raw_query,
+            "",
+            true,
+        );
+
+        assert!(matches!(result, Err(ApiKeyError::InvalidSignature(_))));
+    }
+
+    #[test]
+    fn query_only_get_and_body_only_post_verify_with_single_formula() {
+        let secret = "test-secret";
+        let config = ApiKeyConfig::new("test-key".to_string()).with_hmac_secret(secret.to_string());
+
+        let unsigned_query = "timestamp=1640995200000&symbol=BTCUSDT";
+        let get_payload = SignatureVerifier::build_request_payload(
+            "GET",
+            "/api/orders",
+            unsigned_query,
+            "",
+            false,
+        );
+        let get_signature = SignatureVerifier::generate_hmac(&get_payload, secret).unwrap();
+        let signed_query = format!("{unsigned_query}&signature={get_signature}");
+
+        assert!(ApiKeyMiddleware::validate_signature(
+            &config,
+            "GET",
+            "/api/orders",
+            &get_signature,
+            &signed_query,
+            "",
+            false,
+        )
+        .is_ok());
+
+        let unsigned_body = "timestamp=1640995200000&symbol=BTCUSDT";
+        let post_payload = SignatureVerifier::build_request_payload(
+            "POST",
+            "/api/orders",
+            "",
+            unsigned_body,
+            true,
+        );
+        let post_signature = SignatureVerifier::generate_hmac(&post_payload, secret).unwrap();
+        let signed_body = format!("{unsigned_body}&signature={post_signature}");
+
+        assert!(ApiKeyMiddleware::validate_signature(
+            &config,
+            "POST",
+            "/api/orders",
+            &post_signature,
+            "",
+            &signed_body,
+            true,
+        )
+        .is_ok());
+    }
+
+    #[actix_web::test]
+    async fn signed_request_with_duplicate_query_parameter_is_rejected() {
+        let app = actix_test::init_service(
+            App::new()
+                .wrap(signed_test_middleware())
+                .default_service(web::to(HttpResponse::Ok)),
+        )
+        .await;
+        let request = actix_test::TestRequest::get()
+            .uri("/api/orders?timestamp=1&symbol=BTCUSDT&symbol=ETHUSDT&signature=invalid")
+            .insert_header(("X-MBX-APIKEY", "test-key"))
+            .to_request();
+
+        let error = actix_test::try_call_service(&app, request)
+            .await
+            .err()
+            .unwrap();
+
+        assert_eq!(
+            error.as_response_error().status_code(),
+            actix_web::http::StatusCode::BAD_REQUEST
+        );
+        assert!(error.to_string().contains("duplicate query parameter name"));
+    }
+
+    #[actix_web::test]
+    async fn signed_request_with_duplicate_form_body_parameter_is_rejected() {
+        let app = actix_test::init_service(
+            App::new()
+                .wrap(signed_test_middleware())
+                .default_service(web::to(HttpResponse::Ok)),
+        )
+        .await;
+        let request = actix_test::TestRequest::post()
+            .uri("/api/orders?timestamp=1&signature=invalid")
+            .insert_header(("X-MBX-APIKEY", "test-key"))
+            .insert_header(("content-type", "application/x-www-form-urlencoded"))
+            .set_payload("symbol=BTCUSDT&symbol=ETHUSDT")
+            .to_request();
+
+        let error = actix_test::try_call_service(&app, request)
+            .await
+            .err()
+            .unwrap();
+
+        assert_eq!(
+            error.as_response_error().status_code(),
+            actix_web::http::StatusCode::BAD_REQUEST
+        );
+        assert!(error
+            .to_string()
+            .contains("duplicate form body parameter name"));
     }
 }

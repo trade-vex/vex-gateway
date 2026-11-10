@@ -5,7 +5,6 @@ use hmac::{Hmac, Mac};
 use pkcs8::DecodePublicKey;
 use rsa::{pkcs8::DecodePublicKey as _, Pkcs1v15Sign, PublicKey as RsaPublicKey};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 
 /// Supported signature algorithms
 #[derive(Debug, Clone, PartialEq)]
@@ -104,51 +103,28 @@ impl SignatureVerifier {
         Ok(hex::encode(mac.finalize().into_bytes()))
     }
 
-    /// Build signature payload from query parameters and body
-    /// Following the exact Binance specification for payload construction
-    pub fn build_payload(
-        query_params: &HashMap<String, String>,
-        body_params: &HashMap<String, String>,
+    /// Build the canonical signature payload for every request.
+    pub fn build_request_payload(
+        method: &str,
+        path: &str,
+        query_string: &str,
+        request_body: &str,
+        body_is_form: bool,
     ) -> String {
-        let mut all_params = HashMap::new();
-
-        // Add query parameters (excluding signature)
-        for (key, value) in query_params {
-            if key != "signature" {
-                all_params.insert(key.clone(), value.clone());
-            }
-        }
-
-        // Add body parameters (excluding signature)
-        for (key, value) in body_params {
-            if key != "signature" {
-                all_params.insert(key.clone(), value.clone());
-            }
-        }
-
-        // Sort parameters alphabetically by key (case-sensitive)
-        let mut sorted_params: Vec<_> = all_params.iter().collect();
-        sorted_params.sort_by_key(|(key, _)| *key);
-
-        // Build payload string exactly as Binance expects
-        sorted_params
-            .iter()
-            .map(|(key, value)| format!("{}={}", key, value))
-            .collect::<Vec<_>>()
-            .join("&")
-    }
-
-    /// Build payload for mixed query string and request body
-    /// This handles the case where query and body parameters are concatenated without '&' between them
-    pub fn build_mixed_payload(query_string: &str, request_body: &str) -> String {
         // Remove signature from query string if present
         let clean_query = Self::remove_signature_from_query(query_string);
 
-        // Remove signature from request body if present
-        let clean_body = Self::remove_signature_from_body(request_body);
+        let clean_body = if body_is_form {
+            Self::remove_signature_from_body(request_body)
+        } else {
+            request_body.to_string()
+        };
+        let encoded_method: String =
+            url::form_urlencoded::byte_serialize(method.as_bytes()).collect();
+        let encoded_path: String = url::form_urlencoded::byte_serialize(path.as_bytes()).collect();
+        let encoded_body = hex::encode(clean_body.as_bytes());
 
-        // Concatenate without separator as per Binance example 3
-        format!("{}{}", clean_query, clean_body)
+        format!("{encoded_method}\n{encoded_path}\n{clean_query}\n{encoded_body}")
     }
 
     /// Remove signature parameter from query string
@@ -157,11 +133,20 @@ impl SignatureVerifier {
             return String::new();
         }
 
-        query_string
+        let mut params: Vec<_> = query_string
             .split('&')
-            .filter(|param| !param.starts_with("signature="))
-            .collect::<Vec<_>>()
-            .join("&")
+            .filter_map(|param| {
+                let (key, value) = url::form_urlencoded::parse(param.as_bytes()).next()?;
+                (key != "signature").then(|| (key.into_owned(), value.into_owned()))
+            })
+            .collect();
+        params.sort();
+
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        for (key, value) in params {
+            serializer.append_pair(&key, &value);
+        }
+        serializer.finish()
     }
 
     /// Remove signature parameter from request body
@@ -172,7 +157,11 @@ impl SignatureVerifier {
 
         request_body
             .split('&')
-            .filter(|param| !param.starts_with("signature="))
+            .filter(|param| {
+                url::form_urlencoded::parse(param.as_bytes())
+                    .next()
+                    .is_none_or(|(key, _)| key != "signature")
+            })
             .collect::<Vec<_>>()
             .join("&")
     }
@@ -227,7 +216,6 @@ impl SignatureVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     #[test]
     fn test_binance_example_1_hmac() {
@@ -246,42 +234,42 @@ mod tests {
     }
 
     #[test]
-    fn test_binance_example_3_mixed_payload() {
-        // Exact Binance Example 3 - mixed query string and request body
+    fn test_canonical_mixed_payload() {
         let query_string = "symbol=LTCBTC&side=BUY&type=LIMIT&timeInForce=GTC";
         let request_body = "quantity=1&price=0.1&recvWindow=5000&timestamp=1499827319559";
 
-        let payload = SignatureVerifier::build_mixed_payload(query_string, request_body);
-        let expected_payload = "symbol=LTCBTC&side=BUY&type=LIMIT&timeInForce=GTCquantity=1&price=0.1&recvWindow=5000&timestamp=1499827319559";
-
-        assert_eq!(
-            payload, expected_payload,
-            "Mixed payload should match Binance Example 3"
+        let payload = SignatureVerifier::build_request_payload(
+            "POST",
+            "/api/order",
+            query_string,
+            request_body,
+            true,
+        );
+        let expected_payload = concat!(
+            "POST\n%2Fapi%2Forder\n",
+            "side=BUY&symbol=LTCBTC&timeInForce=GTC&type=LIMIT\n",
+            "7175616e746974793d312670726963653d302e31267265637657696e646f773d",
+            "353030302674696d657374616d703d31343939383237333139353539"
         );
 
-        // Test signature generation
-        let secret_key = "NhqPtmdSJYdKjVHjA7PZj4Mge3R5YNiP1e3UZjInClVN65XAbvqqM6A7H5fATj0j";
-        let expected_signature = "0fd168b8ddb4876a0358a8d14d0c9f3da0e9b20c5d52b2a00fcf7d1c602f9a77";
-
-        let result =
-            SignatureVerifier::verify_hmac(&payload, expected_signature, secret_key).unwrap();
-        assert!(result, "Binance Example 3 HMAC verification should pass");
+        assert_eq!(payload, expected_payload);
     }
 
     #[test]
-    fn test_build_payload_sorting() {
-        let mut query_params = HashMap::new();
-        query_params.insert("symbol".to_string(), "BTCUSDT".to_string());
-        query_params.insert("side".to_string(), "BUY".to_string());
-        query_params.insert("timestamp".to_string(), "1640995200000".to_string());
-        query_params.insert("quantity".to_string(), "1".to_string());
-
-        let body_params = HashMap::new();
-
-        let payload = SignatureVerifier::build_payload(&query_params, &body_params);
+    fn test_build_request_payload_sorting() {
+        let payload = SignatureVerifier::build_request_payload(
+            "GET",
+            "/api/orders",
+            "symbol=BTCUSDT&side=BUY&timestamp=1640995200000&quantity=1",
+            "",
+            false,
+        );
 
         // Parameters should be sorted alphabetically
-        let expected = "quantity=1&side=BUY&symbol=BTCUSDT&timestamp=1640995200000";
+        let expected = concat!(
+            "GET\n%2Fapi%2Forders\n",
+            "quantity=1&side=BUY&symbol=BTCUSDT&timestamp=1640995200000\n"
+        );
         assert_eq!(
             payload, expected,
             "Parameters should be sorted alphabetically"
@@ -339,12 +327,22 @@ mod tests {
         let clean_query = SignatureVerifier::remove_signature_from_query(query_with_sig);
         assert_eq!(
             clean_query,
-            "symbol=BTCUSDT&side=BUY&timestamp=1640995200000"
+            "side=BUY&symbol=BTCUSDT&timestamp=1640995200000"
         );
 
         let body_with_sig = "quantity=1&signature=def456&price=0.1";
         let clean_body = SignatureVerifier::remove_signature_from_body(body_with_sig);
         assert_eq!(clean_body, "quantity=1&price=0.1");
+
+        let signature_prefixed = "signature_foo=kept&signature=removed";
+        assert_eq!(
+            SignatureVerifier::remove_signature_from_query(signature_prefixed),
+            "signature_foo=kept"
+        );
+        assert_eq!(
+            SignatureVerifier::remove_signature_from_body(signature_prefixed),
+            "signature_foo=kept"
+        );
     }
 
     #[test]

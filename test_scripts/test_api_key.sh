@@ -20,13 +20,30 @@ fi
 echo "✅ Gateway ready"
 echo ""
 
-# Function to generate HMAC signature (HEX encoded, following Binance spec)
+# Function to generate a hex-encoded HMAC-SHA256 signature
 generate_signature() {
     local payload=$1
     local secret_key=$2
     
     # Generate HMAC-SHA256 signature in HEX format (not base64)
-    echo -n "$payload" | openssl dgst -sha256 -hmac "$secret_key" | sed 's/^.* //'
+    printf '%s' "$payload" | openssl dgst -sha256 -hmac "$secret_key" | sed 's/^.* //'
+}
+
+form_encode() {
+    jq -nr --arg value "$1" '$value | @uri'
+}
+
+build_canonical_payload() {
+    local method=$1
+    local endpoint=$2
+    local sorted_query=$3
+    local raw_body=$4
+    local encoded_method=$(form_encode "$method")
+    local encoded_path=$(form_encode "$endpoint")
+    local body_hex=$(printf '%s' "$raw_body" | od -An -tx1 | tr -d ' \n')
+
+    # One formula for all requests. Empty query/body contribute empty components.
+    printf '%s\n%s\n%s\n%s' "$encoded_method" "$encoded_path" "$sorted_query" "$body_hex"
 }
 
 # Function to make API key authenticated requests
@@ -43,13 +60,10 @@ make_api_key_request() {
     # Build query parameters
     local query_params="timestamp=$timestamp"
     
-    # Build payload for signature (following Binance spec for mixed query/body)
-    # For JSON body: querystring + body (NO & separator, as per Binance Example 3)
-    local payload="$query_params"
-    if [ -n "$data" ]; then
-        # Concatenate query params and JSON body WITHOUT & separator
-        payload="${query_params}${data}"
-    fi
+    # VEX deliberately diverges from Binance by binding method and path.
+    # Duplicate decoded names in a signed query or form body are rejected.
+    local payload=$(build_canonical_payload "$method" "$endpoint" "$query_params" "$data"; printf 'x')
+    payload=${payload%x}
     
     # Generate signature
     local signature=$(generate_signature "$payload" "$secret_key")

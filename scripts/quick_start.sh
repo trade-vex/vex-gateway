@@ -45,8 +45,10 @@ echo "     -H 'Authorization: Bearer YOUR_JWT_TOKEN'"
 echo ""
 
 echo "4. API Key Request (API key required):"
-echo "   curl -X GET 'http://localhost:8081/balances?timestamp=TIMESTAMP&signature=SIGNATURE' \\"
-echo "     -H 'X-API-KEY: test_api_key_12345'"
+echo "   # For every request, sign: ENC(method) LF ENC(path) LF SORTED_QUERY LF HEX(body)"
+echo "   # Empty query/body still contribute empty components; duplicate query/form names are rejected"
+echo "   curl -X GET 'http://localhost:8081/api/balances?timestamp=<timestamp>&signature=<hex-signature>' \\"
+echo "     -H 'X-MBX-APIKEY: <your-api-key>'"
 echo ""
 
 echo "🔑 Test Credentials (after setup):"
