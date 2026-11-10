@@ -60,7 +60,7 @@ pub struct AppState {
     pub gateway_publisher: Arc<TokioMutex<Publisher>>,
 
     // API key middleware for dynamic updates
-    pub api_key_middleware: Arc<TokioMutex<ApiKeyMiddleware>>,
+    pub api_key_middleware: ApiKeyMiddleware,
 
     // Correlation service for matching responses to requests
     pub correlation_service: Arc<CorrelationService>,
@@ -187,7 +187,7 @@ impl AppState {
             email_service,
             session_service,
             gateway_publisher: Arc::new(TokioMutex::new(gateway_publisher)),
-            api_key_middleware: Arc::new(TokioMutex::new(api_key_middleware)),
+            api_key_middleware,
             api_key_repository,
             portfolio_repository,
             trading_repository: trading_repo,

@@ -475,6 +475,7 @@ impl ApiKeyStore {
     }
 }
 
+#[derive(Clone)]
 pub struct ApiKeyMiddleware {
     api_key_store: ApiKeyStore,
     default_security: SecurityType,

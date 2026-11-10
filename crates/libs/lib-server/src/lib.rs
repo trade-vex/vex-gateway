@@ -32,7 +32,7 @@ pub async fn initialize_server(
 
     // Initialize AppState with all dependencies
     let app_state = AppState::new(&auth_config, gateway_publisher, correlation_service).await?;
-    let api_key_store = app_state.api_key_middleware.lock().await.api_key_store();
+    let api_key_store = app_state.api_key_middleware.api_key_store();
 
     // Create TCP listener
     let listener = TcpListener::bind(config.server_address()?)?;
