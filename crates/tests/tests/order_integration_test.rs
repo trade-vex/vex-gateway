@@ -120,7 +120,7 @@ async fn test_place_order(
                 message: "Order processing timeout".to_string(),
             })
         }
-        Err(ResponseError::Cancelled) => HttpResponse::InternalServerError().json(OrderResponse {
+        Err(ResponseError::LinkLost) => HttpResponse::InternalServerError().json(OrderResponse {
             order_id: 0,
             client_order_id,
             status: "error".to_string(),
@@ -207,7 +207,7 @@ async fn test_cancel_order(
                 message: "Cancel timeout".to_string(),
             })
         }
-        Err(ResponseError::Cancelled) => HttpResponse::InternalServerError().json(OrderResponse {
+        Err(ResponseError::LinkLost) => HttpResponse::InternalServerError().json(OrderResponse {
             order_id: cancel_data.order_id,
             client_order_id,
             status: "error".to_string(),

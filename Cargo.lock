@@ -1544,7 +1544,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "vex-networking",
 ]
 
 [[package]]
@@ -2305,6 +2304,7 @@ dependencies = [
 name = "lib-core"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "chrono",
  "clickhouse",
@@ -2312,6 +2312,7 @@ dependencies = [
  "dashmap 6.1.0",
  "lib-db",
  "num_cpus",
+ "rand 0.8.8",
  "redis",
  "rust_decimal",
  "sea-orm",

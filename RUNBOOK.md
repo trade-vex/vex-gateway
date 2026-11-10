@@ -161,6 +161,30 @@ The gateway exits at startup when one of these keys is missing, malformed or unk
 vex-core's own rules reject the combination (`Invalid vex-core link settings in [core]: ...`, for
 example equal ports).
 
+The gateway does not need the core to start: it serves at once and connects to the core in the
+background. When the link is lost, because the core stopped or restarted, or because its order
+responses have kept timing out for 10 s, the gateway drops it and connects again on its own.
+Between attempts it waits 0.5 s, doubling after each failed attempt up to 10 s, with jitter; an
+attempt against a core that is down itself waits up to 20 s for it. The log shows
+`Could not connect to vex-core; retrying` with the error for each failed attempt,
+`Lost the link to vex-core; reconnecting` with the reason for a lost link, and
+`Connected to vex-core` once the link is up. Only order and cancel requests need the link (see
+[VEX Core is Down](#vex-core-is-down)).
+
+### Health and Readiness
+
+- `GET /api/health` is liveness: 200 whenever the process serves requests. It checks no
+  dependency.
+- `GET /api/ready` is readiness of the vex-core link: 200 while the gateway is connected to the
+  core and its orders get answers, otherwise 503 with the reason (see
+  [VEX Core is Down](#vex-core-is-down)).
+
+Point the AWS ALB target group's health check, and any orchestrator's liveness check, at
+`/api/health`. On `/api/ready`, a core outage would fail every gateway's check at once: every
+target would turn unhealthy together, and an orchestrator replacing unhealthy tasks would restart
+gateways that are fine, taking login, sessions and user data down with orders. Use `/api/ready`
+to monitor and alert on the engine link, not to route traffic or restart gateways.
+
 ### Client IP Behind a Proxy
 
 Login, signup, email-verification and OAuth rate limits, and API-key IP blacklists, key on the
@@ -339,7 +363,8 @@ redis-cli -u "<auth.redis.url>" INFO server
 
 ### VEX Core Communication Failures
 
-**Symptom**: Orders fail with "Failed to send order" errors
+**Symptom**: Orders fail with 503 `Matching engine unavailable` or "Failed to send order" errors,
+and `GET /api/ready` returns 503
 
 **Diagnosis**:
 ```bash
@@ -356,9 +381,9 @@ ping <core.address>
 - Verify `core.context_dir` exists and is writable
 - Check VEX Core service is running
 - Verify `core.address`, `core.port` and `core.control_port` are correct (see "VEX Core Connection")
-- `Connection rejected: Handshake rejected` at startup, with `handshake_rejected` and
-  `reason=Authentication failed: Invalid credentials` in the vex-core log, means `core.auth_key`
-  differs from vex-core's key
+- `Connection rejected: Handshake rejected` in every `Could not connect to vex-core; retrying`
+  warning, with `handshake_rejected` and `reason=Authentication failed: Invalid credentials` in the
+  vex-core log, means `core.auth_key` differs from vex-core's key
 - Check Aeron media driver is running
 - Verify network connectivity to VEX Core
 
@@ -390,8 +415,8 @@ for 24 hours to prevent a retry from publishing a duplicate order.
 
 A claim the gateway gives back because the engine executed nothing (busy, or the publish failed)
 is not stranded: a release marker replaces it for 60 seconds, a request already waiting on it gets
-a `503` for why it was released (busy, with `Retry-After: 1`, or `Matching engine unavailable`),
-and the retry claims the key as usual.
+a `503` for why it was released (busy, with `Retry-After: 1`, or `Matching engine unavailable`,
+with `Retry-After: 5`), and the retry claims the key as usual.
 
 **Remedy**:
 1. Reconcile the returned `client_order_id` against open orders, order history, and gateway/core
@@ -469,7 +494,8 @@ grep -i "memory\|oom" logs/app.log
 
 4. **Verify Health**
    ```bash
-   curl http://localhost:8081/api/health
+   curl http://localhost:8081/api/health   # 200 while the process serves
+   curl http://localhost:8081/api/ready    # 200 once connected to vex-core
    ```
 
 ### Database is Down
@@ -524,30 +550,32 @@ grep -i "memory\|oom" logs/app.log
    ```
 
 2. **Service Impact**
-   - **All order operations will fail** (place/cancel)
-   - `GET /api/health` returns 503 `engine_link: not connected to vex-core` while no core reads
-     this gateway's publication: a few seconds after the core stops, and from then on, also once
-     the core is back, because a restarted core has lost this gateway's session (see
-     Mitigation).
-   - It also returns 503 (`engine_link: response from vex-core timed out`) once order requests
-     have kept timing out for 10 s with no engine response in between (timeouts more than 30 s
-     apart count as separate incidents). With no order traffic this check keeps passing, and
-     once red it turns green only on the next routed response, so do not use the endpoint as a
-     load-balancer readiness check: an instance taken out of rotation would stay red. Use it as
-     the orchestrator's health check, which restarts the gateway.
-   - User data endpoints keep working only until the orchestrator restarts the gateway. A gateway
-     cannot start without a core (its handshake times out after 20 s and it exits), so from then
-     on the whole gateway is down, and it comes back with the orchestrator's first restart after
-     the core is up again.
+   - Order and cancel requests return 503 `Matching engine unavailable` with `Retry-After: 5`
+     while the gateway is not connected to a core. Nothing is sent, so a retry with the same
+     `Idempotency-Key` is placed as usual once the link is back. A busy core answers 503
+     `Matching engine is busy; please retry` with `Retry-After: 1` instead.
+   - Aeron notices that the core has gone a few seconds after it stops, at once when it shuts down
+     cleanly. Until then requests can still time out (408) or get the busy 503. The requests still
+     waiting for the core's answer when the link is lost fail at once: a cancel with the
+     unavailable 503, an order with the 408 `outcome_unknown` of a timeout. That order was sent
+     and may have executed, so it is recorded under its idempotency key; reconcile its
+     `client_order_id` as for any 408, and do not retry the key.
+   - Everything else keeps working: login, sessions, balances, order history and the other user
+     data, and API-key management. `GET /api/health` stays 200.
+   - `GET /api/ready` returns 503 `engine_link: not connected to vex-core` until the gateway is
+     connected to a core again. While connected, it returns 503
+     `engine_link: response from vex-core timed out` once order requests have kept timing out for
+     10 s with no engine response in between (timeouts more than 30 s apart count as separate
+     incidents). The gateway then drops that link and connects again, as for a lost one. With no
+     order traffic this check keeps passing.
 
 3. **Mitigation**
-   - Restore VEX Core service, then restart every gateway: a gateway does not reconnect to a
-     restarted core, and cannot publish until it restarts and handshakes again. The orchestrator
-     restarts it when its health check uses `/api/health`.
-   - Order and cancel requests return 503 `Matching engine unavailable` (no `Retry-After`) while
-     no core is connected; a busy core answers 503 `Matching engine is busy; please retry` with
-     `Retry-After: 1` instead. Until Aeron notices that the core has gone, which takes a few
-     seconds, requests can still time out (408) or get the busy 503
+   - Restore VEX Core. The gateways reconnect on their own, without a restart, at most 10 s plus
+     one handshake after the core accepts handshakes again: `Connected to vex-core` in the log,
+     and `GET /api/ready` returns 200.
+   - If a gateway stays not ready while the core is up, read its
+     `Could not connect to vex-core; retrying` warnings (see
+     [VEX Core Communication Failures](#vex-core-communication-failures)).
    - Consider rate limiting or disabling order endpoints temporarily
 
 ### High Error Rate
@@ -579,7 +607,8 @@ grep -i "memory\|oom" logs/app.log
 
 ### Public Endpoints (No Authentication)
 
-- `GET /api/health` - Health check
+- `GET /api/health` - Liveness: 200 while the process serves
+- `GET /api/ready` - Readiness: 503 while the vex-core link is down
 - `POST /api/signup` - User registration
 - `POST /api/login` - User login
 - `POST /api/refresh` - Refresh JWT token

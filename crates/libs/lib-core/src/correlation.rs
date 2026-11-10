@@ -116,6 +116,21 @@ impl CorrelationService {
         }
     }
 
+    /// The engine link was lost: every waiting request fails at once with
+    /// [`ResponseError::LinkLost`] instead of waiting out its timeout, and the timeouts seen on the
+    /// lost link no longer count against the next one.
+    pub(crate) fn link_lost(&self) {
+        let failed = self.pending_requests.len();
+        // Dropping a sender ends its waiting request.
+        self.pending_requests.clear();
+        self.first_timeout_ms.store(0, Ordering::Relaxed);
+        self.last_timeout_ms.store(0, Ordering::Relaxed);
+        warn!(
+            failed,
+            "Failed the requests waiting on the lost engine link"
+        );
+    }
+
     /// Cancel a pending request (on timeout)
     #[inline]
     pub fn cancel_request(&self, client_order_id: u64) -> bool {
@@ -284,6 +299,26 @@ mod tests {
         assert!(service.is_engine_link_healthy());
     }
 
+    #[tokio::test]
+    async fn lost_link_fails_waiting_requests_at_once_and_clears_the_timeout_window() {
+        let service = CorrelationService::new();
+        let t0 = std::time::Instant::now();
+        service.timeout_request_at(1, t0);
+        service.timeout_request_at(2, t0 + 10 * SECOND);
+        assert!(!service.is_engine_link_healthy());
+        let waiting = service.register_request(3);
+
+        service.link_lost();
+
+        // Without the lost link, the wait would end in a timeout.
+        assert!(matches!(
+            wait_for_response(waiting, 5 * SECOND).await,
+            Err(ResponseError::LinkLost)
+        ));
+        assert_eq!(service.pending_count(), 0);
+        assert!(service.is_engine_link_healthy());
+    }
+
     #[test]
     fn correlation_ids_use_counter_when_clock_is_before_epoch() {
         let before_epoch = UNIX_EPOCH.checked_sub(Duration::from_secs(1)).unwrap();
@@ -306,7 +341,7 @@ pub async fn wait_for_response(
     tokio::time::timeout(timeout, receiver)
         .await
         .map_err(|_| ResponseError::Timeout)?
-        .map_err(|_| ResponseError::Cancelled)
+        .map_err(|_| ResponseError::LinkLost)
 }
 
 /// Response errors
@@ -315,6 +350,8 @@ pub enum ResponseError {
     #[error("Response timeout")]
     Timeout,
 
-    #[error("Response channel cancelled")]
-    Cancelled,
+    /// The engine link was lost before the response arrived, so the engine link supervisor failed
+    /// the waiting request. The request may have reached the engine.
+    #[error("Engine link lost before the response arrived")]
+    LinkLost,
 }
