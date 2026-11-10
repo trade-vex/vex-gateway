@@ -1,5 +1,6 @@
 pub mod api_key;
 pub mod client_ip;
+pub mod metrics;
 pub mod models;
 pub mod repository;
 

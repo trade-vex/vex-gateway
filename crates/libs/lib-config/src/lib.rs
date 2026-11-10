@@ -47,6 +47,7 @@
 //! export APP__LOGGING__LEVEL=info                        # logging.level
 //! export APP__AUTH__SERVER__TRUSTED_PROXIES=10.0.1.0/24  # auth.server.trusted_proxies
 //! export APP__CORE__AUTH_KEY=123456                      # core.auth_key
+//! export APP__METRICS__BIND=0.0.0.0:9091                 # metrics.bind
 //! ```
 //!
 //! # Configuration Discovery
@@ -61,6 +62,7 @@ mod core_link;
 pub mod environment;
 mod error;
 pub mod logging;
+mod metrics;
 pub mod server;
 pub mod util;
 
@@ -70,6 +72,7 @@ pub use core_link::CoreLinkConfig;
 pub use environment::Environment;
 pub use error::ConfigError;
 pub use logging::LoggingConfig;
+pub use metrics::MetricsConfig;
 pub use server::ServerConfig;
 
 use config::Source;
@@ -109,6 +112,8 @@ pub struct Config {
     pub core: CoreLinkConfig,
     /// ClickHouse, for portfolio and balance-chart reads
     pub clickhouse: ClickHouseConfig,
+    /// The internal listener that serves the Prometheus metrics
+    pub metrics: MetricsConfig,
 }
 
 impl Config {
@@ -328,6 +333,7 @@ impl Config {
     ///   gateway id below 16, an empty or signed 32-bit `auth_key`, non-empty `context_dir`), and
     ///   `core.address` cannot be empty
     /// - Every `auth.server.trusted_proxies` entry must be an IP address or CIDR range
+    /// - `metrics.bind` must be an IP address and a port
     /// - `auth.oauth.providers` may list only `google`, `github` and `twitter`
     /// - With an OAuth provider configured, `auth.oauth.frontend_url_web` and `frontend_url_app`
     ///   must be set
@@ -338,6 +344,7 @@ impl Config {
     /// - Cannot use trace or debug logging levels
     /// - `auth.server.trusted_proxies` cannot be empty: production runs behind a load balancer
     /// - `core.auth_key` cannot be empty, as vex-core requires
+    /// - `metrics.bind` needs a port of its own: not 0, and not `server.port`
     ///
     /// ## Testing Environment
     /// - Port 0 is allowed for ephemeral port usage
@@ -377,6 +384,9 @@ impl Config {
                 "auth.server.trusted_proxies: {e}"
             )));
         }
+
+        // Parsed here, before any network startup, though only the metrics listener uses it.
+        let metrics_bind = self.metrics.socket_addr()?;
 
         // OAuthService knows the scopes and user-info endpoint of these providers only; any other
         // would load, then fail at its callback.
@@ -443,6 +453,16 @@ impl Config {
                     return Err(ConfigError::ValidationError(
                         "Production environment requires auth.server.trusted_proxies (the load \
                          balancer's addresses or CIDR ranges)"
+                            .to_string(),
+                    ));
+                }
+
+                // The metrics are never served on the public listener, so they must not share its
+                // port; on an ephemeral port the scraper would not find them.
+                if metrics_bind.port() == 0 || metrics_bind.port() == self.server.port {
+                    return Err(ConfigError::ValidationError(
+                        "Production environment requires metrics.bind to have a port of its own \
+                         (not 0, and not server.port)"
                             .to_string(),
                     ));
                 }
@@ -714,6 +734,9 @@ environment = "production"
 host = "0.0.0.0"
 port = 8081
 
+[metrics]
+bind = "0.0.0.0:9091"
+
 [logging]
 level = "info"
 
@@ -769,6 +792,10 @@ url = "http://clickhouse.internal:8123"
 
         assert_eq!(config.environment, Environment::Production);
         assert_eq!(config.server.host, "0.0.0.0");
+        assert_eq!(
+            config.metrics.socket_addr().unwrap(),
+            "0.0.0.0:9091".parse().unwrap()
+        );
         assert_eq!(config.logging.level, "info");
         assert_eq!(
             config.auth.database.url,
@@ -943,6 +970,7 @@ url = "http://clickhouse.internal:8123"
         assert_eq!(config.environment, Environment::Development);
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 8081);
+        assert_eq!(config.metrics.bind, "127.0.0.1:9091");
         assert_eq!(config.logging.level, "debug");
         // trusted_proxies is optional: absent, development trusts no proxy. So is [auth.server],
         // which holds nothing else.
@@ -1094,6 +1122,65 @@ url = "http://clickhouse.internal:8123"
         );
 
         config.core.auth_key = "-123456789".into();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_metrics_bind_is_required_and_must_be_an_address() {
+        let config = load_development_example(&[("APP__METRICS__BIND", "10.0.0.5:9100")]).unwrap();
+        assert_eq!(
+            config.metrics.socket_addr().unwrap(),
+            "10.0.0.5:9100".parse().unwrap()
+        );
+
+        // No built-in default: without the section the configuration does not load.
+        let (result, _) = load_edited_example("[metrics]\nbind = \"127.0.0.1:9091\"\n", "");
+        let error = result.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Failed to load configuration: missing field `metrics`"
+        );
+
+        // An address that is not an IP address and a port stops loading, without showing it.
+        for bind in ["localhost:9091", "127.0.0.1", "9091", "0.0.0.0:65536", ""] {
+            let error = load_development_example(&[("APP__METRICS__BIND", bind)]).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "Configuration validation failed: metrics.bind must be an IP address and a port, \
+                 such as 127.0.0.1:9091",
+                "{bind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_production_requires_a_metrics_port_of_its_own() {
+        let mut config = development_config();
+        config.environment = Environment::Production;
+        config.server.host = "0.0.0.0".to_string();
+        config.logging.level = "info".to_string();
+        config.auth.server.trusted_proxies = vec!["10.0.0.0/16".to_string()];
+        config.core.auth_key = "-123456789".into();
+        assert_eq!(config.server.port, 8081);
+
+        // The public listener's address and port, the same port on another address, and an
+        // ephemeral port.
+        for bind in ["0.0.0.0:8081", "127.0.0.1:8081", "[::]:8081", "0.0.0.0:0"] {
+            config.metrics.bind = bind.to_string();
+            let error = config.validate().unwrap_err();
+            assert!(
+                matches!(error, ConfigError::ValidationError(_))
+                    && error.to_string().contains("metrics.bind"),
+                "{bind}: unexpected error: {error}"
+            );
+        }
+
+        config.metrics.bind = "0.0.0.0:9091".to_string();
+        assert!(config.validate().is_ok());
+
+        // Outside production the same port only fails to bind; port 0 is an ephemeral port.
+        config.environment = Environment::Development;
+        config.metrics.bind = "0.0.0.0:8081".to_string();
         assert!(config.validate().is_ok());
     }
 

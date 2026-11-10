@@ -17,6 +17,7 @@ use crate::models::user::{Model, UserStatus};
 use crate::repository::UserRepository;
 use crate::service::{EmailService, SessionService, TokenService};
 use lib_middleware::client_ip::{client_ip, is_https};
+use lib_middleware::metrics::{self, AuthMethod};
 use std::sync::Arc;
 
 const LOGIN_RATE_LIMIT_SCOPE: &str = "login";
@@ -43,6 +44,12 @@ const VERIFY_EMAIL_PRINCIPAL_WINDOW_SECONDS: u64 = 15 * 60;
 
 fn normalized_principal(value: &str) -> String {
     value.trim().to_ascii_lowercase()
+}
+
+/// A login refused for its email and password, counted as a login authentication failure.
+fn refused_login() -> AuthError {
+    metrics::auth_failures(AuthMethod::Login).inc();
+    AuthError::InvalidCredentials
 }
 
 /// Session cookie attributes for `req`. Returns (is_secure, cookie_ttl) where:
@@ -200,7 +207,7 @@ pub async fn login(
                     LOGIN_PRINCIPAL_WINDOW_SECONDS,
                 )
                 .await?;
-            return Err(AuthError::InvalidCredentials);
+            return Err(refused_login());
         }
     };
     // PR #85: capture the token version immediately after the lookup and
@@ -216,7 +223,7 @@ pub async fn login(
     // `mint_tokens_at_version` fails closed. The two together close the window.
     let user = match user_repo.find_by_id(user.user_id).await? {
         Some(user) => user,
-        None => return Err(AuthError::InvalidCredentials),
+        None => return Err(refused_login()),
     };
 
     // Check if user can login
@@ -235,7 +242,7 @@ pub async fn login(
                     LOGIN_PRINCIPAL_WINDOW_SECONDS,
                 )
                 .await?;
-            return Err(AuthError::InvalidCredentials);
+            return Err(refused_login());
         }
     };
 
@@ -275,7 +282,7 @@ pub async fn login(
     release_result?;
 
     if !authenticated {
-        return Err(AuthError::InvalidCredentials);
+        return Err(refused_login());
     }
 
     let user_id = user.user_id;
@@ -1142,7 +1149,9 @@ mod tests {
     }
 
     async fn test_services() -> (Arc<EmailService>, Arc<TokenService>, Arc<SessionService>) {
-        let client = redis::Client::open("redis://127.0.0.1:6379/").unwrap();
+        let redis_url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
+        let client = redis::Client::open(redis_url).unwrap();
         let conn = redis::aio::ConnectionManager::new(client).await.unwrap();
         let email_config = EmailConfig {
             smtp_host: "127.0.0.1".to_string(),
@@ -1410,6 +1419,34 @@ mod tests {
             "the password must be checked against the re-read hash, not the first read; got {:?}",
             result.err()
         );
+    }
+
+    #[tokio::test]
+    async fn refused_logins_are_counted_as_login_authentication_failures() {
+        const PASSWORD: &str = "correct-horse-battery-staple";
+        let (email_service, token_service, session_service) = test_services().await;
+        let email = format!("{}@example.com", Uuid::new_v4());
+        let user_repo: Arc<dyn UserRepository> = Arc::new(LoginRepository {
+            user: login_user(email.clone(), PASSWORD),
+            find_by_email_calls: AtomicUsize::new(0),
+        });
+        let failures = metrics::auth_failures(AuthMethod::Login);
+        let before = failures.get();
+
+        let result = attempt_login(
+            &email,
+            "incorrect-password",
+            "198.51.100.30:12345",
+            user_repo,
+            email_service,
+            token_service,
+            session_service,
+        )
+        .await;
+
+        assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+        // The other tests here refuse logins concurrently, so the count can rise by more.
+        assert!(failures.get() > before);
     }
 
     #[tokio::test]
