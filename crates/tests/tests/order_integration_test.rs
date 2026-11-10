@@ -11,6 +11,7 @@ use lib_core::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tests::gateway_send_error;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct OrderRequest {
@@ -40,7 +41,7 @@ struct OrderResponse {
 /// Test version of place_order handler that doesn't require authentication
 async fn test_place_order(
     order_data: web::Json<OrderRequest>,
-    publisher: web::Data<Arc<tokio::sync::Mutex<Publisher>>>,
+    publisher: web::Data<Arc<Publisher>>,
     correlation_service: web::Data<Arc<CorrelationService>>,
 ) -> HttpResponse {
     let start = Instant::now();
@@ -77,19 +78,17 @@ async fn test_place_order(
     };
 
     // Send to VEX Core
-    let send_result = {
-        let publisher = publisher.lock().await;
-        publisher.send_order_command(&command)
-    };
+    let send_result = publisher.try_send_order_command(&command);
 
     if let Err(e) = send_result {
         correlation_service.cancel_request(client_order_id);
         eprintln!("Failed to send order to VEX Core: {}", e);
-        return HttpResponse::InternalServerError().json(OrderResponse {
+        let (status, message) = gateway_send_error(&e, format!("Failed to send order: {}", e));
+        return HttpResponse::build(status).json(OrderResponse {
             order_id: 0,
             client_order_id,
             status: "error".to_string(),
-            message: format!("Failed to send order: {}", e),
+            message,
         });
     }
 
@@ -133,7 +132,7 @@ async fn test_place_order(
 /// Test version of cancel_order handler that doesn't require authentication
 async fn test_cancel_order(
     cancel_data: web::Json<CancelOrderRequest>,
-    publisher: web::Data<Arc<tokio::sync::Mutex<Publisher>>>,
+    publisher: web::Data<Arc<Publisher>>,
     correlation_service: web::Data<Arc<CorrelationService>>,
 ) -> HttpResponse {
     let start = Instant::now();
@@ -168,18 +167,16 @@ async fn test_cancel_order(
     };
 
     // Send cancel command
-    let send_result = {
-        let publisher = publisher.lock().await;
-        publisher.send_order_command(&command)
-    };
+    let send_result = publisher.try_send_order_command(&command);
 
     if let Err(e) = send_result {
         correlation_service.cancel_request(client_order_id);
-        return HttpResponse::InternalServerError().json(OrderResponse {
+        let (status, message) = gateway_send_error(&e, format!("Failed to send cancel: {}", e));
+        return HttpResponse::build(status).json(OrderResponse {
             order_id: cancel_data.order_id,
             client_order_id,
             status: "error".to_string(),
-            message: format!("Failed to send cancel: {}", e),
+            message,
         });
     }
 
@@ -224,7 +221,7 @@ fn spawn_test_server(publisher: Publisher, correlation_service: CorrelationServi
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to bind random port");
     let port = listener.local_addr().unwrap().port();
 
-    let publisher = Arc::new(tokio::sync::Mutex::new(publisher));
+    let publisher = Arc::new(publisher);
     let correlation_service = Arc::new(correlation_service);
 
     let server = HttpServer::new(move || {

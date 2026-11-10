@@ -387,7 +387,10 @@ grep -i "memory\|oom" logs/app.log
 
 3. **Mitigation**
    - Restore VEX Core service
-   - Service will return 500 errors for order operations
+   - Order and cancel requests return 503 `Matching engine unavailable` (no `Retry-After`) while
+     no core is connected; a busy core answers 503 `Matching engine is busy; please retry` with
+     `Retry-After: 1` instead. Until Aeron notices that the core has gone, which takes a few
+     seconds, requests can still time out (408) or get the busy 503
    - Consider rate limiting or disabling order endpoints temporarily
 
 ### High Error Rate

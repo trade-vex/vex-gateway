@@ -1,6 +1,6 @@
 //! Order Management API Handlers
 
-use actix_web::{HttpResponse, web};
+use actix_web::{HttpResponse, http::StatusCode, web};
 use common::{OrderCommand, OrderCommandType, Side, Status, TimeInForce, UserBalance};
 use lib_core::{
     CorrelationService, Publisher, ResponseError, TradingRepository, generate_client_order_id,
@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
+use vex_networking::client::GatewayError;
 
 // Request/Response DTOs
 
@@ -133,6 +134,55 @@ pub struct OrderResponse {
     pub message: String,
 }
 
+fn gateway_error_status(error: &GatewayError) -> StatusCode {
+    match error {
+        GatewayError::Busy | GatewayError::NotConnected => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+const ENGINE_BUSY_MESSAGE: &str = "Matching engine is busy; please retry";
+const ENGINE_BUSY_RETRY_AFTER_SECS: u32 = 1;
+
+/// The one answer for a busy engine, whether the publish was back-pressured
+/// (`GatewayError::Busy`) or the engine's ingress ring was full (`Status::Busy`): nothing was
+/// executed, so the client may resend the same request after `Retry-After`.
+fn engine_busy_response(order_id: u64, client_order_id: u64) -> HttpResponse {
+    HttpResponse::ServiceUnavailable()
+        .insert_header((
+            actix_web::http::header::RETRY_AFTER,
+            ENGINE_BUSY_RETRY_AFTER_SECS,
+        ))
+        .json(OrderResponse {
+            order_id,
+            client_order_id,
+            status: "error".to_string(),
+            message: ENGINE_BUSY_MESSAGE.to_string(),
+        })
+}
+
+/// Answers a publish that failed, so nothing reached the engine. A busy engine is expected back
+/// shortly; a disconnected one (down or restarting) is not, so it gets no `Retry-After`. Any other
+/// error means this gateway's own publication is unusable.
+fn send_failure_response(
+    error: &GatewayError,
+    request: &str,
+    order_id: u64,
+    client_order_id: u64,
+) -> HttpResponse {
+    let message = match error {
+        GatewayError::Busy => return engine_busy_response(order_id, client_order_id),
+        GatewayError::NotConnected => "Matching engine unavailable".to_string(),
+        _ => format!("Failed to send {request}: {error}"),
+    };
+    HttpResponse::build(gateway_error_status(error)).json(OrderResponse {
+        order_id,
+        client_order_id,
+        status: "error".to_string(),
+        message,
+    })
+}
+
 fn serialize_u64_as_string<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -209,7 +259,7 @@ where
 pub async fn place_order(
     order_data: web::Json<OrderRequest>,
     auth_user: AuthenticatedUserId,
-    publisher: web::Data<Arc<tokio::sync::Mutex<Publisher>>>,
+    publisher: web::Data<Arc<Publisher>>,
     correlation_service: web::Data<Arc<CorrelationService>>,
     trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> HttpResponse {
@@ -284,10 +334,7 @@ pub async fn place_order(
     };
 
     // Send to VEX Core
-    let send_result = {
-        let publisher = publisher.lock().await;
-        publisher.send_order_command(&command)
-    };
+    let send_result = publisher.try_send_order_command(&command);
 
     if let Err(e) = send_result {
         correlation_service.cancel_request(client_order_id);
@@ -297,17 +344,20 @@ pub async fn place_order(
             error = %e,
             "Failed to send order to VEX Core"
         );
-        return HttpResponse::InternalServerError().json(OrderResponse {
-            order_id: 0,
-            client_order_id,
-            status: "error".to_string(),
-            message: format!("Failed to send order: {}", e),
-        });
+        return send_failure_response(&e, "order", 0, client_order_id);
     }
 
     // Wait for response with timeout - function pauses here
     match wait_for_response(response_receiver, Duration::from_secs(5)).await {
         Ok(response) => {
+            if response.status == Status::Busy {
+                warn!(
+                    client_order_id = client_order_id,
+                    user_id = user_id,
+                    "Matching engine busy; order not accepted"
+                );
+                return engine_busy_response(0, client_order_id);
+            }
             let latency = start.elapsed();
             let status_str = format!("{:?}", response.status);
 
@@ -474,7 +524,7 @@ pub async fn place_order(
 pub async fn cancel_order(
     cancel_data: web::Json<CancelOrderRequest>,
     auth_user: AuthenticatedUserId,
-    publisher: web::Data<Arc<tokio::sync::Mutex<Publisher>>>,
+    publisher: web::Data<Arc<Publisher>>,
     correlation_service: web::Data<Arc<CorrelationService>>,
 ) -> HttpResponse {
     let start = Instant::now();
@@ -529,24 +579,24 @@ pub async fn cancel_order(
     };
 
     // Send cancel command
-    let send_result = {
-        let publisher = publisher.lock().await;
-        publisher.send_order_command(&command)
-    };
+    let send_result = publisher.try_send_order_command(&command);
 
     if let Err(e) = send_result {
         correlation_service.cancel_request(client_order_id);
-        return HttpResponse::InternalServerError().json(OrderResponse {
-            order_id,
-            client_order_id,
-            status: "error".to_string(),
-            message: format!("Failed to send cancel: {}", e),
-        });
+        return send_failure_response(&e, "cancel", order_id, client_order_id);
     }
 
     // Wait for cancel confirmation
     match wait_for_response(response_receiver, Duration::from_secs(5)).await {
         Ok(response) => {
+            if response.status == Status::Busy {
+                warn!(
+                    client_order_id = client_order_id,
+                    user_id = user_id,
+                    "Matching engine busy; cancel not accepted"
+                );
+                return engine_busy_response(order_id, client_order_id);
+            }
             let latency = start.elapsed();
 
             info!(
@@ -579,5 +629,98 @@ pub async fn cancel_order(
             status: "error".to_string(),
             message: "Internal error".to_string(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::http::StatusCode;
+    use vex_networking::client::GatewayError;
+
+    #[test]
+    fn busy_and_not_connected_map_to_service_unavailable() {
+        for error in [GatewayError::Busy, GatewayError::NotConnected] {
+            assert_eq!(
+                gateway_error_status(&error),
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+        }
+    }
+
+    async fn body_message(response: HttpResponse) -> String {
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        body["message"].as_str().unwrap().to_string()
+    }
+
+    #[actix_web::test]
+    async fn busy_engine_is_a_retryable_503_whether_back_pressured_or_ring_full() {
+        for response in [
+            send_failure_response(&GatewayError::Busy, "order", 0, 7),
+            engine_busy_response(0, 7),
+        ] {
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(actix_web::http::header::RETRY_AFTER)
+                    .unwrap(),
+                "1"
+            );
+            assert_eq!(body_message(response).await, ENGINE_BUSY_MESSAGE);
+        }
+    }
+
+    #[actix_web::test]
+    async fn disconnected_engine_is_an_unavailable_503_without_retry_after() {
+        let response = send_failure_response(&GatewayError::NotConnected, "cancel", 9, 7);
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            !response
+                .headers()
+                .contains_key(actix_web::http::header::RETRY_AFTER)
+        );
+        assert_eq!(body_message(response).await, "Matching engine unavailable");
+    }
+
+    #[actix_web::test]
+    async fn unusable_publication_is_a_500_naming_the_request() {
+        let response = send_failure_response(
+            &GatewayError::SendError("publication closed".to_string()),
+            "cancel",
+            9,
+            7,
+        );
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            !response
+                .headers()
+                .contains_key(actix_web::http::header::RETRY_AFTER)
+        );
+        assert_eq!(
+            body_message(response).await,
+            "Failed to send cancel: Failed to send message: publication closed"
+        );
+    }
+
+    #[test]
+    fn send_error_maps_to_internal_server_error() {
+        assert_eq!(
+            gateway_error_status(&GatewayError::SendError("send failed".to_string())),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn protocol_error_maps_to_internal_server_error() {
+        assert_eq!(
+            gateway_error_status(&GatewayError::ProtocolError("invalid command".to_string())),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }

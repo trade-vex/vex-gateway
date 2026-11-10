@@ -1,9 +1,5 @@
 [advisories]
 ignore = [
-    # unsafe-libyaml is unmaintained. Path: vex-config (vex-core, pinned rev efeaeb4) -> serde_yaml
-    # -> unsafe-libyaml. vex-core removes serde_yaml in its own PR, and the gateway's vex-core pin
-    # moves to that revision later in this stack; drop this entry then.
-    "RUSTSEC-2024-0449",
     # rsa 0.9 (Marvin attack: a timing side channel in private-key decryption and signing). There is
     # no fixed 0.9 release; the fix is rsa 0.10, which lib-middleware uses. Two paths still reach 0.9:
     # - openidconnect 4.1 (its latest release) -> rsa 0.9. It only verifies ID-token signatures with
