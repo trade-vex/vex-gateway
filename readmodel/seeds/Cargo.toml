@@ -1,0 +1,14 @@
+[package]
+name = "readmodel-seeds"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+config = { workspace = true }
+vex-config = { workspace = true }
+
+[dev-dependencies]
+common = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }

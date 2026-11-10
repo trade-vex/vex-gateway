@@ -10,8 +10,9 @@ use actix_web::web;
 use chrono::Utc;
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::OnceCell;
 use uuid::Uuid;
 
 use async_trait::async_trait;
@@ -31,13 +32,15 @@ use lib_core::{
 };
 use lib_utils::{AuthenticatedUserId, uuid_to_u64};
 
+fn database_url() -> String {
+    std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        "postgresql://postgres:postgres123@localhost:5432/trading_db".to_string()
+    })
+}
+
 /// Setup test database connection
 async fn setup_test_db() -> Result<DatabaseConnection, sea_orm::DbErr> {
-    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgresql://postgres:postgres123@localhost:5432/trading_db".to_string()
-    });
-
-    let connection_future = Database::connect(&database_url);
+    let connection_future = Database::connect(database_url());
     let timeout_duration = std::time::Duration::from_secs(5);
 
     match tokio::time::timeout(timeout_duration, connection_future).await {
@@ -49,114 +52,41 @@ async fn setup_test_db() -> Result<DatabaseConnection, sea_orm::DbErr> {
     }
 }
 
-/// Setup database with all required migrations
-async fn setup_test_db_with_schema() -> Result<DatabaseConnection, sea_orm::DbErr> {
-    let db = setup_test_db().await?;
+/// Creates the tests' database afresh, `<DATABASE_URL's database>_user_handler_tests`, as a
+/// deployment does: the read model's Postgres migrations, then its development seeds. Returns
+/// its URL.
+async fn create_schema_database(server: &DatabaseConnection) -> String {
+    let mut url = url::Url::parse(&database_url()).expect("DATABASE_URL is a URL");
+    let name = format!("{}_user_handler_tests", url.path().trim_start_matches('/'));
+    for statement in [
+        format!(r#"DROP DATABASE IF EXISTS "{name}" WITH (FORCE)"#),
+        format!(r#"CREATE DATABASE "{name}""#),
+    ] {
+        server.execute_unprepared(&statement).await.unwrap();
+    }
+    url.set_path(&name);
+    let db = Database::connect(url.as_str()).await.unwrap();
 
-    // Read and execute migrations
-    let migrations_dir = PathBuf::from("/Users/nikhilsharma/code/testing-setup/migrations");
-
-    // Execute migrations in order
-    let migration_files = vec![
-        "001_create_users_table.sql",
-        "004_create_asset_table.sql",
-        "006_create_markets_table.sql",
-        "003_create_events_table.sql",
-        "005_create_deposit_withdraw_table.sql",
-        "007_create_user_favorite_markets_table.sql",
-    ];
-
-    for migration_file in migration_files {
-        let migration_path = migrations_dir.join(migration_file);
-        if migration_path.exists() {
-            let mut sql = fs::read_to_string(&migration_path).map_err(|e| {
-                sea_orm::DbErr::Custom(format!(
-                    "Failed to read migration {}: {}",
-                    migration_file, e
-                ))
-            })?;
-
-            // Fix TIMESTAMP (without timezone) to TIMESTAMPTZ for created_at columns to match SeaORM expectations
-            // This is needed because SeaORM expects TIMESTAMPTZ when using DateTime<Utc>
-            // Only replace TIMESTAMP that's not already TIMESTAMPTZ or TIMESTAMP WITH TIME ZONE
-            sql = sql.replace(
-                "created_at TIMESTAMP DEFAULT",
-                "created_at TIMESTAMPTZ DEFAULT",
-            );
-            sql = sql.replace("created_at TIMESTAMP,", "created_at TIMESTAMPTZ,");
-
-            // Execute the entire migration file as one statement
-            // PostgreSQL can handle multiple statements separated by semicolons
-            // This is necessary because INSERT statements with VALUES can span multiple lines
-            if let Err(e) = db.execute_unprepared(&sql).await {
-                // Ignore "already exists" errors for idempotency (tables, indexes, etc.)
-                let error_str = e.to_string();
-                if error_str.contains("syntax error") || error_str.contains("unterminated") {
-                    // Syntax and parse errors should be escalated - they indicate real problems
-                    eprintln!(
-                        "ERROR: Migration {} has syntax/parse error: {}",
-                        migration_file, e
-                    );
-                } else if !error_str.contains("already exists")
-                    && !error_str.contains("duplicate")
-                    && !error_str.contains("does not exist")
-                {
-                    // Only warn on non-idempotency errors
-                    eprintln!("Warning: Migration {} failed: {}", migration_file, e);
-                }
-            }
+    let readmodel = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../readmodel");
+    let mut scripts: Vec<_> = fs::read_dir(readmodel.join("migrations/postgres"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.to_string_lossy().ends_with(".up.sql"))
+        .collect();
+    scripts.sort();
+    scripts.push(readmodel.join("seeds/development.sql"));
+    for script in scripts {
+        let sql = fs::read_to_string(&script).unwrap();
+        if let Err(error) = db.execute_unprepared(&sql).await {
+            panic!("{}: {error}", script.display());
         }
     }
 
-    // Explicitly ensure reference data (assets and markets) is populated
-    // This is critical because tests depend on this data existing
-    // We run these INSERTs separately to ensure they execute even if migration had errors
-    ensure_reference_data(&db).await;
-
-    Ok(db)
-}
-
-/// Ensure reference data (assets and markets) is populated
-/// This is called after migrations to guarantee the data exists for tests
-async fn ensure_reference_data(db: &DatabaseConnection) {
-    // Insert assets if they don't exist
-    let assets_insert = r#"
-        INSERT INTO assets (asset_id, name, native_scale, active) VALUES
-        (1, 'USD', 1000000, true),
-        (2, 'BTC', 100000000, true),
-        (3, 'ETH', 1000000000000000000, true)
-        ON CONFLICT (asset_id) DO NOTHING;
-    "#;
-
-    if let Err(e) = db.execute_unprepared(assets_insert).await {
-        eprintln!("Warning: Failed to ensure assets data: {}", e);
-    }
-
-    // Insert markets if they don't exist
-    let markets_insert = r#"
-        INSERT INTO markets (market_id, base_asset_name, quote_asset_name, base_asset, quote_asset, base_scale_k, quote_scale_k, taker_fee, maker_fee, slippage, active) VALUES
-        ((1 << 16) | 2, 'BTC', 'USD', 2, 1, 10000, 100, 0, 0, 150, true),
-        ((1 << 16) | 3, 'ETH', 'USD', 3, 1, 1000000000000000, 100, 0, 0, 150, true)
-        ON CONFLICT (market_id) DO NOTHING;
-    "#;
-
-    if let Err(e) = db.execute_unprepared(markets_insert).await {
-        eprintln!("Warning: Failed to ensure markets data: {}", e);
-    }
-}
-
-/// Require database connection, return None if unavailable (test will be skipped)
-async fn require_database() -> Option<DatabaseConnection> {
-    setup_test_db_with_schema().await.ok()
-}
-
-/// Set up the tables exercised by the latest-event repository tests.
-async fn require_latest_event_test_database() -> Option<DatabaseConnection> {
-    let db = require_database().await?;
-    let schema = r#"
-        CREATE SCHEMA IF NOT EXISTS trading;
-
-        CREATE TABLE IF NOT EXISTS trading.orders_events (
+    // PostgresTradingRepository still ranks the raw events of these tables, which the read
+    // model's schema does not have.
+    db.execute_unprepared(
+        r#"
+        CREATE TABLE trading.orders_events (
             id BIGSERIAL PRIMARY KEY,
             market_id INTEGER NOT NULL,
             order_order_id BIGINT NOT NULL,
@@ -171,7 +101,7 @@ async fn require_latest_event_test_database() -> Option<DatabaseConnection> {
             created_at TIMESTAMP NULL
         );
 
-        CREATE TABLE IF NOT EXISTS trading.balances_events (
+        CREATE TABLE trading.balances_events (
             id BIGSERIAL PRIMARY KEY,
             user_id BIGINT NOT NULL,
             asset_id INTEGER NOT NULL,
@@ -181,14 +111,22 @@ async fn require_latest_event_test_database() -> Option<DatabaseConnection> {
             timestamp BIGINT NOT NULL,
             created_at TIMESTAMP NULL
         );
-    "#;
+        "#,
+    )
+    .await
+    .unwrap();
+    url.into()
+}
 
-    if let Err(error) = db.execute_unprepared(schema).await {
-        eprintln!("Skipping latest-event tests: failed to create test tables: {error}");
-        return None;
-    }
-
-    Some(db)
+/// A connection to the tests' database, which the first caller creates; None, so that the test
+/// is skipped, when no Postgres server answers at DATABASE_URL.
+async fn require_database() -> Option<DatabaseConnection> {
+    static SCHEMA_DATABASE: OnceCell<String> = OnceCell::const_new();
+    let server = setup_test_db().await.ok()?;
+    let url = SCHEMA_DATABASE
+        .get_or_init(|| create_schema_database(&server))
+        .await;
+    Some(Database::connect(url).await.unwrap())
 }
 
 /// Cleanup test data for a specific user
@@ -205,14 +143,6 @@ async fn cleanup_test_data(db: &DatabaseConnection, user_id: u64) {
         ),
         format!(
             "DELETE FROM trading.balances_events WHERE user_id = {}",
-            user_id
-        ),
-        format!(
-            "DELETE FROM trading.deposits_events WHERE user_id = {}",
-            user_id
-        ),
-        format!(
-            "DELETE FROM trading.withdrawals_events WHERE user_id = {}",
             user_id
         ),
     ];
@@ -814,7 +744,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_postgres_order_queries_use_latest_event_per_order() {
-        let Some(db) = require_latest_event_test_database().await else {
+        let Some(db) = require_database().await else {
             return;
         };
         let user_id = uuid_to_u64(create_test_user()) & i64::MAX as u64;
@@ -888,7 +818,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_postgres_open_orders_exclude_partially_filled_ioc() {
-        let Some(db) = require_latest_event_test_database().await else {
+        let Some(db) = require_database().await else {
             return;
         };
         let user_id = uuid_to_u64(create_test_user()) & i64::MAX as u64;
@@ -919,7 +849,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_postgres_balances_use_latest_event_per_asset() {
-        let Some(db) = require_latest_event_test_database().await else {
+        let Some(db) = require_database().await else {
             return;
         };
         let user_id = uuid_to_u64(create_test_user()) & i64::MAX as u64;
@@ -951,7 +881,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "required test schema is unavailable in CI"]
     async fn test_get_balances_success() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
@@ -1015,7 +944,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "required test schema is unavailable in CI"]
     async fn test_get_balances_empty() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
@@ -1057,7 +985,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "required test schema is unavailable in CI"]
     async fn test_get_open_orders_success() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
@@ -1150,7 +1077,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "required test schema is unavailable in CI"]
     async fn test_get_open_orders_pagination() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
@@ -1221,7 +1147,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "required test schema is unavailable in CI"]
     async fn test_get_open_orders_all_statuses() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
@@ -1387,7 +1312,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "required test schema is unavailable in CI"]
     async fn test_get_order_history_success() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
@@ -1491,7 +1415,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "required test schema is unavailable in CI"]
     async fn test_get_order_history_with_rejected() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
@@ -1638,7 +1561,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "required test schema is unavailable in CI"]
     async fn test_get_open_orders_with_market_id_filter() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
@@ -1748,7 +1670,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "required test schema is unavailable in CI"]
     async fn test_get_order_history_with_market_id_filter() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
@@ -1858,7 +1779,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "required test schema is unavailable in CI"]
     async fn test_get_favorite_markets_success() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
@@ -1914,7 +1834,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "required test schema is unavailable in CI"]
     async fn test_get_favorite_markets_empty() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
@@ -1955,7 +1874,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "required test schema is unavailable in CI"]
     async fn test_toggle_favorite_market_add() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
@@ -2006,7 +1924,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "required test schema is unavailable in CI"]
     async fn test_toggle_favorite_market_remove() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable

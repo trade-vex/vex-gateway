@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = [ "crates/bin" , "crates/tests" , "crates/libs/lib-api", "crates/libs/lib-server", "crates/libs/lib-config", "crates/libs/lib-auth", "crates/libs/lib-db", "crates/libs/lib-middleware", "crates/libs/lib-utils", "crates/libs/lib-core"]
+members = [ "crates/bin" , "crates/tests" , "crates/libs/lib-api", "crates/libs/lib-server", "crates/libs/lib-config", "crates/libs/lib-auth", "crates/libs/lib-db", "crates/libs/lib-middleware", "crates/libs/lib-utils", "crates/libs/lib-core", "readmodel/seeds", "readmodel/tests/traffic"]
 
 [workspace.dependencies]
 # No HTTP/2, TLS or body (de)compression: the gateway listens on plain HTTP/1.1 behind the load

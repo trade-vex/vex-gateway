@@ -1,0 +1,17 @@
+# The GitHub Actions cache for the layers of the images compose.yml builds, which run.py adds when
+# the Actions runtime is exposed to it (ci.yml "Read model"). The core's and the traffic driver's
+# scopes name the pinned vex-core rev, so re-pinning vex-core starts them afresh. A failed export
+# costs the next run its cache, not this run its result.
+services:
+  connect:
+    build:
+      cache_from: ["type=gha,scope=readmodel-connect"]
+      cache_to: ["type=gha,scope=readmodel-connect,mode=max,ignore-error=true"]
+  core:
+    build:
+      cache_from: ["type=gha,scope=readmodel-core-${CORE_REV:?}"]
+      cache_to: ["type=gha,scope=readmodel-core-${CORE_REV:?},mode=max,ignore-error=true"]
+  traffic:
+    build:
+      cache_from: ["type=gha,scope=readmodel-traffic-${CORE_REV:?}"]
+      cache_to: ["type=gha,scope=readmodel-traffic-${CORE_REV:?},mode=max,ignore-error=true"]
