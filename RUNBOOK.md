@@ -364,7 +364,7 @@ The error gives the entry's position in the list, never its value; empty items o
 comma-separated value are skipped and not counted.
 
 With `APP_ENV=production` the list is required: the gateway refuses to start when it is empty.
-Development and testing default to an empty list, so the TCP peer is the client.
+Development defaults to an empty list, so the TCP peer is the client.
 
 Production runs behind an AWS Application Load Balancer (ALB):
 
