@@ -1862,6 +1862,55 @@ mod tests {
         cleanup_test_data(&db, user_id).await;
     }
 
+    /// A market above `i32::MAX` (a quote asset from 32768 up), stored negative with the same bits
+    /// as the schema says, is listed among the favourites it was added to.
+    #[tokio::test]
+    async fn favourites_round_trip_a_market_id_above_i32_max() {
+        let Some(db) = require_database().await else {
+            return;
+        };
+        let user = database_test_user(101_017);
+        let user_id = uuid_to_u64(user);
+        cleanup_test_data(&db, user_id).await;
+        // Base asset 2, quote asset 32768.
+        let market_id: u32 = 0x8000_0002;
+        let quote_asset = 0x8000_u16 as i16;
+        db.execute_unprepared(&format!(
+            "INSERT INTO assets (asset_id, native_scale) VALUES ({quote_asset}, 1) \
+             ON CONFLICT DO NOTHING; \
+             INSERT INTO markets (market_id, base_asset, quote_asset, quote_scale_k) \
+             VALUES ({}, 2, {quote_asset}, 1) ON CONFLICT DO NOTHING",
+            market_id as i32
+        ))
+        .await
+        .unwrap();
+        let trading_repo: Arc<dyn TradingRepository> =
+            Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
+
+        let toggled = toggle_favorite_market(
+            create_authenticated_user_id(user),
+            web::Json(ToggleFavoriteMarketRequest { market_id }),
+            web::Data::new(trading_repo.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(toggled.status(), 200);
+
+        let favorites = get_favorite_markets(
+            create_authenticated_user_id(user),
+            web::Data::new(trading_repo),
+        )
+        .await
+        .unwrap();
+        let body = actix_web::body::to_bytes(favorites.into_body())
+            .await
+            .unwrap();
+        let favorites: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(favorites["market_ids"], serde_json::json!([market_id]));
+
+        cleanup_test_data(&db, user_id).await;
+    }
+
     /// A favourite of a market the read model does not list is a 404, not a server error.
     #[tokio::test]
     async fn toggling_an_unknown_market_is_not_found() {

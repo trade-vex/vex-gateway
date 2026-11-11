@@ -632,17 +632,10 @@ pub async fn get_favorite_markets(
 
     match trading_repo.get_user_favorite_markets(user_id).await {
         Ok(favorites) => {
+            // Stored with the same bits in an INTEGER (schema: markets.market_id).
             let market_ids: Vec<u32> = favorites
                 .into_iter()
-                .filter_map(|fav| {
-                    u32::try_from(fav.market_id).ok().or_else(|| {
-                        tracing::warn!(
-                            market_id = fav.market_id,
-                            "Invalid market_id (negative value), skipping"
-                        );
-                        None
-                    })
-                })
+                .map(|fav| fav.market_id as u32)
                 .collect();
 
             let response = FavoriteMarketsListResponse { market_ids };

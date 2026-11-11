@@ -575,8 +575,7 @@ fn parse_order_id(order_id: &str) -> Result<u64, std::num::ParseIntError> {
 /// Place a new order in the market
 ///
 /// Submits a new order to the VEX Core matching engine for processing.
-/// The market ID is checked for the database storage range, then the order is sent
-/// asynchronously and tracked using a correlation ID.
+/// The order is sent asynchronously and tracked using a correlation ID.
 ///
 /// # Endpoint
 /// `POST /api/order`
@@ -689,20 +688,6 @@ pub async fn place_order(
         time_in_force,
         order_type,
     } = order_data;
-
-    // Validate market_id fits in i32 (database storage type)
-    if market_id > i32::MAX as u32 {
-        return HttpResponse::BadRequest().json(OrderResponse {
-            order_id: 0,
-            client_order_id: 0,
-            status: "rejected".to_string(),
-            message: format!(
-                "market_id {} exceeds maximum allowed value {}",
-                market_id,
-                i32::MAX
-            ),
-        });
-    }
 
     if let Err(message) = validate_order_inputs(price, volume, time_in_force, &order_type) {
         return HttpResponse::BadRequest().json(OrderResponse {
