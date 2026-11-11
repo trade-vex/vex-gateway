@@ -555,10 +555,6 @@ fn link_lost_outcome(client_order_id: u64) -> IdempotentOrderOutcome {
     }
 }
 
-fn parse_order_id(order_id: &str) -> Result<u64, std::num::ParseIntError> {
-    order_id.parse()
-}
-
 // API Handlers
 
 /// Place a new order in the market
@@ -801,8 +797,6 @@ pub async fn place_order(
             release_reason(&e),
         )
         .await;
-        // PR #92 distinguishes engine back-pressure (503) from a hard send failure (500);
-        // PR #105's unconditional 503 would mislabel the latter.
         return send_failure_response(&e, "order", 0, client_order_id);
     }
 
@@ -817,11 +811,6 @@ pub async fn place_order(
                 start.elapsed(),
             );
 
-            // PR #83 removed the gateway-side cancelled-order insert: order history is
-            // written by the Kafka consumer, and the duplicate writer used a status
-            // vocabulary no read query matched.
-            // PR #81: an engine rejection must not be a 200. PR #105 records the outcome
-            // for idempotent replays, so it has to record the SAME status the client sees.
             settle_idempotent_order(
                 &idempotency_store,
                 user_id,
@@ -963,7 +952,7 @@ pub async fn cancel_order(
     let cancel_data = cancel_data.into_inner();
 
     // Parse order_id from string to u64
-    let order_id = match parse_order_id(&cancel_data.order_id) {
+    let order_id = match cancel_data.order_id.parse::<u64>() {
         Ok(id) => id,
         Err(e) => {
             error!(
@@ -1728,12 +1717,6 @@ mod tests {
         let result = validate_order_inputs(100, 1, TimeInForce::Gtc, &OrderType::Limit);
 
         assert_eq!(result, Ok(()));
-    }
-
-    #[test]
-    fn parses_cancel_order_id() {
-        assert_eq!(parse_order_id("18446744073709551615"), Ok(u64::MAX));
-        assert!(parse_order_id("not-an-order-id").is_err());
     }
 
     #[test]

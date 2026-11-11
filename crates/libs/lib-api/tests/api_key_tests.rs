@@ -14,8 +14,9 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use lib_api::handlers::api_key::{
-    ApiKeyListResponse, ApiKeyResponse, CreateApiKeyRequest, UpdateApiKeyRequest, create_api_key,
-    delete_api_key, get_api_key, list_api_keys, toggle_api_key, update_api_key,
+    ApiKeyListResponse, ApiKeyResponse, CreateApiKeyRequest, ToggleApiKeyRequest,
+    UpdateApiKeyRequest, create_api_key, delete_api_key, get_api_key, list_api_keys,
+    toggle_api_key, update_api_key,
 };
 use lib_auth::middleware::jwt_auth::AuthenticatedUser;
 use lib_middleware::models::api_key::NewApiKey;
@@ -341,7 +342,7 @@ async fn test_delete_api_key_success() {
     assert!(repo.find_by_id(api_key_id).await.unwrap().is_none());
     let toggle = toggle_api_key(
         web::Path::from(api_key_id),
-        web::Json(serde_json::json!({"enabled": true})),
+        web::Json(ToggleApiKeyRequest { enabled: true }),
         repo.clone(),
         None,
         user.clone(),
@@ -366,7 +367,7 @@ async fn test_toggle_api_key_disable_then_enable() {
     ] {
         let response = toggle_api_key(
             web::Path::from(api_key_id),
-            web::Json(serde_json::json!({ "enabled": enabled })),
+            web::Json(ToggleApiKeyRequest { enabled }),
             repo.clone(),
             None,
             user.clone(),
@@ -451,7 +452,7 @@ async fn another_users_key_is_forbidden_on_update_delete_and_toggle() {
         .unwrap();
     let toggle = toggle_api_key(
         web::Path::from(id),
-        web::Json(serde_json::json!({"enabled": false})),
+        web::Json(ToggleApiKeyRequest { enabled: false }),
         repo.clone(),
         None,
         other.clone(),
