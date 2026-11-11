@@ -413,10 +413,17 @@ async fn complete_idempotent_order(
     user_id: u64,
     idempotency_key: &str,
     fingerprint: &str,
+    nonce: u64,
     outcome: IdempotentOrderOutcome,
 ) -> HttpResponse {
     let result = store
-        .complete(user_id, idempotency_key, fingerprint, outcome.clone())
+        .complete(
+            user_id,
+            idempotency_key,
+            fingerprint,
+            nonce,
+            outcome.clone(),
+        )
         .await;
     record_idempotent_completion(result, outcome.client_order_id, idempotency_key);
     response_from_outcome(outcome)
@@ -431,6 +438,7 @@ async fn release_idempotency_claim(
     idempotency_key: &str,
     fingerprint: &str,
     client_order_id: u64,
+    nonce: u64,
     reason: ReleaseReason,
 ) {
     match store
@@ -439,6 +447,7 @@ async fn release_idempotency_claim(
             idempotency_key,
             fingerprint,
             client_order_id,
+            nonce,
             reason,
         )
         .await
@@ -520,6 +529,7 @@ async fn settle_idempotent_order(
     user_id: u64,
     idempotency_key: &str,
     fingerprint: &str,
+    nonce: u64,
     engine_status: Status,
     outcome: IdempotentOrderOutcome,
 ) -> HttpResponse {
@@ -530,12 +540,13 @@ async fn settle_idempotent_order(
             idempotency_key,
             fingerprint,
             outcome.client_order_id,
+            nonce,
             ReleaseReason::Busy,
         )
         .await;
         return engine_busy_response(0, outcome.client_order_id);
     }
-    complete_idempotent_order(store, user_id, idempotency_key, fingerprint, outcome).await
+    complete_idempotent_order(store, user_id, idempotency_key, fingerprint, nonce, outcome).await
 }
 
 /// The answer to an order sent on a link that was lost before the engine answered. The engine may
@@ -719,11 +730,11 @@ pub async fn place_order(
     // Generate unique client order ID for correlation
     let client_order_id = generate_client_order_id();
 
-    match idempotency_store
+    let nonce = match idempotency_store
         .claim(user_id, &idempotency_key, &fingerprint, client_order_id)
         .await
     {
-        Ok(OrderClaim::Acquired) => {}
+        Ok(OrderClaim::Acquired { nonce }) => nonce,
         Ok(OrderClaim::Completed(outcome)) => return response_from_outcome(outcome),
         Ok(OrderClaim::InFlight { client_order_id }) => {
             return await_in_flight_order(
@@ -755,7 +766,7 @@ pub async fn place_order(
                     .to_string(),
             });
         }
-    }
+    };
 
     // Register this request - get receiver for response
     let response_receiver = correlation_service.register_request(client_order_id);
@@ -798,6 +809,7 @@ pub async fn place_order(
             &idempotency_key,
             &fingerprint,
             client_order_id,
+            nonce,
             release_reason(&e),
         )
         .await;
@@ -827,6 +839,7 @@ pub async fn place_order(
                 user_id,
                 &idempotency_key,
                 &fingerprint,
+                nonce,
                 response.status,
                 IdempotentOrderOutcome {
                     http_status: http_status.as_u16(),
@@ -853,6 +866,7 @@ pub async fn place_order(
                 user_id,
                 &idempotency_key,
                 &fingerprint,
+                nonce,
                 IdempotentOrderOutcome {
                     http_status: StatusCode::REQUEST_TIMEOUT.as_u16(),
                     order_id: 0,
@@ -882,6 +896,7 @@ pub async fn place_order(
                 user_id,
                 &idempotency_key,
                 &fingerprint,
+                nonce,
                 link_lost_outcome(client_order_id),
             )
             .await
@@ -1434,6 +1449,14 @@ mod tests {
         }
     }
 
+    /// The nonce of an `Acquired` claim; any other claim fails the test.
+    fn acquired(claim: OrderClaim) -> u64 {
+        match claim {
+            OrderClaim::Acquired { nonce } => nonce,
+            other => panic!("expected Acquired, got {other:?}"),
+        }
+    }
+
     fn engine_outcome_record(client_order_id: u64, status: &str) -> IdempotentOrderOutcome {
         IdempotentOrderOutcome {
             http_status: StatusCode::OK.as_u16(),
@@ -1452,12 +1475,11 @@ mod tests {
         let user_id = generate_client_order_id();
         let key = format!("busy-answer-{}", generate_client_order_id());
         let client_order_id = generate_client_order_id();
-        assert_eq!(
+        let nonce = acquired(
             store
                 .claim(user_id, &key, "payload", client_order_id)
                 .await
                 .unwrap(),
-            OrderClaim::Acquired
         );
 
         let response = settle_idempotent_order(
@@ -1465,6 +1487,7 @@ mod tests {
             user_id,
             &key,
             "payload",
+            nonce,
             Status::Busy,
             engine_outcome_record(client_order_id, "Busy"),
         )
@@ -1477,12 +1500,11 @@ mod tests {
                 .contains_key(actix_web::http::header::RETRY_AFTER)
         );
         let retry_client_order_id = generate_client_order_id();
-        assert_eq!(
+        let retry_nonce = acquired(
             store
                 .claim(user_id, &key, "payload", retry_client_order_id)
                 .await
                 .unwrap(),
-            OrderClaim::Acquired
         );
         store
             .release(
@@ -1490,6 +1512,7 @@ mod tests {
                 &key,
                 "payload",
                 retry_client_order_id,
+                retry_nonce,
                 ReleaseReason::Busy,
             )
             .await
@@ -1504,10 +1527,12 @@ mod tests {
         let user_id = generate_client_order_id();
         let key = format!("final-answer-{}", generate_client_order_id());
         let client_order_id = generate_client_order_id();
-        store
-            .claim(user_id, &key, "payload", client_order_id)
-            .await
-            .unwrap();
+        let nonce = acquired(
+            store
+                .claim(user_id, &key, "payload", client_order_id)
+                .await
+                .unwrap(),
+        );
         let outcome = engine_outcome_record(client_order_id, "Placed");
 
         let response = settle_idempotent_order(
@@ -1515,6 +1540,7 @@ mod tests {
             user_id,
             &key,
             "payload",
+            nonce,
             Status::Placed,
             outcome.clone(),
         )
@@ -1538,12 +1564,11 @@ mod tests {
         let user_id = generate_client_order_id();
         let key = format!("released-wait-{}", generate_client_order_id());
         let client_order_id = generate_client_order_id();
-        assert_eq!(
+        let nonce = acquired(
             store
                 .claim(user_id, &key, "payload", client_order_id)
                 .await
                 .unwrap(),
-            OrderClaim::Acquired
         );
         // The engine turned the owner away, so the owner releases its claim.
         settle_idempotent_order(
@@ -1551,6 +1576,7 @@ mod tests {
             user_id,
             &key,
             "payload",
+            nonce,
             Status::Busy,
             engine_outcome_record(client_order_id, "Busy"),
         )
@@ -1569,12 +1595,11 @@ mod tests {
         );
         assert_eq!(body_message(response).await, ENGINE_BUSY_MESSAGE);
         let retry_client_order_id = generate_client_order_id();
-        assert_eq!(
+        let retry_nonce = acquired(
             store
                 .claim(user_id, &key, "payload", retry_client_order_id)
                 .await
                 .unwrap(),
-            OrderClaim::Acquired
         );
         store
             .release(
@@ -1582,6 +1607,7 @@ mod tests {
                 &key,
                 "payload",
                 retry_client_order_id,
+                retry_nonce,
                 ReleaseReason::Busy,
             )
             .await
@@ -1607,12 +1633,11 @@ mod tests {
         let user_id = generate_client_order_id();
         let key = format!("unavailable-wait-{}", generate_client_order_id());
         let client_order_id = generate_client_order_id();
-        assert_eq!(
+        let nonce = acquired(
             store
                 .claim(user_id, &key, "payload", client_order_id)
                 .await
                 .unwrap(),
-            OrderClaim::Acquired
         );
         // The owner's publish failed because no core is connected, so it releases its claim.
         release_idempotency_claim(
@@ -1621,6 +1646,7 @@ mod tests {
             &key,
             "payload",
             client_order_id,
+            nonce,
             release_reason(&GatewayError::NotConnected),
         )
         .await;

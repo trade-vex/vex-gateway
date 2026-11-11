@@ -32,8 +32,14 @@ pub struct IdempotentOrderOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OrderClaim {
-    Acquired,
-    InFlight { client_order_id: u64 },
+    /// The key is this attempt's: `nonce` tells its record from an identical one another gateway
+    /// wrote for the same retry, and `complete` and `release` need it.
+    Acquired {
+        nonce: u64,
+    },
+    InFlight {
+        client_order_id: u64,
+    },
     Completed(IdempotentOrderOutcome),
     PayloadMismatch,
 }
@@ -65,6 +71,7 @@ enum StoredOrderAttempt {
     InFlight {
         fingerprint: String,
         client_order_id: u64,
+        nonce: u64,
     },
     Completed {
         fingerprint: String,
@@ -99,9 +106,11 @@ impl OrderIdempotencyStore {
         client_order_id: u64,
     ) -> Result<OrderClaim, OrderIdempotencyError> {
         let key = redis_key(user_id, idempotency_key);
+        let nonce: u64 = rand::random();
         let attempt = StoredOrderAttempt::InFlight {
             fingerprint: fingerprint.to_owned(),
             client_order_id,
+            nonce,
         };
         let bytes = serialize(&attempt)?;
         let released_busy = serialize(&StoredOrderAttempt::Released(ReleaseReason::Busy))?;
@@ -134,34 +143,20 @@ impl OrderIdempotencyStore {
             let acquired = match outcome {
                 Ok(acquired) => acquired == 1,
                 Err(error) => {
-                    // The connection can drop AFTER Redis executed the SET but before the reply
-                    // reaches us. Propagating here stranded our own claim for the full 24h TTL:
-                    // every retry then saw InFlight, waited, and returned 408, with no handler
-                    // left alive to complete it (finding G4-1).
-                    //
-                    // Read the key back instead. If it holds THIS attempt -- same fingerprint and
-                    // client_order_id -- then our SET did land and the claim is ours to continue
-                    // with. Any other state (or a failed read-back) propagates as before.
-                    // Deliberately NOT treated as "our claim landed".
-                    //
-                    // A record matching our fingerprint and client_order_id does not prove we
-                    // wrote it: client_order_id combines a timestamp with a PROCESS-LOCAL counter
-                    // and carries no gateway identity (correlation.rs), so a second gateway
-                    // handling the same retry of the same request can mint an identical record.
-                    // Claiming Acquired on that evidence would let both publish -- a duplicate
-                    // order, which is worse than the stranded claim this recovery was meant to
-                    // avoid. Proving ownership needs a per-attempt nonce carried through
-                    // complete/release; until then, report the state we find and fail safe. A
-                    // release marker is not our claim either.
+                    // The connection can drop after Redis executed the SET but before the reply
+                    // reaches us, so read the key back: if it holds this attempt's own record,
+                    // the claim is ours. Any other state, or a failed read-back, is reported.
                     let existing = self.lookup_state(&key).await.ok().flatten();
                     return existing
-                        .and_then(|existing| claim_from_state(existing, fingerprint))
+                        .and_then(|existing| {
+                            read_back_claim(existing, fingerprint, client_order_id, nonce)
+                        })
                         .ok_or_else(|| error.into());
                 }
             };
 
             if acquired {
-                return Ok(OrderClaim::Acquired);
+                return Ok(OrderClaim::Acquired { nonce });
             }
 
             // Freed between the two reads (expired or released): try again.
@@ -182,12 +177,14 @@ impl OrderIdempotencyStore {
         user_id: u64,
         idempotency_key: &str,
         fingerprint: &str,
+        nonce: u64,
         outcome: IdempotentOrderOutcome,
     ) -> Result<bool, OrderIdempotencyError> {
         let key = redis_key(user_id, idempotency_key);
         let expected = serialize(&StoredOrderAttempt::InFlight {
             fingerprint: fingerprint.to_owned(),
             client_order_id: outcome.client_order_id,
+            nonce,
         })?;
         let completed = serialize(&StoredOrderAttempt::Completed {
             fingerprint: fingerprint.to_owned(),
@@ -223,12 +220,14 @@ impl OrderIdempotencyStore {
         idempotency_key: &str,
         fingerprint: &str,
         client_order_id: u64,
+        nonce: u64,
         reason: ReleaseReason,
     ) -> Result<bool, OrderIdempotencyError> {
         let key = redis_key(user_id, idempotency_key);
         let expected = serialize(&StoredOrderAttempt::InFlight {
             fingerprint: fingerprint.to_owned(),
             client_order_id,
+            nonce,
         })?;
         let released = serialize(&StoredOrderAttempt::Released(reason))?;
         let script = Script::new(
@@ -303,6 +302,32 @@ impl OrderIdempotencyStore {
     }
 }
 
+/// The claim of an attempt that could not tell whether its claim landed, from the key's state read
+/// back: its own only if the record is its own, nonce included. The same fingerprint and
+/// client_order_id are no proof: client_order_id carries no gateway identity (correlation.rs), so
+/// a second gateway handling the same retry can write an identical record, and taking it for ours
+/// would let both publish.
+fn read_back_claim(
+    existing: StoredOrderAttempt,
+    fingerprint: &str,
+    client_order_id: u64,
+    nonce: u64,
+) -> Option<OrderClaim> {
+    match existing {
+        StoredOrderAttempt::InFlight {
+            fingerprint: stored_fingerprint,
+            client_order_id: stored_client_order_id,
+            nonce: stored_nonce,
+        } if stored_fingerprint == fingerprint
+            && stored_client_order_id == client_order_id
+            && stored_nonce == nonce =>
+        {
+            Some(OrderClaim::Acquired { nonce })
+        }
+        other => claim_from_state(other, fingerprint),
+    }
+}
+
 /// The claim a request gets from the key's current state, or `None` for a release marker, which
 /// leaves the key free.
 fn claim_from_state(existing: StoredOrderAttempt, fingerprint: &str) -> Option<OrderClaim> {
@@ -310,6 +335,7 @@ fn claim_from_state(existing: StoredOrderAttempt, fingerprint: &str) -> Option<O
         StoredOrderAttempt::InFlight {
             fingerprint: stored_fingerprint,
             client_order_id,
+            ..
         } if stored_fingerprint == fingerprint => Some(OrderClaim::InFlight { client_order_id }),
         StoredOrderAttempt::Completed {
             fingerprint: stored_fingerprint,
@@ -364,6 +390,14 @@ mod tests {
         }
     }
 
+    /// The nonce of an `Acquired` claim; any other claim fails the test.
+    fn acquired(claim: OrderClaim) -> u64 {
+        match claim {
+            OrderClaim::Acquired { nonce } => nonce,
+            other => panic!("expected Acquired, got {other:?}"),
+        }
+    }
+
     fn outcome(client_order_id: u64) -> IdempotentOrderOutcome {
         IdempotentOrderOutcome {
             http_status: 200,
@@ -382,16 +416,15 @@ mod tests {
         let client_order_id = generate_client_order_id();
         let publishes = AtomicUsize::new(0);
 
-        assert_eq!(
+        let nonce = acquired(
             store
                 .claim(user_id, &key, "payload", client_order_id)
                 .await
                 .unwrap(),
-            OrderClaim::Acquired
         );
         publishes.fetch_add(1, Ordering::SeqCst);
         assert!(store
-            .complete(user_id, &key, "payload", outcome(client_order_id))
+            .complete(user_id, &key, "payload", nonce, outcome(client_order_id))
             .await
             .unwrap());
 
@@ -423,12 +456,12 @@ mod tests {
                     .await
                     .unwrap()
                 {
-                    OrderClaim::Acquired => {
+                    OrderClaim::Acquired { nonce } => {
                         publishes.fetch_add(1, Ordering::SeqCst);
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         let result = outcome(client_order_id);
                         store
-                            .complete(user_id, &key, "payload", result.clone())
+                            .complete(user_id, &key, "payload", nonce, result.clone())
                             .await
                             .unwrap();
                         result
@@ -462,20 +495,18 @@ mod tests {
         let second_id = generate_client_order_id();
         let publishes = AtomicUsize::new(0);
 
-        assert_eq!(
+        acquired(
             store
                 .claim(user_id, "different-a", "payload", first_id)
                 .await
                 .unwrap(),
-            OrderClaim::Acquired
         );
         publishes.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(
+        acquired(
             store
                 .claim(user_id, "different-b", "payload", second_id)
                 .await
                 .unwrap(),
-            OrderClaim::Acquired
         );
         publishes.fetch_add(1, Ordering::SeqCst);
         assert_eq!(publishes.load(Ordering::SeqCst), 2);
@@ -487,20 +518,18 @@ mod tests {
         let user_id = generate_client_order_id();
         let key = format!("expiry-key-{}", generate_client_order_id());
 
-        assert_eq!(
+        acquired(
             store
                 .claim(user_id, &key, "payload", generate_client_order_id())
                 .await
                 .unwrap(),
-            OrderClaim::Acquired
         );
         tokio::time::sleep(Duration::from_millis(1_100)).await;
-        assert_eq!(
+        acquired(
             store
                 .claim(user_id, &key, "payload", generate_client_order_id())
                 .await
                 .unwrap(),
-            OrderClaim::Acquired
         );
     }
 
@@ -512,23 +541,24 @@ mod tests {
             let key = format!("release-key-{}", generate_client_order_id());
             let first_id = generate_client_order_id();
 
-            assert_eq!(
+            let nonce = acquired(
                 store
                     .claim(user_id, &key, "payload", first_id)
                     .await
                     .unwrap(),
-                OrderClaim::Acquired
             );
             assert!(store
-                .release(user_id, &key, "payload", first_id, reason)
+                .release(user_id, &key, "payload", first_id, nonce, reason)
                 .await
                 .unwrap());
-            assert_eq!(
-                store
-                    .claim(user_id, &key, "payload", generate_client_order_id())
-                    .await
-                    .unwrap(),
-                OrderClaim::Acquired,
+            assert!(
+                matches!(
+                    store
+                        .claim(user_id, &key, "payload", generate_client_order_id())
+                        .await
+                        .unwrap(),
+                    OrderClaim::Acquired { .. }
+                ),
                 "a {reason:?} release marker must leave the key free"
             );
         }
@@ -541,12 +571,11 @@ mod tests {
             let user_id = generate_client_order_id();
             let key = format!("released-key-{}", generate_client_order_id());
             let first_id = generate_client_order_id();
-            assert_eq!(
+            let nonce = acquired(
                 store
                     .claim(user_id, &key, "payload", first_id)
                     .await
                     .unwrap(),
-                OrderClaim::Acquired
             );
 
             // A same-key request is already waiting when the engine turns the attempt away.
@@ -561,7 +590,7 @@ mod tests {
             };
             tokio::time::sleep(Duration::from_millis(50)).await;
             assert!(store
-                .release(user_id, &key, "payload", first_id, reason)
+                .release(user_id, &key, "payload", first_id, nonce, reason)
                 .await
                 .unwrap());
 
@@ -580,12 +609,11 @@ mod tests {
                 "release marker TTL {marker_ttl}"
             );
             // The marker never blocks the retry: it claims the key as if it were free.
-            assert_eq!(
+            acquired(
                 store
                     .claim(user_id, &key, "payload", generate_client_order_id())
                     .await
                     .unwrap(),
-                OrderClaim::Acquired
             );
         }
     }
@@ -595,12 +623,11 @@ mod tests {
         let Some(store) = store().await else { return };
         let user_id = generate_client_order_id();
         let key = format!("vanished-key-{}", generate_client_order_id());
-        assert_eq!(
+        acquired(
             store
                 .claim(user_id, &key, "payload", generate_client_order_id())
                 .await
                 .unwrap(),
-            OrderClaim::Acquired
         );
         // Eviction or failover drops the claim without a release marker: the order may have been
         // published, so the waiter must not be told to retry.
@@ -617,6 +644,30 @@ mod tests {
                 .await
                 .unwrap(),
             CompletionWait::Unresolved
+        );
+    }
+
+    /// A claim whose reply was lost is ours only if the key holds our record, nonce included: an
+    /// identical request through another gateway writes the same fingerprint and client_order_id.
+    #[test]
+    fn read_back_of_own_record_is_acquired() {
+        let record = |nonce| StoredOrderAttempt::InFlight {
+            fingerprint: "p".to_owned(),
+            client_order_id: 1,
+            nonce,
+        };
+
+        assert_eq!(
+            read_back_claim(record(7), "p", 1, 7),
+            Some(OrderClaim::Acquired { nonce: 7 })
+        );
+        assert_eq!(
+            read_back_claim(record(8), "p", 1, 7),
+            Some(OrderClaim::InFlight { client_order_id: 1 })
+        );
+        assert_eq!(
+            read_back_claim(StoredOrderAttempt::Released(ReleaseReason::Busy), "p", 1, 7),
+            None
         );
     }
 
@@ -639,12 +690,11 @@ mod tests {
         let Some(store) = store().await else { return };
         let user_id = generate_client_order_id();
         let key = format!("deadline-key-{}", generate_client_order_id());
-        assert_eq!(
+        acquired(
             store
                 .claim(user_id, &key, "payload", generate_client_order_id())
                 .await
                 .unwrap(),
-            OrderClaim::Acquired
         );
 
         // Unclamped, the 25+50+100+200 ms steps would be followed by a full 400 ms sleep,
