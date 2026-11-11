@@ -136,8 +136,7 @@ pub struct OtpConfig {
     /// How long an email-verification code is valid, in minutes.
     pub email_verification_expiry_minutes: i64,
     /// How long a password-reset code is valid, in minutes. A setting of its own: a reset code
-    /// takes over the account, and its lifetime bounds how many guesses the fixed reset-code rate
-    /// limit allows per code, so tuning email verification must not lengthen it.
+    /// takes over the account, so tuning email verification must not lengthen it.
     pub password_reset_expiry_minutes: i64,
 }
 

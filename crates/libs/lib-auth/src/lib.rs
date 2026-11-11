@@ -20,7 +20,7 @@ pub use error::auth_error::AuthError;
 /// Signup, login, email verification, and the OAuth redirect and callback limit their own rate per
 /// client IP (`EmailService::enforce_rate_limit`). Every other route is wrapped with
 /// `rate_limited`: the gateway's rate limit for anonymous callers, per client IP. The
-/// password-reset request and code check also limit their own rate per email.
+/// password-reset request also limits its own rate per email.
 pub fn configure_public_auth_services(
     cfg: &mut web::ServiceConfig,
     rate_limited: fn(Route) -> Route,

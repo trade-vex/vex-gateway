@@ -149,8 +149,8 @@ login is redirected to, and refuses to start without them:
 `email_verification_expiry_minutes` (signup email verification) or `password_reset_expiry_minutes`
 (password reset). Every key is required, and a lifetime that is not a positive number of minutes
 stops the gateway at startup. Keep the password-reset lifetime short: a reset code takes over the
-account, and its check allows 5 attempts per email per 15 minutes, so a longer-lived code can be
-guessed more often.
+account. After 5 wrong attempts a code is void (the 5th answers 429), and a new one must be
+requested.
 
 ### ClickHouse
 
@@ -267,9 +267,9 @@ The routes:
   `GET /api/oauth/{provider}`, `GET /api/oauth/{provider}/callback`. And `GET /api/health`, the
   load balancer's health check, which reads a flag and touches no store.
 
-The routes that send an email, or check a code sent by email, also have a fixed limit per email
-address, on top of their client IP's `general` budget: `POST /api/forgot-password` 3 an hour,
-`POST /api/verify-reset-otp` 5 in 15 minutes. Over it they answer the same 429.
+`POST /api/forgot-password`, which sends an email, also has a fixed limit per email address on top
+of its client IP's `general` budget: 3 an hour. Over it, it answers the same 429. A code sent by
+email has an attempt cap instead (see [Email Codes](#email-codes)).
 
 `POST /api/change-password` has the login's failure budget, per user: after 5 wrong old passwords
 in 5 minutes it answers 429 until the window ends.

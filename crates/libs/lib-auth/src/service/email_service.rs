@@ -14,6 +14,7 @@ use secrecy::ExposeSecret;
 
 const OTP_KEY_PREFIX: &str = "otp:verification:";
 const PASSWORD_RESET_OTP_PREFIX: &str = "otp:password_reset:";
+const PASSWORD_RESET_ATTEMPT_PREFIX: &str = "otp:password_reset_attempts:";
 const PASSWORD_RESET_TOKEN_PREFIX: &str = "password_reset:";
 const AUTH_RATE_LIMIT_PREFIX: &str = "rate_limit:auth:";
 const LOGIN_INFLIGHT_PREFIX: &str = "auth_rl:login_inflight:";
@@ -23,9 +24,6 @@ const OTP_VERIFY_MAX_ATTEMPTS: u64 = 5;
 const PASSWORD_RESET_RATE_LIMIT_SCOPE: &str = "password_reset";
 const PASSWORD_RESET_MAX_REQUESTS: u64 = 3;
 const PASSWORD_RESET_WINDOW_SECONDS: u64 = 60 * 60;
-const PASSWORD_RESET_OTP_RATE_LIMIT_SCOPE: &str = "password_reset_otp";
-const PASSWORD_RESET_OTP_MAX_REQUESTS: u64 = 5;
-const PASSWORD_RESET_OTP_WINDOW_SECONDS: u64 = 15 * 60;
 
 #[derive(Clone)]
 pub struct EmailService {
@@ -125,42 +123,49 @@ impl EmailService {
         otp
     }
 
-    /// Store OTP in Redis
+    /// Store a verification code for `email`.
     async fn store_otp(&self, email: &str, otp: &str) -> Result<(), AuthError> {
-        tracing::debug!("Storing OTP in Redis for email: {}", email);
-
-        let expiry_seconds_u64 = Self::expiry_seconds(self.otp_expiry_minutes)?;
-
-        tracing::debug!("Getting Redis connection from pool");
-        let mut conn = self.conn.clone();
-
-        let key = code_key(OTP_KEY_PREFIX, email);
-
-        tracing::debug!("Redis key: {}", key);
-        tracing::debug!(
-            "OTP expiry: {} minutes ({} seconds)",
+        self.store_code(
+            OTP_KEY_PREFIX,
+            OTP_VERIFY_ATTEMPT_PREFIX,
+            email,
+            otp,
             self.otp_expiry_minutes,
-            expiry_seconds_u64
-        );
+        )
+        .await
+    }
 
-        tracing::debug!(
-            "Storing OTP in Redis with key: {} and expiry: {} seconds",
-            key,
-            expiry_seconds_u64
-        );
-        let attempt_key = code_key(OTP_VERIFY_ATTEMPT_PREFIX, email);
+    /// Store a password-reset code for `email`.
+    async fn store_password_reset_otp(&self, email: &str, otp: &str) -> Result<(), AuthError> {
+        self.store_code(
+            PASSWORD_RESET_OTP_PREFIX,
+            PASSWORD_RESET_ATTEMPT_PREFIX,
+            email,
+            otp,
+            self.password_reset_expiry_minutes,
+        )
+        .await
+    }
+
+    /// Store a code for its lifetime, replacing the last one; a new code starts with no failed
+    /// attempts.
+    async fn store_code(
+        &self,
+        prefix: &str,
+        attempt_prefix: &str,
+        email: &str,
+        otp: &str,
+        minutes: i64,
+    ) -> Result<(), AuthError> {
+        let expiry_seconds = Self::expiry_seconds(minutes)?;
+        let mut conn = self.conn.clone();
         let _: () = redis::pipe()
             .atomic()
-            .set_ex(&key, otp, expiry_seconds_u64)
-            .del(attempt_key)
+            .set_ex(code_key(prefix, email), otp, expiry_seconds)
+            .del(code_key(attempt_prefix, email))
             .query_async(&mut conn)
             .await
-            .map_err(|e| {
-                tracing::error!("Failed to store OTP in Redis: {}", e);
-                AuthError::Redis(format!("Failed to store OTP: {}", e))
-            })?;
-
-        tracing::debug!("OTP stored successfully in Redis");
+            .map_err(|e| AuthError::Redis(format!("Failed to store code: {}", e)))?;
         Ok(())
     }
 
@@ -286,12 +291,42 @@ impl EmailService {
         result.map(|_| ())
     }
 
-    /// Verify OTP
+    /// Check and consume the verification code for `email`.
     pub async fn verify_otp(&self, email: &str, submitted_otp: &str) -> Result<(), AuthError> {
-        let mut conn = self.conn.clone();
+        self.verify_code(
+            OTP_KEY_PREFIX,
+            OTP_VERIFY_ATTEMPT_PREFIX,
+            email,
+            submitted_otp,
+        )
+        .await
+    }
 
-        let key = code_key(OTP_KEY_PREFIX, email);
-        let attempt_key = code_key(OTP_VERIFY_ATTEMPT_PREFIX, email);
+    /// Check and consume the password-reset code for `email`.
+    pub async fn verify_password_reset_otp(
+        &self,
+        email: &str,
+        submitted_otp: &str,
+    ) -> Result<(), AuthError> {
+        self.verify_code(
+            PASSWORD_RESET_OTP_PREFIX,
+            PASSWORD_RESET_ATTEMPT_PREFIX,
+            email,
+            submitted_otp,
+        )
+        .await
+    }
+
+    /// One round trip: a matching code is deleted, so it works once; a wrong one counts an
+    /// attempt, and at `OTP_VERIFY_MAX_ATTEMPTS` the code is deleted.
+    async fn verify_code(
+        &self,
+        prefix: &str,
+        attempt_prefix: &str,
+        email: &str,
+        submitted_otp: &str,
+    ) -> Result<(), AuthError> {
+        let mut conn = self.conn.clone();
         let result: (u8, u64, i64) = redis::Script::new(
             r#"
 local otp = redis.call('GET', KEYS[1])
@@ -318,8 +353,8 @@ end
 return {2, attempts, ttl}
 "#,
         )
-        .key(&key)
-        .key(&attempt_key)
+        .key(code_key(prefix, email))
+        .key(code_key(attempt_prefix, email))
         .arg(submitted_otp)
         .arg(OTP_VERIFY_MAX_ATTEMPTS)
         .invoke_async(&mut conn)
@@ -499,32 +534,6 @@ return count
         .await
     }
 
-    /// Enforce the existing password-reset OTP verification limit.
-    async fn enforce_password_reset_otp_rate_limit(&self, email: &str) -> Result<(), AuthError> {
-        self.enforce_rate_limit(
-            PASSWORD_RESET_OTP_RATE_LIMIT_SCOPE,
-            email,
-            PASSWORD_RESET_OTP_MAX_REQUESTS,
-            PASSWORD_RESET_OTP_WINDOW_SECONDS,
-        )
-        .await
-    }
-
-    /// Store password reset OTP in Redis
-    async fn store_password_reset_otp(&self, email: &str, otp: &str) -> Result<(), AuthError> {
-        let expiry_seconds_u64 = Self::expiry_seconds(self.password_reset_expiry_minutes)?;
-        let mut conn = self.conn.clone();
-
-        let key = code_key(PASSWORD_RESET_OTP_PREFIX, email);
-
-        let _: () = conn
-            .set_ex(&key, otp, expiry_seconds_u64)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to store password reset OTP: {}", e)))?;
-
-        Ok(())
-    }
-
     /// Store a new password-reset code for `email` and send it there.
     pub async fn send_password_reset_otp(&self, email: &str) -> Result<(), AuthError> {
         let otp = self.generate_otp();
@@ -540,55 +549,6 @@ return count
         .await
     }
 
-    /// Verify password reset OTP
-    /// Returns Ok(()) if OTP is valid, deletes OTP (one-time use)
-    pub async fn verify_password_reset_otp(
-        &self,
-        email: &str,
-        submitted_otp: &str,
-    ) -> Result<(), AuthError> {
-        self.enforce_password_reset_otp_rate_limit(email).await?;
-
-        let mut conn = self.conn.clone();
-
-        let key = code_key(PASSWORD_RESET_OTP_PREFIX, email);
-
-        let stored_otp: Option<String> = conn
-            .get(&key)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get password reset OTP: {}", e)))?;
-
-        match stored_otp {
-            Some(otp) if otp == submitted_otp => {
-                // Delete OTP after successful verification (one-time use)
-                let _: () = conn
-                    .del(&key)
-                    .await
-                    .map_err(|e| AuthError::Redis(format!("Failed to delete OTP: {}", e)))?;
-
-                // Clean up OTP verification rate limit since OTP is no longer valid
-                let rate_limit_key = format!(
-                    "{}{}:{}",
-                    AUTH_RATE_LIMIT_PREFIX,
-                    PASSWORD_RESET_OTP_RATE_LIMIT_SCOPE,
-                    email.trim().to_ascii_lowercase()
-                );
-                let _: () = conn
-                    .del(&rate_limit_key)
-                    .await
-                    .map_err(|e| {
-                        tracing::warn!("Failed to delete OTP verify rate limit: {}", e);
-                        // Don't fail the request if cleanup fails
-                    })
-                    .unwrap_or(());
-
-                Ok(())
-            }
-            Some(_) => Err(AuthError::InvalidOtp),
-            None => Err(AuthError::OtpExpired),
-        }
-    }
-
     /// Generate a new password reset token
     pub fn generate_reset_token(&self) -> String {
         Uuid::new_v4().to_string()
@@ -601,30 +561,13 @@ return count
 
         let token_key = format!("{}{}", PASSWORD_RESET_TOKEN_PREFIX, reset_token);
 
-        let user_id_str: Option<String> = conn
-            .get(&token_key)
+        // GETDEL: two requests with the same token cannot both redeem it.
+        let user_id: Option<String> = conn
+            .get_del(&token_key)
             .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get reset token: {}", e)))?;
-
-        match user_id_str {
-            Some(user_id_str) => {
-                // Delete token after validation (one-time use)
-                let _: () = conn.del(&token_key).await.map_err(|e| {
-                    AuthError::Redis(format!("Failed to delete reset token: {}", e))
-                })?;
-
-                // Parse user_id
-                if user_id_str == "pending" {
-                    return Err(AuthError::InvalidResetToken);
-                }
-
-                let user_id =
-                    Uuid::parse_str(&user_id_str).map_err(|_| AuthError::InvalidResetToken)?;
-
-                Ok(user_id)
-            }
-            None => Err(AuthError::ResetTokenExpired),
-        }
+            .map_err(|e| AuthError::Redis(format!("Failed to redeem reset token: {}", e)))?;
+        let user_id = user_id.ok_or(AuthError::ResetTokenExpired)?;
+        Uuid::parse_str(&user_id).map_err(|_| AuthError::InvalidResetToken)
     }
 
     /// Store reset token with user_id
@@ -800,6 +743,83 @@ mod tests {
 
         service.store_otp(&email, "654321").await.unwrap();
         service.verify_otp(&email, "654321").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn password_reset_code_works_once_and_dies_at_the_attempt_cap() {
+        let service = email_service().await;
+        let email = format!("{}@example.com", Uuid::new_v4());
+        service
+            .store_password_reset_otp(&email, "123456")
+            .await
+            .unwrap();
+
+        for _ in 0..OTP_VERIFY_MAX_ATTEMPTS - 1 {
+            assert!(matches!(
+                service.verify_password_reset_otp(&email, "000000").await,
+                Err(AuthError::InvalidOtp)
+            ));
+        }
+        assert!(matches!(
+            service.verify_password_reset_otp(&email, "000000").await,
+            Err(AuthError::RateLimited { .. })
+        ));
+        assert!(matches!(
+            service.verify_password_reset_otp(&email, "123456").await,
+            Err(AuthError::OtpExpired)
+        ));
+
+        // A new code starts with a fresh attempt count and works once.
+        service
+            .store_password_reset_otp(&email, "654321")
+            .await
+            .unwrap();
+        service
+            .verify_password_reset_otp(&email, "654321")
+            .await
+            .unwrap();
+        assert!(matches!(
+            service.verify_password_reset_otp(&email, "654321").await,
+            Err(AuthError::OtpExpired)
+        ));
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_redeem_a_reset_code_and_a_reset_token_once() {
+        let service = email_service().await;
+        let email = format!("{}@example.com", Uuid::new_v4());
+        let token = service.generate_reset_token();
+        service
+            .store_password_reset_otp(&email, "123456")
+            .await
+            .unwrap();
+        service
+            .store_reset_token(&token, Uuid::new_v4())
+            .await
+            .unwrap();
+
+        let tasks: Vec<_> = (0..10)
+            .map(|_| {
+                let (service, email, token) = (service.clone(), email.clone(), token.clone());
+                tokio::spawn(async move {
+                    (
+                        service
+                            .verify_password_reset_otp(&email, "123456")
+                            .await
+                            .is_ok(),
+                        service.validate_reset_token(&token).await.is_ok(),
+                    )
+                })
+            })
+            .collect();
+        let (mut codes, mut tokens) = (0, 0);
+        for task in tasks {
+            let (code, token) = task.await.unwrap();
+            codes += usize::from(code);
+            tokens += usize::from(token);
+        }
+
+        assert_eq!((codes, tokens), (1, 1));
     }
 
     #[test]
