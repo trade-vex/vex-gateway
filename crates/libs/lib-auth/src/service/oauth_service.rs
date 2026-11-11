@@ -524,7 +524,9 @@ impl OAuthService {
         } else if provider == "twitter" {
             auth_request = auth_request
                 .add_scope(Scope::new("tweet.read".to_string()))
-                .add_scope(Scope::new("users.read".to_string()));
+                .add_scope(Scope::new("users.read".to_string()))
+                // `confirmed_email` is returned only under this scope.
+                .add_scope(Scope::new("users.email".to_string()));
         }
 
         let (final_auth_url, csrf_state, nonce) = auth_request.url();
@@ -619,7 +621,9 @@ impl OAuthService {
         } else if provider == "twitter" {
             auth_request = auth_request
                 .add_scope(Scope::new("tweet.read".to_string()))
-                .add_scope(Scope::new("users.read".to_string()));
+                .add_scope(Scope::new("users.read".to_string()))
+                // `confirmed_email` is returned only under this scope.
+                .add_scope(Scope::new("users.email".to_string()));
         }
 
         let (final_auth_url, csrf_state, nonce) = auth_request.url();
@@ -867,7 +871,9 @@ impl OAuthService {
         let user_info_url = match provider {
             "google" => "https://openidconnect.googleapis.com/v1/userinfo",
             "github" => "https://api.github.com/user",
-            "twitter" => "https://api.twitter.com/2/users/me?user.fields=profile_image_url",
+            "twitter" => {
+                "https://api.x.com/2/users/me?user.fields=profile_image_url,confirmed_email"
+            }
             _ => {
                 return Err(AuthError::InvalidProvider(format!(
                     "Unknown provider: {}",
@@ -957,7 +963,7 @@ impl OAuthService {
         let oauth_user_info = match provider {
             "google" => self.parse_google_user_info(user_info)?,
             "github" => self.parse_github_user_info(user_info).await?,
-            "twitter" => self.parse_twitter_user_info(user_info)?,
+            "twitter" => Self::parse_twitter_user_info(user_info)?,
             _ => {
                 return Err(AuthError::UserInfoFetchFailed(format!(
                     "Unsupported provider: {}",
@@ -1108,30 +1114,28 @@ impl OAuthService {
     ///     "username": "johndoe",
     ///     "name": "John Doe",
     ///     "profile_image_url": "https://...",
-    ///     "email": "user@example.com"  // May be missing if email scope not granted
+    ///     "confirmed_email": "user@example.com"
     ///   }
     /// }
     /// ```
     ///
     /// # Email Requirement
     ///
-    /// This method requires a non-empty email address. If the email is missing or empty,
-    /// it returns an error indicating that the email scope must be requested.
-    fn parse_twitter_user_info(&self, data: Value) -> Result<OAuthUserInfo, AuthError> {
+    /// X returns `confirmed_email` only for an address the account has confirmed, and only when
+    /// the app has "Request email from users" enabled and asked for `users.email`. Without it the
+    /// login is refused.
+    fn parse_twitter_user_info(data: Value) -> Result<OAuthUserInfo, AuthError> {
         let user_data = &data["data"];
 
-        // Extract and validate email
-        let email = user_data["email"].as_str().ok_or_else(|| {
-            AuthError::UserInfoFetchFailed(
-                "Twitter email not provided; request email scope".to_string(),
-            )
-        })?;
-
-        if email.is_empty() {
-            return Err(AuthError::UserInfoFetchFailed(
-                "Twitter email not provided; request email scope".to_string(),
-            ));
-        }
+        let email = user_data["confirmed_email"]
+            .as_str()
+            .filter(|email| !email.is_empty())
+            .ok_or_else(|| {
+                AuthError::UserInfoFetchFailed(
+                    "X returned no confirmed email: enable 'Request email from users' for the app"
+                        .to_string(),
+                )
+            })?;
 
         Ok(OAuthUserInfo {
             provider_id: user_data["id"]
@@ -1149,7 +1153,7 @@ impl OAuthService {
             avatar_url: user_data["profile_image_url"]
                 .as_str()
                 .map(|s| s.to_string()),
-            email_verified: user_data["email_verified"].as_bool().unwrap_or(false),
+            email_verified: true,
         })
     }
 
@@ -1238,6 +1242,26 @@ mod tests {
             landing_url(None, &None, &app),
             Err(AuthError::Config(_))
         ));
+    }
+
+    #[test]
+    fn x_profile_uses_confirmed_email() {
+        let info = OAuthService::parse_twitter_user_info(serde_json::json!({
+            "data": {"id": "1", "username": "u", "name": "U", "confirmed_email": "u@x.com"}
+        }))
+        .unwrap();
+
+        assert_eq!(info.email, "u@x.com");
+        assert!(info.email_verified);
+    }
+
+    #[test]
+    fn x_profile_without_confirmed_email_is_refused() {
+        let result = OAuthService::parse_twitter_user_info(serde_json::json!({
+            "data": {"id": "1", "username": "u", "email": "u@x.com"}
+        }));
+
+        assert!(matches!(result, Err(AuthError::UserInfoFetchFailed(_))));
     }
 
     mod normalize_username {

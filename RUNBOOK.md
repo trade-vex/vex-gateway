@@ -125,10 +125,13 @@ The service validates configuration on startup:
 - **Development**: More lenient validation
 - **Testing**: Allows ephemeral ports (port 0)
 - **Every environment**: `auth.oauth.providers` may list only `google`, `github` and `twitter`;
-  another provider stops the gateway at startup, and the error names it. The code lifetimes in
-  `[auth.otp]` must be positive, `clickhouse.user` must not be empty, `clickhouse.database` must
-  be a plain identifier, `metrics.bind` must be an IP address and a port, and every `rate_limit`
-  setting must be greater than 0
+  another provider stops the gateway at startup, and the error names it. For `twitter` (X), the X
+  developer app must have "Request email from users" enabled (it needs Terms of Service and
+  Privacy Policy URLs in the app settings): without it X sends no confirmed email and every X
+  login is refused with 400 `USER_INFO_FAILED`. The code lifetimes in `[auth.otp]` must be
+  positive, `clickhouse.user` must not be empty, `clickhouse.database` must be a plain
+  identifier, `metrics.bind` must be an IP address and a port, and every `rate_limit` setting
+  must be greater than 0
 
 ### OAuth Redirects
 
