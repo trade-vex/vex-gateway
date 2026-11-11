@@ -2280,6 +2280,7 @@ version = "0.1.0"
 dependencies = [
  "config",
  "lib-auth",
+ "secrecy",
  "serde",
  "serde_ignored",
  "tempfile",
@@ -2367,6 +2368,7 @@ dependencies = [
  "rusteron-archive",
  "rusteron-client",
  "sea-orm",
+ "secrecy",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",

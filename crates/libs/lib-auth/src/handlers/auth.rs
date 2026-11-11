@@ -954,7 +954,7 @@ mod tests {
         assert!(matches!(result, Err(AuthError::TokenRevoked)));
     }
 
-    use crate::config::EmailConfig;
+    use crate::config::{EmailConfig, OtpConfig};
     use async_trait::async_trait;
     use lib_middleware::TrustedProxies;
     use rsa::{
@@ -1151,8 +1151,13 @@ mod tests {
             smtp_password: SecretString::new("test".to_string()),
             from_email: "test@example.com".to_string(),
         };
+        let otp_config = OtpConfig {
+            otp_length: 6,
+            email_verification_expiry_minutes: 15,
+            password_reset_expiry_minutes: 15,
+        };
         let email_service =
-            Arc::new(EmailService::new(&email_config, conn.clone(), 6, 15).unwrap());
+            Arc::new(EmailService::new(&email_config, conn.clone(), &otp_config).unwrap());
         let jwt_config = Arc::new(JwtConfig {
             private_key_path: String::new(),
             public_key_path: String::new(),

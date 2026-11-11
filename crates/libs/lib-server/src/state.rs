@@ -22,6 +22,7 @@ use lib_middleware::{
 use redis::aio::ConnectionManager;
 use reqwest::Client;
 use sea_orm::DatabaseConnection;
+use secrecy::ExposeSecret;
 use std::sync::Arc;
 use tracing::{debug, info};
 use url::Url;
@@ -103,12 +104,8 @@ impl AppState {
             Arc::new(PostgresApiKeyRepository::new(db.clone()));
 
         // Initialize portfolio repository (ClickHouse)
-        let portfolio_repository: Arc<dyn PortfolioRepository> = {
-            let sanitized = Self::sanitize_url(&clickhouse.url);
-            info!("Connecting to ClickHouse: {}", sanitized);
-            let ch = ClickHouseClient::default().with_url(&clickhouse.url);
-            Arc::new(ClickHousePortfolioRepository::new(ch))
-        };
+        let portfolio_repository: Arc<dyn PortfolioRepository> =
+            Arc::new(Self::init_portfolio_repository(clickhouse));
 
         // Initialize API key middleware with database repository; signature replay protection
         // uses the gateway's Redis connection
@@ -132,12 +129,7 @@ impl AppState {
         )
         .await?;
 
-        let email_service = EmailService::new(
-            &config.email,
-            redis_conn.clone(),
-            config.otp.otp_length,
-            config.otp.email_verification_expiry_minutes,
-        )?;
+        let email_service = EmailService::new(&config.email, redis_conn.clone(), &config.otp)?;
 
         // Initialize trading repository
         let trading_repo: Arc<dyn TradingRepository> =
@@ -253,6 +245,23 @@ impl AppState {
             .map_err(|e| format!("Failed to connect to database: {}", e).into())
     }
 
+    /// The ClickHouse portfolio repository: `clickhouse.user` reading `clickhouse.database`, which
+    /// is also the database each query names before its tables
+    fn init_portfolio_repository(config: &ClickHouseConfig) -> ClickHousePortfolioRepository {
+        info!(
+            "Connecting to ClickHouse: {} (database {}, user {})",
+            Self::sanitize_url(&config.url),
+            config.database,
+            config.user
+        );
+        let client = ClickHouseClient::default()
+            .with_url(&config.url)
+            .with_user(&config.user)
+            .with_password(config.password.expose_secret())
+            .with_database(&config.database);
+        ClickHousePortfolioRepository::new_with_schema(client, &config.database)
+    }
+
     /// Initialize Redis connection manager
     async fn init_redis(
         config: &RedisConfig,
@@ -365,6 +374,72 @@ mod tests {
     fn handlers_share_the_engine_link_without_a_lock() {
         fn shared_directly(_field: fn(&AppState) -> &EngineLink) {}
         shared_directly(|state| &state.engine_link);
+    }
+
+    /// The repository built from `[clickhouse]` sends its user, password and database with a query
+    /// and names that database before the table.
+    #[tokio::test]
+    async fn portfolio_repository_reads_the_configured_database_as_the_configured_user() {
+        use lib_core::PnlResolution;
+        use secrecy::SecretString;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // A ClickHouse stand-in that records the head of the first request and fails it.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = ClickHouseConfig {
+            url: format!("http://{}", listener.local_addr().unwrap()),
+            user: "gateway_reader".to_string(),
+            password: SecretString::new("Sup3r-S3cret".to_string()),
+            database: "analytics".to_string(),
+        };
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            while !head.windows(4).any(|end| end == b"\r\n\r\n") {
+                let mut buffer = [0; 4096];
+                let read = stream.read(&mut buffer).await.unwrap();
+                assert_ne!(
+                    read, 0,
+                    "the connection closed before the request head ended"
+                );
+                head.extend_from_slice(&buffer[..read]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            String::from_utf8(head).unwrap()
+        });
+
+        let result = AppState::init_portfolio_repository(&config)
+            .get_balance_chart(1, 0, PnlResolution::Day)
+            .await;
+        assert!(result.is_err());
+
+        let head = server.await.unwrap();
+        let header = |name: &str| {
+            head.lines().find_map(|line| {
+                let (key, value) = line.split_once(": ")?;
+                key.eq_ignore_ascii_case(name).then_some(value)
+            })
+        };
+        assert_eq!(header("X-ClickHouse-User"), Some("gateway_reader"));
+        assert_eq!(header("X-ClickHouse-Key"), Some("Sup3r-S3cret"));
+
+        // A short read-only query travels in the URL.
+        let target = head.split(' ').nth(1).unwrap();
+        let url = Url::parse(&format!("http://clickhouse{target}")).unwrap();
+        let parameter = |name: &str| {
+            url.query_pairs()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.into_owned())
+        };
+        assert_eq!(parameter("database").as_deref(), Some("analytics"));
+        let query = parameter("query").unwrap();
+        assert!(
+            query.contains("FROM analytics.balances_per_minute"),
+            "{query}"
+        );
     }
 
     #[test]

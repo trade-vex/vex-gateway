@@ -428,9 +428,9 @@ impl TradingRepository for PostgresTradingRepository {
 
 /// ClickHouse-backed Portfolio Repository
 ///
-/// It reads only the read model's views (`readmodel/migrations/clickhouse`), which read their
-/// tables through `FINAL`, so that copies of an event count once, and scale vex-core's integers
-/// to decimals as `ScalingCache` does:
+/// It reads only the read model's views (`readmodel/migrations/clickhouse`) in the database
+/// `clickhouse.database` names. The views read their tables through `FINAL`, so that copies of an
+/// event count once, and scale vex-core's integers to decimals as `ScalingCache` does:
 /// - `balances_per_minute(user_id, asset_id, minute, total)`: each asset's last balance per minute;
 /// - `asset_prices_per_minute(asset_id, quote_asset_id, minute, price)`: each market's last trade
 ///   price per minute, as its base asset's price in its quote asset;
@@ -453,10 +453,7 @@ pub struct ClickHousePortfolioRepository {
 }
 
 impl ClickHousePortfolioRepository {
-    pub fn new(ch: ClickHouseClient) -> Self {
-        Self::new_with_schema(ch, "trading")
-    }
-
+    /// A repository reading the tables of the database `schema`, which every query names.
     pub fn new_with_schema<S: Into<String>>(ch: ClickHouseClient, schema: S) -> Self {
         Self {
             ch,
