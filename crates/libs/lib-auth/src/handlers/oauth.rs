@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tracing::error;
 use url::Url;
 
-pub(crate) fn validate_callback_state_cookie(
+fn validate_callback_state_cookie(
     meta: &OAuthCallbackMeta,
     has_state_cookie: bool,
 ) -> Result<(), AuthError> {
@@ -434,6 +434,29 @@ mod tests {
         // The code was used up: the right verifier no longer redeems it.
         let right = exchange(verifier).await;
         assert!(matches!(right, Err(AuthError::InvalidRequest)));
+    }
+
+    fn meta(platform: Option<&str>) -> OAuthCallbackMeta {
+        OAuthCallbackMeta {
+            platform: platform.map(String::from),
+            app_challenge: None,
+        }
+    }
+
+    #[test]
+    fn web_callback_without_state_cookie_is_rejected() {
+        for platform in [None, Some("web")] {
+            assert!(matches!(
+                validate_callback_state_cookie(&meta(platform), false),
+                Err(AuthError::StateMismatch)
+            ));
+            assert!(validate_callback_state_cookie(&meta(platform), true).is_ok());
+        }
+    }
+
+    #[test]
+    fn app_callback_needs_no_state_cookie() {
+        assert!(validate_callback_state_cookie(&meta(Some("app")), false).is_ok());
     }
 
     #[test]

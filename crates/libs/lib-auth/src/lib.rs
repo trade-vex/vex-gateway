@@ -6,8 +6,6 @@ pub mod middleware;
 pub mod models;
 pub mod repository;
 pub mod service;
-#[cfg(test)]
-pub mod tests;
 pub mod utils;
 
 use actix_web::{Route, web};
