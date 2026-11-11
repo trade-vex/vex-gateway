@@ -97,6 +97,16 @@ pub enum AuthError {
 
 impl ResponseError for AuthError {
     fn error_response(&self) -> HttpResponse {
+        // A 500's detail is for the log; the client gets a fixed body.
+        if matches!(
+            self,
+            AuthError::Database(_)
+                | AuthError::Redis(_)
+                | AuthError::Config(_)
+                | AuthError::InternalError(_)
+        ) {
+            tracing::error!("{self}");
+        }
         let (status_code, error_code, message) = match self {
             AuthError::TokenRevoked | AuthError::TokenExpired => {
                 (401, "TOKEN_INVALID", self.to_string())
@@ -196,8 +206,6 @@ impl ResponseError for AuthError {
                 "Too many requests. Please try again later.".to_string(),
             ),
             AuthError::Config(_) | AuthError::InternalError(_) => {
-                // The detail is for the log; the client gets a fixed body.
-                tracing::error!("{self}");
                 (500, "INTERNAL_ERROR", "Internal server error".to_string())
             }
         };
