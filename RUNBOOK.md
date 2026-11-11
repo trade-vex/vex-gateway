@@ -423,11 +423,12 @@ the Postgres tables, with every proto integer a `UInt64`, plus `ts`, the time `e
 Each is a `ReplacingMergeTree` keyed by the event's key and `event_ts`, which keeps one copy of an
 event, the last one written, once its parts merge; until then the copies are stored too, so read
 the tables through `FINAL`. Materialized views keep each minute's last balance and last trade price
-(`balances_last_per_min`, `market_prices_last_per_min`). The gateway reads only five views, which
-read through `FINAL` and scale vex-core's integers to decimals with the `assets` and `markets` rows
-as the gateway's `ScalingCache` does: `balances_per_minute`, `asset_prices_per_minute`,
-`deposits`, `withdrawals` and `trade_volumes`. Every view and materialized view runs as
-`readmodel_owner`, a user nobody can log in as.
+(`balances_last_per_min`, `market_prices_last_per_min`) and each fill once per user, keyed by user
+(`user_trades`). The gateway reads only five views, which read through `FINAL` and scale
+vex-core's integers to decimals with the `assets` and `markets` rows as the gateway's
+`ScalingCache` does: `balances_per_minute`, `asset_prices_per_minute`, `deposits`, `withdrawals`
+and `trade_volumes`. Every view and materialized view runs as `readmodel_owner`, a user nobody can
+log in as.
 
 ### Bringing Up an Environment
 
@@ -609,7 +610,7 @@ In ClickHouse:
 |---|---|
 | `readmodel_connect` (role) | `INSERT` into the seven raw tables, which also lets the sink describe them. Nothing else. |
 | `readmodel_gateway` (role) | `SELECT` on the five views. Nothing else: every read the gateway makes goes through `FINAL` and is scaled. |
-| `readmodel_owner` (user) | Owns every view and materialized view, which run with its privileges (`SQL SECURITY DEFINER`): `SELECT` on the tables they read, `INSERT` into the per-minute tables. The deploy creates it; the migrations set its `HOST NONE`, so nobody can log in as it. |
+| `readmodel_owner` (user) | Owns every view and materialized view, which run with its privileges (`SQL SECURITY DEFINER`): `SELECT` on the tables they read, `INSERT` into the per-minute tables and `user_trades`. The deploy creates it; the migrations set its `HOST NONE`, so nobody can log in as it. |
 
 Roles and users belong to the server, not to a database: migrating a second database on the same
 server grants the same roles on its tables, so a login holding `readmodel_gateway` reads the views

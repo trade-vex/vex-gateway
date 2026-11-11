@@ -445,7 +445,8 @@ impl TradingRepository for PostgresTradingRepository {
 /// - `asset_prices_per_minute(asset_id, quote_asset_id, minute, price)`: each market's last trade
 ///   price per minute, as its base asset's price in its quote asset;
 /// - `deposits` and `withdrawals(user_id, asset_id, ts, amount)`;
-/// - `trade_volumes(ts, maker_user_id, taker_user_id, volume)`: each fill's price times size.
+/// - `trade_volumes(ts, user_id, quote_asset_id, volume)`: each fill's price times size, in its
+///   market's quote asset, once for each of its users.
 ///
 /// A request reads its window only: the balances and prices in it, with each asset's last balance
 /// and price before it, and the deposits and withdrawals in it. Equity at a time is the sum of
@@ -459,7 +460,8 @@ impl TradingRepository for PostgresTradingRepository {
 /// - pnl_7d: equity(now) - equity(now - 7d) - cashflow(7d)
 /// - max_drawdown_1m: peak-to-trough decline over equity net of deposits and withdrawals, hourly
 ///   in the last 30 days
-/// - volume_24h: sum of `trade_volumes.volume` where user is maker or taker in last 24h
+/// - volume_24h: sum of `trade_volumes.volume` of the user's fills in markets quoted in USD in the
+///   last 24h
 ///
 /// Notes:
 /// - Time parameters are passed as Unix seconds and wrapped with ClickHouse `toDateTime(?)`
@@ -680,17 +682,17 @@ impl PortfolioRepository for ClickHousePortfolioRepository {
 
         let volume_query = format!(
             "SELECT toString(sum(volume))
-             FROM {} WHERE ts >= toDateTime(?) AND ts <= toDateTime(?)
-               AND (maker_user_id = ? OR taker_user_id = ?)",
+             FROM {} WHERE user_id = ? AND quote_asset_id = ?
+               AND ts >= toDateTime(?) AND ts <= toDateTime(?)",
             self.table("trade_volumes")
         );
         let vol_str: String = self
             .ch
             .query(&volume_query)
+            .bind(user_id)
+            .bind(Self::QUOTE_ASSET_ID)
             .bind(cutoff_24h)
             .bind(now_ts_secs)
-            .bind(user_id)
-            .bind(user_id)
             .fetch_one()
             .await
             .map_err(|e| TradingError::Database(e.to_string()))?;

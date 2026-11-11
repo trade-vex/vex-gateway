@@ -408,8 +408,8 @@ pub async fn get_order_history(
 ///   ASOF price in its minute (zero before the asset's first trade, as equity values it)
 /// - `max_drawdown_1m`: peak-to-trough decline over equity net of deposits and withdrawals in the
 ///   last 30 days
-/// - `volume_24h`: sum of `trade_volumes.volume`, each fill's price times size in its quote asset,
-///   for `ts in [now-24h, now]`
+/// - `volume_24h`: sum of `trade_volumes.volume`, each fill's price times size, of the user's fills
+///   in markets quoted in USD for `ts in [now-24h, now]`
 ///
 /// The handler is backend-agnostic and uses the injected `PortfolioRepository` which is
 /// implemented against ClickHouse in production.

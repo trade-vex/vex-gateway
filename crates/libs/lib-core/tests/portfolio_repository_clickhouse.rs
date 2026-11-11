@@ -489,9 +489,8 @@ async fn views_scale_as_scaling_cache_does() {
             scaled_price,
             "price of market {market}"
         );
-        let sql = format!(
-            "SELECT toString(volume) FROM {DATABASE}.trade_volumes WHERE maker_user_id = ?"
-        );
+        let sql =
+            format!("SELECT toString(volume) FROM {DATABASE}.trade_volumes WHERE user_id = ?");
         assert_eq!(
             read(sql, market_user(index)).await,
             scaled_price * cache.scale_volume(market as u32, Decimal::from(size)),
@@ -677,4 +676,68 @@ async fn each_request_reads_each_view_once() {
         .await
         .unwrap();
     assert_eq!(ch.logged(&comment).await.len(), 2);
+}
+
+/// The 24-hour volume is in USD: a fill in a market quoted in another asset is not in it.
+#[tokio::test]
+async fn volume_24h_counts_only_fills_quoted_in_usd() {
+    let Some(ch) = clickhouse().await else {
+        return;
+    };
+    let user = 47;
+    let now = this_minute();
+    // Asset 3 quoted in BTC: market 2 << 16 | 3.
+    ch.execute(
+        "INSERT INTO markets (market_id, base_asset, quote_asset, quote_scale_k) \
+         VALUES (131075, 3, 2, 1)",
+    )
+    .await;
+    ch.fill(BTC_USD, 100, BTC_SCALE, 999, user, now - HOUR)
+        .await;
+    ch.fill(131075, 5, 1_000_000_000_000_000_000, user, 999, now - HOUR)
+        .await;
+    let repository = ClickHousePortfolioRepository::new_with_schema(ch.gateway.clone(), DATABASE);
+
+    let portfolio = repository
+        .get_portfolio(user, now, PnlResolution::Day)
+        .await
+        .unwrap();
+    assert_eq!(portfolio.volume_24h, decimal("100"));
+}
+
+/// The 24-hour volume reads the user's fills, not the exchange's: those of 16,384 fills between two
+/// other users are skipped.
+#[tokio::test]
+async fn volume_24h_reads_only_the_users_fills() {
+    let Some(ch) = clickhouse().await else {
+        return;
+    };
+    let user = 48;
+    let now = this_minute();
+    // Users 10 and 11, below every other test's, have 32,768 rows: four whole index granules of
+    // 8,192 rows, which share none with the user's row once the parts merge.
+    ch.execute(&format!(
+        "INSERT INTO trade_events (maker_user_id, taker_user_id, market_id, price, size, \
+         maker_order_id, taker_order_id, taker_side, event_ts) \
+         SELECT 10, 11, {BTC_USD}, 100, {BTC_SCALE}, 1000000 + number, 1000000 + number, \
+                'SIDE_BID', {} + number \
+         FROM numbers(16384)",
+        at(now - HOUR)
+    ))
+    .await;
+    ch.fill(BTC_USD, 100, BTC_SCALE, 999, user, now - HOUR)
+        .await;
+
+    let (repository, comment) = ch.logging_gateway();
+    let portfolio = repository
+        .get_portfolio(user, now, PnlResolution::Day)
+        .await
+        .unwrap();
+    assert_eq!(portfolio.volume_24h, decimal("100"));
+    let logged = ch.logged(&comment).await;
+    let (_, read_rows) = logged
+        .iter()
+        .find(|(query, _)| query.contains("trade_volumes"))
+        .unwrap();
+    assert!(*read_rows < 1000, "the volume read {read_rows} rows");
 }

@@ -108,7 +108,8 @@ CLICKHOUSE_TABLES = {
     "deposits": "deposit_events",
     "withdrawals": "withdrawal_events",
 }
-# The ClickHouse views, which the gateway reads, and the per-minute tables behind them.
+# The ClickHouse views, which the gateway reads, and the tables behind them that materialized views
+# fill.
 CLICKHOUSE_VIEWS = {
     "balances_per_minute",
     "asset_prices_per_minute",
@@ -116,7 +117,7 @@ CLICKHOUSE_VIEWS = {
     "withdrawals",
     "trade_volumes",
 }
-PER_MINUTE_TABLES = {"balances_last_per_min", "market_prices_last_per_min"}
+PER_MINUTE_TABLES = {"balances_last_per_min", "market_prices_last_per_min", "user_trades"}
 OWNER = "readmodel_owner"
 
 SECRETS = "/etc/vex-connect/postgres.properties"
