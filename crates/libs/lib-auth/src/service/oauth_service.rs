@@ -68,7 +68,6 @@ pub struct OAuthCallbackMeta {
     /// App challenge for mobile verification (app only)
     pub app_challenge: Option<String>,
 }
-#[allow(unused_imports)]
 use openidconnect::TokenResponse;
 use openidconnect::{
     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointMaybeSet,
@@ -121,9 +120,8 @@ type OAuthClient = CoreClient<
 ///
 /// # Redis Keys
 ///
-/// - `oauth_state:{provider}:{state}` - CSRF state validation (600s TTL)
-/// - `oauth_verifier:{provider}:{state}` - PKCE verifier storage (600s TTL)
-/// - `oauth_nonce:{provider}:{state}` - OIDC nonce for ID token validation (600s TTL)
+/// - `oauth_txn:{provider}:{state}` - the login's PKCE verifier, OIDC nonce, platform and app
+///   challenge (600s TTL), consumed by the callback
 #[derive(Clone)]
 pub struct OAuthService {
     /// Redis connection for state management
@@ -474,107 +472,6 @@ impl OAuthService {
     /// whenever a provider is configured; there is no fallback URL.
     pub fn frontend_url(&self, platform: Option<&str>) -> Result<&str, AuthError> {
         landing_url(platform, &self.frontend_url_web, &self.frontend_url_app)
-    }
-
-    /// Generates an authorization URL for initiating OAuth flow
-    ///
-    /// This method:
-    /// 1. Generates a random PKCE challenge and verifier
-    /// 2. Generates a random CSRF state token
-    /// 3. Builds the authorization URL with appropriate scopes
-    /// 4. Stores state and verifier in Redis with 10-minute expiry
-    ///
-    /// # Arguments
-    ///
-    /// * `provider` - The OAuth provider name ("google", "github", "twitter")
-    ///
-    /// # Returns
-    ///
-    /// The authorization URL to redirect the user to, or an error if:
-    /// - Provider is not configured
-    /// - Redis connection fails
-    ///
-    /// # Security
-    ///
-    /// - **PKCE**: SHA-256 code challenge protects against authorization code interception
-    /// - **State**: Random 128-bit token prevents CSRF attacks
-    /// - **TTL**: 10-minute expiry prevents replay attacks
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let auth_url = oauth_service.get_auth_url("google").await?;
-    /// // Returns: "https://accounts.google.com/o/oauth2/v2/auth?client_id=...&state=..."
-    /// ```
-    pub async fn get_auth_url(&self, provider: &str) -> Result<String, AuthError> {
-        if provider.is_empty() {
-            return Err(AuthError::InvalidProvider(
-                "Provider name is empty".to_string(),
-            ));
-        }
-
-        let client = self.oauth_clients.get(provider).ok_or_else(|| {
-            AuthError::InvalidProvider(format!("Provider '{}' not configured", provider))
-        })?;
-
-        // Generate PKCE challenge for security (prevents authorization code interception)
-        let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-
-        // Build authorization URL using OpenID Connect flow
-        // Note: Nonce is required by API but only used for OIDC ID token validation
-        let mut auth_request = client
-            .authorize_url(
-                CoreAuthenticationFlow::AuthorizationCode,
-                CsrfToken::new_random,
-                Nonce::new_random,
-            )
-            .set_pkce_challenge(pkce_challenge);
-
-        // Add provider-specific scopes
-        if provider == "google" {
-            auth_request = auth_request
-                .add_scope(Scope::new("openid".to_string()))
-                .add_scope(Scope::new("email".to_string()))
-                .add_scope(Scope::new("profile".to_string()));
-        } else if provider == "github" {
-            auth_request = auth_request.add_scope(Scope::new("user:email".to_string()));
-        } else if provider == "twitter" {
-            auth_request = auth_request
-                .add_scope(Scope::new("tweet.read".to_string()))
-                .add_scope(Scope::new("users.read".to_string()))
-                // `confirmed_email` is returned only under this scope.
-                .add_scope(Scope::new("users.email".to_string()));
-        }
-
-        let (final_auth_url, csrf_state, nonce) = auth_request.url();
-
-        // Store state and PKCE verifier in Redis with 10-minute expiry
-        let mut redis_conn = self.conn.clone();
-
-        let state_key = format!("oauth_state:{}:{}", provider, csrf_state.secret());
-        let verifier_key = format!("oauth_verifier:{}:{}", provider, csrf_state.secret());
-
-        let _: () = redis_conn
-            .set_ex(&state_key, "valid", 600)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to store state: {}", e)))?;
-
-        let _: () = redis_conn
-            .set_ex(&verifier_key, pkce_verifier.secret(), 600)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to store verifier: {}", e)))?;
-
-        // Store nonce for OIDC providers (used for ID token validation)
-        // nonce is validated in handle_callback to prevent replay attacks
-        if provider == "google" {
-            let nonce_key = format!("oauth_nonce:{}:{}", provider, csrf_state.secret());
-            let _: () = redis_conn
-                .set_ex(&nonce_key, nonce.secret(), 600)
-                .await
-                .map_err(|e| AuthError::Redis(format!("Failed to store nonce: {}", e)))?;
-        }
-
-        Ok(final_auth_url.to_string())
     }
 
     /// Generates an authorization URL for initiating OAuth flow with platform support
@@ -1170,51 +1067,6 @@ impl OAuthService {
                 .map(|s| s.to_string()),
             email_verified: true,
         })
-    }
-
-    /// Logs out a user by blacklisting their JWT token
-    ///
-    /// This method invalidates the JWT by adding its JTI (JWT ID) to a Redis
-    /// blacklist. The blacklist entry expires when the token would naturally expire.
-    ///
-    /// # Arguments
-    ///
-    /// * `token` - The JWT access token to revoke
-    ///
-    /// # Behavior
-    ///
-    /// - If token has no JTI, does nothing (token can't be blacklisted)
-    /// - If token is already expired, does nothing
-    /// - Otherwise, adds JTI to Redis blacklist with TTL = remaining token lifetime
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// oauth_service.logout("eyJhbGciOiJSUzI1NiIs...").await?;
-    /// // Token is now invalid for all future requests
-    /// ```
-    pub async fn logout(&self, token: &str) -> Result<(), AuthError> {
-        // Validate JWT to extract claims
-        let claims = self.token_service.validate_jwt(token)?;
-
-        // Check if token has JTI (required for blacklisting)
-        if claims.jti.is_empty() {
-            return Ok(());
-        }
-
-        // Calculate remaining TTL
-        let current_time = chrono::Utc::now().timestamp();
-        if claims.exp <= current_time {
-            // Token already expired, no need to blacklist
-            return Ok(());
-        }
-
-        let ttl_secs = (claims.exp - current_time) as u64;
-
-        // Add JTI to blacklist in Redis
-        self.token_service
-            .blacklist_jti(&claims.jti, ttl_secs)
-            .await
     }
 }
 

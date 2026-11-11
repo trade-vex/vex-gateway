@@ -122,18 +122,6 @@ impl TokenService {
         Ok(())
     }
 
-    // Blacklist a JTI with specific TTL
-    pub async fn blacklist_jti(&self, jti: &str, ttl_secs: u64) -> Result<(), AuthError> {
-        let mut conn = self.conn.clone();
-
-        let _: () = conn
-            .set_ex(blacklist_key(jti), "1", ttl_secs)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to blacklist JTI: {}", e)))?;
-
-        Ok(())
-    }
-
     pub async fn get_token_version(&self, user_id: Uuid) -> Result<u64, AuthError> {
         let mut conn = self.conn.clone();
         let version: Option<u64> = conn

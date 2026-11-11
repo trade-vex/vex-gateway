@@ -1,5 +1,5 @@
 use rand::distributions::{Alphanumeric, Distribution};
-use rand::{Rng, rngs::OsRng};
+use rand::rngs::OsRng;
 
 /// Generates a cryptographically secure random alphanumeric string.
 ///
@@ -58,11 +58,6 @@ pub fn generate_random_string(length: usize) -> String {
         .take(length)
         .map(char::from)
         .collect::<String>()
-}
-
-pub fn generate_random_bytes(length: usize) -> Vec<u8> {
-    let mut rng = rand::thread_rng();
-    (0..length).map(|_| rng.r#gen()).collect()
 }
 
 #[cfg(test)]

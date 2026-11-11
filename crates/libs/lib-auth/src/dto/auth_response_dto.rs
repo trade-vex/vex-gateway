@@ -14,15 +14,6 @@ pub struct OAuthLoginResponse {
     pub user: UserInfo,
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct OAuthTokenResponse {
-    pub access_token: String,
-    pub token_type: String,
-    pub expires_in: Option<u64>,
-    pub refresh_token: Option<String>,
-    pub scope: Option<String>,
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct UserInfo {
     pub user_id: Uuid,
