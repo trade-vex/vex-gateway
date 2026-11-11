@@ -28,12 +28,12 @@ async fn token_is_revoked(
     jti: &str,
     token_version: u64,
 ) -> redis::RedisResult<bool> {
-    if conn.exists::<_, bool>(blacklist_key(jti)).await? {
-        return Ok(true);
-    }
-
-    let stored_version: Option<u64> = conn.get(token_version_key(user_id)).await?;
-    Ok(token_version < stored_version.unwrap_or_default())
+    let (blacklisted, stored_version): (bool, Option<u64>) = redis::pipe()
+        .exists(blacklist_key(jti))
+        .get(token_version_key(user_id))
+        .query_async(conn)
+        .await?;
+    Ok(blacklisted || token_version < stored_version.unwrap_or_default())
 }
 
 /// Refuses the request's token with a 401 carrying `code` and `message`, and counts it as a JWT
@@ -267,7 +267,9 @@ where
                                     if let Some(cookie) = req.cookie("session_id")
                                         && let Some(session_service) = &session_service_opt
                                     {
-                                        match session_service.refresh_session(cookie.value()).await
+                                        match session_service
+                                            .refresh_session(cookie.value(), user_id)
+                                            .await
                                         {
                                             Ok(()) => {
                                                 tracing::debug!(

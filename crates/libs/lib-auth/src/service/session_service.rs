@@ -142,20 +142,18 @@ impl SessionService {
         Ok(())
     }
 
-    /// Refresh/extend a session's TTL
-    pub async fn refresh_session(&self, session_id: &str) -> Result<(), AuthError> {
+    /// Extends the idle TTL of the session of `user_id`, the user of the token the request
+    /// carries. `InvalidRequest` when the session is gone: it idled out or was revoked.
+    pub async fn refresh_session(&self, session_id: &str, user_id: Uuid) -> Result<(), AuthError> {
         let session_key = format!("session:{}", session_id);
-        let session_data = self.get_session(session_id).await?;
-        let session_index_key = Self::session_index_key(session_data.user_id);
+        let session_index_key = Self::session_index_key(user_id);
         let mut conn = self.conn.clone();
 
-        // Extend the TTL
-        let _: () = redis::pipe()
+        let (alive,): (bool,) = redis::pipe()
             .atomic()
             .cmd("EXPIRE")
             .arg(&session_key)
             .arg(self.session_ttl_seconds)
-            .ignore()
             .cmd("SADD")
             .arg(&session_index_key)
             .arg(session_id)
@@ -168,6 +166,9 @@ impl SessionService {
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to refresh session: {}", e)))?;
 
+        if !alive {
+            return Err(AuthError::InvalidRequest);
+        }
         Ok(())
     }
 
@@ -429,5 +430,25 @@ mod tests {
         assert!(service.get_session(&other_session).await.is_ok());
 
         service.delete_session(&other_session).await.unwrap();
+    }
+
+    /// The JWT middleware takes `InvalidRequest` from `refresh_session` as the session's idle
+    /// expiry: it must answer so without reading the session first.
+    #[tokio::test]
+    async fn refreshing_a_missing_session_is_invalid_request() {
+        let service = SessionService::new(crate::test_redis().await, 60);
+        let user_id = Uuid::new_v4();
+        let live = service
+            .create_session(user_id, "access".into())
+            .await
+            .unwrap();
+
+        assert!(service.refresh_session(&live, user_id).await.is_ok());
+        let missing = Uuid::new_v4().to_string();
+        assert!(matches!(
+            service.refresh_session(&missing, user_id).await,
+            Err(AuthError::InvalidRequest)
+        ));
+        service.delete_session(&live).await.unwrap();
     }
 }
