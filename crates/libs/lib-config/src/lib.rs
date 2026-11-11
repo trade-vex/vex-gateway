@@ -88,6 +88,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tracing::{debug, info};
+use url::Url;
 
 use crate::util::find_config_dir;
 
@@ -347,7 +348,7 @@ impl Config {
     /// - Every `rate_limit` setting must be greater than 0
     /// - `auth.oauth.providers` may list only `google`, `github` and `twitter`
     /// - With an OAuth provider configured, `auth.oauth.frontend_url_web` and `frontend_url_app`
-    ///   must be set
+    ///   must be absolute URLs
     /// - A `google` provider needs its `issuer_url`
     /// - `auth.otp.email_verification_expiry_minutes` and `password_reset_expiry_minutes` must be
     ///   positive
@@ -426,16 +427,17 @@ impl Config {
             )));
         }
 
-        // A completed OAuth login is redirected to one of these; there is no fallback URL.
+        // A completed or cancelled OAuth login is redirected to one of these, with a query
+        // parameter appended, so each must parse as an absolute URL; there is no fallback.
         let oauth = &self.auth.oauth;
         if !oauth.providers.is_empty() {
             for (key, url) in [
                 ("frontend_url_web", &oauth.frontend_url_web),
                 ("frontend_url_app", &oauth.frontend_url_app),
             ] {
-                if url.as_deref().is_none_or(|url| url.trim().is_empty()) {
+                if url.as_deref().is_none_or(|url| Url::parse(url).is_err()) {
                     return Err(ConfigError::ValidationError(format!(
-                        "auth.oauth.{key} is required when OAuth providers are configured"
+                        "auth.oauth.{key} must be an absolute URL when OAuth providers are configured"
                     )));
                 }
             }
@@ -1091,6 +1093,11 @@ database = "vex_analytics"
             (
                 vec![web, r#"frontend_url_app = " ""#],
                 "auth.oauth.frontend_url_app",
+            ),
+            // A relative URL cannot take the query a cancelled login appends.
+            (
+                vec![r#"frontend_url_web = "/oauth/done""#, app],
+                "auth.oauth.frontend_url_web",
             ),
         ] {
             let error = with_provider(&urls).unwrap_err();

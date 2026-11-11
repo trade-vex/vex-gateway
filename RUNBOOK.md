@@ -138,7 +138,7 @@ The service validates configuration on startup:
 ### OAuth Redirects
 
 Once `auth.oauth.providers` lists a provider, the gateway needs the two URLs a completed OAuth
-login is redirected to, and refuses to start without them:
+login is redirected to, and refuses to start unless both are absolute URLs:
 
 - `auth.oauth.frontend_url_web`: the web frontend page that finishes a browser login (the session
   cookie is already set).
