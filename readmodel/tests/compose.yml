@@ -1,7 +1,8 @@
-# The read model's test stack: a three-broker Redpanda (Kafka and Schema Registry), Postgres, the
-# Kafka Connect worker of readmodel/connect and the real vex-core at the rev Cargo.lock pins, with
-# the Aeron Archive that journals its commands, both built from vex-core's own Dockerfiles. run.py
-# drives it; nothing publishes a fixed host port, and every Aeron directory is inside a container.
+# The read model's test stack: a three-broker Redpanda (Kafka and Schema Registry), Postgres,
+# ClickHouse, the Kafka Connect worker of readmodel/connect and the real vex-core at the rev
+# Cargo.lock pins, with the Aeron Archive that journals its commands, both built from vex-core's
+# own Dockerfiles. run.py drives it; nothing publishes a fixed host port, and every Aeron directory
+# is inside a container.
 #
 # CORE_DIR is a checkout of trade-vex/vex-core at CORE_REV; TLS_DIR holds the throwaway CA and
 # server certificates run.py generates.
@@ -69,6 +70,35 @@ services:
       timeout: 5s
       retries: 30
 
+  clickhouse:
+    # The 26.8 LTS. The read model needs 26.3 or later (RUNBOOK.md "Read Model").
+    image: clickhouse/clickhouse-server:26.8.36.3@sha256:d426d2f612e1e189c90f9a3f8dcd85a03c6851273833817a296bb327e63aa7a7
+    # HTTPS only, with the certificate the CA in TLS_DIR signed for this host name
+    # (clickhouse.xml), so Connect reaches it over TLS or not at all; run.py uses the native
+    # protocol inside the container. The certificate and key are copied in for the server's user
+    # when the container is created; run.py swaps them the same way and restarts the container.
+    entrypoint:
+      - bash
+      - -c
+      - >-
+        { test -f /etc/clickhouse-server/tls/clickhouse.crt
+        || install -D -o clickhouse -g clickhouse -m 600 -t /etc/clickhouse-server/tls
+        /tls/clickhouse.crt /tls/clickhouse.key; }
+        && exec /entrypoint.sh
+    environment:
+      CLICKHOUSE_DB: readmodel
+      CLICKHOUSE_USER: admin
+      CLICKHOUSE_PASSWORD: admin
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - ${TLS_DIR:?}:/tls:ro
+      - ./clickhouse.xml:/etc/clickhouse-server/config.d/readmodel.xml:ro
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--user=admin", "--password=admin", "--query=SELECT 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
   connect:
     build: ../connect
     image: vex-readmodel-connect:test
@@ -77,12 +107,15 @@ services:
       redpanda-1: {condition: service_healthy}
       redpanda-2: {condition: service_healthy}
       postgres: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
     environment:
       KAFKA_BOOTSTRAP_SERVERS: redpanda-0:9092,redpanda-1:9092,redpanda-2:9092
       SCHEMA_REGISTRY_URL: http://redpanda-0:8081,http://redpanda-1:8081,http://redpanda-2:8081
     volumes:
       - ./postgres.properties:/etc/vex-connect/postgres.properties:ro
       - ${TLS_DIR:?}/ca.crt:/etc/vex-connect/postgres-ca.pem:ro
+      - ./clickhouse.properties:/etc/vex-connect/clickhouse.properties:ro
+      - ${TLS_DIR:?}/ca.crt:/etc/vex-connect/clickhouse-ca.pem:ro
     ports:
       - 127.0.0.1::8083
     healthcheck:
@@ -153,7 +186,7 @@ services:
     profiles: [tools]
     image: migrate/migrate:v4.20.1@sha256:76cc2074cb6642631f34a898ced71e6aeaa6b1a4d78c4daa743275a22e0c5be7
     volumes:
-      - ../migrations/postgres:/migrations:ro
+      - ../migrations:/migrations:ro
 
   buf:
     profiles: [tools]

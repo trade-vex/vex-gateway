@@ -1,29 +1,46 @@
-//! Writes the read model's `assets` and `markets` rows from a vex-core configuration file.
+//! Writes the read model's `assets` and `markets` rows from a vex-core configuration file, for
+//! Postgres or ClickHouse.
 //!
-//! The gateway's `ScalingCache` turns engine integers into decimals with these rows, so they must
-//! equal the engine's own symbol configuration. They are generated from the `symbols` section of
-//! the core's file, read and validated by vex-config's own code, never written by hand:
+//! The gateway's `ScalingCache` turns engine integers into decimals with the Postgres rows, and
+//! ClickHouse's views with their copies, so they must equal the engine's own symbol
+//! configuration. They are generated from the `symbols` section of the core's file, read and
+//! validated by vex-config's own code, never written by hand:
 //!
 //! ```text
-//! cargo run -p readmodel-seeds -- <vex-core config file> > seeds.sql
+//! cargo run -p readmodel-seeds -- postgres <vex-core config file> > seeds.sql
+//! cargo run -p readmodel-seeds -- clickhouse <vex-core config file> > seeds.clickhouse.sql
 //! ```
 //!
-//! The output is idempotent: it upserts every configured asset and market as active and
-//! deactivates the rows the configuration no longer has.
+//! The output is idempotent. For Postgres, it upserts every configured asset and market as active
+//! and deactivates the rows the configuration no longer has. For ClickHouse, it writes every
+//! configured row again, which replaces the stored one, and keeps the others: history still needs
+//! their scales.
 
+use common::CoreMarketSpecification;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::path::Path;
 use std::process::ExitCode;
 use vex_config::SymbolSpecificationConfig;
 
+/// The database the seed SQL is for.
+#[derive(Clone, Copy)]
+enum Engine {
+    Postgres,
+    ClickHouse,
+}
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
-    let (Some(path), None) = (args.next(), args.next()) else {
-        eprintln!("usage: readmodel-seeds <vex-core config file>");
-        return ExitCode::from(2);
+    let engine = match args.next().as_deref() {
+        Some("postgres") => Engine::Postgres,
+        Some("clickhouse") => Engine::ClickHouse,
+        _ => return usage(),
     };
-    match generate(Path::new(&path)) {
+    let (Some(path), None) = (args.next(), args.next()) else {
+        return usage();
+    };
+    match generate(engine, Path::new(&path)) {
         Ok(sql) => {
             print!("{sql}");
             ExitCode::SUCCESS
@@ -35,8 +52,13 @@ fn main() -> ExitCode {
     }
 }
 
-/// The seed SQL for the vex-core configuration file at `path`.
-fn generate(path: &Path) -> Result<String, String> {
+fn usage() -> ExitCode {
+    eprintln!("usage: readmodel-seeds <postgres|clickhouse> <vex-core config file>");
+    ExitCode::from(2)
+}
+
+/// The seed SQL for `engine` from the vex-core configuration file at `path`.
+fn generate(engine: Engine, path: &Path) -> Result<String, String> {
     // The `symbols` section alone, deserialized as vex-config's loader does and checked by its
     // validation. The rest of the file does not bear on these rows, and a production file is
     // incomplete without the secrets the core takes from its environment (its gateway key), which
@@ -51,12 +73,23 @@ fn generate(path: &Path) -> Result<String, String> {
         .validate()
         .map_err(|error| format!("{}: {error}", path.display()))?;
     let source = path.file_name().unwrap_or_default().to_string_lossy();
-    seed_sql(&symbols, &source)
+    match engine {
+        Engine::Postgres => postgres_sql(&symbols, &source),
+        Engine::ClickHouse => clickhouse_sql(&symbols, &source),
+    }
 }
 
-/// Upserts of `assets` and `markets` from `symbols`, in id order. Every integer keeps its bits in
-/// the signed column (`as i16`, `as i32`, `as i64`), as the gateway decodes it (`as u16`, ...).
-fn seed_sql(symbols: &SymbolSpecificationConfig, source: &str) -> Result<String, String> {
+/// The rows to seed, in id order.
+#[derive(Debug)]
+struct Rows<'a> {
+    /// asset id -> native scale
+    assets: BTreeMap<u16, u64>,
+    markets: BTreeMap<u32, &'a CoreMarketSpecification>,
+}
+
+/// The markets of `symbols` and their assets. Refuses an asset that two markets give different
+/// native scales.
+fn rows(symbols: &SymbolSpecificationConfig) -> Result<Rows<'_>, String> {
     let markets: BTreeMap<_, _> = symbols
         .symbols
         .values()
@@ -80,7 +113,17 @@ fn seed_sql(symbols: &SymbolSpecificationConfig, source: &str) -> Result<String,
             }
         }
     }
+    let assets = assets
+        .into_iter()
+        .map(|(asset, (scale, _))| (asset, scale))
+        .collect();
+    Ok(Rows { assets, markets })
+}
 
+/// Upserts of `assets` and `markets` from `symbols`, in id order. Every integer keeps its bits in
+/// the signed column (`as i16`, `as i32`, `as i64`), as the gateway decodes it (`as u16`, ...).
+fn postgres_sql(symbols: &SymbolSpecificationConfig, source: &str) -> Result<String, String> {
+    let Rows { assets, markets } = rows(symbols)?;
     let mut sql = format!(
         "-- Generated by readmodel-seeds from vex-core's {source}. Do not edit: regenerate it.\nBEGIN;\n"
     );
@@ -88,7 +131,7 @@ fn seed_sql(symbols: &SymbolSpecificationConfig, source: &str) -> Result<String,
         sql.push_str("\nINSERT INTO assets (asset_id, native_scale, active) VALUES\n");
         let rows: Vec<_> = assets
             .iter()
-            .map(|(&asset, &(scale, _))| format!("    ({}, {}, true)", asset as i16, scale as i64))
+            .map(|(&asset, &scale)| format!("    ({}, {}, true)", asset as i16, scale as i64))
             .collect();
         sql.push_str(&rows.join(",\n"));
         sql.push_str(
@@ -144,10 +187,50 @@ fn seed_sql(symbols: &SymbolSpecificationConfig, source: &str) -> Result<String,
     Ok(sql)
 }
 
+/// Inserts of `assets` and `markets` from `symbols`, in id order, each a statement that ends with
+/// a semicolon. The tables are ReplacingMergeTrees, so a row written again replaces the stored
+/// one.
+fn clickhouse_sql(symbols: &SymbolSpecificationConfig, source: &str) -> Result<String, String> {
+    let Rows { assets, markets } = rows(symbols)?;
+    let mut sql = format!(
+        "-- Generated by readmodel-seeds from vex-core's {source}. Do not edit: regenerate it.\n"
+    );
+    if !assets.is_empty() {
+        let rows: Vec<_> = assets
+            .iter()
+            .map(|(asset, scale)| format!("    ({asset}, {scale})"))
+            .collect();
+        writeln!(
+            sql,
+            "INSERT INTO assets (asset_id, native_scale) VALUES\n{};",
+            rows.join(",\n")
+        )
+        .expect("writing to a String cannot fail");
+    }
+    if !markets.is_empty() {
+        let rows: Vec<_> = markets
+            .values()
+            .map(|spec| {
+                format!(
+                    "    ({}, {}, {}, {})",
+                    spec.market_id, spec.base_asset, spec.quote_asset, spec.quote_scale_k
+                )
+            })
+            .collect();
+        writeln!(
+            sql,
+            "INSERT INTO markets (market_id, base_asset, quote_asset, quote_scale_k) VALUES\n{};",
+            rows.join(",\n")
+        )
+        .expect("writing to a String cannot fail");
+    }
+    Ok(sql)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::{CoreMarketSpecification, MarketType};
+    use common::MarketType;
     use std::path::PathBuf;
     use vex_config::{ConfigLoader, Environment};
 
@@ -208,14 +291,28 @@ mod tests {
     #[test]
     fn committed_development_seeds_match_the_pinned_core() {
         let config = pinned_core_checkout().join("config.dev.yaml");
-        let generated = generate(&config).unwrap();
-        assert!(
-            generated == include_str!("../development.sql"),
-            "readmodel/seeds/development.sql differs from vex-core's {}; regenerate it with\n  \
-             cargo run -p readmodel-seeds -- {} > readmodel/seeds/development.sql",
-            config.display(),
-            config.display()
-        );
+        for (engine, name, file, committed) in [
+            (
+                Engine::Postgres,
+                "postgres",
+                "development.sql",
+                include_str!("../development.sql"),
+            ),
+            (
+                Engine::ClickHouse,
+                "clickhouse",
+                "development.clickhouse.sql",
+                include_str!("../development.clickhouse.sql"),
+            ),
+        ] {
+            assert!(
+                generate(engine, &config).unwrap() == committed,
+                "readmodel/seeds/{file} differs from vex-core's {}; regenerate it with\n  \
+                 cargo run -p readmodel-seeds -- {name} {} > readmodel/seeds/{file}",
+                config.display(),
+                config.display()
+            );
+        }
     }
 
     #[test]
@@ -241,12 +338,14 @@ mod tests {
                 .is_err()
         );
 
-        assert_eq!(
-            generate(&production).unwrap(),
-            generate(&development)
-                .unwrap()
-                .replace("config.dev.yaml", "config.prod.yaml")
-        );
+        for engine in [Engine::Postgres, Engine::ClickHouse] {
+            assert_eq!(
+                generate(engine, &production).unwrap(),
+                generate(engine, &development)
+                    .unwrap()
+                    .replace("config.dev.yaml", "config.prod.yaml")
+            );
+        }
     }
 
     #[test]
@@ -271,7 +370,7 @@ symbols:
 "#;
         std::fs::write(&path, file).unwrap();
 
-        let error = generate(&path).unwrap_err();
+        let error = generate(Engine::ClickHouse, &path).unwrap_err();
 
         assert!(
             error.contains("Symbol ID 65538 does not match quote_asset << 16 | base_asset = 65539"),
@@ -284,7 +383,7 @@ symbols:
         let mut spec = market(40_000, 50_000);
         spec.base_native_scale = 10_000_000_000_000_000_000;
         spec.quote_scale_k = u64::MAX;
-        let sql = seed_sql(&symbols([spec]), "test").unwrap();
+        let sql = postgres_sql(&symbols([spec]), "test").unwrap();
 
         // asset 40000 = -25536 as i16, 10^19 = -8446744073709551616 as i64
         assert!(
@@ -300,12 +399,30 @@ symbols:
     }
 
     #[test]
+    fn clickhouse_columns_are_unsigned() {
+        let mut spec = market(40_000, 50_000);
+        spec.base_native_scale = 10_000_000_000_000_000_000;
+        spec.quote_scale_k = u64::MAX;
+
+        let sql = clickhouse_sql(&symbols([spec]), "test").unwrap();
+
+        assert_eq!(
+            sql,
+            "-- Generated by readmodel-seeds from vex-core's test. Do not edit: regenerate it.\n\
+             INSERT INTO assets (asset_id, native_scale) VALUES\n    \
+             (40000, 10000000000000000000),\n    (50000, 1000000);\n\
+             INSERT INTO markets (market_id, base_asset, quote_asset, quote_scale_k) VALUES\n    \
+             (3276840000, 40000, 50000, 18446744073709551615);\n"
+        );
+    }
+
+    #[test]
     fn an_asset_with_two_native_scales_is_refused() {
         let btc = market(2, 1);
         let mut eth = market(3, 1);
         eth.quote_native_scale = 100;
 
-        let error = seed_sql(&symbols([btc, eth]), "test").unwrap_err();
+        let error = rows(&symbols([btc, eth])).unwrap_err();
 
         assert_eq!(
             error,
@@ -315,10 +432,20 @@ symbols:
 
     #[test]
     fn an_empty_configuration_deactivates_every_row() {
-        let sql = seed_sql(&symbols([]), "test").unwrap();
+        let sql = postgres_sql(&symbols([]), "test").unwrap();
 
         assert!(!sql.contains("INSERT"), "{sql}");
         assert!(sql.contains("UPDATE assets SET active = false WHERE asset_id <> ALL ('{}');"));
         assert!(sql.contains("UPDATE markets SET active = false WHERE market_id <> ALL ('{}');"));
+    }
+
+    #[test]
+    fn an_empty_configuration_writes_nothing_to_clickhouse() {
+        let sql = clickhouse_sql(&symbols([]), "test").unwrap();
+
+        assert_eq!(
+            sql,
+            "-- Generated by readmodel-seeds from vex-core's test. Do not edit: regenerate it.\n"
+        );
     }
 }

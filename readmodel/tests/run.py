@@ -2,30 +2,42 @@
 """The read model's tests, against a real stack (trade-vex/vex-core#189).
 
 Checks that apply-connectors.sh retries a request Connect refuses while it rebalances, a bounded
-number of times, and no other, and that one put() of a connector blocks for less than the sink
-consumers' max.poll.interval.ms. Then builds and starts readmodel/tests/compose.yml with vex-core
-at the rev Cargo.lock pins, journaling to its Aeron Archive, with its topics as that rev's
-deploy/kafka/topics.toml declares them, and with Postgres serving TLS under a throwaway CA, and
-checks:
-- the migrations refuse a database in which roles other than its owner may create in schema
-  public, apply to an empty database, and a second run is a no-op;
-- the seeds apply, twice;
+number of times, and no other, and that one put() of a JDBC connector blocks for less than the
+sink consumers' max.poll.interval.ms. Then builds and starts readmodel/tests/compose.yml with
+vex-core at the rev Cargo.lock pins, journaling to its Aeron Archive, with its topics as that rev's
+deploy/kafka/topics.toml declares them, and with Postgres and ClickHouse serving TLS under a
+throwaway CA, and checks:
+- the Postgres migrations refuse a database in which roles other than its owner may create in
+  schema public, apply to an empty database, and a second run is a no-op;
+- the ClickHouse migrations refuse a server where the deploy has not created the views' owner,
+  apply to an empty database, on a server that refuses users without a password, and to a second
+  one on the same server, and a second run is a no-op;
+- the seeds apply to both, twice;
 - schema.sql: the keep_newer guard on every trading table, the guard itself, trading.u64 and the
   roles' privileges;
+- ClickHouse's privileges: Connect may only insert into the raw tables, the gateway may only read
+  the views, every view and materialized view runs as readmodel_owner, who cannot log in, even
+  with its password;
 - every field of every trading.proto event, after Flatten, has a column of the right type in its
-  connectors' tables, and every connector follows the read model's rules;
+  connectors' Postgres tables and in its ClickHouse raw table, which is a ReplacingMergeTree keyed
+  by the event's key and event_ts, and every connector follows the read model's rules;
 - end to end, with traffic through the real core and Postgres out for 90 s, first hung with a
   statement of every connector in flight, then stopped: no connector task fails, every connector
   cuts off its statement, no later than check_put_bound assumes, and its login that gets no answer,
   and retries its refused logins, every topic lands in its tables, a latest-state row holds its
-  key's greatest event_ts, u64 values above i64::MAX keep their bits, replaying an out-of-order
-  and duplicated suffix changes no table, every latest-state row is the engine's state after a
-  restart of the core with a gateway connected, which replays its journal, after a Kafka outage
-  while orders flow, and after a kill -9 of the core with events queued behind paused brokers
-  (check_acceptance), Connect reaches Postgres over TLS only, a connector
-  refuses a server certificate its CA did not sign or that names another host and resumes by
-  itself once the right one is back, and a field without a column stops its connector, skipping
-  nothing, until the migration adds the column and a restart resumes it.
+  key's greatest event_ts, every event lands in its ClickHouse table once, and the per-minute
+  tables hold each minute's last balance and price, a command's last fill whatever order its
+  fills arrive in, u64 values above i64::MAX keep their bits in both, replaying an out-of-order
+  and duplicated suffix changes no table and no view, although ClickHouse stores the copies until
+  its parts merge, every latest-state row is the engine's state, and every table in both holds
+  what Kafka holds, after a restart of the core with a gateway connected, which replays its
+  journal, after a Kafka outage while orders flow, and after a kill -9 of the core with events
+  queued behind paused brokers (check_acceptance), Connect reaches Postgres over TLS only, the
+  ClickHouse connector rides out ClickHouse being down, a connector refuses a server certificate
+  its CA did not sign or that names another host and resumes by itself once the right one is
+  back, and a field without a column stops its Postgres connector, skipping nothing, until the
+  migration adds the column and a restart resumes it, while ClickHouse's sink drops the field
+  silently.
 
 Needs git, openssl, Docker with Compose v2, and network access to GitHub. Stops and removes the
 stack at the end, also on failure. In GitHub Actions, with the Actions runtime exposed to it
@@ -72,17 +84,44 @@ TOPIC_MESSAGES = {
 # trading.proto's other messages: Order is nested in OrderEvent; order-book levels travel as JSON.
 NOT_EVENTS = {"Order", "OrderbookLevel"}
 BROKERS = ("redpanda-0", "redpanda-1", "redpanda-2")
-# The column type of each proto field type (design doc §3.4). A type missing here has none yet.
+# The column type of each proto field type (design doc §3.4), in Postgres and in ClickHouse. A
+# type missing here has none yet.
 COLUMN_TYPES = {
     "TYPE_UINT64": "bigint",
     "TYPE_UINT32": "bigint",
     "TYPE_ENUM": "text",
     "TYPE_STRING": "text",
 }
+CLICKHOUSE_TYPES = {
+    "TYPE_UINT64": "UInt64",
+    "TYPE_UINT32": "UInt64",
+    "TYPE_ENUM": "LowCardinality(String)",
+    "TYPE_STRING": "String",
+}
+# Each topic's ClickHouse raw table (readmodel/migrations/clickhouse).
+CLICKHOUSE_TABLES = {
+    "balances": "balance_events",
+    "orders": "order_events",
+    "orderbook": "orderbook_events",
+    "cancels": "cancel_events",
+    "trades": "trade_events",
+    "deposits": "deposit_events",
+    "withdrawals": "withdrawal_events",
+}
+# The ClickHouse views, which the gateway reads, and the per-minute tables behind them.
+CLICKHOUSE_VIEWS = {
+    "balances_per_minute",
+    "asset_prices_per_minute",
+    "deposits",
+    "withdrawals",
+    "trade_volumes",
+}
+PER_MINUTE_TABLES = {"balances_last_per_min", "market_prices_last_per_min"}
+OWNER = "readmodel_owner"
 
 SECRETS = "/etc/vex-connect/postgres.properties"
 POSTGRES_CA = "/etc/vex-connect/postgres-ca.pem"
-# Settings every connector has, with these values.
+# Settings every Postgres connector has, with these values.
 CONNECTOR_RULES = {
     "connector.class": "io.confluent.connect.jdbc.JdbcSinkConnector",
     # TLS that verifies the server's certificate and host name; a bound on each login and on each
@@ -112,7 +151,8 @@ CONNECTOR_RULES = {
     "max.retries": "60",
     "retry.backoff.ms": "10000",
 }
-# Settings that differ between connectors. Anything else (a dead-letter queue, say) is refused.
+# Settings that differ between Postgres connectors. Anything else (a dead-letter queue, say) is
+# refused.
 CONNECTOR_SETTINGS = {
     "tasks.max",
     "topics",
@@ -120,6 +160,47 @@ CONNECTOR_SETTINGS = {
     "pk.fields",
     "transforms.event_ts.renames",
 }
+
+CLICKHOUSE_SECRETS = "/etc/vex-connect/clickhouse.properties"
+CLICKHOUSE_CA = "/etc/vex-connect/clickhouse-ca.pem"
+# The settings of the ClickHouse connector, which writes every topic, with these values.
+CLICKHOUSE_RULES = {
+    "connector.class": "com.clickhouse.kafka.connect.ClickHouseSinkConnector",
+    "topics": ",".join(CLICKHOUSE_TABLES),
+    "topic2TableMap": ",".join(f"{topic}={table}" for topic, table in CLICKHOUSE_TABLES.items()),
+    **{
+        setting: f"${{file:{CLICKHOUSE_SECRETS}:{setting}}}"
+        for setting in ("hostname", "port", "database", "username", "password")
+    },
+    # HTTPS that verifies the server's certificate against the mounted CA, and its host name:
+    # the sink's clients do both by default, given the CA (sslrootcert), and nothing here turns
+    # either off.
+    "ssl": "true",
+    "jdbcConnectionProperties": f"?sslrootcert={CLICKHOUSE_CA}",
+    # The sink's exactly-once mode deduplicates by Kafka offset, but vex-core's re-published copies
+    # arrive at new offsets: the ReplacingMergeTrees collapse both kinds.
+    "exactlyOnce": "false",
+    "errors.tolerance": "none",
+    # A ClickHouse that cannot be reached is retried, as a refused or reset connection is too, and
+    # a certificate that does not verify, which the sink reports as a failed connection: the task
+    # writes once it is back, like the JDBC connectors after a Postgres outage.
+    "retryOnSocketException": "true",
+    "transforms": "flatten,event_ts,order_event_ts",
+    "transforms.flatten.type": "org.apache.kafka.connect.transforms.Flatten$Value",
+    "transforms.flatten.delimiter": "_",
+    # ReplaceField reads each field of its output from the record by its name before the
+    # rename, so it fails a record that already has the target name: the rename of orders'
+    # timestamp applies to the orders topic only.
+    "transforms.event_ts.type": "org.apache.kafka.connect.transforms.ReplaceField$Value",
+    "transforms.event_ts.renames": "timestamp:event_ts",
+    "transforms.order_event_ts.type": "org.apache.kafka.connect.transforms.ReplaceField$Value",
+    "transforms.order_event_ts.renames": "order_timestamp:event_ts",
+    "transforms.order_event_ts.predicate": "orders",
+    "predicates": "orders",
+    "predicates.orders.type": "org.apache.kafka.connect.transforms.predicates.TopicNameMatches",
+    "predicates.orders.pattern": "orders",
+}
+CLICKHOUSE_SETTINGS = {"tasks.max"}
 
 # What readmodel/tests/traffic sends: user 2^63 + 1 trades USD and BTC, user 3 deposits 10^19 ETH.
 MAKER = 2**63 + 1
@@ -150,7 +231,7 @@ def main():
         run(["git", "-C", str(core), "-c", "advice.detachedHead=false", "checkout", "-q", rev])
         # The core's image is built from this tree; without .git, an unchanged rev hits the cache.
         shutil.rmtree(core / ".git")
-        step("generate the stack's CA and Postgres certificates")
+        step("generate the stack's CA and server certificates")
         tls = Path(temp) / "tls"
         make_certificates(tls)
 
@@ -173,37 +254,46 @@ def test(stack, core):
     stack.compose(
         "--profile", "tools", "build", "connect", "aeron-archive", "core", "traffic", capture=False
     )
-    step("start Redpanda and Postgres")
-    stack.compose("up", "--detach", "--wait", *BROKERS, "postgres")
+    step("start Redpanda, Postgres and ClickHouse")
+    stack.compose("up", "--detach", "--wait", *BROKERS, "postgres", "clickhouse")
     apply_topics(stack, core)
 
     check_migrations(stack)
+    check_clickhouse_migrations(stack)
     check_seeds(stack)
     step("schema.sql: triggers, guard, trading.u64, roles")
     stack.psql((TESTS / "schema.sql").read_text())
+    check_clickhouse_privileges(stack)
 
     connectors = {
         path.stem: json.loads(path.read_text())
         for path in sorted((READMODEL / "connect" / "connectors").glob("*.json"))
     }
+    postgres = postgres_connectors(connectors)
+    clickhouse = {name: config for name, config in connectors.items() if name not in postgres}
+    expect(list(clickhouse) == ["clickhouse"], f"connectors other than Postgres': {list(clickhouse)}")
+    keys = topic_keys(postgres)
     descriptor = proto_descriptor(stack)
-    check_coverage(stack, connectors, descriptor)
+    check_coverage(stack, postgres, descriptor)
+    check_clickhouse_coverage(stack, clickhouse["clickhouse"], keys, descriptor)
     start_connect(stack, connectors)
-    drive_traffic_through_an_outage(stack, connectors)
+    drive_traffic_through_an_outage(stack, connectors, postgres)
 
     check_tables_hold_the_topics(stack, connectors, descriptor)
+    check_last_fill_price(stack, connectors)
     check_u64_round_trip(stack, connectors)
     check_replayed_suffix_changes_nothing(stack, connectors)
     check_acceptance(stack, connectors, descriptor)
     check_tls(stack, connectors)
-    check_skew(stack, connectors, core)
+    check_clickhouse_outage_and_tls(stack, connectors)
+    check_skew(stack, connectors, clickhouse, core)
 
 
 def make_certificates(directory):
-    """Writes into `directory` a throwaway CA (ca.crt) and, each with its key, the certificate it
-    signs for the host name the connectors reach Postgres by (postgres.crt), and two that must not
-    verify: one another CA of the same name signs (untrusted.crt), and one the CA signs for another
-    host name (wrong-name.crt)."""
+    """Writes into `directory` a throwaway CA (ca.crt) and, each with its key, the certificates it
+    signs for the host names the connectors reach Postgres and ClickHouse by (postgres.crt,
+    clickhouse.crt), and two that must not verify: one another CA of the same name signs
+    (untrusted.crt), and one the CA signs for another host name (wrong-name.crt)."""
 
     def certificate(name, host, ca=None):
         key, request, extensions, crt = (
@@ -233,6 +323,8 @@ def make_certificates(directory):
     certificate("ca", "vex-readmodel test CA")
     certificate("rogue-ca", "vex-readmodel test CA")
     certificate("postgres", "postgres", ca="ca")
+    certificate("clickhouse", "clickhouse", ca="ca")
+    certificate("clickhouse-untrusted", "clickhouse", ca="rogue-ca")
     certificate("untrusted", "postgres", ca="rogue-ca")
     certificate("wrong-name", "impostor", ca="ca")
 
@@ -398,6 +490,37 @@ def check_migrations(stack):
     expect(stack.dump_schema() == schema, "the second run changed the schema")
 
 
+def check_clickhouse_migrations(stack):
+    step("the ClickHouse migrations refuse a server where the deploy has not created their owner")
+    stack.clickhouse("CREATE DATABASE no_owner")
+    output = stack.migrate_clickhouse("no_owner", check=False, stderr=subprocess.STDOUT)
+    expect(f"There is no user `{OWNER}`" in output, output)
+    stack.clickhouse("DROP DATABASE no_owner SYNC")
+    # What a deployment does (RUNBOOK "Read Model"), with the test password but, unlike it, from
+    # any host: the migrations make it HOST NONE. The server refuses users without a password
+    # (clickhouse.xml), as managed ones do.
+    stack.clickhouse(f"CREATE USER {OWNER} IDENTIFIED BY 'test-only'")
+    expect(stack.clickhouse("SELECT 1", user=OWNER) == "1", f"{OWNER} cannot log in yet")
+
+    step("the ClickHouse migrations apply to an empty database, and a second run is a no-op")
+    migrations = (READMODEL / "migrations" / "clickhouse").glob("*.up.sql")
+    latest = max(int(path.name.split("_")[0]) for path in migrations)
+    stack.migrate_clickhouse()
+    schema = stack.clickhouse_schema()
+    version = stack.clickhouse(
+        "SELECT version, dirty FROM schema_migrations ORDER BY sequence DESC LIMIT 1"
+    )
+    expect(version == f"{latest}\t0", f"version, dirty is {version!r}, not {latest}, 0")
+    output = stack.migrate_clickhouse(stderr=subprocess.STDOUT)
+    expect(output.rstrip().endswith("no change"), output)
+    expect(stack.clickhouse_schema() == schema, "the second run changed the schema")
+
+    step("they apply to a second database on the same server, whose roles and owner exist")
+    stack.clickhouse("CREATE DATABASE second")
+    stack.migrate_clickhouse("second")
+    stack.clickhouse("DROP DATABASE second SYNC")
+
+
 def check_seeds(stack):
     step("the seeds apply, and again with no change")
     seeds = (READMODEL / "seeds" / "development.sql").read_text()
@@ -406,6 +529,68 @@ def check_seeds(stack):
     seeded = stack.psql(rows)
     stack.psql(seeds)
     expect(seeded and stack.psql(rows) == seeded, seeded)
+
+    seeds = (READMODEL / "seeds" / "development.clickhouse.sql").read_text()
+    rows = "SELECT * FROM assets FINAL ORDER BY ALL; SELECT * FROM markets FINAL ORDER BY ALL"
+    stack.clickhouse(seeds)
+    seeded = stack.clickhouse(rows)
+    stack.clickhouse(seeds)
+    expect(seeded and stack.clickhouse(rows) == seeded, seeded)
+
+
+def check_clickhouse_privileges(stack):
+    step("ClickHouse: Connect only inserts into the raw tables, the gateway only reads the views")
+    # What a deployment does for the logins (RUNBOOK "Read Model"), with the test password.
+    for login, role in [
+        ("readmodel_connect_login", "readmodel_connect"),
+        ("readmodel_gateway_login", "readmodel_gateway"),
+    ]:
+        stack.clickhouse(f"CREATE USER {login} IDENTIFIED BY 'test-only'; GRANT {role} TO {login}")
+    grants = defaultdict(set)
+    for grant in stack.clickhouse_rows(
+        "SELECT role_name, access_type, table FROM system.grants "
+        "WHERE (database = 'readmodel' OR database IS NULL) "
+        "AND role_name IN ('readmodel_connect', 'readmodel_gateway')"
+    ):
+        grants[grant["role_name"]].add((grant["access_type"], grant["table"]))
+    raw = {("INSERT", table) for table in CLICKHOUSE_TABLES.values()}
+    expect(grants["readmodel_connect"] == raw, f"readmodel_connect: {grants['readmodel_connect']}")
+    views = {("SELECT", view) for view in CLICKHOUSE_VIEWS}
+    expect(grants["readmodel_gateway"] == views, f"readmodel_gateway: {grants['readmodel_gateway']}")
+
+    tables = stack.clickhouse_rows(
+        "SELECT name, engine, create_table_query FROM system.tables WHERE database = 'readmodel'"
+    )
+    expect(
+        {table["name"] for table in tables if table["engine"] == "View"} == CLICKHOUSE_VIEWS,
+        "every view is the gateway's, and the gateway reads every view",
+    )
+    for table in tables:
+        if table["engine"] in ("View", "MaterializedView"):
+            # Without the clause, a view runs with the rights of whoever reads it.
+            expect(
+                f"DEFINER = {OWNER} SQL SECURITY DEFINER" in table["create_table_query"],
+                f"{table['name']} does not run as {OWNER}: {table['create_table_query']}",
+            )
+
+    step("the gateway's login reads the views and is denied every table")
+    for table in tables:
+        name = table["name"]
+        read = stack.clickhouse(
+            f"SELECT * FROM {name} LIMIT 0", user="readmodel_gateway_login", check=False
+        )
+        if name in CLICKHOUSE_VIEWS:
+            expect(read == "", f"the gateway cannot read {name}: {read}")
+        else:
+            expect("ACCESS_DENIED" in read, f"the gateway may read {name}: {read!r}")
+        write = stack.clickhouse(
+            f"INSERT INTO {name} SELECT * FROM {name} LIMIT 0",
+            user="readmodel_gateway_login",
+            check=False,
+        )
+        expect("ACCESS_DENIED" in write, f"the gateway may write {name}: {write!r}")
+    login = stack.clickhouse("SELECT 1", user=OWNER, check=False)
+    expect("AUTHENTICATION_FAILED" in login, f"{OWNER} can log in with its password: {login!r}")
 
 
 def proto_descriptor(stack):
@@ -418,10 +603,34 @@ def proto_descriptor(stack):
     }
 
 
-def connector_columns(config, descriptor):
-    """{column: path of proto fields} of a connector's table: its topic's message after Flatten
-    (delimiter "_") and the event_ts rename."""
-    renames = dict(pair.split(":") for pair in config["transforms.event_ts.renames"].split(","))
+def postgres_connectors(connectors):
+    """The JDBC connectors, which write Postgres: every connector but the ClickHouse one."""
+    return {
+        name: config
+        for name, config in connectors.items()
+        if config["connector.class"] == CONNECTOR_RULES["connector.class"]
+    }
+
+
+def topic_keys(postgres):
+    """Each topic's key columns: the primary key of its Postgres tables without event_ts."""
+    keys = {}
+    for config in postgres.values():
+        key = [column for column in config["pk.fields"].split(",") if column != "event_ts"]
+        topic = config["topics"]
+        expect(keys.setdefault(topic, key) == key, f"{topic}: keys {keys[topic]} and {key}")
+    return keys
+
+
+def topic_columns(topic, config, descriptor):
+    """{column: path of proto fields} of a table that a connector with `config` writes `topic`
+    to: the topic's message after Flatten (delimiter "_") and the connector's renames."""
+    renames = dict(
+        pair.split(":")
+        for setting, value in config.items()
+        if setting.endswith(".renames")
+        for pair in value.split(",")
+    )
 
     def flatten(message, prefix):
         for field in descriptor["messages"][message]["field"]:
@@ -436,7 +645,7 @@ def connector_columns(config, descriptor):
                 name = "_".join(part["name"] for part in path)
                 yield renames.get(name, name), path
 
-    return dict(flatten(TOPIC_MESSAGES[config["topics"]], ()))
+    return dict(flatten(TOPIC_MESSAGES[topic], ()))
 
 
 def check_coverage(stack, connectors, descriptor):
@@ -461,7 +670,7 @@ def check_coverage(stack, connectors, descriptor):
         schema, table = config["table.name.format"].split(".")
         needed = {
             column: COLUMN_TYPES.get(path[-1]["type"], path[-1]["type"])
-            for column, path in connector_columns(config, descriptor).items()
+            for column, path in topic_columns(config["topics"], config, descriptor).items()
         }
         columns = dict(
             line.split("|")
@@ -485,6 +694,46 @@ def check_coverage(stack, connectors, descriptor):
         )
 
 
+def check_clickhouse_coverage(stack, config, keys, descriptor):
+    step("every field of every trading.proto event has a column in its ClickHouse raw table")
+    for setting, value in CLICKHOUSE_RULES.items():
+        expect(config.get(setting) == value, f"clickhouse: {setting} must be {value!r}")
+    unexpected = set(config) - set(CLICKHOUSE_RULES) - CLICKHOUSE_SETTINGS
+    expect(not unexpected, f"clickhouse: unexpected settings {unexpected}")
+    expect(set(CLICKHOUSE_TABLES) == set(TOPIC_MESSAGES), "every topic needs a ClickHouse table")
+    for topic, table in CLICKHOUSE_TABLES.items():
+        # The sink writes a table's columns and drops any field without one, silently: this is
+        # the only check that every field has its column.
+        needed = {
+            column: CLICKHOUSE_TYPES.get(path[-1]["type"], path[-1]["type"])
+            for column, path in topic_columns(topic, config, descriptor).items()
+        }
+        columns = stack.clickhouse_rows(
+            "SELECT name, type, default_kind, default_expression FROM system.columns "
+            f"WHERE database = 'readmodel' AND table = '{table}'"
+        )
+        written = {c["name"]: c["type"] for c in columns if c["default_kind"] != "MATERIALIZED"}
+        expect(written == needed, f"{table} has {written}, the {topic} events need {needed}")
+        materialized = {
+            c["name"]: (c["type"], c["default_expression"])
+            for c in columns
+            if c["default_kind"] == "MATERIALIZED"
+        }
+        ts = ("DateTime64(9, 'UTC')", "fromUnixTimestamp64Nano(toInt64(event_ts))")
+        expect(materialized == {"ts": ts}, f"{table}: MATERIALIZED columns {materialized}")
+        # One row per event once merged, whichever copy came last, and copies share a partition.
+        (engine,) = stack.clickhouse_rows(
+            "SELECT engine, sorting_key, partition_key FROM system.tables "
+            f"WHERE database = 'readmodel' AND name = '{table}'"
+        )
+        expected = {
+            "engine": "ReplacingMergeTree",
+            "sorting_key": ", ".join(keys[topic] + ["event_ts"]),
+            "partition_key": "toYYYYMM(ts)",
+        }
+        expect(engine == expected, f"{table} is {engine}, not {expected}")
+
+
 def start_connect(stack, connectors):
     step("Connect runs exactly the connectors in readmodel/connect/connectors")
     # What a deployment does for Connect's login (RUNBOOK "Read Model"), with postgres.properties'
@@ -503,7 +752,7 @@ def start_connect(stack, connectors):
     expect("deleted" not in output, output)
 
 
-def drive_traffic_through_an_outage(stack, connectors):
+def drive_traffic_through_an_outage(stack, connectors, postgres):
     step("drive traffic through vex-core with the connectors paused")
     for name in connectors:
         stack.connect("PUT", f"/connectors/{name}/pause")
@@ -512,10 +761,10 @@ def drive_traffic_through_an_outage(stack, connectors):
     stack.compose("up", "--detach", "--wait", "core")
     stack.compose("run", "--rm", "traffic", "coverage", capture=False)
 
-    step("lock the trading tables and resume the connectors: each one's upserts wait")
-    # So that every connector has a statement in flight when Postgres hangs, each begun a moment
-    # before: it is cut off while Postgres is hung.
-    tables = sorted(config["table.name.format"] for config in connectors.values())
+    step("lock the trading tables and resume the connectors: each Postgres one's upserts wait")
+    # So that every Postgres connector has a statement in flight when Postgres hangs, each begun a
+    # moment before: it is cut off while Postgres is hung.
+    tables = sorted(config["table.name.format"] for config in postgres.values())
     lock = stack.lock(tables)
     for name in connectors:
         stack.connect("PUT", f"/connectors/{name}/resume")
@@ -536,11 +785,11 @@ def drive_traffic_through_an_outage(stack, connectors):
             + int(url["loginTimeout"])
             + 30
         )
-        wait_for_every_connector(stack, connectors, hung_since, hung + within, {
+        wait_for_every_connector(stack, connectors, postgres, hung_since, hung + within, {
             "statement cut off for want of an answer": [("Write of", "Read timed out")],
             "login cut off for want of an answer": [("Unable to connect", "timed out")],
         })
-        check_cut_off_times(stack, connectors, hung_since, started, cut_off)
+        check_cut_off_times(stack, postgres, hung_since, started, cut_off)
     finally:
         stack.compose("unpause", "postgres")
         lock.communicate(timeout=30)
@@ -549,7 +798,7 @@ def drive_traffic_through_an_outage(stack, connectors):
     stopped_since = f"{time.time():.3f}"
     stack.compose("stop", "postgres")
     within = time.monotonic() + int(CONNECTOR_RULES["connection.backoff.ms"]) / 1000 + 30
-    wait_for_every_connector(stack, connectors, stopped_since, within, {
+    wait_for_every_connector(stack, connectors, postgres, stopped_since, within, {
         "login refused": [
             ("Unable to connect", "UnknownHostException"), ("Unable to connect", "refused")
         ],
@@ -615,10 +864,10 @@ def check_cut_off_times(stack, connectors, since, started, cut_off):
     )
 
 
-def wait_for_every_connector(stack, connectors, since, deadline, expected):
+def wait_for_every_connector(stack, connectors, logging, since, deadline, expected):
     """Waits, while no connector task fails, until the worker has logged, since the Unix time
-    `since` and for every connector, each of `expected`: {what: entries that show it, each as the
-    texts it contains}. Fails after the monotonic time `deadline`."""
+    `since` and for every one of the connectors `logging`, each of `expected`: {what: entries that
+    show it, each as the texts it contains}. Fails after the monotonic time `deadline`."""
     while True:
         expect_no_failed_task(stack.connect("GET", "/connectors?expand=status"))
         entries = connect_log(stack, since)
@@ -628,7 +877,7 @@ def wait_for_every_connector(stack, connectors, since, deadline, expected):
                 for what, shown_by in expected.items()
                 if not any(logged(entries, name, *texts) for texts in shown_by)
             ]
-            for name in connectors
+            for name in logging
         }
         missing = {name: whats for name, whats in missing.items() if whats}
         if not missing:
@@ -665,17 +914,22 @@ def logged(entries, connector, *texts):
 
 
 def wait_until_caught_up(stack, connectors, every_topic_published=False):
-    """Waits until every connector task runs and has committed the end of its topic, and no topic
-    has grown since the previous look. With `every_topic_published`, also until no topic is
-    empty: vex-core publishes after it answers."""
+    """Waits until every task of the `connectors` runs and has committed the end of its topics,
+    and no topic has grown since the previous look. With `every_topic_published`, also until no
+    topic is empty: vex-core publishes after it answers."""
     deadline = time.monotonic() + CATCH_UP_SECONDS
-    # Each connector's group reads every partition of its topic.
+    # Each connector's group reads every partition of its topics.
     partitions = {
-        f"connect-{name}": stack.partitions[config["topics"]] for name, config in connectors.items()
+        f"connect-{name}": sum(stack.partitions[topic] for topic in config["topics"].split(","))
+        for name, config in connectors.items()
     }
     previous_ends = None
     while True:
-        states = stack.connect("GET", "/connectors?expand=status")
+        states = {
+            name: state
+            for name, state in stack.connect("GET", "/connectors?expand=status").items()
+            if name in connectors
+        }
         expect_no_failed_task(states)
         try:
             groups = json.loads(stack.rpk("group", "describe", *partitions, "--format=json"))
@@ -735,11 +989,12 @@ def consume(stack, topic, value_format):
             print(f"    reading {topic} timed out; reading it again", flush=True)
 
 
-def row_of(value, config, descriptor):
-    """The row a connector writes for one event, decoded to proto3 JSON. That JSON leaves out
-    default values, which Connect writes."""
+def row_of(value, columns, descriptor, signed=True):
+    """The row a connector writes for one event, decoded to proto3 JSON, into a table with
+    `columns` (topic_columns). That JSON leaves out default values, which Connect writes. Integers
+    are as Postgres stores them, or unsigned, as ClickHouse does, unless `signed`."""
     row = {}
-    for column, path in connector_columns(config, descriptor).items():
+    for column, path in columns.items():
         field_value = value
         for field in path:
             field_value = (field_value or {}).get(field["jsonName"])
@@ -751,9 +1006,9 @@ def row_of(value, config, descriptor):
         elif field["type"] == "TYPE_STRING":
             row[column] = field_value or ""
         else:
-            # proto3 JSON writes 64-bit integers as strings; the column holds their bits.
+            # proto3 JSON writes 64-bit integers as strings; a Postgres column holds their bits.
             number = int(field_value or 0)
-            row[column] = number - 2**64 if number >= 2**63 else number
+            row[column] = number - 2**64 if signed and number >= 2**63 else number
     return row
 
 
@@ -764,11 +1019,12 @@ def published(stack, topic):
 
 
 def rows_of(events, config, descriptor):
-    """The rows a connector's table holds after `events`, by primary key. A key's events share a
-    partition, in the order the sink reads them: the first copy of a (key, event_ts) stays, and a
-    latest-state row keeps the greatest event_ts."""
+    """The rows a Postgres connector's table holds after `events`, by primary key. A key's events
+    share a partition, in the order the sink reads them: the first copy of a (key, event_ts) stays,
+    and a latest-state row keeps the greatest event_ts."""
+    columns = topic_columns(config["topics"], config, descriptor)
     rows = {}
-    for row in (row_of(value, config, descriptor) for value in events):
+    for row in (row_of(value, columns, descriptor) for value in events):
         key = key_of(row, config)
         if key not in rows or row["event_ts"] > rows[key]["event_ts"]:
             rows[key] = row
@@ -776,7 +1032,7 @@ def rows_of(events, config, descriptor):
 
 
 def key_of(row, config):
-    """The primary key of a row of a connector's table."""
+    """The primary key of a row of a Postgres connector's table."""
     return tuple(row[column] for column in config["pk.fields"].split(","))
 
 
@@ -785,13 +1041,89 @@ def check_tables_hold_the_topics(stack, connectors, descriptor):
     events = {topic: published(stack, topic) for topic in TOPIC_MESSAGES}
     for topic, published_events in events.items():
         expect(published_events, f"vex-core published nothing on {topic}")
-    for name, config in connectors.items():
+    postgres = postgres_connectors(connectors)
+    for name, config in postgres.items():
         expected = rows_of(events[config["topics"]], config, descriptor)
         rows = stack.json_rows(config["table.name.format"])
         expect(
             sorted(rows, key=canonical) == sorted(expected.values(), key=canonical),
             f"{name}: {config['table.name.format']} holds {rows}, not {list(expected.values())}",
         )
+    check_clickhouse_holds_the_topics(
+        stack, connectors["clickhouse"], topic_keys(postgres), descriptor, events
+    )
+
+
+def check_clickhouse_holds_the_topics(stack, config, keys, descriptor, events):
+    step("every topic lands in its ClickHouse table, once per event")
+    stored = {}
+    for topic, table in CLICKHOUSE_TABLES.items():
+        columns = topic_columns(topic, config, descriptor)
+        key = keys[topic] + ["event_ts"]
+        expected = {}
+        # Of two copies of an event, the one written last stays.
+        for row in (row_of(value, columns, descriptor, signed=False) for value in events[topic]):
+            expected[tuple(row[column] for column in key)] = row
+        stored[topic] = sorted(expected.values(), key=canonical)
+        rows = sorted(stack.clickhouse_rows(f"SELECT * FROM {table} FINAL"), key=canonical)
+        expect(rows == stored[topic], f"{table} holds {rows}, not {stored[topic]}")
+
+    step("the per-minute tables hold each minute's last balance and last trade price")
+
+    def minute(row):
+        return row["event_ts"] // 60_000_000_000 * 60
+
+    balances = {}
+    for row in stored["balances"]:
+        last = {column: row[column] for column in ("user_id", "asset_id", "total", "event_ts")}
+        last["minute"] = minute(row)
+        key = (row["user_id"], row["asset_id"], last["minute"])
+        if key not in balances or row["event_ts"] > balances[key]["event_ts"]:
+            balances[key] = last
+    rows = stack.clickhouse_rows(
+        "SELECT user_id, asset_id, toUnixTimestamp(minute) AS minute, total, event_ts "
+        "FROM balances_last_per_min FINAL"
+    )
+    expected = sorted(balances.values(), key=canonical)
+    expect(sorted(rows, key=canonical) == expected, f"balances per minute: {rows}, not {expected}")
+    prices = {}
+    for row in stored["trades"]:
+        # The last fill of a command: a bid taker fills from the lowest ask price up, an ask
+        # taker from the highest bid price down.
+        order = (row["event_ts"], -row["price"] if row["taker_side"] == "SIDE_ASK" else row["price"])
+        key = (row["market_id"], minute(row))
+        if key not in prices or order > prices[key][0]:
+            prices[key] = (order, {"market_id": key[0], "minute": key[1], "price": row["price"]})
+    rows = stack.clickhouse_rows(
+        "SELECT market_id, toUnixTimestamp(minute) AS minute, price "
+        "FROM market_prices_last_per_min FINAL"
+    )
+    expected = sorted((last for _, last in prices.values()), key=canonical)
+    expect(sorted(rows, key=canonical) == expected, f"prices per minute: {rows}, not {expected}")
+
+
+def check_last_fill_price(stack, connectors):
+    step("a minute's price is its last command's last fill, whatever order the fills arrive in")
+    market = 4242
+    now = time.time_ns() // 60_000_000_000 * 60_000_000_000
+    # One ask taker's fills, from the highest bid down, then a bid taker's, from the lowest ask
+    # up, each command's fills sharing its timestamp: the last fill comes first in each. Each
+    # fill is written once the one before it is, so by an insert of its own: with event_ts alone
+    # as the version, the fills would tie and the one inserted later, not the last, would win.
+    commands = [("SIDE_ASK", now, [90, 100]), ("SIDE_BID", now + 1, [80, 70])]
+    for side, timestamp, fills in commands:
+        for maker, price in enumerate(fills):
+            trade = {
+                "makerUserId": "1", "takerUserId": "2", "marketId": market, "price": str(price),
+                "size": "1", "makerOrderId": str(maker), "takerOrderId": str(timestamp),
+                "takerSide": side, "timestamp": str(timestamp),
+            }
+            produce(stack, "trades", f"{timestamp}:{maker}", "TradeEvent", [trade])
+            wait_until_caught_up(stack, connectors)
+        price = stack.clickhouse(
+            f"SELECT price FROM market_prices_last_per_min FINAL WHERE market_id = {market}"
+        )
+        expect(price == str(fills[0]), f"market {market} has price {price}, not {fills[0]}")
 
 
 def check_u64_round_trip(stack, connectors):
@@ -806,6 +1138,21 @@ def check_u64_round_trip(stack, connectors):
         f"SELECT count(*) FROM trading.balances WHERE trading.u64(user_id) = {MAKER}"
     )
     expect(maker == "2", f"user 2^63 + 1 has {maker} balances, not 2")
+    # ClickHouse holds them unsigned, and the gateway's view scales them.
+    balance = stack.clickhouse(
+        f"SELECT available FROM balance_events FINAL WHERE user_id = {WHALE} AND asset_id = {ETH}"
+    )
+    expect(balance == str(WHALE_ETH), f"ClickHouse has the balance of 10^19 as {balance}")
+    maker = stack.clickhouse(
+        f"SELECT uniqExact(asset_id) FROM balance_events FINAL WHERE user_id = {MAKER}"
+    )
+    expect(maker == "2", f"ClickHouse has balances of user 2^63 + 1 in {maker} assets, not 2")
+    scaled = stack.clickhouse(
+        "SELECT total FROM balances_per_minute "
+        f"WHERE user_id = {WHALE} AND asset_id = {ETH} ORDER BY minute DESC LIMIT 1",
+        user="readmodel_gateway_login",
+    )
+    expect(scaled == "10", f"the gateway reads the balance of 10^19 ETH units as {scaled} ETH")
     # vex-core's order ids reach 2^63 around 2029, so this one is produced here, encoded with the
     # schema the core registered.
     order_id = 2**63 + 12345
@@ -833,11 +1180,22 @@ def check_u64_round_trip(stack, connectors):
             stored == str(order_id - 2**64) and int(stored) % 2**64 == order_id,
             f"{table}: order {order_id} is {stored!r}",
         )
+    stored = stack.clickhouse(
+        f"SELECT order_order_id FROM order_events FINAL WHERE order_order_id = {order_id}"
+    )
+    expect(stored == str(order_id), f"ClickHouse has order {order_id} as {stored!r}")
 
 
 def check_replayed_suffix_changes_nothing(stack, connectors):
-    step("replaying an out-of-order, duplicated suffix changes no table")
+    step("replaying an out-of-order, duplicated suffix changes no table and no view")
     before = stack.snapshot()
+    # ClickHouse keeps a copy written in another insert than the original until their parts
+    # merge, which they do not meanwhile: reads through FINAL see each event once all the same.
+    # Copies within one insert collapse as it is written.
+    stack.clickhouse("SYSTEM STOP MERGES")
+    clickhouse_before = stack.clickhouse_snapshot()
+    stored_before = stack.clickhouse_stored_rows()
+    replayed = {}
     for topic in TOPIC_MESSAGES:
         records = defaultdict(list)
         for partition, key, value in consume(stack, topic, [r"--format=%p\t%k\t%v{base64}\n"]):
@@ -846,12 +1204,27 @@ def check_replayed_suffix_changes_nothing(stack, connectors):
         # Each record again, then every one once more in reverse: older copies after newer
         # events, which a missing guard would leave as the latest rows.
         replay = suffix + suffix[::-1]
+        replayed[topic] = len(suffix)
         stack.rpk(
             "topic", "produce", topic, "--partition=0", r"--format=%p\t%k\t%v{base64}\n",
             stdin="".join(replay),
         )
     wait_until_caught_up(stack, connectors)
     expect(stack.snapshot() == before, "the replayed suffix changed a table")
+    expect(
+        stack.clickhouse_snapshot() == clickhouse_before,
+        "the replayed suffix changed a ClickHouse table or view",
+    )
+    stored = stack.clickhouse_stored_rows()
+    for topic, table in CLICKHOUSE_TABLES.items():
+        expect(
+            stored[table] >= stored_before[table] + replayed[topic],
+            f"{table} stored {stored[table] - stored_before[table]} rows for copies of "
+            f"{replayed[topic]} stored events",
+        )
+    for table in PER_MINUTE_TABLES:
+        expect(stored[table] > stored_before[table], f"{table} stored no copy")
+    stack.clickhouse("SYSTEM START MERGES")
 
 
 def check_acceptance(stack, connectors, descriptor):
@@ -929,11 +1302,11 @@ def ledger_round(stack, ledger, gateway):
 def check_engine_state(stack, connectors, descriptor, ledger):
     """Every latest-state row is the engine's state, by the ledger: waits until Kafka's latest
     event for each key in the ledger is the ledger's, then until the connectors have caught up,
-    and checks that the latest-state tables hold the ledger's rows, and every table what Kafka
-    holds."""
+    and checks that the latest-state tables hold the ledger's rows, and every table, in Postgres
+    and ClickHouse, what Kafka holds."""
     latest_state = {
         config["topics"]: config
-        for config in connectors.values()
+        for config in postgres_connectors(connectors).values()
         if "event_ts" not in config["pk.fields"].split(",")
     }
     expect(set(latest_state) == {"balances", "orders", "orderbook"}, sorted(latest_state))
@@ -1043,11 +1416,65 @@ def check_tls(stack, connectors):
     expect(count == str(len(unverifiable)), f"{count} of user {user}'s deposits landed")
 
 
-def wait_for_log(stack, connector, text):
-    """Waits until the worker logs an entry of `connector`'s tasks with `text`: at most a
-    connection backoff, and 30 s for the attempt after it."""
+def check_clickhouse_outage_and_tls(stack, connectors):
+    user = 4244
+    written = f"SELECT count() FROM deposit_events FINAL WHERE user_id = {user}"
+
+    def deposit():
+        now = str(time.time_ns())
+        produce(stack, "deposits", user, "DepositEvent", [
+            {"userId": str(user), "assetId": 1, "amount": "1", "timestamp": now}
+        ])
+
+    step("ClickHouse is down: its connector retries, and writes once it is back")
+    stopped_since = f"{time.time():.3f}"
+    stack.compose("stop", "clickhouse")
+    deposit()
+    wait_for_log(stack, "clickhouse", "RetriableException", stopped_since)
+    expect_no_failed_task(stack.connect("GET", "/connectors?expand=status"))
+    stack.compose("up", "--detach", "--wait", "clickhouse")
+    wait_until_caught_up(stack, connectors)
+    expect(stack.clickhouse(written) == "1", "the deposit sent while ClickHouse was down is lost")
+
+    # Each certificate that must not verify, and what the worker logs when the task refuses it.
+    # The sink reports a refused certificate as a failed connection, which it retries.
+    unverifiable = {
+        "clickhouse-untrusted": "PKIX path",
+        "wrong-name": "doesn't match any of the subject alternative names",
+    }
+    for certificate, error in unverifiable.items():
+        step(f"the ClickHouse connector refuses ClickHouse presenting {certificate}.crt, and retries")
+        served_since = f"{time.time():.3f}"
+        serve_clickhouse_certificate(stack, certificate)
+        deposit()
+        wait_for_log(stack, "clickhouse", error, served_since)
+        expect_no_failed_task(stack.connect("GET", "/connectors?expand=status"))
+        expect(stack.clickhouse(written) == "1", f"a deposit landed through {certificate}.crt")
+
+    step("with the CA's certificate back, the ClickHouse connector resumes by itself with no gap")
+    serve_clickhouse_certificate(stack, "clickhouse")
+    wait_until_caught_up(stack, connectors)
+    count = stack.clickhouse(written)
+    expect(count == str(1 + len(unverifiable)), f"{count} of user {user}'s deposits landed")
+
+
+def serve_clickhouse_certificate(stack, name):
+    """Makes ClickHouse present the certificate `name` from TLS_DIR, and restarts it, so that
+    every connection to it is new."""
+    for suffix in ("crt", "key"):
+        stack.compose(
+            "exec", "-T", "clickhouse", "install", "-o", "clickhouse", "-g", "clickhouse", "-m",
+            "600", f"/tls/{name}.{suffix}", f"/etc/clickhouse-server/tls/clickhouse.{suffix}",
+        )
+    stack.compose("restart", "clickhouse")
+    stack.compose("up", "--detach", "--wait", "clickhouse")
+
+
+def wait_for_log(stack, connector, text, since=None):
+    """Waits until the worker logs an entry of `connector`'s tasks with `text`, since the Unix time
+    `since` or from the start: at most a connection backoff, and 30 s for the attempt after it."""
     deadline = time.monotonic() + int(CONNECTOR_RULES["connection.backoff.ms"]) / 1000 + 30
-    while not logged(connect_log(stack), connector, text):
+    while not logged(connect_log(stack, since), connector, text):
         status = stack.connect("GET", f"/connectors/{connector}/status")
         expect(time.monotonic() < deadline, f"{connector} logged no {text!r}; status {status}")
         time.sleep(1)
@@ -1067,7 +1494,7 @@ def serve_certificate(stack, name):
     )
 
 
-def check_skew(stack, connectors, core):
+def check_skew(stack, connectors, clickhouse, core):
     step("a field without a column fails its connector, and nothing is skipped")
     # vex-core starts publishing a field that has no column yet.
     proto = (core / "processors" / "src" / "protos" / "trading.proto").read_text()
@@ -1096,6 +1523,10 @@ def check_skew(stack, connectors, core):
     produce(stack, "deposits", user, "DepositEvent", deposits[1:])
     written = stack.psql(f"SELECT count(*) FROM trading.deposit_events WHERE user_id = {user}")
     expect(written == "0", f"{written} deposits written past the failure")
+    # ClickHouse's sink writes them, without the field: the coverage check is the guard there.
+    wait_until_caught_up(stack, clickhouse)
+    written = stack.clickhouse(f"SELECT count() FROM deposit_events FINAL WHERE user_id = {user}")
+    expect(written == "3", f"ClickHouse has {written} of the 3 deposits")
 
     step("after the migration, a restart resumes with no gap")
     stack.psql("ALTER TABLE trading.deposit_events ADD COLUMN skew_probe BIGINT")
@@ -1185,8 +1616,70 @@ class Stack:
         """Runs golang-migrate's `up` on `database` as the superuser; returns its output."""
         url = f"postgres://postgres:postgres@postgres:5432/{database}?sslmode=disable"
         return self.compose(
-            "run", "--rm", "migrate", "-path=/migrations", f"-database={url}", "up", **options
+            "run", "--rm", "migrate", "-path=/migrations/postgres", f"-database={url}", "up",
+            **options,
         )
+
+    def migrate_clickhouse(self, database="readmodel", **options):
+        """Runs golang-migrate's `up` on the ClickHouse `database` as its administrator; returns
+        its output."""
+        url = (
+            "clickhouse://clickhouse:9000?username=admin&password=admin"
+            f"&database={database}&x-multi-statement=true"
+        )
+        return self.compose(
+            "run", "--rm", "migrate", "-path=/migrations/clickhouse", f"-database={url}", "up",
+            **options,
+        )
+
+    def clickhouse(self, sql, user="admin", check=True, options=()):
+        """Runs `sql` in the database readmodel with clickhouse-client, as `user` (the
+        administrator, or a user with the test password), and returns its output, in
+        TabSeparated; with `check` false, also its error."""
+        password = "admin" if user == "admin" else "test-only"
+        command = self.command(
+            "exec", "-T", "clickhouse", "clickhouse-client", f"--user={user}",
+            f"--password={password}", "--database=readmodel", "--multiquery", *options,
+        )
+        stderr = subprocess.PIPE if check else subprocess.STDOUT
+        return run(command, stdin=sql, env=self.env, check=check, stderr=stderr).strip()
+
+    def clickhouse_rows(self, sql):
+        """The rows `sql` selects, as dicts, with 64-bit integers as numbers."""
+        output = self.clickhouse(
+            sql,
+            options=["--format=JSONEachRow", "--output_format_json_quote_64bit_integers=0"],
+        )
+        return [json.loads(line) for line in output.splitlines()]
+
+    def clickhouse_schema(self):
+        return self.clickhouse(
+            "SELECT name, create_table_query FROM system.tables WHERE database = 'readmodel' "
+            "AND name <> 'schema_migrations' ORDER BY name FORMAT TSVRaw; "
+            "SELECT * FROM system.grants WHERE database = 'readmodel' ORDER BY ALL FORMAT TSVRaw"
+        )
+
+    def clickhouse_tables(self, engine):
+        return self.clickhouse(
+            "SELECT name FROM system.tables "
+            f"WHERE database = 'readmodel' AND engine = '{engine}' AND name <> 'schema_migrations'"
+        ).split()
+
+    def clickhouse_snapshot(self):
+        """Every MergeTree table, read through FINAL, and every view, as text."""
+        sources = [f"{table} FINAL" for table in self.clickhouse_tables("ReplacingMergeTree")]
+        sources += self.clickhouse_tables("View")
+        return {
+            source: self.clickhouse(f"SELECT * FROM {source} ORDER BY ALL") for source in sources
+        }
+
+    def clickhouse_stored_rows(self):
+        """The rows each MergeTree table stores, copies of an event that are not merged yet
+        included."""
+        return {
+            table: int(self.clickhouse(f"SELECT count() FROM {table}"))
+            for table in self.clickhouse_tables("ReplacingMergeTree")
+        }
 
     def json_rows(self, table):
         rows = self.psql(f"SELECT row_to_json(t) FROM {table} t")

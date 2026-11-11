@@ -48,10 +48,29 @@ jobs:
           --health-retries 5
         ports:
           - 6379:6379
+      # The read model's ClickHouse, pinned as in readmodel/tests/compose.yml, for
+      # lib-core/tests/portfolio_repository_clickhouse.rs: its user may create databases, users
+      # and roles, as the migrations need.
+      clickhouse:
+        image: clickhouse/clickhouse-server:26.8.36.3@sha256:d426d2f612e1e189c90f9a3f8dcd85a03c6851273833817a296bb327e63aa7a7
+        env:
+          CLICKHOUSE_USER: myuser
+          CLICKHOUSE_PASSWORD: mypassword
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+        options: >-
+          --health-cmd "clickhouse-client --user=myuser --password=mypassword --query='SELECT 1'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 8123:8123
     env:
       CI: true
       DATABASE_URL: postgres://myuser:mypassword@localhost:5432/mydb
       REDIS_URL: redis://localhost:6379
+      TEST_CLICKHOUSE_URL: http://localhost:8123
+      TEST_CLICKHOUSE_USER: myuser
+      TEST_CLICKHOUSE_PASSWORD: mypassword
     steps:
       - uses: actions/checkout@v4
 
@@ -150,10 +169,29 @@ jobs:
           --health-retries 5
         ports:
           - 6379:6379
+      # The read model's ClickHouse, pinned as in readmodel/tests/compose.yml, for
+      # lib-core/tests/portfolio_repository_clickhouse.rs: its user may create databases, users
+      # and roles, as the migrations need.
+      clickhouse:
+        image: clickhouse/clickhouse-server:26.8.36.3@sha256:d426d2f612e1e189c90f9a3f8dcd85a03c6851273833817a296bb327e63aa7a7
+        env:
+          CLICKHOUSE_USER: myuser
+          CLICKHOUSE_PASSWORD: mypassword
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+        options: >-
+          --health-cmd "clickhouse-client --user=myuser --password=mypassword --query='SELECT 1'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 8123:8123
     env:
       CI: true
       DATABASE_URL: postgres://myuser:mypassword@localhost:5432/mydb
       REDIS_URL: redis://localhost:6379
+      TEST_CLICKHOUSE_URL: http://localhost:8123
+      TEST_CLICKHOUSE_USER: myuser
+      TEST_CLICKHOUSE_PASSWORD: mypassword
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
