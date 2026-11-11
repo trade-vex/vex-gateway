@@ -51,7 +51,7 @@ async fn setup_test_db_with_schema() -> Result<DatabaseConnection, sea_orm::DbEr
         END $$;
 
         DO $$ BEGIN
-            CREATE TYPE key_material_type AS ENUM ('hmac_secret', 'rsa_public_key', 'ed25519_public_key');
+            CREATE TYPE key_material_type AS ENUM ('hmac_secret');
         EXCEPTION
             WHEN duplicate_object THEN null;
         END $$;
@@ -115,8 +115,6 @@ fn create_test_request() -> CreateApiKeyRequest {
         recv_window: Some(5000),
         expires_at: Some(Utc::now() + chrono::Duration::days(30)),
         ip_blacklist: Some(vec!["192.168.1.1".to_string()]),
-        key_material_type: Some("hmac_secret".to_string()),
-        key_material_value: Some("test-secret-key".to_string()),
     }
 }
 
@@ -206,42 +204,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_api_key_invalid_key_material() {
-        let Some(db) = require_database().await else {
-            return; // Skip test if database is unavailable
-        };
-        let user = create_test_user();
-        let user_id = user.user_id;
-        cleanup_test_data(&db, user_id).await;
-        let repo = Arc::new(
-            lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(
-                Arc::new(db.clone()),
-            ),
-        );
-
-        let mut request = create_test_request();
-        request.key_material_type = Some("invalid_type".to_string());
-
-        let result = create_api_key(
-            web::Json(request),
-            web::Data::new(repo.clone() as Arc<dyn ApiKeyRepository>),
-            user,
-        )
-        .await;
-
-        match result {
-            Ok(_) => {
-                panic!("Expected error for invalid key material, but got success");
-            }
-            Err(e) => {
-                assert!(e.to_string().contains("Invalid key material"));
-            }
-        }
-
-        cleanup_test_data(&db, user_id).await;
-    }
-
-    #[tokio::test]
     async fn test_list_api_keys_success() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
@@ -263,8 +225,6 @@ mod tests {
             recv_window: Some(10000),
             expires_at: None,
             ip_blacklist: None,
-            key_material_type: None,
-            key_material_value: None,
         };
 
         // Create first API key
@@ -955,5 +915,42 @@ mod tests {
         assert_eq!(unchanged, key);
 
         cleanup_test_data(&db, owner.user_id).await;
+    }
+
+    /// The HMAC secret is always the server's 32 random bytes: a client-chosen one ("a") would
+    /// let anyone holding one signed request brute-force it.
+    #[tokio::test]
+    async fn create_api_key_never_stores_a_client_chosen_secret() {
+        let Some(db) = require_database().await else {
+            return; // Skip test if database is unavailable
+        };
+        let user = create_test_user();
+        let repo: Arc<dyn ApiKeyRepository> = Arc::new(
+            lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(
+                Arc::new(db.clone()),
+            ),
+        );
+        let request: CreateApiKeyRequest = serde_json::from_value(serde_json::json!({
+            "permissions": ["trade"],
+            "key_material_type": "hmac_secret",
+            "key_material_value": "a"
+        }))
+        .unwrap();
+
+        let response = create_api_key(
+            web::Json(request),
+            web::Data::new(repo.clone()),
+            user.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), 201);
+        let key = repo.find_by_user_id(user.user_id).await.unwrap().remove(0);
+        let secret = key.key_material_value.unwrap();
+        assert_ne!(secret, "a");
+        assert_eq!(secret.len(), 44, "base64 of 32 bytes");
+
+        cleanup_test_data(&db, user.user_id).await;
     }
 }

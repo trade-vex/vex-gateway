@@ -4,7 +4,6 @@ use actix_web::{
     http::header::RETRY_AFTER,
     web, Error, HttpMessage, HttpRequest, HttpResponse,
 };
-use base64::{engine::general_purpose, Engine as _};
 use futures_util::future::{ready, LocalBoxFuture, Ready};
 use futures_util::stream;
 use sha2::{Digest, Sha256};
@@ -323,7 +322,6 @@ impl Drop for CacheFillGuard {
 async fn guard_signature(
     replay_store: Option<&redis::aio::ConnectionManager>,
     signature: &str,
-    key_material: &KeyMaterial,
     ttl_ms: u64,
 ) -> Result<(), ApiKeyError> {
     let mut connection = replay_store
@@ -331,26 +329,14 @@ async fn guard_signature(
             ApiKeyError::Internal("Replay-protection store is not configured".to_string())
         })?
         .clone();
-    // Verification already decoded this signature with the same algorithm, so failure here
-    // indicates an internal invariant violation rather than a normal invalid-input path.
-    let signature_bytes = match key_material {
-        KeyMaterial::HmacSecret(_) => hex::decode(signature).map_err(|error| {
-            ApiKeyError::Internal(format!(
-                "Verified HMAC signature could not be decoded: {}",
-                error
-            ))
-        })?,
-        KeyMaterial::RsaPublicKey(_) | KeyMaterial::Ed25519PublicKey(_) => {
-            general_purpose::STANDARD
-                .decode(signature)
-                .map_err(|error| {
-                    ApiKeyError::Internal(format!(
-                        "Verified base64 signature could not be decoded: {}",
-                        error
-                    ))
-                })?
-        }
-    };
+    // Verification already decoded this signature, so failure here indicates an internal
+    // invariant violation rather than a normal invalid-input path.
+    let signature_bytes = hex::decode(signature).map_err(|error| {
+        ApiKeyError::Internal(format!(
+            "Verified HMAC signature could not be decoded: {}",
+            error
+        ))
+    })?;
     let signature_hash = hex::encode(Sha256::digest(&signature_bytes));
     let key = format!("api_signature:{}", signature_hash);
     let stored: Option<String> = redis::cmd("SET")
@@ -746,18 +732,8 @@ impl ApiKeyMiddleware {
             body_is_form,
         );
 
-        // Verify signature based on algorithm
-        let is_valid = match key_material {
-            KeyMaterial::HmacSecret(secret) => {
-                SignatureVerifier::verify_hmac(&payload, signature, secret)?
-            }
-            KeyMaterial::RsaPublicKey(public_key) => {
-                SignatureVerifier::verify_rsa(&payload, signature, public_key)?
-            }
-            KeyMaterial::Ed25519PublicKey(public_key) => {
-                SignatureVerifier::verify_ed25519(&payload, signature, public_key)?
-            }
-        };
+        let KeyMaterial::HmacSecret(secret) = key_material;
+        let is_valid = SignatureVerifier::verify_hmac(&payload, signature, secret)?;
 
         if !is_valid {
             return Err(ApiKeyError::InvalidSignature(format!(
@@ -1159,9 +1135,6 @@ where
                 if let Err(e) = guard_signature(
                     replay_store.as_ref(),
                     signature,
-                    api_config
-                        .get_key_material()
-                        .expect("signed request key material was already validated"),
                     // Cover the verifier's 1s future-drift tolerance as well as the receive window.
                     effective_recv_window.saturating_add(1000),
                 )
@@ -1608,31 +1581,6 @@ mod tests {
         assert!(error
             .to_string()
             .contains("Signature has already been used"));
-    }
-
-    #[actix_web::test]
-    async fn replay_guard_keeps_distinct_base64_signatures_separate() {
-        let replay_store = crate::test_redis().await;
-        let key_material = KeyMaterial::RsaPublicKey(String::new());
-        let unique_suffix = general_purpose::STANDARD.encode(uuid::Uuid::new_v4().as_bytes());
-        let first_signature = format!("AAAA{unique_suffix}");
-        let second_signature = format!("aAAA{unique_suffix}");
-
-        assert_ne!(
-            general_purpose::STANDARD.decode(&first_signature).unwrap(),
-            general_purpose::STANDARD.decode(&second_signature).unwrap()
-        );
-
-        assert!(
-            guard_signature(Some(&replay_store), &first_signature, &key_material, 5000)
-                .await
-                .is_ok()
-        );
-        assert!(
-            guard_signature(Some(&replay_store), &second_signature, &key_material, 5000)
-                .await
-                .is_ok()
-        );
     }
 
     #[actix_web::test]

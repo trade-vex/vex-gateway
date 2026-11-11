@@ -2,22 +2,6 @@ use lib_middleware::api_key::error::ApiKeyError;
 use lib_middleware::api_key::signature::{SignatureAlgorithm, SignatureVerifier};
 
 #[test]
-fn test_signature_algorithm_equality() {
-    assert_eq!(
-        SignatureAlgorithm::HmacSha256,
-        SignatureAlgorithm::HmacSha256
-    );
-    assert_eq!(SignatureAlgorithm::RsaSha256, SignatureAlgorithm::RsaSha256);
-    assert_eq!(SignatureAlgorithm::Ed25519, SignatureAlgorithm::Ed25519);
-
-    assert_ne!(
-        SignatureAlgorithm::HmacSha256,
-        SignatureAlgorithm::RsaSha256
-    );
-    assert_ne!(SignatureAlgorithm::RsaSha256, SignatureAlgorithm::Ed25519);
-}
-
-#[test]
 fn test_signature_algorithm_clone() {
     let original = SignatureAlgorithm::HmacSha256;
     let cloned = original.clone();
@@ -78,76 +62,6 @@ fn test_generate_hmac_roundtrip() {
     let verification = SignatureVerifier::verify_hmac(payload, &signature, secret_key).unwrap();
 
     assert!(verification);
-}
-
-#[test]
-fn test_verify_rsa_invalid_signature() {
-    let payload = "test";
-    let invalid_signature = "not_base64";
-    let public_key_pem = "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA...\n-----END PUBLIC KEY-----";
-
-    let result = SignatureVerifier::verify_rsa(payload, invalid_signature, public_key_pem);
-    assert!(result.is_err());
-
-    match result.unwrap_err() {
-        ApiKeyError::InvalidSignature(msg) => {
-            assert!(msg.contains("Failed to decode base64 signature"))
-        }
-        _ => panic!("Expected InvalidSignature error"),
-    }
-}
-
-#[test]
-fn test_verify_rsa_invalid_key() {
-    let payload = "test";
-    let signature = "dGVzdA=="; // "test" in base64
-    let invalid_key = "not a pem key";
-
-    let result = SignatureVerifier::verify_rsa(payload, signature, invalid_key);
-    assert!(result.is_err());
-
-    match result.unwrap_err() {
-        ApiKeyError::InvalidSignature(msg) => {
-            assert!(msg.contains("Failed to parse RSA public key"))
-        }
-        _ => panic!("Expected InvalidSignature error"),
-    }
-}
-
-#[test]
-fn test_verify_ed25519_invalid_signature() {
-    let payload = "test";
-    let invalid_signature = "not_base64";
-    let public_key_pem =
-        "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA...\n-----END PUBLIC KEY-----";
-
-    let result = SignatureVerifier::verify_ed25519(payload, invalid_signature, public_key_pem);
-    assert!(result.is_err());
-
-    match result.unwrap_err() {
-        ApiKeyError::InvalidSignature(msg) => {
-            assert!(msg.contains("Failed to decode base64 signature"))
-        }
-        _ => panic!("Expected InvalidSignature error"),
-    }
-}
-
-#[test]
-fn test_verify_ed25519_invalid_key() {
-    let payload = "test";
-    let signature = "dGVzdA=="; // "test" in base64 (too short for Ed25519)
-    let invalid_key = "not a pem key";
-
-    let result = SignatureVerifier::verify_ed25519(payload, signature, invalid_key);
-    assert!(result.is_err());
-
-    match result.unwrap_err() {
-        ApiKeyError::InvalidSignature(msg) => {
-            // The error message might be about signature format or key parsing
-            assert!(msg.contains("Ed25519") || msg.contains("signature") || msg.contains("key"));
-        }
-        _ => panic!("Expected InvalidSignature error"),
-    }
 }
 
 #[test]

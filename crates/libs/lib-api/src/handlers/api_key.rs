@@ -53,8 +53,6 @@ pub struct CreateApiKeyRequest {
     pub recv_window: Option<u64>,
     pub expires_at: Option<DateTime<Utc>>,
     pub ip_blacklist: Option<Vec<String>>,
-    pub key_material_type: Option<String>,
-    pub key_material_value: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -131,16 +129,6 @@ fn parse_security_type(s: &str) -> Result<SecurityType, String> {
     }
 }
 
-/// parse key material from type and value
-fn parse_key_material(key_type: &str, value: &str) -> Result<KeyMaterial, String> {
-    match key_type.to_lowercase().as_str() {
-        "hmac_secret" => Ok(KeyMaterial::HmacSecret(value.to_string())),
-        "rsa_public_key" => Ok(KeyMaterial::RsaPublicKey(value.to_string())),
-        "ed25519_public_key" => Ok(KeyMaterial::Ed25519PublicKey(value.to_string())),
-        _ => Err(format!("Invalid key material type: {}", key_type)),
-    }
-}
-
 /// Every entry must be an IP address or a CIDR range: the form the API-key middleware matches.
 fn validate_ip_blacklist(ip_list: &[String]) -> Result<(), String> {
     match ip_list
@@ -176,36 +164,13 @@ pub async fn create_api_key(
         })?;
     }
 
-    // parse key material if provided
-    let key_material = if let (Some(key_type), Some(key_value)) =
-        (&req.key_material_type, &req.key_material_value)
-    {
-        Some(parse_key_material(key_type, key_value).map_err(|e| {
-            actix_web::error::ErrorBadRequest(format!("Invalid key material: {}", e))
-        })?)
-    } else {
-        None
-    };
-
     // generating a new API key
     let api_key = format!("vex_{}", Uuid::new_v4().to_string().replace('-', ""));
 
-    // Generate secret key for HMAC signing (if not provided)
-    let secret_key = if let Some(ref key_material) = key_material {
-        // If user provided key material, extract the secret
-        match key_material {
-            KeyMaterial::HmacSecret(secret) => secret.clone(),
-            _ => {
-                return Err(actix_web::error::ErrorBadRequest(
-                    "Only HMAC secret keys are supported for API key authentication",
-                ));
-            }
-        }
-    } else {
-        // Generate a random secret key
+    // The HMAC secret is always the server's: a client-chosen one may be weak.
+    let secret_key = {
         use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let secret_bytes: [u8; 32] = rng.r#gen();
+        let secret_bytes: [u8; 32] = rand::thread_rng().r#gen();
         base64::engine::general_purpose::STANDARD.encode(secret_bytes)
     };
 

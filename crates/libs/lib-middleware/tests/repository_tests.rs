@@ -107,8 +107,8 @@ impl ApiKeyRepository for MockApiKeyRepository {
             lib_middleware::models::api_key::Model {
                 id: Uuid::new_v4(),
                 api_key: "user-key-1".to_string(),
-                key_material_type: Some(KeyMaterialType::RsaPublicKey),
-                key_material_value: Some("mock-rsa-key".to_string()),
+                key_material_type: Some(KeyMaterialType::HmacSecret),
+                key_material_value: Some("mock-secret".to_string()),
                 permissions: vec![SecurityType::Trade],
                 recv_window: 5000,
                 enabled: true,
@@ -151,12 +151,6 @@ impl ApiKeyRepository for MockApiKeyRepository {
             Some(KeyMaterial::HmacSecret(secret)) => {
                 (Some(KeyMaterialType::HmacSecret), Some(secret.clone()))
             }
-            Some(KeyMaterial::RsaPublicKey(key)) => {
-                (Some(KeyMaterialType::RsaPublicKey), Some(key.clone()))
-            }
-            Some(KeyMaterial::Ed25519PublicKey(key)) => {
-                (Some(KeyMaterialType::Ed25519PublicKey), Some(key.clone()))
-            }
             None => (None, None),
         };
 
@@ -195,7 +189,7 @@ impl ApiKeyRepository for MockApiKeyRepository {
         Ok(lib_middleware::models::api_key::Model {
             id,
             api_key: "updated-key".to_string(),
-            key_material_type: Some(KeyMaterialType::Ed25519PublicKey),
+            key_material_type: Some(KeyMaterialType::HmacSecret),
             key_material_value: Some("updated-key-material".to_string()),
             permissions: vec![SecurityType::UserData],
             recv_window: 10000,
@@ -311,8 +305,8 @@ impl ApiKeyRepository for MockApiKeyRepository {
         Ok(vec![lib_middleware::models::api_key::Model {
             id: Uuid::new_v4(),
             api_key: "expiring-key".to_string(),
-            key_material_type: Some(KeyMaterialType::RsaPublicKey),
-            key_material_value: Some("expiring-rsa-key".to_string()),
+            key_material_type: Some(KeyMaterialType::HmacSecret),
+            key_material_value: Some("expiring-secret".to_string()),
             permissions: vec![SecurityType::Trade, SecurityType::UserData],
             recv_window: 5000,
             enabled: true,
@@ -401,9 +395,7 @@ async fn test_repository_create() {
 
     let new_api_key = NewApiKey {
         api_key: "new-test-key".to_string(),
-        key_material: Some(KeyMaterial::Ed25519PublicKey(
-            "ed25519-key-data".to_string(),
-        )),
+        key_material: Some(KeyMaterial::HmacSecret("hmac-secret".to_string())),
         permissions: vec![SecurityType::Trade, SecurityType::UserData],
         recv_window: 10000,
         description: Some("Test key creation".to_string()),
@@ -415,10 +407,7 @@ async fn test_repository_create() {
     let result = repo.create(new_api_key.clone()).await.unwrap();
 
     assert_eq!(result.api_key, new_api_key.api_key);
-    assert_eq!(
-        result.key_material_type,
-        Some(KeyMaterialType::Ed25519PublicKey)
-    );
+    assert_eq!(result.key_material_type, Some(KeyMaterialType::HmacSecret));
     assert_eq!(result.recv_window, new_api_key.recv_window as i64);
     assert!(result.enabled); // Mock always creates enabled keys
     assert_eq!(result.description, new_api_key.description);

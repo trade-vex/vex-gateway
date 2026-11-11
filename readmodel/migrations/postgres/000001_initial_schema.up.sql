@@ -58,7 +58,7 @@ CREATE UNIQUE INDEX ux_users_provider_identity ON users (auth_provider, provider
     WHERE provider_id IS NOT NULL;
 
 CREATE TYPE security_type AS ENUM ('none', 'trade', 'user_data', 'user_stream');
-CREATE TYPE key_material_type AS ENUM ('hmac_secret', 'rsa_public_key', 'ed25519_public_key');
+CREATE TYPE key_material_type AS ENUM ('hmac_secret');
 
 CREATE TABLE api_keys (
     id                 UUID PRIMARY KEY,

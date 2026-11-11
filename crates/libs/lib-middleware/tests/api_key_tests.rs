@@ -65,8 +65,8 @@ fn test_model_serialization() {
     let model = Model {
         id: Uuid::new_v4(),
         api_key: "test-api-key".to_string(),
-        key_material_type: Some(KeyMaterialType::RsaPublicKey),
-        key_material_value: Some("pem-data".to_string()),
+        key_material_type: Some(KeyMaterialType::HmacSecret),
+        key_material_value: Some("hmac-secret".to_string()),
         permissions: vec![SecurityType::UserData, SecurityType::UserStream],
         recv_window: 10000,
         enabled: false,
@@ -92,14 +92,6 @@ fn test_model_serialization() {
 fn test_key_material_type_variants() {
     // KeyMaterialType doesn't implement Display, so we test debug format instead
     assert_eq!(format!("{:?}", KeyMaterialType::HmacSecret), "HmacSecret");
-    assert_eq!(
-        format!("{:?}", KeyMaterialType::RsaPublicKey),
-        "RsaPublicKey"
-    );
-    assert_eq!(
-        format!("{:?}", KeyMaterialType::Ed25519PublicKey),
-        "Ed25519PublicKey"
-    );
 }
 
 #[test]
@@ -108,18 +100,6 @@ fn test_key_material_type_from_key_material() {
     assert_eq!(
         KeyMaterialType::from(&hmac_material),
         KeyMaterialType::HmacSecret
-    );
-
-    let rsa_material = KeyMaterial::RsaPublicKey("pem".to_string());
-    assert_eq!(
-        KeyMaterialType::from(&rsa_material),
-        KeyMaterialType::RsaPublicKey
-    );
-
-    let ed25519_material = KeyMaterial::Ed25519PublicKey("pem".to_string());
-    assert_eq!(
-        KeyMaterialType::from(&ed25519_material),
-        KeyMaterialType::Ed25519PublicKey
     );
 }
 
@@ -131,14 +111,6 @@ fn test_key_material_type_serialization() {
 
     let deserialized: KeyMaterialType = serde_json::from_str(&serialized).unwrap();
     assert_eq!(deserialized, KeyMaterialType::HmacSecret);
-
-    // Test actual sea_orm string values separately
-    let rsa_type = KeyMaterialType::RsaPublicKey;
-    let ed25519_type = KeyMaterialType::Ed25519PublicKey;
-
-    // Test that the enum variants exist and can be serialized
-    let _rsa_serialized = serde_json::to_string(&rsa_type).unwrap();
-    let _ed25519_serialized = serde_json::to_string(&ed25519_type).unwrap();
 }
 
 #[test]
@@ -146,9 +118,7 @@ fn test_new_api_key_creation() {
     let user_id = Uuid::new_v4();
     let new_api_key = NewApiKey {
         api_key: "new-test-key".to_string(),
-        key_material: Some(KeyMaterial::Ed25519PublicKey(
-            "ed25519-pem-data".to_string(),
-        )),
+        key_material: Some(KeyMaterial::HmacSecret("hmac-secret".to_string())),
         permissions: vec![SecurityType::Trade, SecurityType::UserData],
         recv_window: 15000,
         description: Some("Trading bot key".to_string()),
@@ -160,7 +130,7 @@ fn test_new_api_key_creation() {
     assert_eq!(new_api_key.api_key, "new-test-key");
     assert!(matches!(
         new_api_key.key_material,
-        Some(KeyMaterial::Ed25519PublicKey(_))
+        Some(KeyMaterial::HmacSecret(_))
     ));
     assert_eq!(
         new_api_key.permissions,
@@ -270,8 +240,8 @@ fn test_model_with_complex_permissions() {
     let model = Model {
         id: Uuid::new_v4(),
         api_key: "complex-perms".to_string(),
-        key_material_type: Some(KeyMaterialType::RsaPublicKey),
-        key_material_value: Some("rsa-key".to_string()),
+        key_material_type: Some(KeyMaterialType::HmacSecret),
+        key_material_value: Some("hmac-secret".to_string()),
         permissions: permissions.clone(),
         recv_window: 30000,
         enabled: true,

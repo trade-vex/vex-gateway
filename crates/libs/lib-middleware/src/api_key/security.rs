@@ -42,34 +42,22 @@ impl std::fmt::Display for SecurityType {
     }
 }
 
-/// Key material for different signature algorithms
+/// The key's signing secret: an HMAC secret the server generated.
 #[derive(Clone, Serialize, Deserialize)]
 pub enum KeyMaterial {
     /// HMAC secret key
     HmacSecret(String),
-    /// RSA public key in PEM format
-    RsaPublicKey(String),
-    /// Ed25519 public key in PEM format
-    Ed25519PublicKey(String),
 }
 
 impl std::fmt::Debug for KeyMaterial {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            KeyMaterial::HmacSecret(_) => f.debug_tuple("HmacSecret").field(&"[REDACTED]").finish(),
-            KeyMaterial::RsaPublicKey(_) => f.write_str("RsaPublicKey"),
-            KeyMaterial::Ed25519PublicKey(_) => f.write_str("Ed25519PublicKey"),
-        }
+        f.debug_tuple("HmacSecret").field(&"[REDACTED]").finish()
     }
 }
 
 impl KeyMaterial {
     pub fn algorithm(&self) -> SignatureAlgorithm {
-        match self {
-            KeyMaterial::HmacSecret(_) => SignatureAlgorithm::HmacSha256,
-            KeyMaterial::RsaPublicKey(_) => SignatureAlgorithm::RsaSha256,
-            KeyMaterial::Ed25519PublicKey(_) => SignatureAlgorithm::Ed25519,
-        }
+        SignatureAlgorithm::HmacSha256
     }
 }
 
@@ -124,18 +112,6 @@ impl ApiKeyConfig {
     /// Configure HMAC secret key for signing
     pub fn with_hmac_secret(mut self, secret_key: String) -> Self {
         self.key_material = Some(KeyMaterial::HmacSecret(secret_key));
-        self
-    }
-
-    /// Configure RSA public key for signature verification
-    pub fn with_rsa_public_key(mut self, public_key_pem: String) -> Self {
-        self.key_material = Some(KeyMaterial::RsaPublicKey(public_key_pem));
-        self
-    }
-
-    /// Configure Ed25519 public key for signature verification
-    pub fn with_ed25519_public_key(mut self, public_key_pem: String) -> Self {
-        self.key_material = Some(KeyMaterial::Ed25519PublicKey(public_key_pem));
         self
     }
 

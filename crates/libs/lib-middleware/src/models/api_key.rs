@@ -32,29 +32,17 @@ pub struct Model {
 pub enum KeyMaterialType {
     #[sea_orm(string_value = "hmac_secret")]
     HmacSecret,
-    #[sea_orm(string_value = "rsa_public_key")]
-    RsaPublicKey,
-    #[sea_orm(string_value = "ed25519_public_key")]
-    Ed25519PublicKey,
 }
 
 impl From<&KeyMaterial> for KeyMaterialType {
-    fn from(key_material: &KeyMaterial) -> Self {
-        match key_material {
-            KeyMaterial::HmacSecret(_) => KeyMaterialType::HmacSecret,
-            KeyMaterial::RsaPublicKey(_) => KeyMaterialType::RsaPublicKey,
-            KeyMaterial::Ed25519PublicKey(_) => KeyMaterialType::Ed25519PublicKey,
-        }
+    fn from(_: &KeyMaterial) -> Self {
+        KeyMaterialType::HmacSecret
     }
 }
 
 impl KeyMaterialType {
     pub fn to_key_material(&self, value: &str) -> KeyMaterial {
-        match self {
-            KeyMaterialType::HmacSecret => KeyMaterial::HmacSecret(value.to_string()),
-            KeyMaterialType::RsaPublicKey => KeyMaterial::RsaPublicKey(value.to_string()),
-            KeyMaterialType::Ed25519PublicKey => KeyMaterial::Ed25519PublicKey(value.to_string()),
-        }
+        KeyMaterial::HmacSecret(value.to_string())
     }
 }
 
@@ -161,13 +149,10 @@ impl NewApiKey {
     pub fn to_active_model(self) -> ActiveModel {
         let (key_material_type, key_material_value) = if let Some(key_material) = &self.key_material
         {
+            let KeyMaterial::HmacSecret(secret) = key_material;
             (
                 Some(KeyMaterialType::from(key_material)),
-                Some(match key_material {
-                    KeyMaterial::HmacSecret(secret) => secret.clone(),
-                    KeyMaterial::RsaPublicKey(key) => key.clone(),
-                    KeyMaterial::Ed25519PublicKey(key) => key.clone(),
-                }),
+                Some(secret.clone()),
             )
         } else {
             (None, None)
