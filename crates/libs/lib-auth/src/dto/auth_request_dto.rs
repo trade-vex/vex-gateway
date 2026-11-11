@@ -32,7 +32,6 @@ pub struct OAuthCallbackQuery {
     pub code: Option<String>,
     pub state: String,
     pub error: Option<String>,
-    pub error_description: Option<String>,
 }
 
 #[derive(Deserialize, Validate)]

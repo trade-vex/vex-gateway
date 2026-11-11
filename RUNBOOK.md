@@ -1136,7 +1136,9 @@ grep -i "memory\|oom" logs/app.log
 - `GET /api/oauth/{provider}/callback` - OAuth callback. Refused with 403 `EMAIL_NOT_VERIFIED`
   when the provider has not verified the email or the account cannot log in, and with 409
   `EMAIL_EXISTS` when a verified account already holds the email; a provider-verified email
-  replaces a password sign-up that was never verified
+  replaces a password sign-up that was never verified. A login cancelled at the provider (an
+  `error`, or no `code`) is redirected to `frontend_url_web` (`frontend_url_app` without the
+  browser's state cookie) with `?error=oauth_cancelled`
 
 ### Protected Endpoints (Requires Authentication)
 

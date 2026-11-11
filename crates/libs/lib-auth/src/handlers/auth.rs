@@ -728,7 +728,7 @@ pub async fn reset_password(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::config::JwtConfig;
     use crate::dto::jwt_response_dto::JwtTokenResponse;
@@ -1018,7 +1018,8 @@ mod tests {
         .clone()
     }
 
-    async fn test_services() -> (Arc<EmailService>, Arc<TokenService>, Arc<SessionService>) {
+    pub(crate) async fn test_services()
+    -> (Arc<EmailService>, Arc<TokenService>, Arc<SessionService>) {
         let conn = crate::test_redis().await;
         let email_config = EmailConfig {
             smtp_host: "127.0.0.1".to_string(),

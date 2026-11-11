@@ -113,6 +113,8 @@ pub async fn initiate_oauth(
 /// Handle OAuth callback
 /// GET /oauth/{provider}/callback?code=...&state=...
 ///
+/// Without a code (the user cancelled, or the provider answered `error`), redirects to the
+/// front end with `?error=oauth_cancelled`.
 /// For web: validates state cookie binding before processing.
 /// For mobile: creates a one-time login_code instead of returning session_id directly.
 pub async fn handle_oauth_callback(
@@ -132,17 +134,36 @@ pub async fn handle_oauth_callback(
         )
         .await?;
 
-    // Validate that the OAuth code is present and non-empty
-    let code = query
-        .code
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or(AuthError::InvalidRequest)?;
-
     // Check for state cookie (present for web, absent for mobile)
     let cookie_name = format!("oauth_state_{}", provider.as_str());
     let cookie_state = req.cookie(&cookie_name).map(|c| c.value().to_string());
     let has_state_cookie = cookie_state.is_some();
+    let clear_state_cookie = Cookie::build(cookie_name, "")
+        .path(format!("/api/oauth/{}/callback", provider.as_str()))
+        .http_only(true)
+        .secure(is_https(&req))
+        .same_site(SameSite::Lax)
+        .max_age(Duration::seconds(0))
+        .finish();
+
+    // The user cancelled or the provider refused: land on the front end, not on this API. Only a
+    // browser login has the state cookie.
+    let code = match query.code.as_deref().filter(|code| !code.is_empty()) {
+        Some(code) if query.error.is_none() => code,
+        _ => {
+            let platform = if has_state_cookie { None } else { Some("app") };
+            let landing = login_redirect(
+                oauth_service.frontend_url(platform)?,
+                "error",
+                "oauth_cancelled",
+            )?;
+            return Ok(HttpResponse::Found()
+                .cookie(clear_state_cookie)
+                .insert_header(("Cache-Control", "no-store"))
+                .append_header(("Location", landing))
+                .finish());
+        }
+    };
 
     // For web flow: enforce state cookie binding (prevents login CSRF / session swapping)
     // If cookie exists, it must match the query state
@@ -204,14 +225,6 @@ pub async fn handle_oauth_callback(
                     // For web: session cookie only; frontend can call /profile to fetch user info
                     // Removed user_info cookie - it was XSS-sensitive (not HttpOnly)
                     // Clear the oauth_state cookie on success
-                    let clear_state_cookie = Cookie::build(cookie_name, "")
-                        .path(format!("/api/oauth/{}/callback", provider.as_str()))
-                        .http_only(true)
-                        .secure(is_https(&req))
-                        .same_site(SameSite::Lax)
-                        .max_age(Duration::seconds(0))
-                        .finish();
-
                     Ok(HttpResponse::Found()
                         .cookie(session_cookie(&req, session_id))
                         .cookie(clear_state_cookie)
@@ -289,6 +302,87 @@ pub async fn exchange_oauth_login_code(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{OAuthConfig, OAuthProviderConfig};
+    use crate::handlers::auth::tests::test_services;
+    use crate::service::oauth_service::tests::test_service;
+    use actix_web::{
+        App,
+        dev::ServiceResponse,
+        http::{StatusCode, header::LOCATION},
+        test::{self, TestRequest},
+    };
+    use secrecy::SecretString;
+    use std::collections::HashMap;
+
+    /// GitHub as the one provider; its token endpoint refuses connections.
+    fn oauth_config() -> OAuthConfig {
+        OAuthConfig {
+            providers: HashMap::from([(
+                "github".to_string(),
+                OAuthProviderConfig {
+                    client_id: "id".to_string(),
+                    client_secret: SecretString::new("secret".to_string()),
+                    auth_url: "https://github.com/login/oauth/authorize".to_string(),
+                    token_url: "http://127.0.0.1:9/token".to_string(),
+                    issuer_url: None,
+                },
+            )]),
+            redirect_base: "http://localhost".to_string(),
+            frontend_url_web: Some("https://app.example.com/oauth/done".to_string()),
+            frontend_url_app: Some("vex://oauth".to_string()),
+        }
+    }
+
+    /// Sends `req` to the callback route, whose services use the test Redis.
+    async fn callback(req: TestRequest) -> ServiceResponse {
+        let (email_service, _, session_service) = test_services().await;
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(Arc::new(
+                    test_service(&oauth_config()).await,
+                )))
+                .app_data(web::Data::new(session_service))
+                .app_data(web::Data::new(email_service))
+                .route(
+                    "/oauth/{provider}/callback",
+                    web::get().to(handle_oauth_callback),
+                ),
+        )
+        .await;
+        let req = req
+            .peer_addr("198.51.100.7:1".parse().unwrap())
+            .to_request();
+        test::call_service(&app, req).await
+    }
+
+    #[actix_web::test]
+    async fn cancelled_oauth_login_redirects_to_the_front_end_with_an_error() {
+        // A browser login has the state cookie; the app's has none.
+        for (state_cookie, landing) in [
+            (
+                true,
+                "https://app.example.com/oauth/done?error=oauth_cancelled",
+            ),
+            (false, "vex://oauth?error=oauth_cancelled"),
+        ] {
+            let mut req =
+                TestRequest::get().uri("/oauth/github/callback?error=access_denied&state=s");
+            if state_cookie {
+                req = req.cookie(Cookie::new("oauth_state_github", "s"));
+            }
+
+            let response = callback(req).await;
+
+            assert_eq!(response.status(), StatusCode::FOUND);
+            assert_eq!(response.headers().get(LOCATION).unwrap(), landing);
+            let cleared = response
+                .response()
+                .cookies()
+                .find(|cookie| cookie.name() == "oauth_state_github")
+                .unwrap();
+            assert_eq!(cleared.max_age(), Some(Duration::ZERO));
+        }
+    }
 
     #[test]
     fn the_mobile_redirect_keeps_an_existing_query_on_the_app_url() {
