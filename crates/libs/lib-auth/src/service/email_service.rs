@@ -842,7 +842,10 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         // 127.0.0.2 is loopback but not a local-development host: the production transport.
-        let server = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
+        // macOS has no 127.0.0.2 without an interface alias; skip there.
+        let Ok(server) = tokio::net::TcpListener::bind("127.0.0.2:0").await else {
+            return;
+        };
         let config = EmailConfig {
             smtp_host: "127.0.0.2".to_string(),
             smtp_port: server.local_addr().unwrap().port(),
