@@ -112,7 +112,7 @@ impl ClickHouse {
 
     /// The gateway's login, logging its queries with a comment of their own, which `logged` reads.
     fn logging_gateway(&self) -> (ClickHousePortfolioRepository, String) {
-        let comment = uuid::Uuid::new_v4().to_string();
+        let comment = rand::random::<u64>().to_string();
         let client = self.gateway.clone().with_option("log_comment", &comment);
         (
             ClickHousePortfolioRepository::new_with_schema(client, DATABASE),
