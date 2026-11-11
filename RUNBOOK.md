@@ -271,6 +271,9 @@ The routes that send an email, or check a code sent by email, also have a fixed 
 address, on top of their client IP's `general` budget: `POST /api/forgot-password` 3 an hour,
 `POST /api/verify-reset-otp` 5 in 15 minutes. Over it they answer the same 429.
 
+`POST /api/change-password` has the login's failure budget, per user: after 5 wrong old passwords
+in 5 minutes it answers 429 until the window ends.
+
 API-key authentication has a budget of its own, a code constant: each client IP (an IPv6 client
 by its /64) may make 60 refused API-key authentications a minute (an unknown, disabled or expired
 key, or a wrong signature). Over that, every API-key request from that IP is refused with the same

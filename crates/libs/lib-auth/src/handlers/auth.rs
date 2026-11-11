@@ -520,10 +520,21 @@ pub async fn change_password(
     user_repo: web::Data<Arc<dyn UserRepository>>,
     token_service: web::Data<Arc<TokenService>>,
     session_service: web::Data<Arc<SessionService>>,
+    email_service: web::Data<Arc<EmailService>>,
 ) -> Result<HttpResponse, AuthError> {
     // Validate the request
     body.validate()
         .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
+
+    // The old password gets login's failure budget, so a stolen session cannot guess it.
+    let principal = format!("change_password:{}", user.user_id);
+    email_service
+        .check_login_failure_rate_limit(
+            &principal,
+            LOGIN_PRINCIPAL_MAX_REQUESTS,
+            LOGIN_PRINCIPAL_WINDOW_SECONDS,
+        )
+        .await?;
 
     // Get user
     let user_record = user_repo
@@ -531,20 +542,20 @@ pub async fn change_password(
         .await?
         .ok_or(AuthError::UserNotFound)?;
 
-    // Verify old password
-    if let Some(password_hash) = &user_record.password_hash {
-        if !tokio::task::spawn_blocking({
-            let p = body.old_password.clone();
-            let h = password_hash.clone();
-            move || verify(&p, &h)
-        })
-        .await
-        .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
-        .map_err(|e| AuthError::Validation(format!("Password verification failed: {}", e)))?
-        {
-            return Err(AuthError::InvalidCredentials);
-        }
-    } else {
+    let Some(password_hash) = user_record.password_hash else {
+        return Err(AuthError::InvalidCredentials);
+    };
+    let authenticated = tokio::task::spawn_blocking({
+        let p = body.old_password.clone();
+        move || verify(&p, &password_hash)
+    })
+    .await
+    .map_err(|e| AuthError::InternalError(format!("Join error: {}", e)))?
+    .map_err(|e| AuthError::InternalError(format!("Password verification failed: {}", e)))?;
+    email_service
+        .record_login_authentication(&principal, authenticated, LOGIN_PRINCIPAL_WINDOW_SECONDS)
+        .await?;
+    if !authenticated {
         return Err(AuthError::InvalidCredentials);
     }
 
@@ -2005,7 +2016,7 @@ mod tests {
 
     #[tokio::test]
     async fn password_change_without_a_session_cookie_revokes_every_session_and_token() {
-        let (_, token_service, session_service) = test_services().await;
+        let (email_service, token_service, session_service) = test_services().await;
         let user = login_user(
             format!("change-{}@example.com", Uuid::new_v4()),
             "old-password",
@@ -2027,6 +2038,7 @@ mod tests {
             web::Data::new(user_repo),
             web::Data::new(token_service.clone()),
             web::Data::new(session_service.clone()),
+            web::Data::new(email_service),
         )
         .await
         .unwrap();
@@ -2040,7 +2052,7 @@ mod tests {
 
     #[tokio::test]
     async fn password_change_keeps_only_the_current_session_on_fresh_tokens() {
-        let (_, token_service, session_service) = test_services().await;
+        let (email_service, token_service, session_service) = test_services().await;
         let user = login_user(
             format!("change-{}@example.com", Uuid::new_v4()),
             "old-password",
@@ -2067,6 +2079,7 @@ mod tests {
             web::Data::new(user_repo),
             web::Data::new(token_service.clone()),
             web::Data::new(session_service.clone()),
+            web::Data::new(email_service),
         )
         .await
         .unwrap();
@@ -2084,5 +2097,35 @@ mod tests {
         assert!(session_service.get_session(&other_session).await.is_err());
         assert_tokens_revoked(&token_service, user_id, &current_tokens).await;
         assert_tokens_revoked(&token_service, user_id, &other_tokens).await;
+    }
+
+    #[tokio::test]
+    async fn change_password_refuses_the_sixth_wrong_old_password_for_the_window() {
+        let (email_service, token_service, session_service) = test_services().await;
+        let user = login_user(
+            format!("change-{}@example.com", Uuid::new_v4()),
+            "old-password",
+        );
+        let user_id = user.user_id;
+        let user_repo: Arc<dyn UserRepository> = Arc::new(PasswordRepository { user });
+        let guess = || {
+            change_password(
+                actix_web::test::TestRequest::default().to_http_request(),
+                AuthenticatedUser { user_id },
+                web::Json(ChangePasswordRequest {
+                    old_password: "guessed-password".to_string(),
+                    new_password: "new-password".to_string(),
+                }),
+                web::Data::new(user_repo.clone()),
+                web::Data::new(token_service.clone()),
+                web::Data::new(session_service.clone()),
+                web::Data::new(email_service.clone()),
+            )
+        };
+
+        for _ in 0..LOGIN_PRINCIPAL_MAX_REQUESTS {
+            assert!(matches!(guess().await, Err(AuthError::InvalidCredentials)));
+        }
+        assert!(matches!(guess().await, Err(AuthError::RateLimited { .. })));
     }
 }
