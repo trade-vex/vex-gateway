@@ -196,6 +196,8 @@ impl ResponseError for AuthError {
                 "Too many requests. Please try again later.".to_string(),
             ),
             AuthError::Config(_) | AuthError::InternalError(_) => {
+                // The detail is for the log; the client gets a fixed body.
+                tracing::error!("{self}");
                 (500, "INTERNAL_ERROR", "Internal server error".to_string())
             }
         };

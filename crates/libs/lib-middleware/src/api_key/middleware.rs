@@ -1144,7 +1144,7 @@ where
                     // Only an unreachable replay store is the gateway's fault; a replay is the client's.
                     return Err(if matches!(e, ApiKeyError::Internal(_)) {
                         error!("{message}");
-                        actix_web::error::ErrorServiceUnavailable(message)
+                        actix_web::error::ErrorServiceUnavailable(STORE_UNAVAILABLE)
                     } else {
                         warn!("{message}");
                         actix_web::error::ErrorBadRequest(message)
@@ -1625,6 +1625,8 @@ mod tests {
             error.as_response_error().status_code(),
             actix_web::http::StatusCode::SERVICE_UNAVAILABLE
         );
+        // The store's error is for the log, not the client.
+        assert_eq!(error.to_string(), STORE_UNAVAILABLE);
     }
 
     #[actix_web::test]

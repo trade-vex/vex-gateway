@@ -115,8 +115,8 @@ pub async fn signup(
         move || hash(&pwd, DEFAULT_COST)
     })
     .await
-    .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
-    .map_err(|e| AuthError::Validation(format!("Password hashing failed: {}", e)))?;
+    .map_err(|e| AuthError::InternalError(format!("Join error: {}", e)))?
+    .map_err(|e| AuthError::InternalError(format!("Password hashing failed: {}", e)))?;
 
     // Create new user
     let now = Utc::now();
@@ -253,8 +253,8 @@ pub async fn login(
         move || verify(&p, &h)
     })
     .await
-    .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
-    .map_err(|e| AuthError::Validation(format!("Password verification failed: {}", e)));
+    .map_err(|e| AuthError::InternalError(format!("Join error: {}", e)))?
+    .map_err(|e| AuthError::InternalError(format!("Password verification failed: {}", e)));
 
     let authenticated = match authenticated {
         Ok(authenticated) => authenticated,
@@ -565,8 +565,8 @@ pub async fn change_password(
         move || hash(&p, DEFAULT_COST)
     })
     .await
-    .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
-    .map_err(|e| AuthError::Validation(format!("Password hashing failed: {}", e)))?;
+    .map_err(|e| AuthError::InternalError(format!("Join error: {}", e)))?
+    .map_err(|e| AuthError::InternalError(format!("Password hashing failed: {}", e)))?;
 
     // Invalidate all previously issued access and refresh tokens first: if the update then fails,
     // the user is logged out everywhere, never the reverse.
@@ -751,8 +751,8 @@ pub async fn reset_password(
         move || hash(&p, DEFAULT_COST)
     })
     .await
-    .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
-    .map_err(|e| AuthError::Validation(format!("Password hashing failed: {}", e)))?;
+    .map_err(|e| AuthError::InternalError(format!("Join error: {}", e)))?
+    .map_err(|e| AuthError::InternalError(format!("Password hashing failed: {}", e)))?;
 
     // Invalidate all previously issued access and refresh tokens first: if the update then fails,
     // the user is logged out everywhere, never the reverse.
@@ -2157,6 +2157,60 @@ mod tests {
             token_service.get_token_version(user_id).await.unwrap(),
             version_before + 2
         );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_stored_hash_is_a_500_without_detail() {
+        use actix_web::ResponseError;
+
+        let (email_service, token_service, session_service) = test_services().await;
+        let user = Model {
+            password_hash: Some("not-a-bcrypt-hash".to_string()),
+            ..login_user(format!("{}@example.com", Uuid::new_v4()), "unused")
+        };
+        let user_id = user.user_id;
+        let login_result = attempt_login(
+            &user.email,
+            "some-password",
+            "198.51.100.42:12345",
+            Arc::new(LoginRepository {
+                user: user.clone(),
+                find_by_email_calls: AtomicUsize::new(0),
+            }),
+            email_service.clone(),
+            token_service.clone(),
+            session_service.clone(),
+        )
+        .await;
+        let change_result = change_password(
+            actix_web::test::TestRequest::default().to_http_request(),
+            AuthenticatedUser { user_id },
+            web::Json(ChangePasswordRequest {
+                old_password: "some-password".to_string(),
+                new_password: "new-password".to_string(),
+            }),
+            web::Data::new(Arc::new(PasswordRepository {
+                user,
+                update_fails: false,
+            }) as Arc<dyn UserRepository>),
+            web::Data::new(token_service),
+            web::Data::new(session_service),
+            web::Data::new(email_service),
+        )
+        .await;
+
+        for result in [login_result, change_result] {
+            let response = result.unwrap_err().error_response();
+            assert_eq!(
+                response.status(),
+                actix_web::http::StatusCode::INTERNAL_SERVER_ERROR
+            );
+            let body = actix_web::body::to_bytes(response.into_body())
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"]["message"], "Internal server error");
+        }
     }
 
     #[tokio::test]

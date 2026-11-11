@@ -220,12 +220,15 @@ fn send_failure_response(
     match error {
         GatewayError::Busy => engine_busy_response(order_id, client_order_id),
         GatewayError::NotConnected => engine_unavailable_response(order_id, client_order_id),
-        _ => HttpResponse::InternalServerError().json(OrderResponse {
-            order_id,
-            client_order_id,
-            status: "error".to_string(),
-            message: format!("Failed to send {request}: {error}"),
-        }),
+        _ => {
+            error!(%error, "Failed to send {request}");
+            HttpResponse::InternalServerError().json(OrderResponse {
+                order_id,
+                client_order_id,
+                status: "error".to_string(),
+                message: format!("Failed to send {request}"),
+            })
+        }
     }
 }
 
@@ -948,7 +951,7 @@ pub async fn place_order(
 ///   "order_id": "123456789",
 ///   "client_order_id": "987654321",
 ///   "status": "error",
-///   "message": "Failed to send cancel: connection refused"
+///   "message": "Failed to send cancel"
 /// }
 /// ```
 pub async fn cancel_order(
@@ -1196,10 +1199,7 @@ mod tests {
                 .headers()
                 .contains_key(actix_web::http::header::RETRY_AFTER)
         );
-        assert_eq!(
-            body_message(response).await,
-            "Failed to send cancel: Failed to send message: publication closed"
-        );
+        assert_eq!(body_message(response).await, "Failed to send cancel");
     }
 
     #[test]

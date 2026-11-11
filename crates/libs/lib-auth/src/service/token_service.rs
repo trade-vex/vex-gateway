@@ -86,7 +86,7 @@ impl TokenService {
             &access_claims,
             &self.encoding_key,
         )
-        .map_err(|e| AuthError::Validation(format!("JWT validation failed: {}", e)))?;
+        .map_err(|e| AuthError::InternalError(format!("JWT encoding failed: {}", e)))?;
 
         // Refresh Token
         let refresh_token = Uuid::new_v4().to_string();
