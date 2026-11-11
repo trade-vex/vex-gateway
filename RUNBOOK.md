@@ -395,9 +395,9 @@ Kafka Connect writes there from vex-core's Kafka events. The gateway may only re
 `GET /api/balances` reads `trading.balances`, and `GET /api/orders/open` and `/api/orders/history`
 read `trading.orders`, as fresh as the connectors' lag. ClickHouse holds every event, the history
 of every topic, for the portfolio and balance-chart endpoints and for ad-hoc and compliance
-queries, which Kafka Connect writes there too; the gateway may only read its views. Redis holds only the gateway's own state (sessions,
-tokens, OTP and OAuth state, rate limits, API-key signatures, order idempotency claims).
-Everything for both lives in `readmodel/`:
+queries, which Kafka Connect writes there too; the gateway may only read its views. Redis holds only
+the gateway's own state (sessions, tokens, OTP and OAuth state, rate limits, API-key signatures,
+order idempotency claims). Everything for both lives in `readmodel/`:
 
 - `migrations/postgres/`, `migrations/clickhouse/`: the schemas, as forward-only plain SQL
   migrations for golang-migrate.
@@ -412,9 +412,9 @@ Everything for both lives in `readmodel/`:
 In `trading`, each table (`balances`, `orders`, `orderbook`) holds one row per key, with the
 timestamp of its latest event (`event_ts`, vex-core's `timestamp` in nanoseconds). Every table's
 `keep_newer` trigger turns the connectors' upserts into "newer `event_ts` wins; of two copies of
-one event, the first stays", so duplicates and events delivered out of order change nothing. vex-core's `u64` values are stored with the same bits in
-`BIGINT` columns: read them as `i64` and decode with `as u64`; in SQL, `trading.u64(column)` gives
-the unsigned value.
+one event, the first stays", so duplicates and events delivered out of order change nothing.
+vex-core's `u64` values are stored with the same bits in `BIGINT` columns: read them as `i64` and
+decode with `as u64`; in SQL, `trading.u64(column)` gives the unsigned value.
 
 In ClickHouse, each topic has a raw table (`balance_events`, `order_events`, `orderbook_events`,
 `cancel_events`, `trade_events`, `deposit_events`, `withdrawal_events`) whose columns are the
