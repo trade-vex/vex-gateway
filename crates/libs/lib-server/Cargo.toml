@@ -29,6 +29,7 @@ lib-auth = {path = "../lib-auth"}
 lib-config = {path = "../lib-config"}
 lib-core = {path = "../lib-core"}
 lib-middleware = {path = "../lib-middleware"}
+lib-utils = {path = "../lib-utils"}
 
 # Vex dependencies
 vex-networking = {workspace = true}
@@ -39,3 +40,4 @@ rusteron-archive = "=0.1.157"
 
 [dev-dependencies]
 rsa = "0.10"
+tracing-subscriber = {workspace = true}

@@ -1,5 +1,6 @@
-//! Client IP and scheme resolution behind trusted proxies: the client IP keys rate limits and IP
-//! access control, the scheme decides whether cookies are `Secure`.
+//! Client IP and scheme resolution behind trusted proxies: the client IP keys rate limits (an IPv6
+//! client by its /64, [`client_ip_key`]) and IP access control, the scheme decides whether cookies
+//! are `Secure`.
 //!
 //! The client is the TCP peer unless that peer is a configured trusted proxy (the load balancer or
 //! reverse proxy in front of the gateway). Only then is `X-Forwarded-For` read, from the right,
@@ -8,7 +9,7 @@
 //! trusted peer's `X-Forwarded-Proto` is believed.
 
 use actix_web::{web, HttpRequest};
-use ipnet::IpNet;
+use ipnet::{IpNet, Ipv6Net};
 use std::net::IpAddr;
 
 /// Addresses (`192.0.2.7`) or CIDR ranges (`10.0.0.0/8`) of the proxies whose
@@ -86,12 +87,26 @@ fn registered(req: &HttpRequest) -> &TrustedProxies {
         .map_or(&NONE, |trusted_proxies| trusted_proxies.get_ref())
 }
 
-/// The client IP for rate-limit keys and IP access control, resolved with the [`TrustedProxies`]
-/// registered as app data. Without one, no proxy is trusted.
+/// The client IP for IP access control, resolved with the [`TrustedProxies`] registered as app
+/// data. Without one, no proxy is trusted. Rate limits key on [`client_ip_key`] instead.
 pub fn client_ip(req: &HttpRequest) -> String {
     registered(req)
         .client_ip(req)
         .map_or_else(|| "unknown".to_string(), |ip| ip.to_string())
+}
+
+/// The client of `req` as a rate-limit key, resolved as [`client_ip`] resolves it: `ip:` and an
+/// IPv4 address, or the /64 network of an IPv6 address (`ip:2001:db8:1:2::/64`), or `ip:unknown`
+/// when the transport reports no peer. Every limit keyed by the client IP uses it.
+///
+/// An IPv6 client is usually given a whole /64 and can send from any address in it, so a limit
+/// per address would give it a fresh budget with each one.
+pub fn client_ip_key(req: &HttpRequest) -> String {
+    match registered(req).client_ip(req) {
+        Some(IpAddr::V6(ip)) => format!("ip:{}", Ipv6Net::new_assert(ip, 64).trunc()),
+        Some(ip) => format!("ip:{ip}"),
+        None => "ip:unknown".to_string(),
+    }
 }
 
 /// Whether `req` used HTTPS (see [`TrustedProxies::is_https`]), judged with the
@@ -237,6 +252,46 @@ mod tests {
         assert_eq!(
             TrustedProxies::parse(&["proxy.internal"]).unwrap_err(),
             "entry 1 is not an IP address or CIDR range"
+        );
+    }
+
+    #[test]
+    fn client_ip_key_is_the_ipv4_address_or_the_ipv6_64() {
+        let key = |peer: &str| client_ip_key(&request(peer, &[]));
+
+        assert_eq!(key("192.0.2.10:1234"), "ip:192.0.2.10");
+        // Every address of a /64 is the same client; the next /64 is another one.
+        assert_eq!(
+            key("[2001:db8:1:2:aaaa:bbbb:cccc:dddd]:1234"),
+            "ip:2001:db8:1:2::/64"
+        );
+        assert_eq!(key("[2001:db8:1:2::1]:1234"), "ip:2001:db8:1:2::/64");
+        assert_eq!(key("[2001:db8:1:3::1]:1234"), "ip:2001:db8:1:3::/64");
+        // An IPv4 client on a dual-stack socket is its own IPv4 address, not the /64 that every
+        // such client is in.
+        assert_eq!(key("[::ffff:192.0.2.10]:1234"), "ip:192.0.2.10");
+        assert_eq!(
+            client_ip_key(&TestRequest::default().to_http_request()),
+            "ip:unknown"
+        );
+    }
+
+    #[test]
+    fn client_ip_key_uses_the_trusted_proxies_registered_as_app_data() {
+        let forwarded = || {
+            TestRequest::default()
+                .peer_addr("10.0.0.2:1234".parse().unwrap())
+                .insert_header(("X-Forwarded-For", "2001:db8:5:6::7"))
+        };
+
+        assert_eq!(client_ip_key(&forwarded().to_http_request()), "ip:10.0.0.2");
+        assert_eq!(
+            client_ip_key(
+                &forwarded()
+                    .app_data(web::Data::new(proxies(&["10.0.0.0/8"])))
+                    .to_http_request()
+            ),
+            "ip:2001:db8:5:6::/64"
         );
     }
 

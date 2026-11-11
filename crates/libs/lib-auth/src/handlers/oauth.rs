@@ -12,7 +12,7 @@ use actix_web::{
     cookie::{Cookie, SameSite, time::Duration},
     web,
 };
-use lib_middleware::client_ip::{client_ip, is_https};
+use lib_middleware::client_ip::{client_ip_key, is_https};
 use serde_json;
 use std::sync::Arc;
 use tracing::error;
@@ -31,8 +31,8 @@ pub(crate) fn validate_callback_state_cookie(
 
 const OAUTH_INIT_RATE_LIMIT_SCOPE: &str = "oauth_initiate";
 const OAUTH_CALLBACK_RATE_LIMIT_SCOPE: &str = "oauth_callback";
-// `client_ip` honours X-Forwarded-For only from configured trusted proxies
-// (`auth.server.trusted_proxies`).
+// `client_ip_key` honours X-Forwarded-For only from configured trusted proxies
+// (`auth.server.trusted_proxies`), and keys an IPv6 client by its /64.
 // This loose limit is a coarse flood guard.
 const OAUTH_IP_MAX_REQUESTS: u64 = 300;
 const OAUTH_IP_WINDOW_SECONDS: u64 = 5 * 60;
@@ -55,7 +55,7 @@ pub async fn initiate_oauth(
     email_service
         .enforce_rate_limit(
             OAUTH_INIT_RATE_LIMIT_SCOPE,
-            &format!("ip:{}", client_ip(&req)),
+            &client_ip_key(&req),
             OAUTH_IP_MAX_REQUESTS,
             OAUTH_IP_WINDOW_SECONDS,
         )
@@ -117,7 +117,7 @@ pub async fn handle_oauth_callback(
     email_service
         .enforce_rate_limit(
             OAUTH_CALLBACK_RATE_LIMIT_SCOPE,
-            &format!("ip:{}", client_ip(&req)),
+            &client_ip_key(&req),
             OAUTH_IP_MAX_REQUESTS,
             OAUTH_IP_WINDOW_SECONDS,
         )

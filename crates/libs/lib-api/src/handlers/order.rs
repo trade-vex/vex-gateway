@@ -7,6 +7,7 @@ use lib_core::{
     OrderIdempotencyError, OrderIdempotencyStore, ReleaseReason, ResponseError,
     generate_client_order_id, wait_for_response,
 };
+use lib_middleware::metrics::{self, EngineOutcome};
 use lib_utils::{AuthenticatedUserId, uuid_to_u64};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -238,6 +239,15 @@ fn release_reason(error: &GatewayError) -> ReleaseReason {
     }
 }
 
+/// How a failed publish is counted: as a busy engine, or one that is unavailable, as
+/// `release_reason` tells them apart.
+fn publish_failure(error: &GatewayError) -> EngineOutcome {
+    match release_reason(error) {
+        ReleaseReason::Busy => EngineOutcome::Busy,
+        ReleaseReason::EngineUnavailable => EngineOutcome::Unavailable,
+    }
+}
+
 /// The client request an engine answer belongs to; only the wording of the answer differs.
 #[derive(Clone, Copy)]
 enum EngineRequest {
@@ -245,12 +255,26 @@ enum EngineRequest {
     Cancel,
 }
 
-/// The one mapping from the engine's answer to the HTTP status and message that the client sees,
-/// the gateway logs and the idempotency record replays. The match is exhaustive on purpose: a
-/// status added in vex-core must be classified here before the gateway compiles, instead of
-/// silently becoming a 200. A `Busy` answer goes out through `engine_busy_response`, with
-/// `Retry-After`, and is never recorded.
-fn engine_outcome(request: EngineRequest, status: Status) -> (StatusCode, &'static str) {
+impl EngineRequest {
+    /// Counts a request of this kind that ended with `outcome`.
+    fn count(self, outcome: EngineOutcome) {
+        match self {
+            Self::Order => metrics::orders(outcome),
+            Self::Cancel => metrics::cancels(outcome),
+        }
+        .inc();
+    }
+}
+
+/// The one mapping from the engine's answer to the outcome the metrics count and the HTTP status
+/// and message that the client sees, the gateway logs and the idempotency record replays. The
+/// match is exhaustive on purpose: a status added in vex-core must be classified here before the
+/// gateway compiles, instead of silently becoming a 200. A `Busy` answer goes out through
+/// `engine_busy_response`, with `Retry-After`, and is never recorded.
+fn engine_outcome(
+    request: EngineRequest,
+    status: Status,
+) -> (EngineOutcome, StatusCode, &'static str) {
     match status {
         Status::Placed
         | Status::Cancelled
@@ -258,6 +282,7 @@ fn engine_outcome(request: EngineRequest, status: Status) -> (StatusCode, &'stat
         | Status::Filled
         | Status::Processing
         | Status::Processed => (
+            EngineOutcome::Accepted,
             StatusCode::OK,
             match request {
                 EngineRequest::Order => "Order processed successfully",
@@ -265,6 +290,7 @@ fn engine_outcome(request: EngineRequest, status: Status) -> (StatusCode, &'stat
             },
         ),
         Status::Rejected => (
+            EngineOutcome::Rejected,
             StatusCode::UNPROCESSABLE_ENTITY,
             match request {
                 EngineRequest::Order => "Order rejected by the matching engine",
@@ -273,17 +299,58 @@ fn engine_outcome(request: EngineRequest, status: Status) -> (StatusCode, &'stat
                 }
             },
         ),
-        Status::Busy => (StatusCode::SERVICE_UNAVAILABLE, ENGINE_BUSY_MESSAGE),
+        Status::Busy => (
+            EngineOutcome::Busy,
+            StatusCode::SERVICE_UNAVAILABLE,
+            ENGINE_BUSY_MESSAGE,
+        ),
     }
 }
 
-/// Answers a cancel from the engine's reply: the retryable 503 for a busy engine, otherwise what
-/// `engine_outcome` says.
-fn cancel_response(order_id: u64, client_order_id: u64, response: &OrderCommand) -> HttpResponse {
+/// Counts and logs the engine's answer to a request this gateway sent, and returns the HTTP status
+/// and message `engine_outcome` gives it, for the client and the idempotency record.
+fn record_engine_answer(
+    request: EngineRequest,
+    response: &OrderCommand,
+    client_order_id: u64,
+    user_id: u64,
+    latency: Duration,
+) -> (StatusCode, &'static str) {
+    let (outcome, http_status, message) = engine_outcome(request, response.status);
+    request.count(outcome);
+    if http_status.is_success() {
+        info!(
+            client_order_id,
+            order_id = response.order_id,
+            user_id,
+            status = ?response.status,
+            latency_us = latency.as_micros(),
+            "{message}"
+        );
+    } else {
+        warn!(
+            client_order_id,
+            order_id = response.order_id,
+            user_id,
+            status = ?response.status,
+            latency_us = latency.as_micros(),
+            "{message}"
+        );
+    }
+    (http_status, message)
+}
+
+/// Answers a cancel from the engine's reply: the retryable 503 for a busy engine, otherwise the
+/// HTTP status and message `record_engine_answer` returned for it.
+fn cancel_response(
+    order_id: u64,
+    client_order_id: u64,
+    response: &OrderCommand,
+    (http_status, message): (StatusCode, &str),
+) -> HttpResponse {
     if response.status == Status::Busy {
         return engine_busy_response(order_id, client_order_id);
     }
-    let (http_status, message) = engine_outcome(EngineRequest::Cancel, response.status);
     HttpResponse::build(http_status).json(OrderResponse {
         order_id: response.order_id,
         client_order_id: response.client_order_id,
@@ -575,7 +642,6 @@ pub async fn place_order(
 ) -> HttpResponse {
     let start = Instant::now();
 
-    // Extract user ID from JWT
     let user_id = uuid_to_u64(auth_user.0);
     let idempotency_key = match request
         .headers()
@@ -719,6 +785,7 @@ pub async fn place_order(
 
     if let Err(e) = send_result {
         correlation_service.cancel_request(client_order_id);
+        EngineRequest::Order.count(publish_failure(&e));
         error!(
             client_order_id = client_order_id,
             user_id = user_id,
@@ -742,29 +809,13 @@ pub async fn place_order(
     // Wait for response with timeout - function pauses here
     match wait_for_response(response_receiver, Duration::from_secs(5)).await {
         Ok(response) => {
-            let latency = start.elapsed();
-            let status_str = format!("{:?}", response.status);
-            let (http_status, message) = engine_outcome(EngineRequest::Order, response.status);
-
-            if http_status.is_success() {
-                info!(
-                    client_order_id = client_order_id,
-                    order_id = response.order_id,
-                    user_id = user_id,
-                    status = ?response.status,
-                    latency_us = latency.as_micros(),
-                    "{message}"
-                );
-            } else {
-                warn!(
-                    client_order_id = client_order_id,
-                    order_id = response.order_id,
-                    user_id = user_id,
-                    status = ?response.status,
-                    latency_us = latency.as_micros(),
-                    "{message}"
-                );
-            }
+            let (http_status, message) = record_engine_answer(
+                EngineRequest::Order,
+                &response,
+                client_order_id,
+                user_id,
+                start.elapsed(),
+            );
 
             // PR #83 removed the gateway-side cancelled-order insert: order history is
             // written by the Kafka consumer, and the duplicate writer used a status
@@ -781,7 +832,7 @@ pub async fn place_order(
                     http_status: http_status.as_u16(),
                     order_id: response.order_id,
                     client_order_id: response.client_order_id,
-                    status: status_str,
+                    status: format!("{:?}", response.status),
                     message: message.to_string(),
                 },
             )
@@ -789,6 +840,7 @@ pub async fn place_order(
         }
         Err(ResponseError::Timeout) => {
             correlation_service.timeout_request(client_order_id);
+            EngineRequest::Order.count(EngineOutcome::Unknown);
 
             warn!(
                 client_order_id = client_order_id,
@@ -815,6 +867,7 @@ pub async fn place_order(
             .await
         }
         Err(ResponseError::LinkLost) => {
+            EngineRequest::Order.count(EngineOutcome::Unknown);
             warn!(
                 client_order_id = client_order_id,
                 user_id = user_id,
@@ -956,39 +1009,25 @@ pub async fn cancel_order(
 
     if let Err(e) = send_result {
         correlation_service.cancel_request(client_order_id);
+        EngineRequest::Cancel.count(publish_failure(&e));
         return send_failure_response(&e, "cancel", order_id, client_order_id);
     }
 
     // Wait for cancel confirmation
     match wait_for_response(response_receiver, Duration::from_secs(5)).await {
         Ok(response) => {
-            let latency = start.elapsed();
-            let (http_status, message) = engine_outcome(EngineRequest::Cancel, response.status);
-
-            if http_status.is_success() {
-                info!(
-                    client_order_id = client_order_id,
-                    order_id = response.order_id,
-                    user_id = user_id,
-                    status = ?response.status,
-                    latency_us = latency.as_micros(),
-                    "{message}"
-                );
-            } else {
-                warn!(
-                    client_order_id = client_order_id,
-                    order_id = response.order_id,
-                    user_id = user_id,
-                    status = ?response.status,
-                    latency_us = latency.as_micros(),
-                    "{message}"
-                );
-            }
-
-            cancel_response(order_id, client_order_id, &response)
+            let answer = record_engine_answer(
+                EngineRequest::Cancel,
+                &response,
+                client_order_id,
+                user_id,
+                start.elapsed(),
+            );
+            cancel_response(order_id, client_order_id, &response, answer)
         }
         Err(ResponseError::Timeout) => {
             correlation_service.timeout_request(client_order_id);
+            EngineRequest::Cancel.count(EngineOutcome::Unknown);
             HttpResponse::RequestTimeout().json(OrderResponse {
                 order_id,
                 client_order_id,
@@ -996,7 +1035,10 @@ pub async fn cancel_order(
                 message: "Cancel timeout".to_string(),
             })
         }
-        Err(ResponseError::LinkLost) => engine_unavailable_response(order_id, client_order_id),
+        Err(ResponseError::LinkLost) => {
+            EngineRequest::Cancel.count(EngineOutcome::Unknown);
+            engine_unavailable_response(order_id, client_order_id)
+        }
     }
 }
 
@@ -1099,7 +1141,8 @@ mod tests {
                     );
                     service.call(request)
                 })
-                .configure(crate::routes::order_route::configure),
+                // No rate limits: the routes' own handlers answer.
+                .configure(|cfg| crate::routes::order_route::configure(cfg, |route, _| route)),
         )
         .await;
 
@@ -1173,16 +1216,25 @@ mod tests {
         ] {
             assert_eq!(
                 engine_outcome(Order, status),
-                (StatusCode::OK, "Order processed successfully")
+                (
+                    EngineOutcome::Accepted,
+                    StatusCode::OK,
+                    "Order processed successfully"
+                )
             );
             assert_eq!(
                 engine_outcome(Cancel, status),
-                (StatusCode::OK, "Cancel processed successfully")
+                (
+                    EngineOutcome::Accepted,
+                    StatusCode::OK,
+                    "Cancel processed successfully"
+                )
             );
         }
         assert_eq!(
             engine_outcome(Order, Status::Rejected),
             (
+                EngineOutcome::Rejected,
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "Order rejected by the matching engine"
             )
@@ -1190,6 +1242,7 @@ mod tests {
         assert_eq!(
             engine_outcome(Cancel, Status::Rejected),
             (
+                EngineOutcome::Rejected,
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "Cancel rejected: the order is not open or not owned by the caller"
             )
@@ -1197,8 +1250,61 @@ mod tests {
         for request in [Order, Cancel] {
             assert_eq!(
                 engine_outcome(request, Status::Busy),
-                (StatusCode::SERVICE_UNAVAILABLE, ENGINE_BUSY_MESSAGE)
+                (
+                    EngineOutcome::Busy,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    ENGINE_BUSY_MESSAGE
+                )
             );
+        }
+    }
+
+    #[test]
+    fn engine_answers_are_counted_by_request_and_outcome() {
+        use EngineRequest::{Cancel, Order};
+
+        for (request, status, counter) in [
+            (
+                Order,
+                Status::Rejected,
+                metrics::orders(EngineOutcome::Rejected),
+            ),
+            (
+                Order,
+                Status::Filled,
+                metrics::orders(EngineOutcome::Accepted),
+            ),
+            (Cancel, Status::Busy, metrics::cancels(EngineOutcome::Busy)),
+            (
+                Cancel,
+                Status::Rejected,
+                metrics::cancels(EngineOutcome::Rejected),
+            ),
+        ] {
+            let reply = OrderCommand {
+                order_id: 9,
+                client_order_id: 7,
+                status,
+                ..OrderCommand::default()
+            };
+            let (_, http_status, message) = engine_outcome(request, status);
+            let before = counter.get();
+
+            let answer = record_engine_answer(request, &reply, 7, 1, Duration::from_micros(250));
+
+            assert_eq!(counter.get(), before + 1, "{status:?}");
+            assert_eq!(answer, (http_status, message), "{status:?}");
+        }
+    }
+
+    #[test]
+    fn failed_publishes_are_counted_as_busy_or_unavailable() {
+        assert_eq!(publish_failure(&GatewayError::Busy), EngineOutcome::Busy);
+        for error in [
+            GatewayError::NotConnected,
+            GatewayError::SendError("publication closed".to_string()),
+        ] {
+            assert_eq!(publish_failure(&error), EngineOutcome::Unavailable);
         }
     }
 
@@ -1210,8 +1316,14 @@ mod tests {
             status,
             ..OrderCommand::default()
         };
+        // Answers `status` as cancel_order does, with what record_engine_answer returns, but
+        // without counting it.
+        let cancel = |status| {
+            let (_, http_status, message) = engine_outcome(EngineRequest::Cancel, status);
+            cancel_response(9, 7, &reply(status), (http_status, message))
+        };
 
-        let busy = cancel_response(9, 7, &reply(Status::Busy));
+        let busy = cancel(Status::Busy);
         assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(
             busy.headers()
@@ -1219,14 +1331,14 @@ mod tests {
         );
         assert_eq!(body_message(busy).await, ENGINE_BUSY_MESSAGE);
 
-        let rejected = cancel_response(9, 7, &reply(Status::Rejected));
+        let rejected = cancel(Status::Rejected);
         assert_eq!(rejected.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
             body_message(rejected).await,
             "Cancel rejected: the order is not open or not owned by the caller"
         );
 
-        let cancelled = cancel_response(9, 7, &reply(Status::Cancelled));
+        let cancelled = cancel(Status::Cancelled);
         assert_eq!(cancelled.status(), StatusCode::OK);
         assert_eq!(
             body_message(cancelled).await,

@@ -2,6 +2,7 @@ use lettre::{
     AsyncSmtpTransport, AsyncTransport, Tokio1Executor, message::header::ContentType,
     transport::smtp::authentication::Credentials,
 };
+use lib_middleware::rate_limit::{self, Limit};
 use rand::Rng;
 use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
@@ -25,6 +26,9 @@ const PASSWORD_RESET_WINDOW_SECONDS: u64 = 60 * 60;
 const PASSWORD_RESET_OTP_RATE_LIMIT_SCOPE: &str = "password_reset_otp";
 const PASSWORD_RESET_OTP_MAX_REQUESTS: u64 = 5;
 const PASSWORD_RESET_OTP_WINDOW_SECONDS: u64 = 15 * 60;
+const RESEND_VERIFICATION_RATE_LIMIT_SCOPE: &str = "resend_verification";
+const RESEND_VERIFICATION_MAX_REQUESTS: u64 = 3;
+const RESEND_VERIFICATION_WINDOW_SECONDS: u64 = 60 * 60;
 
 #[derive(Clone)]
 pub struct EmailService {
@@ -422,7 +426,7 @@ return {2, attempts, ttl}
         }
     }
 
-    /// Enforce a fixed-window Redis-backed rate limit.
+    /// Enforce a fixed-window Redis-backed rate limit (`lib_middleware::rate_limit`).
     /// Redis failures are returned to the handler so authentication fails closed.
     pub async fn enforce_rate_limit(
         &self,
@@ -431,29 +435,18 @@ return {2, attempts, ttl}
         max_requests: u64,
         window_seconds: u64,
     ) -> Result<(), AuthError> {
-        let mut conn = self.conn.clone();
         let key = format!(
             "{}{}:{}",
             AUTH_RATE_LIMIT_PREFIX,
             scope,
             identity.trim().to_ascii_lowercase()
         );
-        let result = redis::Script::new(
-            r#"
-local count = redis.call('INCR', KEYS[1])
-if count == 1 then
-    redis.call('EXPIRE', KEYS[1], ARGV[1])
-end
-local ttl = redis.call('TTL', KEYS[1])
-return {count, ttl}
-"#,
-        )
-        .key(key)
-        .arg(window_seconds)
-        .invoke_async(&mut conn)
-        .await;
+        let limit = Limit {
+            max_requests,
+            window_seconds,
+        };
 
-        Self::rate_limit_result(result, max_requests, window_seconds)
+        Self::rate_limit_result(rate_limit::hit(&self.conn, &key, limit).await)
     }
 
     /// Reject a login before password verification when its failure budget is exhausted.
@@ -587,21 +580,15 @@ return count
             .map_err(|e| AuthError::Redis(format!("Failed to record login authentication: {}", e)))
     }
 
-    fn rate_limit_result(
-        result: redis::RedisResult<(u64, i64)>,
-        max_requests: u64,
-        window_seconds: u64,
-    ) -> Result<(), AuthError> {
-        let (count, ttl) =
-            result.map_err(|e| AuthError::Redis(format!("Failed to enforce rate limit: {}", e)))?;
-
-        if count > max_requests {
-            return Err(AuthError::RateLimited {
-                retry_after_seconds: if ttl > 0 { ttl as u64 } else { window_seconds },
-            });
+    fn rate_limit_result(result: redis::RedisResult<Option<u64>>) -> Result<(), AuthError> {
+        match result
+            .map_err(|e| AuthError::Redis(format!("Failed to enforce rate limit: {}", e)))?
+        {
+            None => Ok(()),
+            Some(retry_after_seconds) => Err(AuthError::RateLimited {
+                retry_after_seconds,
+            }),
         }
-
-        Ok(())
     }
 
     /// checking if OTP exists and is not expired
@@ -746,6 +733,20 @@ The Team"#,
                 Err(e)
             }
         }
+    }
+
+    /// Enforce the verification-code resend limit: every resend sends an email.
+    pub async fn enforce_resend_verification_rate_limit(
+        &self,
+        email: &str,
+    ) -> Result<(), AuthError> {
+        self.enforce_rate_limit(
+            RESEND_VERIFICATION_RATE_LIMIT_SCOPE,
+            email,
+            RESEND_VERIFICATION_MAX_REQUESTS,
+            RESEND_VERIFICATION_WINDOW_SECONDS,
+        )
+        .await
     }
 
     /// Enforce the existing password-reset request limit.
@@ -994,13 +995,9 @@ mod tests {
     use crate::config::EmailConfig;
     use secrecy::SecretString;
 
-    /// A service on the test Redis (`REDIS_URL`, default local 6379) with these code settings.
+    /// A service on the tests' Redis ([`crate::test_redis`]) with these code settings.
     async fn email_service_with(otp_config: &OtpConfig) -> EmailService {
-        let url =
-            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
-        let conn = ConnectionManager::new(redis::Client::open(url).unwrap())
-            .await
-            .unwrap();
+        let conn = crate::test_redis().await;
         let config = EmailConfig {
             smtp_host: "127.0.0.1".to_string(),
             smtp_port: 2525,
@@ -1101,7 +1098,7 @@ mod tests {
     #[test]
     fn redis_failure_rejects_rate_limited_operation() {
         let redis_error = redis::RedisError::from((redis::ErrorKind::Io, "Redis unavailable"));
-        let result = EmailService::rate_limit_result(Err(redis_error), 5, 60);
+        let result = EmailService::rate_limit_result(Err(redis_error));
 
         assert!(matches!(result, Err(AuthError::Redis(_))));
     }

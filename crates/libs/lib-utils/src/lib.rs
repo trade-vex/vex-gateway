@@ -1,8 +1,6 @@
 pub mod auth_extractors;
 
-pub use auth_extractors::{
-    extract_user_id_from_query, extract_user_id_from_request, AuthContext, AuthenticatedUserId,
-};
+pub use auth_extractors::AuthenticatedUserId;
 
 use uuid::Uuid;
 

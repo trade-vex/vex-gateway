@@ -3,15 +3,18 @@
 //! Server initialization and application factory
 
 use actix_web::HttpServer;
-use actix_web::dev::Server;
 use lib_config::Config;
+use std::future::Future;
 use std::net::TcpListener;
 use tracing::info;
 
 mod app;
 mod combined_auth;
 mod correlation_handler;
+mod edge;
 mod engine_connector;
+mod metrics;
+mod rate_limit;
 mod state;
 
 pub use app::create_app;
@@ -21,14 +24,16 @@ pub use engine_connector::spawn_engine_link;
 pub use lib_core::{
     CorrelationService, EngineLink, ResponseError, generate_client_order_id, wait_for_response,
 };
+pub use rate_limit::RateLimiter;
 pub use state::AppState;
 
-/// Initialize the HTTP server with proper configuration
+/// Initialize the HTTP server, and the internal metrics listener beside it. The returned future runs
+/// both until the HTTP server stops.
 pub async fn initialize_server(
     config: &Config,
     engine_link: EngineLink,
     correlation_service: CorrelationService,
-) -> Result<Server, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<impl Future<Output = std::io::Result<()>>, Box<dyn std::error::Error + Send + Sync>> {
     // Use the auth configuration from lib-config
     let auth_config = config.auth.clone();
 
@@ -36,6 +41,7 @@ pub async fn initialize_server(
     let app_state = AppState::new(
         &auth_config,
         &config.clickhouse,
+        config.rate_limit,
         engine_link,
         correlation_service,
     )
@@ -45,11 +51,24 @@ pub async fn initialize_server(
     // Create TCP listener
     let listener = TcpListener::bind(config.server_address()?)?;
     info!("Server listening on {}", listener.local_addr().unwrap());
+    let metrics_listener = TcpListener::bind(config.metrics.socket_addr()?)?;
+    info!("Metrics listening on {}", metrics_listener.local_addr()?);
 
     // Create the HTTP server
     let server = HttpServer::new(move || create_app(app_state.clone(), api_key_store.clone()))
         .listen(listener)?
         .run();
 
-    Ok(server)
+    Ok(metrics::alongside(server, metrics_listener)?)
+}
+
+/// A connection to the tests' Redis: `REDIS_URL`, or the default local port when it is unset. CI
+/// sets `REDIS_URL` to its Redis service.
+#[cfg(test)]
+async fn test_redis() -> redis::aio::ConnectionManager {
+    let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+    let client = redis::Client::open(url).expect("REDIS_URL must be a Redis URL");
+    redis::aio::ConnectionManager::new(client)
+        .await
+        .expect("these tests need the Redis at REDIS_URL")
 }

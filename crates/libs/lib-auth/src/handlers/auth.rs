@@ -16,12 +16,13 @@ use crate::middleware::jwt_auth::AuthenticatedUser;
 use crate::models::user::{Model, UserStatus};
 use crate::repository::UserRepository;
 use crate::service::{EmailService, SessionService, TokenService};
-use lib_middleware::client_ip::{client_ip, is_https};
+use lib_middleware::client_ip::{client_ip_key, is_https};
+use lib_middleware::metrics::{self, AuthMethod};
 use std::sync::Arc;
 
 const LOGIN_RATE_LIMIT_SCOPE: &str = "login";
-// `client_ip` is the TCP peer unless the peer is a configured trusted proxy
-// (`auth.server.trusted_proxies`),
+// The IP limits key on `client_ip_key`: the TCP peer unless the peer is a configured trusted
+// proxy (`auth.server.trusted_proxies`), and an IPv6 client by its /64,
 // so behind an unconfigured load balancer every client shares one IP bucket.
 // These loose limits are coarse flood guards.
 const LOGIN_IP_MAX_REQUESTS: u64 = 300;
@@ -45,6 +46,12 @@ fn normalized_principal(value: &str) -> String {
     value.trim().to_ascii_lowercase()
 }
 
+/// A login refused for its email and password, counted as a login authentication failure.
+fn refused_login() -> AuthError {
+    metrics::auth_failures(AuthMethod::Login).inc();
+    AuthError::InvalidCredentials
+}
+
 /// Session cookie attributes for `req`. Returns (is_secure, cookie_ttl) where:
 /// - is_secure: the request used HTTPS: a TLS connection, or `X-Forwarded-Proto: https` from a
 ///   trusted proxy (`is_https`), the same rule the OAuth handlers apply to their cookies
@@ -65,7 +72,7 @@ pub async fn signup(
     email_service
         .enforce_rate_limit(
             SIGNUP_RATE_LIMIT_SCOPE,
-            &format!("ip:{}", client_ip(&http_req)),
+            &client_ip_key(&http_req),
             SIGNUP_IP_MAX_REQUESTS,
             SIGNUP_IP_WINDOW_SECONDS,
         )
@@ -163,14 +170,14 @@ pub async fn login(
     // of their own account -- the success path that would clear it is unreachable while locked
     // (finding G3-2). The separate per-IP flood limit above still bounds a single source.
     let login_principal = format!(
-        "email:{}|ip:{}",
+        "email:{}|{}",
         normalized_principal(&req.email),
-        client_ip(&http_req)
+        client_ip_key(&http_req)
     );
     email_service
         .enforce_rate_limit(
             LOGIN_RATE_LIMIT_SCOPE,
-            &format!("ip:{}", client_ip(&http_req)),
+            &client_ip_key(&http_req),
             LOGIN_IP_MAX_REQUESTS,
             LOGIN_IP_WINDOW_SECONDS,
         )
@@ -200,7 +207,7 @@ pub async fn login(
                     LOGIN_PRINCIPAL_WINDOW_SECONDS,
                 )
                 .await?;
-            return Err(AuthError::InvalidCredentials);
+            return Err(refused_login());
         }
     };
     // PR #85: capture the token version immediately after the lookup and
@@ -216,7 +223,7 @@ pub async fn login(
     // `mint_tokens_at_version` fails closed. The two together close the window.
     let user = match user_repo.find_by_id(user.user_id).await? {
         Some(user) => user,
-        None => return Err(AuthError::InvalidCredentials),
+        None => return Err(refused_login()),
     };
 
     // Check if user can login
@@ -235,7 +242,7 @@ pub async fn login(
                     LOGIN_PRINCIPAL_WINDOW_SECONDS,
                 )
                 .await?;
-            return Err(AuthError::InvalidCredentials);
+            return Err(refused_login());
         }
     };
 
@@ -275,7 +282,7 @@ pub async fn login(
     release_result?;
 
     if !authenticated {
-        return Err(AuthError::InvalidCredentials);
+        return Err(refused_login());
     }
 
     let user_id = user.user_id;
@@ -414,7 +421,7 @@ pub async fn verify_email_with_otp(
     email_service
         .enforce_rate_limit(
             VERIFY_EMAIL_RATE_LIMIT_SCOPE,
-            &format!("ip:{}", client_ip(&http_req)),
+            &client_ip_key(&http_req),
             VERIFY_EMAIL_IP_MAX_REQUESTS,
             VERIFY_EMAIL_IP_WINDOW_SECONDS,
         )
@@ -653,6 +660,10 @@ pub async fn resend_verification_email(
 
     tracing::debug!("Resend verification email request for: {}", req.email);
 
+    email_service
+        .enforce_resend_verification_rate_limit(&req.email)
+        .await?;
+
     // check if user exists by email
     let user = user_repo.find_by_email(&req.email).await?;
 
@@ -867,15 +878,6 @@ mod tests {
     use jsonwebtoken::{DecodingKey, EncodingKey};
     use redis::AsyncCommands;
 
-    async fn create_test_redis_conn() -> redis::aio::ConnectionManager {
-        let redis_url =
-            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
-        let client = redis::Client::open(redis_url).expect("Failed to create test Redis client");
-        redis::aio::ConnectionManager::new(client)
-            .await
-            .expect("Failed to create test Redis connection manager")
-    }
-
     #[test]
     fn session_cookie_is_secure_exactly_when_the_request_used_https() {
         let forwarded_https = || {
@@ -913,7 +915,7 @@ mod tests {
     async fn refresh_token_stops_working_after_logout() {
         let user_id = Uuid::new_v4();
         let refresh_token = Uuid::new_v4().to_string();
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let jwt_config = Arc::new(JwtConfig {
             private_key_path: String::new(),
             public_key_path: String::new(),
@@ -1142,8 +1144,7 @@ mod tests {
     }
 
     async fn test_services() -> (Arc<EmailService>, Arc<TokenService>, Arc<SessionService>) {
-        let client = redis::Client::open("redis://127.0.0.1:6379/").unwrap();
-        let conn = redis::aio::ConnectionManager::new(client).await.unwrap();
+        let conn = crate::test_redis().await;
         let email_config = EmailConfig {
             smtp_host: "127.0.0.1".to_string(),
             smtp_port: 2525,
@@ -1418,6 +1419,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refused_logins_are_counted_as_login_authentication_failures() {
+        const PASSWORD: &str = "correct-horse-battery-staple";
+        let (email_service, token_service, session_service) = test_services().await;
+        let email = format!("{}@example.com", Uuid::new_v4());
+        let user_repo: Arc<dyn UserRepository> = Arc::new(LoginRepository {
+            user: login_user(email.clone(), PASSWORD),
+            find_by_email_calls: AtomicUsize::new(0),
+        });
+        let failures = metrics::auth_failures(AuthMethod::Login);
+        let before = failures.get();
+
+        let result = attempt_login(
+            &email,
+            "incorrect-password",
+            "198.51.100.30:12345",
+            user_repo,
+            email_service,
+            token_service,
+            session_service,
+        )
+        .await;
+
+        assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+        // The other tests here refuse logins concurrently, so the count can rise by more.
+        assert!(failures.get() > before);
+    }
+
+    #[tokio::test]
     async fn exhausted_budget_for_one_ip_does_not_lock_out_another_ip() {
         // Finding G3-2: with a principal-only failure bucket, an unauthenticated attacker could
         // burn a victim's budget from anywhere and lock them out of their own account, because
@@ -1524,6 +1553,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_ipv6_client_has_one_failure_budget_for_its_whole_64() {
+        // An IPv6 client is usually given a /64 and can send from any address in it: a budget per
+        // address would give it a fresh one with each.
+        const PASSWORD: &str = "correct-horse-battery-staple";
+        let (email_service, token_service, session_service) = test_services().await;
+        let email = format!("{}@example.com", Uuid::new_v4());
+        let repository = Arc::new(LoginRepository {
+            user: login_user(email.clone(), PASSWORD),
+            find_by_email_calls: AtomicUsize::new(0),
+        });
+
+        let mut results = Vec::new();
+        for host in 1..=LOGIN_PRINCIPAL_MAX_REQUESTS + 1 {
+            let user_repo: Arc<dyn UserRepository> = repository.clone();
+            results.push(
+                attempt_login(
+                    &email,
+                    "wrong-password",
+                    &format!("[2001:db8:113:64::{host:x}]:12345"),
+                    user_repo,
+                    email_service.clone(),
+                    token_service.clone(),
+                    session_service.clone(),
+                )
+                .await,
+            );
+        }
+
+        let over_budget = results.pop().unwrap();
+        assert!(
+            matches!(over_budget, Err(AuthError::RateLimited { .. })),
+            "a new address in the same /64 must not get a new budget; got {:?}",
+            over_budget.err()
+        );
+    }
+
+    #[tokio::test]
     async fn occupied_login_inflight_lock_rejects_password_verification() {
         const PASSWORD: &str = "correct-horse-battery-staple";
         let (email_service, token_service, session_service) = test_services().await;
@@ -1589,8 +1655,7 @@ mod tests {
         assert!(matches!(result, Err(AuthError::Validation(_))));
         assert_eq!(repository.find_by_email_calls.load(Ordering::SeqCst), 0);
 
-        let client = redis::Client::open("redis://127.0.0.1:6379/").unwrap();
-        let mut conn = redis::aio::ConnectionManager::new(client).await.unwrap();
+        let mut conn = crate::test_redis().await;
         let ip_key_exists: bool = conn
             .exists("rate_limit:auth:signup:ip:203.0.113.201")
             .await
@@ -1636,8 +1701,7 @@ mod tests {
         assert!(matches!(result, Err(AuthError::Validation(_))));
         assert_eq!(repository.find_by_email_calls.load(Ordering::SeqCst), 0);
 
-        let client = redis::Client::open("redis://127.0.0.1:6379/").unwrap();
-        let mut conn = redis::aio::ConnectionManager::new(client).await.unwrap();
+        let mut conn = crate::test_redis().await;
         let ip_key_exists: bool = conn
             .exists("rate_limit:auth:verify_email:ip:203.0.113.202")
             .await
@@ -1651,14 +1715,53 @@ mod tests {
         assert!(!email_key_exists);
     }
 
+    #[tokio::test]
+    async fn resend_verification_is_limited_per_email_before_the_lookup() {
+        let (email_service, _, _) = test_services().await;
+        let repository = Arc::new(RejectIfCalledRepository {
+            find_by_email_calls: AtomicUsize::new(0),
+        });
+        let resend = |email: &str| {
+            let user_repo: Arc<dyn UserRepository> = repository.clone();
+            resend_verification_email(
+                web::Json(CheckEmailRequest {
+                    email: email.to_string(),
+                }),
+                web::Data::new(user_repo),
+                web::Data::new(email_service.clone()),
+            )
+        };
+        let email = format!("{}@example.com", Uuid::new_v4());
+
+        // Three an hour per email reach the lookup, which this repository fails.
+        for _ in 0..3 {
+            assert!(matches!(
+                resend(&email).await,
+                Err(AuthError::InternalError(_))
+            ));
+        }
+        assert!(matches!(
+            resend(&email).await,
+            Err(AuthError::RateLimited { .. })
+        ));
+        assert_eq!(repository.find_by_email_calls.load(Ordering::SeqCst), 3);
+
+        // Another email has a limit of its own.
+        let other_email = format!("{}@example.com", Uuid::new_v4());
+        assert!(matches!(
+            resend(&other_email).await,
+            Err(AuthError::InternalError(_))
+        ));
+    }
+
     #[test]
-    fn client_ip_uses_peer_address_not_forwarded_header() {
+    fn client_ip_key_uses_peer_address_not_forwarded_header() {
         let request = actix_web::test::TestRequest::default()
             .peer_addr("192.0.2.10:12345".parse().unwrap())
             .insert_header(("X-Forwarded-For", "198.51.100.7"))
             .to_http_request();
 
-        assert_eq!(client_ip(&request), "192.0.2.10");
+        assert_eq!(client_ip_key(&request), "ip:192.0.2.10");
     }
 
     /// Serves one password user and accepts its password update.

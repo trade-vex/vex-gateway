@@ -7,6 +7,28 @@ environment = "development"
 host = "127.0.0.1"
 port = 8081
 
+# The internal listener for GET /metrics (Prometheus text format): an IP address and a port. Bind it
+# where only the metrics scraper reaches it, never the load balancer; production requires a port of
+# its own. Override with APP__METRICS__BIND.
+[metrics]
+bind = "127.0.0.1:9091"
+
+# The API's rate limits, counted in Redis (auth.redis.url): each budget allows each caller
+# max_requests per window of window_seconds, then answers 429 with Retry-After until the window
+# ends. A caller is the authenticated user (the JWT's, or the API key's owner); an anonymous caller
+# is its client IP (an IPv6 client its /64). Every setting must be greater than 0. Override with
+# APP__RATE_LIMIT__<BUDGET>__<KEY>, e.g. APP__RATE_LIMIT__ORDERS__MAX_REQUESTS.
+# Placing orders: POST /api/order.
+[rate_limit.orders]
+max_requests = 100
+window_seconds = 10
+
+# Every other route that has no limit of its own, POST /api/cancel included, so that a caller over
+# the orders budget can still cancel its resting orders.
+[rate_limit.general]
+max_requests = 600
+window_seconds = 60
+
 [logging]
 level = "debug"
 

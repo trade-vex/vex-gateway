@@ -58,8 +58,8 @@ The gateway reads two environment variables by name, and does not read a `.env` 
   directory at or above its working directory.
 
 They choose the configuration file, so they cannot be set in it. Every other setting (server,
-logging, database, Redis, ClickHouse, JWT, email, OAuth, trusted proxies, the vex-core link) lives
-in that file (see [Configuration](#configuration)), and the `APP__` layer of
+metrics, rate limits, logging, database, Redis, ClickHouse, JWT, email, OAuth, trusted proxies, the
+vex-core link) lives in that file (see [Configuration](#configuration)), and the `APP__` layer of
 [Configuration Precedence](#configuration-precedence) is the only way to override one:
 
 ```bash
@@ -68,6 +68,7 @@ APP__SERVER__HOST=0.0.0.0                                  # server.host
 APP__AUTH__SERVER__TRUSTED_PROXIES=10.0.1.0/24,10.0.2.0/24 # auth.server.trusted_proxies
 APP__CORE__AUTH_KEY=<signed 32-bit integer>                # core.auth_key, kept out of the file
 APP__CLICKHOUSE__PASSWORD=<password>                       # clickhouse.password, kept out of the file
+APP__METRICS__BIND=0.0.0.0:9091                            # metrics.bind
 ```
 
 ---
@@ -119,13 +120,15 @@ optional setting.
 
 The service validates configuration on startup:
 - **Production**: Cannot bind to localhost, cannot use debug logging, port must be > 0,
-  `auth.server.trusted_proxies`, `core.auth_key` and `clickhouse.password` must not be empty
+  `auth.server.trusted_proxies`, `core.auth_key` and `clickhouse.password` must not be empty, and
+  `metrics.bind` needs a port of its own (not 0, and not `server.port`)
 - **Development**: More lenient validation
 - **Testing**: Allows ephemeral ports (port 0)
 - **Every environment**: `auth.oauth.providers` may list only `google`, `github` and `twitter`;
   another provider stops the gateway at startup, and the error names it. The code lifetimes in
-  `[auth.otp]` must be positive, `clickhouse.user` must not be empty, and `clickhouse.database`
-  must be a plain identifier
+  `[auth.otp]` must be positive, `clickhouse.user` must not be empty, `clickhouse.database` must
+  be a plain identifier, `metrics.bind` must be an IP address and a port, and every `rate_limit`
+  setting must be greater than 0
 
 ### OAuth Redirects
 
@@ -166,6 +169,111 @@ overrides one:
 
 The gateway reads only the read model's ClickHouse views, so its user needs nothing beyond the
 `readmodel_gateway` role ([Read Model Roles](#read-model-roles)).
+
+### Metrics
+
+`metrics.bind` (required, no default) is the IP address and port of a second listener, internal
+to the gateway's process, that serves `GET /metrics` in the Prometheus text format and nothing
+else. The public listener (`server.host`, `server.port`) never serves `/metrics`. Override it with
+`APP__METRICS__BIND`. It takes an IP address, not a host name: `0.0.0.0:9091` in a container the
+scraper reaches by its address, `127.0.0.1:9091` for a scraper on the same host. With
+`APP_ENV=production` the gateway refuses to start when its port is 0 or `server.port`.
+
+The endpoint has no authentication, so keep it internal: do not put its port in the ALB's target
+group or listener rules, and let the gateway's security group accept that port only from the
+Prometheus scraper. The listener stops with the gateway; on SIGTERM it keeps answering while the
+public listener drains.
+
+Every series is reported from the first scrape, at 0 until its first count:
+
+| Metric | Label | Counts |
+|---|---|---|
+| `vex_gateway_orders_total` | `outcome` | Orders the gateway tried to send to the matching engine (`POST /api/order` past validation and the idempotency claim; a retry that replays or waits for an earlier attempt is not counted again) |
+| `vex_gateway_cancels_total` | `outcome` | Cancels the gateway tried to send to the matching engine (`POST /api/cancel`) |
+| `vex_gateway_auth_failures_total` | `method` | Requests the gateway refused to authenticate |
+| `vex_gateway_rate_limited_total` | `budget` | Requests refused with 429 over a [rate-limit](#rate-limits) budget: `orders` or `general`. The auth endpoints' own limits are not counted |
+
+`outcome` is one of:
+
+- `accepted`: the engine accepted it (200).
+- `rejected`: the engine rejected it (422).
+- `busy`: the engine was busy and executed nothing (503 with `Retry-After`).
+- `unavailable`: it never reached the engine: no core is connected (503 `Matching engine
+  unavailable`), or this gateway's publication failed (500).
+- `unknown`: it was sent but no answer came back: the wait timed out (408), or the answer was
+  lost (500).
+
+`method` is one of:
+
+- `jwt`: a bearer token, or a session cookie whose session holds one, refused with 401 (invalid,
+  expired or revoked, or an expired or unknown session).
+- `api_key`: an `X-MBX-APIKEY` request refused with a 4xx: an unknown, disabled or expired key, a
+  refused IP or permission, or a bad, stale or replayed signature. A 5xx, such as the replay store
+  being unreachable, is the gateway's fault and is not counted.
+- `login`: a `POST /api/login` refused for its email and password (401). A rate-limited or
+  unverified login is not counted.
+
+A request to a protected route without any credentials is not counted.
+
+### Rate Limits
+
+Every API route except `GET /api/health` is rate limited per caller, in fixed windows counted in
+Redis (`auth.redis.url`). There are two budgets, each set by two required settings that have no
+default and must be greater than 0:
+
+- `rate_limit.orders.max_requests`, `rate_limit.orders.window_seconds`
+  (`APP__RATE_LIMIT__ORDERS__MAX_REQUESTS`, `APP__RATE_LIMIT__ORDERS__WINDOW_SECONDS`): placing
+  orders, `POST /api/order`.
+- `rate_limit.general.max_requests`, `rate_limit.general.window_seconds`
+  (`APP__RATE_LIMIT__GENERAL__MAX_REQUESTS`, `APP__RATE_LIMIT__GENERAL__WINDOW_SECONDS`): every
+  other route that has no limit of its own, `POST /api/cancel` included, so that a caller over
+  its order budget can still cancel its resting orders.
+
+A caller may make `max_requests` requests in a window of `window_seconds`, which starts with its
+first request. Over that, each request until the window ends is refused with 429
+(`{"error":{"code":"RATE_LIMITED",...}}`) and `Retry-After`, the seconds left in the window.
+Refused requests count too but never extend the window. The windows are fixed, so across the end
+of one a caller can send up to twice `max_requests` in a short time.
+
+The caller is:
+
+- On an authenticated route, the user the request acts for: the JWT's (from a bearer token or a
+  session cookie), or the API key's owner. A user's sessions and API keys share its budgets. A
+  request is counted once it has authenticated, so one refused authentication is not counted.
+  An API key that has no owner acts for no one: the gateway refuses it with 401 `API key is not
+  owned by a user` on every authenticated route, before counting it, as the handlers that act
+  for a user already did.
+- On a public route, the client IP (see [Client IP Behind a Proxy](#client-ip-behind-a-proxy)),
+  and for an IPv6 client its /64: such a client is usually given a whole /64 and can send from
+  any address in it. Without `auth.server.trusted_proxies`, every client behind a load balancer
+  shares the balancer's budget.
+
+The routes:
+
+- `orders`, per user: `POST /api/order`.
+- `general`, per user: every other authenticated route: `POST /api/cancel`, `/api/balances`,
+  `/api/orders/open`, `/api/orders/history`, `/api/portfolio`, `/api/balance-chart`,
+  `/api/pnl-chart`, `/api/favorites`, `/api/api-key/*`, `/api/session-check`, `/api/profile`,
+  `/api/logout`, `/api/change-password`, `/api/session/info`, `/api/session/refresh`.
+- `general`, per client IP: `GET /api/oauth/providers`, `POST /api/oauth/exchange`,
+  `POST /api/refresh`, `POST /api/session/refresh-tokens`, `POST /api/check-email`,
+  `POST /api/resend-verification`, `POST /api/forgot-password`, `POST /api/verify-reset-otp`,
+  `POST /api/reset-password`.
+- Neither budget: the routes with fixed limits of their own per client IP (and some per email or
+  username too): `POST /api/signup`, `POST /api/login`, `POST /api/verify-email`,
+  `GET /api/oauth/{provider}`, `GET /api/oauth/{provider}/callback`. And `GET /api/health`, the
+  load balancer's health check, which reads a flag and touches no store.
+
+The routes that send an email, or check a code sent by email, also have a fixed limit per email
+address, on top of their client IP's `general` budget: `POST /api/forgot-password` and
+`POST /api/resend-verification` 3 an hour, `POST /api/verify-reset-otp` 5 in 15 minutes. Over it
+they answer the same 429.
+
+When Redis cannot count a request (it is unreachable, or full under `noeviction`), the gateway
+refuses it with 503
+`{"error":{"code":"service_unavailable","message":"Rate limit store is unavailable; please retry","status":503}}`,
+the response the auth middleware gives when Redis fails it. The counters expire with their
+windows.
 
 ### VEX Core Connection
 
@@ -218,9 +326,11 @@ to monitor and alert on the engine link, not to route traffic or restart gateway
 
 ### Client IP Behind a Proxy
 
-Login, signup, email-verification and OAuth rate limits, and API-key IP blacklists, key on the
-client IP. By default that is the TCP peer, so behind a load balancer every client shares the
-balancer's address: one client's failed logins then lock that email out for everyone.
+Login, signup, email-verification and OAuth rate limits, the [rate limits](#rate-limits) of
+anonymous callers, and API-key IP blacklists, key on the client IP; the rate limits key an IPv6
+client by its /64. By default the client IP is the TCP peer, so behind a load balancer every
+client shares the balancer's address: one client's failed logins then lock that email out for
+everyone.
 
 Set `auth.server.trusted_proxies` in the TOML file, or `APP__AUTH__SERVER__TRUSTED_PROXIES`
 (comma-separated), to the addresses or CIDR ranges of the proxies in front of the gateway. Only for
@@ -671,6 +781,15 @@ tail -f logs/app.log
 # Logs appear in terminal
 ```
 
+Every response carries an `X-Request-Id` header: the client's own when it sent one of 1 to 64
+characters of `[A-Za-z0-9-]`, otherwise a new UUID. What the gateway logs while handling the
+request carries `request{request_id=<id>}`, at any log level, so the id a client reports finds that
+request's log lines:
+
+```bash
+grep 'request_id=<id>' logs/app.log
+```
+
 ---
 
 ## Troubleshooting
@@ -949,7 +1068,8 @@ grep -i "memory\|oom" logs/app.log
    - If a gateway stays not ready while the core is up, read its
      `Could not connect to vex-core; retrying` warnings (see
      [VEX Core Communication Failures](#vex-core-communication-failures)).
-   - Consider rate limiting or disabling order endpoints temporarily
+   - Consider lowering `rate_limit.orders` (see [Rate Limits](#rate-limits)) or disabling order
+     endpoints temporarily
 
 ### High Error Rate
 
@@ -971,12 +1091,16 @@ grep -i "memory\|oom" logs/app.log
 3. **Mitigation**
    - Increase connection pool sizes
    - Restart affected services
-   - Enable rate limiting if needed
+   - Lower the [rate limits](#rate-limits) if needed
    - Check upstream service health
 
 ---
 
 ## API Reference
+
+### Internal Endpoint (Metrics Listener Only)
+
+- `GET /metrics` - Prometheus counters, on `metrics.bind` only (see [Metrics](#metrics))
 
 ### Public Endpoints (No Authentication)
 

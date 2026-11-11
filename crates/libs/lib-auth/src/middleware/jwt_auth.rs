@@ -6,6 +6,7 @@ use actix_web::{
 };
 use futures_util::future::LocalBoxFuture;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, errors::ErrorKind};
+use lib_middleware::metrics::{self, AuthMethod};
 use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,38 @@ async fn refreshed_token_is_revoked(
         .get(crate::service::token_service::token_version_key(user_id))
         .await?;
     Ok(token_version < stored_version.unwrap_or_default())
+}
+
+/// Refuses the request's token with a 401 carrying `code` and `message`, and counts it as a JWT
+/// authentication failure. Every 401 of this middleware goes through here.
+fn unauthorized(
+    req: ServiceRequest,
+    code: &str,
+    message: &str,
+) -> Result<ServiceResponse<BoxBody>, Error> {
+    metrics::auth_failures(AuthMethod::Jwt).inc();
+    let (req, _) = req.into_parts();
+    let response = HttpResponse::Unauthorized().json(serde_json::json!({
+        "error": {
+            "code": code,
+            "message": message,
+            "status": 401
+        }
+    }));
+    Ok(ServiceResponse::new(req, response).map_into_boxed_body())
+}
+
+/// The 503 of a request refused because Redis, which it depends on, cannot answer:
+/// `{"error":{"code":"service_unavailable","message":<message>,"status":503}}`. This middleware
+/// refuses with it, and so does the gateway's rate limit.
+pub fn service_unavailable(message: &str) -> HttpResponse {
+    HttpResponse::ServiceUnavailable().json(serde_json::json!({
+        "error": {
+            "code": "service_unavailable",
+            "message": message,
+            "status": 503
+        }
+    }))
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -262,16 +295,7 @@ where
                                         jti,
                                     );
                                     // Token is blacklisted, short-circuit with an unauthorized response
-                                    let (req, _) = req.into_parts();
-                                    let response =
-                                        HttpResponse::Unauthorized().json(serde_json::json!({
-                                            "error": {
-                                                "code": "token_revoked",
-                                                "message": "Token has been revoked",
-                                                "status": 401
-                                            }
-                                        }));
-                                    Ok(ServiceResponse::new(req, response).map_into_boxed_body())
+                                    unauthorized(req, "token_revoked", "Token has been revoked")
                                 }
                                 Ok(false) => {
                                     tracing::debug!(
@@ -316,16 +340,11 @@ where
                                                     }
                                                 }
 
-                                                let (req, _) = req.into_parts();
-                                                let response = HttpResponse::Unauthorized().json(serde_json::json!({
-                                                    "error": {
-                                                        "code": "session_expired",
-                                                        "message": "Session expired due to inactivity",
-                                                        "status": 401
-                                                    }
-                                                }));
-                                                return Ok(ServiceResponse::new(req, response)
-                                                    .map_into_boxed_body());
+                                                return unauthorized(
+                                                    req,
+                                                    "session_expired",
+                                                    "Session expired due to inactivity",
+                                                );
                                             }
                                         }
                                     }
@@ -337,13 +356,9 @@ where
                                 Err(_) => {
                                     // Redis failure - fail closed with service unavailable
                                     let (req, _) = req.into_parts();
-                                    let response = HttpResponse::ServiceUnavailable().json(serde_json::json!({
-                                        "error": {
-                                            "code": "service_unavailable",
-                                            "message": "Authentication service temporarily unavailable",
-                                            "status": 503
-                                        }
-                                    }));
+                                    let response = service_unavailable(
+                                        "Authentication service temporarily unavailable",
+                                    );
                                     Ok(ServiceResponse::new(req, response).map_into_boxed_body())
                                 }
                             }
@@ -439,20 +454,11 @@ where
                                                                 tracing::warn!(
                                                                     "Refreshed token is revoked"
                                                                 );
-                                                                let (req, _) = req.into_parts();
-                                                                let response = HttpResponse::Unauthorized().json(
-                                                                serde_json::json!({
-                                                                    "error": {
-                                                                        "code": "token_revoked",
-                                                                        "message": "Token has been revoked",
-                                                                        "status": 401
-                                                                    }
-                                                                })
-                                                            );
-                                                                return Ok(ServiceResponse::new(
-                                                                    req, response,
-                                                                )
-                                                                .map_into_boxed_body());
+                                                                return unauthorized(
+                                                                    req,
+                                                                    "token_revoked",
+                                                                    "Token has been revoked",
+                                                                );
                                                             }
                                                             Ok(false) => {}
                                                             Err(e) => {
@@ -461,14 +467,8 @@ where
                                                                     e
                                                                 );
                                                                 let (req, _) = req.into_parts();
-                                                                let response = HttpResponse::ServiceUnavailable().json(
-                                                                    serde_json::json!({
-                                                                        "error": {
-                                                                            "code": "service_unavailable",
-                                                                            "message": "Authentication service temporarily unavailable",
-                                                                            "status": 503
-                                                                        }
-                                                                    }),
+                                                                let response = service_unavailable(
+                                                                    "Authentication service temporarily unavailable",
                                                                 );
                                                                 return Ok(ServiceResponse::new(
                                                                     req, response,
@@ -517,15 +517,11 @@ where
                             }
 
                             // If we get here, auto-refresh failed - return expired token error
-                            let (req, _) = req.into_parts();
-                            let response = HttpResponse::Unauthorized().json(serde_json::json!({
-                                "error": {
-                                    "code": "token_expired",
-                                    "message": "Token has expired and could not be refreshed",
-                                    "status": 401
-                                }
-                            }));
-                            Ok(ServiceResponse::new(req, response).map_into_boxed_body())
+                            unauthorized(
+                                req,
+                                "token_expired",
+                                "Token has expired and could not be refreshed",
+                            )
                         });
                     }
 
@@ -541,17 +537,7 @@ where
                         error_message
                     );
 
-                    return Box::pin(async move {
-                        let (req, _) = req.into_parts();
-                        let response = HttpResponse::Unauthorized().json(serde_json::json!({
-                            "error": {
-                                "code": error_code,
-                                "message": error_message,
-                                "status": 401
-                            }
-                        }));
-                        Ok(ServiceResponse::new(req, response).map_into_boxed_body())
-                    });
+                    return Box::pin(async move { unauthorized(req, error_code, error_message) });
                 }
             }
         } else {
@@ -560,15 +546,11 @@ where
 
         // No valid JWT found - return unauthorized
         Box::pin(async move {
-            let (req, _) = req.into_parts();
-            let response = HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": {
-                    "code": "unauthorized",
-                    "message": "Invalid or missing authentication token",
-                    "status": 401
-                }
-            }));
-            Ok(ServiceResponse::new(req, response).map_into_boxed_body())
+            unauthorized(
+                req,
+                "unauthorized",
+                "Invalid or missing authentication token",
+            )
         })
     }
 }
@@ -596,17 +578,6 @@ mod tests {
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
     use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    // Helper function to create a test Redis connection manager
-    async fn create_test_redis_conn() -> ConnectionManager {
-        // Use environment variable for Redis URL, fallback to localhost for local testing
-        let redis_url =
-            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
-        let client = redis::Client::open(redis_url).expect("Failed to create test Redis client");
-        ConnectionManager::new(client)
-            .await
-            .expect("Failed to create test Redis connection manager")
-    }
 
     // Test handler that requires authentication
     async fn protected_handler(user: AuthenticatedUser) -> HttpResponse {
@@ -668,7 +639,7 @@ mod tests {
     #[tokio::test]
     async fn auto_refresh_rejects_stale_token_version() {
         let user_id = Uuid::new_v4();
-        let mut conn = create_test_redis_conn().await;
+        let mut conn = crate::test_redis().await;
         let _: () = conn
             .set(
                 crate::service::token_service::token_version_key(user_id),
@@ -687,7 +658,7 @@ mod tests {
     #[tokio::test]
     async fn test_jwt_middleware_valid_token() {
         let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let middleware = JwtAuthentication::new_with_algorithm(
             decoding_key,
             "vex-gateway".to_string(),
@@ -728,7 +699,7 @@ mod tests {
     async fn test_jwt_middleware_current_token_version_works() {
         let user_id = Uuid::new_v4();
         let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let middleware = JwtAuthentication::new_with_algorithm(
             decoding_key,
             "vex-gateway".to_string(),
@@ -771,7 +742,7 @@ mod tests {
     async fn test_jwt_middleware_rejects_token_after_password_change_bump() {
         let user_id = Uuid::new_v4();
         let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let middleware = JwtAuthentication::new_with_algorithm(
             decoding_key,
             "vex-gateway".to_string(),
@@ -815,7 +786,7 @@ mod tests {
     #[tokio::test]
     async fn test_jwt_middleware_rejects_token_without_a_version() {
         let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let middleware = JwtAuthentication::new_with_algorithm(
             decoding_key,
             "vex-gateway".to_string(),
@@ -861,7 +832,7 @@ mod tests {
     #[tokio::test]
     async fn test_jwt_middleware_invalid_token() {
         let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let middleware = JwtAuthentication::new_with_algorithm(
             decoding_key,
             "vex-gateway".to_string(),
@@ -887,9 +858,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refused_tokens_are_counted_as_jwt_authentication_failures() {
+        let middleware = JwtAuthentication::new_with_algorithm(
+            DecodingKey::from_secret("test_secret".as_ref()),
+            "vex-gateway".to_string(),
+            "vex-api".to_string(),
+            Algorithm::HS256,
+            crate::test_redis().await,
+        );
+        let app = test::init_service(
+            App::new()
+                .wrap(middleware)
+                .route("/protected", web::get().to(protected_handler)),
+        )
+        .await;
+        let failures = metrics::auth_failures(AuthMethod::Jwt);
+
+        // A token that does not verify, and an empty one.
+        for authorization in ["Bearer invalid_token", "Bearer "] {
+            let before = failures.get();
+            let req = test::TestRequest::get()
+                .uri("/protected")
+                .insert_header(("Authorization", authorization))
+                .to_request();
+
+            let resp = test::call_service(&app, req).await;
+
+            assert_eq!(resp.status(), 401);
+            // The other tests here refuse tokens concurrently, so the count can rise by more.
+            assert!(failures.get() > before, "{authorization:?}");
+        }
+    }
+
+    #[tokio::test]
     async fn test_jwt_middleware_expired_token() {
         let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let middleware = JwtAuthentication::new_with_algorithm(
             decoding_key,
             "vex-gateway".to_string(),
@@ -923,7 +927,7 @@ mod tests {
     #[tokio::test]
     async fn test_jwt_middleware_missing_token() {
         let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let middleware = JwtAuthentication::new_with_algorithm(
             decoding_key,
             "vex-gateway".to_string(),
@@ -948,7 +952,7 @@ mod tests {
     #[tokio::test]
     async fn test_jwt_middleware_malformed_header() {
         let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let middleware = JwtAuthentication::new_with_algorithm(
             decoding_key,
             "vex-gateway".to_string(),
@@ -976,7 +980,7 @@ mod tests {
     #[tokio::test]
     async fn test_jwt_middleware_production_rs256() {
         let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let middleware = JwtAuthentication::new(
             decoding_key,
             "vex-gateway".to_string(),
@@ -1010,7 +1014,7 @@ mod tests {
     #[tokio::test]
     async fn test_jwt_middleware_blacklisted_token() {
         let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let middleware = JwtAuthentication::new_with_algorithm(
             decoding_key,
             "vex-gateway".to_string(),
@@ -1058,7 +1062,7 @@ mod tests {
     #[tokio::test]
     async fn test_jwt_middleware_blacklisted_token_does_not_execute_handler() {
         let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let middleware = JwtAuthentication::new_with_algorithm(
             decoding_key,
             "vex-gateway".to_string(),
@@ -1119,7 +1123,7 @@ mod tests {
     #[tokio::test]
     async fn test_jwt_middleware_valid_token_executes_handler() {
         let decoding_key = DecodingKey::from_secret("test_secret".as_ref());
-        let redis_conn = create_test_redis_conn().await;
+        let redis_conn = crate::test_redis().await;
         let middleware = JwtAuthentication::new_with_algorithm(
             decoding_key,
             "vex-gateway".to_string(),
