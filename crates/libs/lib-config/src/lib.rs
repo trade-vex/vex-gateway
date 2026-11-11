@@ -84,7 +84,6 @@ use std::env::VarError;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use tracing::{debug, info};
 use url::Url;
 
 use crate::util::find_config_dir;
@@ -211,11 +210,6 @@ impl Config {
         };
         let file = config_dir.join(environment.config_file_name());
 
-        // Log what we're trying to load
-        info!("Loading configuration for environment: {:?}", environment);
-        debug!("Config directory: {:?}", config_dir);
-        debug!("Looking for config file: {:?}", file);
-
         // The key path each `APP__` variable sets, to name the variable if no setting reads it.
         let overridden = overrides
             .collect()
@@ -259,15 +253,7 @@ impl Config {
         }
         let config = result.map_err(|error| load_error(error, &overridden, &file))?;
 
-        // Log what we loaded before validation
-        debug!("Loaded configuration before validation:");
-        debug!("  Environment: {:?}", config.environment);
-        debug!("  Server host: {}", config.server.host);
-        debug!("  Server port: {}", config.server.port);
-        debug!("  Log level: {}", config.logging.level);
-
         config.validate()?;
-        info!("Configuration loaded and validated successfully");
         Ok(config)
     }
 
@@ -309,8 +295,6 @@ impl Config {
     ) -> Result<Self, ConfigError> {
         let app_env = app_env.ok_or(ConfigError::MissingEnvironment)?;
         let environment = Environment::from_str(app_env)?;
-
-        info!("Auto-detected environment: {:?}", environment);
         Self::load(environment, config_dir)
     }
 
@@ -356,11 +340,6 @@ impl Config {
     /// - `clickhouse.password` cannot be empty
     /// - `metrics.bind` needs a port of its own: not 0, and not `server.port`
     pub fn validate(&self) -> Result<(), ConfigError> {
-        debug!(
-            "Validating configuration for environment: {:?}",
-            self.environment
-        );
-
         // Validate server configuration
         self.server.validate()?;
 
@@ -479,9 +458,6 @@ impl Config {
         // Environment-specific validations
         match self.environment {
             Environment::Production => {
-                debug!("Applying production-specific validation rules");
-
-                // Production-specific validations
                 if self.server.port == 0 {
                     return Err(ConfigError::ValidationError(
                         "Production environment must have an explicitly configured port (cannot be 0)".to_string(),
@@ -540,12 +516,9 @@ impl Config {
                     ));
                 }
             }
-            Environment::Development => {
-                debug!("Applying development-specific validation rules");
-            }
+            Environment::Development => {}
         }
 
-        debug!("Configuration validation passed");
         Ok(())
     }
 }

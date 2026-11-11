@@ -2238,7 +2238,6 @@ dependencies = [
  "serde_ignored",
  "tempfile",
  "thiserror 1.0.69",
- "tracing",
  "url",
  "vex-config",
 ]
