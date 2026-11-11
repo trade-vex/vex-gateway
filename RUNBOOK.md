@@ -270,6 +270,13 @@ address, on top of their client IP's `general` budget: `POST /api/forgot-passwor
 `POST /api/resend-verification` 3 an hour, `POST /api/verify-reset-otp` 5 in 15 minutes. Over it
 they answer the same 429.
 
+API-key authentication has a budget of its own, a code constant: each client IP (an IPv6 client
+by its /64) may make 60 refused API-key authentications a minute (an unknown, disabled or expired
+key, or a wrong signature). Over that, every API-key request from that IP is refused with the same
+429 and `Retry-After` until the window ends, before the key is looked up. A request whose key and
+signature are valid is never counted, so a working client never reaches it. When Redis cannot
+read the budget, the request gets 503 `API key store is unavailable`.
+
 When Redis cannot count a request (it is unreachable, or full under `noeviction`), the gateway
 refuses it with 503
 `{"error":{"code":"service_unavailable","message":"Rate limit store is unavailable; please retry","status":503}}`,
@@ -318,12 +325,6 @@ attempt against a core that is down itself waits up to 20 s for it. The log show
 - `GET /api/ready` is readiness of the vex-core link: 200 while the gateway is connected to the
   core and its orders get answers, otherwise 503 with the reason (see
   [VEX Core is Down](#vex-core-is-down)).
-
-API-key authentication has a budget of its own, a code constant: each client IP (an IPv6 client
-by its /64) may make 60 refused API-key authentications a minute (an unknown, disabled or expired
-key, or a wrong signature). Over that, every API-key request from that IP is refused with the same
-429 and `Retry-After` until the window ends, before the key is looked up. A request whose key and
-signature are valid is never counted, so a working client never reaches it.
 
 Point the AWS ALB target group's health check, and any orchestrator's liveness check, at
 `/api/health`. On `/api/ready`, a core outage would fail every gateway's check at once: every
