@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 pub use crate::model::orders::Model as OrderModel;
 pub use crate::model::user_balances::Model as UserBalanceModel;
 pub use crate::model::user_favorite_markets::Model as UserFavoriteMarketModel;
-use crate::{BalancePoint, PnlPoint, PnlResolution};
+use crate::{BalancePoint, PnlPoint};
 use rust_decimal::Decimal;
 
 // Simple types as specified
@@ -145,17 +145,6 @@ pub struct OrdersHistoryListResponse {
     pub has_prev: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PortfolioOverviewResponse {
-    pub balance: Decimal,
-    pub balance_24h_ago: Decimal,
-    pub volume_24h: Decimal,
-    pub pnl_7d: Decimal,
-    pub max_drawdown_1m: Decimal,
-    pub pnl_series: Vec<PnlPoint>,
-    pub pnl_resolution: String,
-}
-
 /// Portfolio metrics response (without PnL series)
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PortfolioMetricsResponse {
@@ -189,28 +178,6 @@ pub struct FavoriteMarketsListResponse {
 #[derive(Debug, Deserialize)]
 pub struct ToggleFavoriteMarketRequest {
     pub market_id: u32,
-}
-
-impl PortfolioOverviewResponse {
-    pub fn with_metrics(
-        balance: Decimal,
-        balance_24h_ago: Decimal,
-        volume_24h: Decimal,
-        pnl_7d: Decimal,
-        max_drawdown_1m: Decimal,
-        pnl_series: Vec<PnlPoint>,
-        resolution: PnlResolution,
-    ) -> Self {
-        Self {
-            balance,
-            balance_24h_ago,
-            volume_24h,
-            pnl_7d,
-            max_drawdown_1m,
-            pnl_series,
-            pnl_resolution: resolution.as_str().to_string(),
-        }
-    }
 }
 
 impl PortfolioMetricsResponse {

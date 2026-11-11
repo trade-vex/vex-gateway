@@ -353,45 +353,6 @@ impl TradingRepository for ErrorMockTradingRepository {
         Ok(vec![])
     }
 
-    async fn add_favorite_market(
-        &self,
-        _user_id: u64,
-        _market_id: u32,
-    ) -> lib_core::repository::repository::Result<()> {
-        if self.should_error("add_favorite_market") {
-            return Err(TradingError::Database(
-                "Database connection failed".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    async fn remove_favorite_market(
-        &self,
-        _user_id: u64,
-        _market_id: u32,
-    ) -> lib_core::repository::repository::Result<()> {
-        if self.should_error("remove_favorite_market") {
-            return Err(TradingError::Database(
-                "Database connection failed".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    async fn is_market_favorited(
-        &self,
-        _user_id: u64,
-        _market_id: u32,
-    ) -> lib_core::repository::repository::Result<bool> {
-        if self.should_error("is_market_favorited") {
-            return Err(TradingError::Database(
-                "Database connection failed".to_string(),
-            ));
-        }
-        Ok(false)
-    }
-
     async fn toggle_favorite_market(
         &self,
         _user_id: u64,

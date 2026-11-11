@@ -64,9 +64,6 @@ pub trait TradingRepository: Send + Sync {
     // Favorite markets operations
     async fn get_user_favorite_markets(&self, user_id: u64)
         -> Result<Vec<UserFavoriteMarketModel>>;
-    async fn add_favorite_market(&self, user_id: u64, market_id: u32) -> Result<()>;
-    async fn remove_favorite_market(&self, user_id: u64, market_id: u32) -> Result<()>;
-    async fn is_market_favorited(&self, user_id: u64, market_id: u32) -> Result<bool>;
     /// Atomically toggle a market's favorite status.
     /// Returns Ok(true) if the market was added to favorites, Ok(false) if removed.
     async fn toggle_favorite_market(&self, user_id: u64, market_id: u32) -> Result<bool>;
@@ -281,66 +278,6 @@ impl TradingRepository for PostgresTradingRepository {
             .all(&*self.db)
             .await
             .map_err(Into::into)
-    }
-
-    async fn add_favorite_market(&self, user_id: u64, market_id: u32) -> Result<()> {
-        let market_id_i32 = market_id as i32;
-
-        let favorite = UserFavoriteMarketActiveModel {
-            user_id: Set(user_id as i64),
-            market_id: Set(market_id_i32),
-            favorited_at: Set(Some(chrono::Utc::now())),
-            ..Default::default()
-        };
-
-        // Use insert with on_conflict to handle duplicate key constraint
-        let result = UserFavoriteMarketEntity::insert(favorite)
-            .on_conflict(
-                sea_orm::sea_query::OnConflict::columns([
-                    UserFavoriteMarketColumn::UserId,
-                    UserFavoriteMarketColumn::MarketId,
-                ])
-                .do_nothing()
-                .to_owned(),
-            )
-            .exec(&*self.db)
-            .await;
-
-        match result {
-            Ok(_) => Ok(()),
-            Err(DbErr::RecordNotInserted) => Ok(()), // Already exists, treat as success
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    async fn remove_favorite_market(&self, user_id: u64, market_id: u32) -> Result<()> {
-        let market_id_i32 = market_id as i32;
-
-        UserFavoriteMarketEntity::delete_many()
-            .filter(
-                UserFavoriteMarketColumn::UserId
-                    .eq(user_id as i64)
-                    .and(UserFavoriteMarketColumn::MarketId.eq(market_id_i32)),
-            )
-            .exec(&*self.db)
-            .await?;
-
-        Ok(())
-    }
-
-    async fn is_market_favorited(&self, user_id: u64, market_id: u32) -> Result<bool> {
-        let market_id_i32 = market_id as i32;
-
-        let count = UserFavoriteMarketEntity::find()
-            .filter(
-                UserFavoriteMarketColumn::UserId
-                    .eq(user_id as i64)
-                    .and(UserFavoriteMarketColumn::MarketId.eq(market_id_i32)),
-            )
-            .count(&*self.db)
-            .await?;
-
-        Ok(count > 0)
     }
 
     async fn toggle_favorite_market(&self, user_id: u64, market_id: u32) -> Result<bool> {

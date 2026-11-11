@@ -14,7 +14,7 @@ pub use dto::trading::{
 
 pub use repository::repository::{
     BalancePoint, PnlPoint, PnlResolution, PortfolioMetrics, PortfolioRepository,
-    PostgresTradingRepository, Result as TradingResult, TradingError, TradingRepository,
+    PostgresTradingRepository, TradingError, TradingRepository,
 };
 
 pub use cache::user_store::UserBalanceStore;

@@ -194,9 +194,4 @@ impl ScalingCache {
             amount_u64
         }
     }
-
-    /// Refresh the cache by reloading from database
-    pub async fn refresh(&self) -> Result<(), String> {
-        self.load_all().await
-    }
 }
