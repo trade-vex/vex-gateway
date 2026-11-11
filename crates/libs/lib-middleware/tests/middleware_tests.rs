@@ -132,14 +132,14 @@ async fn test_cache_invalidation_does_not_affect_unrelated_key() {
 async fn cached_key_expires_after_ttl() {
     let store = ApiKeyStore::new(CacheConfig {
         l1_max_size: 1,
-        l1_ttl: Duration::from_millis(20),
+        l1_ttl: Duration::from_millis(200),
     });
     store
         .add_api_key(ApiKeyConfig::new("ttl-key".to_string()))
         .await;
     assert!(store.get_api_key("ttl-key").await.unwrap().is_some());
 
-    tokio::time::sleep(Duration::from_millis(40)).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
 
     assert!(
         store.get_api_key("ttl-key").await.unwrap().is_none(),
