@@ -412,13 +412,14 @@ openssl rsa -in private_key.pem -pubout -out public_key.pem
 
 The gateway's Postgres database holds the gateway's own tables (`users`, `api_keys`,
 `user_favorite_markets`, and `markets` and `assets`, which mirror vex-core's symbol configuration)
-and the `trading` schema: vex-core's Kafka events, which Kafka Connect writes there. The gateway
-may only read `trading`: `GET /api/balances` reads `trading.balances`, and `GET /api/orders/open`
-and `/api/orders/history` read `trading.orders`, as fresh as the connectors' lag. ClickHouse holds
-the same events for the portfolio and balance-chart endpoints, which Kafka Connect writes there
-too; the gateway may only read its views. Redis holds only the gateway's own state (sessions,
-tokens, OTP and OAuth state, rate limits, API-key signatures, order idempotency claims).
-Everything for both lives in `readmodel/`:
+and the `trading` schema: the latest state of vex-core's balances, orders and order books, which
+Kafka Connect writes there from vex-core's Kafka events. The gateway may only read `trading`:
+`GET /api/balances` reads `trading.balances`, and `GET /api/orders/open` and `/api/orders/history`
+read `trading.orders`, as fresh as the connectors' lag. ClickHouse holds every event, the history
+of every topic, for the portfolio and balance-chart endpoints and for ad-hoc and compliance
+queries, which Kafka Connect writes there too; the gateway may only read its views. Redis holds only
+the gateway's own state (sessions, tokens, OTP and OAuth state, rate limits, API-key signatures,
+order idempotency claims). Everything for both lives in `readmodel/`:
 
 - `migrations/postgres/`, `migrations/clickhouse/`: the schemas, as forward-only plain SQL
   migrations for golang-migrate.
@@ -430,26 +431,26 @@ Everything for both lives in `readmodel/`:
   (`connectors/*.json`), and `apply-connectors.sh`.
 - `tests/`: the read model's test stack and tests.
 
-In `trading`, each latest-state table (`balances`, `orders`, `orderbook`) holds one row per key and
-each history table (`balance_events`, `order_events`, `cancel_events`, `trade_events`,
-`deposit_events`, `withdrawal_events`) one row per key and event timestamp (`event_ts`, vex-core's
-`timestamp` in nanoseconds). Every table's `keep_newer` trigger turns the connectors' upserts into
-"newer `event_ts` wins; of two copies of one event, the first stays", so duplicates and events
-delivered out of order change nothing. vex-core's `u64` values are stored with the same bits in
-`BIGINT` columns: read them as `i64` and decode with `as u64`; in SQL, `trading.u64(column)` gives
-the unsigned value.
+In `trading`, each table (`balances`, `orders`, `orderbook`) holds one row per key, with the
+timestamp of its latest event (`event_ts`, vex-core's `timestamp` in nanoseconds). Every table's
+`keep_newer` trigger turns the connectors' upserts into "newer `event_ts` wins; of two copies of
+one event, the first stays", so duplicates and events delivered out of order change nothing.
+vex-core's `u64` values are stored with the same bits in `BIGINT` columns: read them as `i64` and
+decode with `as u64`; in SQL, `trading.u64(column)` gives the unsigned value.
 
 In ClickHouse, each topic has a raw table (`balance_events`, `order_events`, `orderbook_events`,
-`cancel_events`, `trade_events`, `deposit_events`, `withdrawal_events`) whose columns are those of
-the Postgres tables, with every proto integer a `UInt64`, plus `ts`, the time `event_ts` names.
+`cancel_events`, `trade_events`, `deposit_events`, `withdrawal_events`) whose columns are the
+event's proto fields after Flatten, as in Postgres, with every proto integer a `UInt64`, plus `ts`,
+the time `event_ts` names.
 Each is a `ReplacingMergeTree` keyed by the event's key and `event_ts`, which keeps one copy of an
 event, the last one written, once its parts merge; until then the copies are stored too, so read
 the tables through `FINAL`. Materialized views keep each minute's last balance and last trade price
-(`balances_last_per_min`, `market_prices_last_per_min`). The gateway reads only five views, which
-read through `FINAL` and scale vex-core's integers to decimals with the `assets` and `markets` rows
-as the gateway's `ScalingCache` does: `balances_per_minute`, `asset_prices_per_minute`,
-`deposits`, `withdrawals` and `trade_volumes`. Every view and materialized view runs as
-`readmodel_owner`, a user nobody can log in as.
+(`balances_last_per_min`, `market_prices_last_per_min`) and each fill once per user, keyed by user
+(`user_trades`). The gateway reads only five views, which read through `FINAL` and scale
+vex-core's integers to decimals with the `assets` and `markets` rows as the gateway's
+`ScalingCache` does: `balances_per_minute`, `asset_prices_per_minute`, `deposits`, `withdrawals`
+and `trade_volumes`. Every view and materialized view runs as `readmodel_owner`, a user nobody can
+log in as.
 
 ### Bringing Up an Environment
 
@@ -513,8 +514,9 @@ In this order:
    ```
    No migration holds a password: every secret comes from the deploy's secret store.
 4. **Seeds,** on every deploy, from the configuration file vex-core runs with. The Postgres
-   output upserts every configured market and asset and deactivates the others, so applying it
-   again is harmless:
+   output upserts every configured market and asset and keeps the rows of those that left the
+   configuration, since their orders and balances still need their scales, so applying it again
+   is harmless:
    ```bash
    cargo run --release -p readmodel-seeds -- postgres <vex-core config file> \
      | psql "<owner URL>" -v ON_ERROR_STOP=1
@@ -615,6 +617,12 @@ In this order:
 7. **The gateway,** with the gateway login: in Postgres through `auth.database.url`, and in
    ClickHouse through `clickhouse.user` and `clickhouse.password` ([ClickHouse](#clickhouse)).
 
+**Listing a market** is a deploy, in this order: the market (and any new asset) in vex-core's
+configuration file, the seeds from that file (step 4, Postgres and ClickHouse), a restart of
+vex-core, which registers markets only at startup, then a rolling restart of the gateways, which
+load the `markets` and `assets` rows once at startup: they show a market they do not know in raw
+engine integers and refuse its orders with 400 `unknown market`.
+
 ### Read Model Roles
 
 | Role | May |
@@ -631,7 +639,7 @@ In ClickHouse:
 |---|---|
 | `readmodel_connect` (role) | `INSERT` into the seven raw tables, which also lets the sink describe them. Nothing else. |
 | `readmodel_gateway` (role) | `SELECT` on the five views. Nothing else: every read the gateway makes goes through `FINAL` and is scaled. |
-| `readmodel_owner` (user) | Owns every view and materialized view, which run with its privileges (`SQL SECURITY DEFINER`): `SELECT` on the tables they read, `INSERT` into the per-minute tables. The deploy creates it; the migrations set its `HOST NONE`, so nobody can log in as it. |
+| `readmodel_owner` (user) | Owns every view and materialized view, which run with its privileges (`SQL SECURITY DEFINER`): `SELECT` on the tables they read, `INSERT` into the per-minute tables and `user_trades`. The deploy creates it; the migrations set its `HOST NONE`, so nobody can log in as it. |
 
 Roles and users belong to the server, not to a database: migrating a second database on the same
 server grants the same roles on its tables, so a login holding `readmodel_gateway` reads the views
@@ -699,6 +707,19 @@ short (`lock_timeout`, `CREATE INDEX CONCURRENTLY`).
 `connector-task-metrics` status), and consumer lag of the groups `connect-<connector name>`.
 Readers of `trading` are as fresh as that lag.
 
+**Throughput:** the Postgres connectors are sized for 10,000 rows/s per topic sustained, an
+engineering assumption (a venue at about 5,000 orders/s at peak), not a product number; bursts
+above it wait in Kafka as lag. Each task upserted about 11,000 rows/s in the test stack (500
+upserts in at most 46 ms per write), so `tasks.max` 3 holds about three times the target. When
+`kafka_consumergroup_lag{group=~"connect-pg-.*"}` grows for more than a few minutes at or below
+the target, repeat that measurement, then set that connector's `tasks.max` to its topic's
+partition count (`balances` and `orders` 12, `orderbook` 6) and size Postgres' connections for
+the extra writers. The ClickHouse connector inserts one topic-partition after another, and each
+insert waits for ClickHouse to flush its asynchronous buffer (`clickhouseSettings`; about 60 ms
+measured, at most 200 ms), so a task writes at most `max.poll.records` (500) rows per wait: about
+8,000 rows/s, 2,500 at worst. When `kafka_consumergroup_lag{group="connect-clickhouse"}` grows while
+the `connect-pg-*` groups keep up, raise its `tasks.max`, up to 54 (its seven topics' partitions).
+
 **Recovery:** a task that is still retrying carries on once the cause is fixed. For a failed one,
 read its `trace` in `GET /connectors/<name>/status`, fix the cause, then restart the connector
 with all its tasks; they resume from the record that failed:
@@ -740,8 +761,9 @@ certificate or `server`; restart the connector if its tasks failed.
 ### Schema Changes
 
 - A migration is a new file, `<next number>_<name>.up.sql`. Never edit one that has been applied.
-- A new `trading.proto` field needs its column, in Postgres and in its ClickHouse raw table,
-  deployed before the vex-core that publishes it.
+- A new `trading.proto` field needs its column in its ClickHouse raw table, and for `balances`,
+  `orders` and `orderbook` in its Postgres table too, deployed before the vex-core that publishes
+  it.
 - A new `trading` table needs its `keep_newer` trigger, its grants to `readmodel_connect` and
   `readmodel_gateway`, and a connector file.
 - A new ClickHouse view states `DEFINER = readmodel_owner SQL SECURITY DEFINER`, reads its tables
@@ -933,8 +955,9 @@ a `503` for why it was released (busy, with `Retry-After: 1`, or `Matching engin
 with `Retry-After: 5`), and the retry claims the key as usual.
 
 **Remedy**:
-1. Reconcile the returned `client_order_id` against open orders, order history, and gateway/core
-   logs.
+1. Look for the order the 408 message names (side, type, market, price and size) in the user's
+   open orders and order history, and for its `client_order_id` in the gateway and core logs:
+   no read returns `client_order_id`.
 2. Only after confirming that the order was never published, remove the exact stranded claim:
    ```bash
    redis-cli -u "<auth.redis.url>" DEL "vex:order-idempotency:<user_id>:<key>"
@@ -1073,8 +1096,8 @@ grep -i "memory\|oom" logs/app.log
      cleanly. Until then requests can still time out (408) or get the busy 503. The requests still
      waiting for the core's answer when the link is lost fail at once: a cancel with the
      unavailable 503, an order with the 408 `outcome_unknown` of a timeout. That order was sent
-     and may have executed, so it is recorded under its idempotency key; reconcile its
-     `client_order_id` as for any 408, and do not retry the key.
+     and may have executed, so it is recorded under its idempotency key; as for any 408, look for
+     the order its message names in open orders and order history, and do not retry the key.
    - Everything else keeps working: login, sessions, balances, order history and the other user
      data, and API-key management. `GET /api/health` stays 200.
    - `GET /api/ready` returns 503 `engine_link: not connected to vex-core` until the gateway is
@@ -1220,21 +1243,27 @@ curl -X POST http://localhost:8081/api/order \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: <unique-logical-order-key>" \
-  -d '{"price": 5000000, "volume": 100, "market_id": 1, "side": "Bid", "time_in_force": "Gtc", "order_type": "Limit"}'
+  -d '{"price": "50000.5", "volume": "0.25", "market_id": 65538, "side": "Bid", "time_in_force": "Gtc", "order_type": "Limit"}'
 ```
 
 The body:
 
 ```json
 {
-  "price": 5000000,
-  "volume": 100,
-  "market_id": 1,
+  "price": "50000.5",
+  "volume": "0.25",
+  "market_id": 65538,
   "side": "Bid",
   "time_in_force": "Gtc",
   "order_type": "Limit"
 }
 ```
+
+`price` (quote asset per base asset) and `volume` (base asset) are decimal strings in the units the
+balance and order reads return; JSON numbers are refused. The gateway converts them to the
+engine's integers with the market's scales from the read model (`markets.quote_scale_k`, the base
+asset's `assets.native_scale`). An unknown market, or a value that is not a multiple of the
+market's price step or the asset's smallest unit, gets 400 with a message naming the step.
 
 ### Order Response Format
 

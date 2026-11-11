@@ -20,9 +20,9 @@ lib-utils = { path = "../lib-utils" }
 lib-core = { path = "../lib-core" }
 vex-networking ={ workspace = true }
 common = { workspace = true}
+rust_decimal = { version = "1.40", features = ["serde-with-str"] }
 
 [dev-dependencies]
 redis = { workspace = true }
 async-trait = "0.1"
-rust_decimal = "1.40"
 url = { workspace = true }

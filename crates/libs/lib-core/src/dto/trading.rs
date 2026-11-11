@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 pub use crate::model::orders::Model as OrderModel;
 pub use crate::model::user_balances::Model as UserBalanceModel;
 pub use crate::model::user_favorite_markets::Model as UserFavoriteMarketModel;
-use crate::{BalancePoint, PnlPoint, PnlResolution};
+use crate::{BalancePoint, PnlPoint};
 use rust_decimal::Decimal;
 
 // Simple types as specified
@@ -58,12 +58,17 @@ pub struct OrderResponse {
     /// Remaining size (order_size - order_filled_size)
     pub size: Decimal,
     pub side: Side,
+    #[serde(
+        serialize_with = "serialize_u64_as_string",
+        deserialize_with = "deserialize_u64_from_string"
+    )]
     pub timestamp: u64,
     pub time_in_force: String,
     pub status: String,
 }
 
-/// Ids are `u64`, beyond what a JSON number holds exactly, so they travel as strings.
+/// Ids and nanosecond timestamps are `u64`, beyond what a JSON number holds exactly, so they
+/// travel as strings.
 fn serialize_u64_as_string<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -102,6 +107,10 @@ pub struct OrderHistoryResponse {
     /// Filled amount
     pub filled: Decimal,
     pub side: Side,
+    #[serde(
+        serialize_with = "serialize_u64_as_string",
+        deserialize_with = "deserialize_u64_from_string"
+    )]
     pub timestamp: u64,
     pub time_in_force: String,
     pub status: String,
@@ -118,6 +127,10 @@ pub struct UserBalanceResponse {
     pub available: Decimal,
     pub locked: Decimal,
     pub total: Decimal,
+    #[serde(
+        serialize_with = "serialize_u64_as_string",
+        deserialize_with = "deserialize_u64_from_string"
+    )]
     pub timestamp: u64,
 }
 
@@ -130,10 +143,8 @@ pub struct BalancesListResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OrdersListResponse {
     pub orders: Vec<OrderResponse>,
-    pub total: usize,
     pub page: usize,
     pub limit: usize,
-    pub total_pages: usize,
     pub has_next: bool,
     pub has_prev: bool,
 }
@@ -141,23 +152,10 @@ pub struct OrdersListResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OrdersHistoryListResponse {
     pub orders: Vec<OrderHistoryResponse>,
-    pub total: usize,
     pub page: usize,
     pub limit: usize,
-    pub total_pages: usize,
     pub has_next: bool,
     pub has_prev: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PortfolioOverviewResponse {
-    pub balance: Decimal,
-    pub balance_24h_ago: Decimal,
-    pub volume_24h: Decimal,
-    pub pnl_7d: Decimal,
-    pub max_drawdown_1m: Decimal,
-    pub pnl_series: Vec<PnlPoint>,
-    pub pnl_resolution: String,
 }
 
 /// Portfolio metrics response (without PnL series)
@@ -193,28 +191,6 @@ pub struct FavoriteMarketsListResponse {
 #[derive(Debug, Deserialize)]
 pub struct ToggleFavoriteMarketRequest {
     pub market_id: u32,
-}
-
-impl PortfolioOverviewResponse {
-    pub fn with_metrics(
-        balance: Decimal,
-        balance_24h_ago: Decimal,
-        volume_24h: Decimal,
-        pnl_7d: Decimal,
-        max_drawdown_1m: Decimal,
-        pnl_series: Vec<PnlPoint>,
-        resolution: PnlResolution,
-    ) -> Self {
-        Self {
-            balance,
-            balance_24h_ago,
-            volume_24h,
-            pnl_7d,
-            max_drawdown_1m,
-            pnl_series,
-            pnl_resolution: resolution.as_str().to_string(),
-        }
-    }
 }
 
 impl PortfolioMetricsResponse {

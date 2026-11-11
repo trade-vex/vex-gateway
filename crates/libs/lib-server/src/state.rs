@@ -85,6 +85,9 @@ pub struct AppState {
     // The API's rate limits, counted in Redis
     pub rate_limiter: RateLimiter,
 
+    // Market and asset scales: order prices and sizes in, balances and orders out
+    pub scaling_cache: Arc<ScalingCache>,
+
     // The API responses for the read model's balances and orders
     pub balance_store: UserBalanceStore,
     pub order_store: OrderStore,
@@ -165,7 +168,7 @@ impl AppState {
 
         // Balances and orders come from the read model (trading_repo); these descale them
         let balance_store = UserBalanceStore::new(scaling_cache.clone());
-        let order_store = OrderStore::new(scaling_cache);
+        let order_store = OrderStore::new(scaling_cache.clone());
 
         // Initialize session service with 30-minute inactivity TTL
         let session_service = SessionService::new(redis_conn.clone(), 30 * 60);
@@ -190,6 +193,7 @@ impl AppState {
             correlation_service: Arc::new(correlation_service),
             order_idempotency_store,
             rate_limiter,
+            scaling_cache,
             balance_store,
             order_store,
         }))

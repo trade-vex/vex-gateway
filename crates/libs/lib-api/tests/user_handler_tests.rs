@@ -37,9 +37,7 @@ async fn cleanup_test_data(db: &DatabaseConnection, user_id: u64) {
     let cleanup_queries = vec![
         format!("DELETE FROM user_favorite_markets WHERE user_id = {user_id}"),
         format!("DELETE FROM trading.orders WHERE order_user_id = {user_id}"),
-        format!("DELETE FROM trading.order_events WHERE order_user_id = {user_id}"),
         format!("DELETE FROM trading.balances WHERE user_id = {user_id}"),
-        format!("DELETE FROM trading.balance_events WHERE user_id = {user_id}"),
     ];
 
     for query in cleanup_queries {
@@ -76,25 +74,13 @@ async fn insert_test_balance(
 ) -> Result<(), sea_orm::DbErr> {
     let total = available + locked;
     let timestamp = Utc::now().timestamp();
-    insert_balance_row(
-        db,
-        "trading.balances",
-        user_id,
-        asset_id,
-        available,
-        locked,
-        total,
-        timestamp,
-    )
-    .await
+    insert_balance_row(db, user_id, asset_id, available, locked, total, timestamp).await
 }
 
-/// Insert a user's balance of an asset, as Kafka Connect would: `table` is `trading.balances` or
-/// its history, `trading.balance_events`. `u64` values are stored with the same bits.
-#[allow(clippy::too_many_arguments)]
+/// Insert a user's balance of an asset into `trading.balances`, as Kafka Connect would. `u64`
+/// values are stored with the same bits.
 async fn insert_balance_row(
     db: &DatabaseConnection,
-    table: &str,
     user_id: u64,
     asset_id: i32,
     available: u64,
@@ -103,7 +89,7 @@ async fn insert_balance_row(
     event_ts: i64,
 ) -> Result<(), sea_orm::DbErr> {
     let sql = format!(
-        "INSERT INTO {table} (user_id, asset_id, available, locked, total, event_ts) \
+        "INSERT INTO trading.balances (user_id, asset_id, available, locked, total, event_ts) \
          VALUES ({}, {asset_id}, {}, {}, {}, {event_ts})",
         user_id as i64, available as i64, locked as i64, total as i64,
     );
@@ -125,7 +111,6 @@ async fn insert_test_order(
 ) -> Result<(), sea_orm::DbErr> {
     insert_order_row(
         db,
-        "trading.orders",
         OrderRow {
             order_id,
             user_id,
@@ -142,7 +127,7 @@ async fn insert_test_order(
     .await
 }
 
-/// An order as Kafka Connect writes it to `trading.orders` or its history, `trading.order_events`.
+/// An order as Kafka Connect writes it to `trading.orders`.
 /// Side, time in force and status are vex-core's enum names (SIDE_*, TIF_*, STATUS_*).
 struct OrderRow<'a> {
     order_id: u64,
@@ -157,14 +142,13 @@ struct OrderRow<'a> {
     event_ts: i64,
 }
 
-/// Inserts `order` into `table`, with `u64` values stored with the same bits.
+/// Inserts `order` into `trading.orders`, with `u64` values stored with the same bits.
 async fn insert_order_row(
     db: &DatabaseConnection,
-    table: &str,
     order: OrderRow<'_>,
 ) -> Result<(), sea_orm::DbErr> {
     let sql = format!(
-        "INSERT INTO {table} (order_order_id, order_user_id, order_price, order_size, \
+        "INSERT INTO trading.orders (order_order_id, order_user_id, order_price, order_size, \
          order_filled_size, order_side, order_time_in_force, order_status, event_ts, market_id) \
          VALUES ({}, {}, {}, {}, {}, '{}', '{}', '{}', {}, {})",
         order.order_id as i64,
@@ -186,14 +170,15 @@ async fn insert_order_row(
 #[derive(Clone)]
 struct ErrorMockTradingRepository {
     error_method: Option<&'static str>, // Method name that should return error
-    total_count: u64,
+    /// Whether an order page holds as many orders as asked for; otherwise it is empty.
+    full_pages: bool,
 }
 
 impl ErrorMockTradingRepository {
     fn new() -> Self {
         Self {
             error_method: None,
-            total_count: 0,
+            full_pages: false,
         }
     }
 
@@ -202,13 +187,33 @@ impl ErrorMockTradingRepository {
         self
     }
 
-    fn with_total_count(mut self, total_count: u64) -> Self {
-        self.total_count = total_count;
+    fn with_full_pages(mut self) -> Self {
+        self.full_pages = true;
         self
     }
 
     fn should_error(&self, method: &str) -> bool {
         self.error_method.is_some_and(|m| m == method)
+    }
+
+    fn page(&self, limit: u64) -> Vec<OrderModel> {
+        let order = OrderModel {
+            order_order_id: 1,
+            order_user_id: 1,
+            order_price: 1,
+            order_size: 1,
+            order_filled_size: 0,
+            order_side: "SIDE_BID".to_string(),
+            order_time_in_force: "TIF_GTC".to_string(),
+            order_status: "STATUS_PLACED".to_string(),
+            event_ts: 1,
+            market_id: 65538,
+        };
+        if self.full_pages {
+            vec![order; limit as usize]
+        } else {
+            Vec::new()
+        }
     }
 }
 
@@ -230,7 +235,7 @@ impl TradingRepository for ErrorMockTradingRepository {
         &self,
         _user_id: u64,
         _offset: u64,
-        _limit: u64,
+        limit: u64,
         _market_id: Option<u32>,
     ) -> lib_core::repository::repository::Result<Vec<OrderModel>> {
         if self.should_error("get_open_orders_paginated") {
@@ -238,27 +243,14 @@ impl TradingRepository for ErrorMockTradingRepository {
                 "Database connection failed".to_string(),
             ));
         }
-        Ok(vec![])
-    }
-
-    async fn count_open_orders(
-        &self,
-        _user_id: u64,
-        _market_id: Option<u32>,
-    ) -> lib_core::repository::repository::Result<u64> {
-        if self.should_error("count_open_orders") {
-            return Err(TradingError::Database(
-                "Database connection failed".to_string(),
-            ));
-        }
-        Ok(self.total_count)
+        Ok(self.page(limit))
     }
 
     async fn get_order_history_paginated(
         &self,
         _user_id: u64,
         _offset: u64,
-        _limit: u64,
+        limit: u64,
         _market_id: Option<u32>,
     ) -> lib_core::repository::repository::Result<Vec<OrderModel>> {
         if self.should_error("get_order_history_paginated") {
@@ -266,20 +258,7 @@ impl TradingRepository for ErrorMockTradingRepository {
                 "Database connection failed".to_string(),
             ));
         }
-        Ok(vec![])
-    }
-
-    async fn count_order_history(
-        &self,
-        _user_id: u64,
-        _market_id: Option<u32>,
-    ) -> lib_core::repository::repository::Result<u64> {
-        if self.should_error("count_order_history") {
-            return Err(TradingError::Database(
-                "Database connection failed".to_string(),
-            ));
-        }
-        Ok(self.total_count)
+        Ok(self.page(limit))
     }
 
     async fn get_user_favorite_markets(
@@ -292,45 +271,6 @@ impl TradingRepository for ErrorMockTradingRepository {
             ));
         }
         Ok(vec![])
-    }
-
-    async fn add_favorite_market(
-        &self,
-        _user_id: u64,
-        _market_id: u32,
-    ) -> lib_core::repository::repository::Result<()> {
-        if self.should_error("add_favorite_market") {
-            return Err(TradingError::Database(
-                "Database connection failed".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    async fn remove_favorite_market(
-        &self,
-        _user_id: u64,
-        _market_id: u32,
-    ) -> lib_core::repository::repository::Result<()> {
-        if self.should_error("remove_favorite_market") {
-            return Err(TradingError::Database(
-                "Database connection failed".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    async fn is_market_favorited(
-        &self,
-        _user_id: u64,
-        _market_id: u32,
-    ) -> lib_core::repository::repository::Result<bool> {
-        if self.should_error("is_market_favorited") {
-            return Err(TradingError::Database(
-                "Database connection failed".to_string(),
-            ));
-        }
-        Ok(false)
     }
 
     async fn toggle_favorite_market(
@@ -484,53 +424,49 @@ mod tests {
         assert_eq!(history_json["orders"], serde_json::json!([]));
     }
 
+    /// Every page is full and has a row after it: has_next holds until MAX_PAGE, past which no
+    /// page can be asked for.
     #[tokio::test]
     async fn test_has_next_is_false_at_max_page() {
         let user = create_authenticated_user_id(create_test_user());
-        let repo = Arc::new(ErrorMockTradingRepository::new().with_total_count(1_000_001));
+        let repo = Arc::new(ErrorMockTradingRepository::new().with_full_pages());
         let order_store = Arc::new(OrderStore::new(unscaled()));
 
-        let open_response = get_open_orders(
-            user.clone(),
-            web::Query(OrdersQuery {
-                page: Some(10_000),
-                limit: Some(100),
-                market_id: None,
-            }),
-            web::Data::new(order_store.clone()),
-            web::Data::new(repo.clone() as Arc<dyn TradingRepository>),
-        )
-        .await
-        .unwrap();
-        let open_body = actix_web::body::to_bytes(open_response.into_body())
+        for (page, has_next) in [(9_999, true), (10_000, false)] {
+            let query = || {
+                web::Query(OrdersQuery {
+                    page: Some(page),
+                    limit: Some(100),
+                    market_id: None,
+                })
+            };
+            let open = get_open_orders(
+                user.clone(),
+                query(),
+                web::Data::new(order_store.clone()),
+                web::Data::new(repo.clone() as Arc<dyn TradingRepository>),
+            )
             .await
             .unwrap();
-        let open_json: serde_json::Value = serde_json::from_slice(&open_body).unwrap();
-
-        assert_eq!(open_json["page"], 10_000);
-        assert_eq!(open_json["total_pages"], 10_001);
-        assert_eq!(open_json["has_next"], false);
-
-        let history_response = get_order_history(
-            user,
-            web::Query(OrdersQuery {
-                page: Some(10_000),
-                limit: Some(100),
-                market_id: None,
-            }),
-            web::Data::new(order_store),
-            web::Data::new(repo as Arc<dyn TradingRepository>),
-        )
-        .await
-        .unwrap();
-        let history_body = actix_web::body::to_bytes(history_response.into_body())
+            let history = get_order_history(
+                user.clone(),
+                query(),
+                web::Data::new(order_store.clone()),
+                web::Data::new(repo.clone() as Arc<dyn TradingRepository>),
+            )
             .await
             .unwrap();
-        let history_json: serde_json::Value = serde_json::from_slice(&history_body).unwrap();
-
-        assert_eq!(history_json["page"], 10_000);
-        assert_eq!(history_json["total_pages"], 10_001);
-        assert_eq!(history_json["has_next"], false);
+            for response in [open, history] {
+                let body = actix_web::body::to_bytes(response.into_body())
+                    .await
+                    .unwrap();
+                let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(json["page"], page);
+                assert_eq!(json["orders"].as_array().unwrap().len(), 100);
+                assert_eq!(json["has_next"], has_next, "page {page}");
+                assert!(json.get("total").is_none() && json.get("total_pages").is_none());
+            }
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -581,21 +517,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_postgres_orders_come_from_the_latest_state_table() {
+    async fn test_postgres_order_pages_filter_by_status_and_market() {
         let Some(db) = require_database().await else {
             return;
         };
         let (_, user_id) = user_above_i64_max();
         cleanup_test_data(&db, user_id).await;
 
-        // trading.orders holds each order's latest state; its history must not leak in.
         for (order_id, market_id, status, event_ts) in [
             (91001, 65538, "STATUS_FILLED", 3),
             (91002, 65538, "STATUS_PLACED", 2),
             (91003, 65539, "STATUS_PARTIALLY_FILLED", 1),
             (91004, 65539, "STATUS_CANCELLED", 4),
         ] {
-            let row = |status, event_ts| OrderRow {
+            let row = OrderRow {
                 order_id,
                 user_id,
                 market_id,
@@ -607,12 +542,7 @@ mod tests {
                 status,
                 event_ts,
             };
-            insert_order_row(&db, "trading.orders", row(status, event_ts))
-                .await
-                .unwrap();
-            insert_order_row(&db, "trading.order_events", row("STATUS_PLACED", 0))
-                .await
-                .unwrap();
+            insert_order_row(&db, row).await.unwrap();
         }
 
         let repo = PostgresTradingRepository::new(Arc::new(db.clone()));
@@ -626,13 +556,11 @@ mod tests {
             open.iter()
                 .all(|order| order.order_user_id as u64 == user_id)
         );
-        assert_eq!(repo.count_open_orders(user_id, None).await.unwrap(), 2);
         let history = repo
             .get_order_history_paginated(user_id, 0, 10, None)
             .await
             .unwrap();
         assert_eq!(order_ids(&history), [91004, 91001, 91003]);
-        assert_eq!(repo.count_order_history(user_id, None).await.unwrap(), 3);
 
         // A market and a page of one.
         let open_in_market = repo
@@ -640,26 +568,133 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(order_ids(&open_in_market), [91003]);
-        assert_eq!(
-            repo.count_open_orders(user_id, Some(65539)).await.unwrap(),
-            1
-        );
         let history_in_market = repo
             .get_order_history_paginated(user_id, 0, 10, Some(65538))
             .await
             .unwrap();
         assert_eq!(order_ids(&history_in_market), [91001]);
-        assert_eq!(
-            repo.count_order_history(user_id, Some(65538))
-                .await
-                .unwrap(),
-            1
-        );
         let second = repo
             .get_order_history_paginated(user_id, 1, 1, None)
             .await
             .unwrap();
         assert_eq!(order_ids(&second), [91001]);
+
+        cleanup_test_data(&db, user_id).await;
+    }
+
+    /// The open-order page, as the repository sends it, is served by the partial index
+    /// orders_user_open, which holds only open orders, and not by walking every order the user
+    /// ever placed.
+    #[tokio::test]
+    async fn open_order_queries_use_the_partial_index() {
+        use sea_orm::sqlx::postgres::PgPoolOptions;
+        use sea_orm::{DbBackend, SqlxPostgresConnector, Statement};
+
+        let Some(db) = require_database().await else {
+            return;
+        };
+        // One connection: it lists the statements the repository prepared on it.
+        let options = db.get_postgres_connection_pool().connect_options();
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with((*options).clone())
+            .await
+            .unwrap();
+        let db = Arc::new(SqlxPostgresConnector::from_sqlx_postgres_pool(pool));
+        // A near-empty table is cheapest to read whole: ask which index serves the page.
+        db.execute_unprepared("SET enable_seqscan = off")
+            .await
+            .unwrap();
+        let repo = PostgresTradingRepository::new(db.clone());
+        let query = |sql: String| {
+            let db = db.clone();
+            async move {
+                db.query_one(Statement::from_string(DbBackend::Postgres, sql))
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+
+        for (market_id, arguments) in [(None, "1, 0, 21"), (Some(65538), "1, 65538, 0, 21")] {
+            repo.get_open_orders_paginated(1, 0, 21, market_id)
+                .await
+                .unwrap();
+            let page: String = query(
+                "SELECT name FROM pg_prepared_statements \
+                 WHERE starts_with(statement, 'SELECT order_order_id') \
+                 ORDER BY prepare_time DESC LIMIT 1"
+                    .to_string(),
+            )
+            .await
+            .try_get("", "name")
+            .unwrap();
+            let plan: serde_json::Value =
+                query(format!("EXPLAIN (FORMAT JSON) EXECUTE {page}({arguments})"))
+                    .await
+                    .try_get("", "QUERY PLAN")
+                    .unwrap();
+            assert!(
+                plan.to_string()
+                    .contains(r#""Index Name":"orders_user_open""#),
+                "market {market_id:?}: {plan}"
+            );
+        }
+    }
+
+    /// A history page fetches one row more than it shows, to say whether another page follows,
+    /// and counts nothing.
+    #[tokio::test]
+    async fn history_page_reports_has_next_without_a_count() {
+        let Some(db) = require_database().await else {
+            return;
+        };
+        let user = database_test_user(101_014);
+        let user_id = uuid_to_u64(user);
+        cleanup_test_data(&db, user_id).await;
+        for order_id in 0..21 {
+            insert_test_order(
+                &db,
+                8000 + order_id,
+                user_id,
+                65538,
+                5_000_000,
+                100,
+                "SIDE_BID",
+                "STATUS_FILLED",
+            )
+            .await
+            .unwrap();
+        }
+        let trading_repo: Arc<dyn TradingRepository> =
+            Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
+
+        for (page, orders, has_next) in [(1, 20, true), (2, 1, false)] {
+            let response = get_order_history(
+                create_authenticated_user_id(user),
+                web::Query(OrdersQuery {
+                    page: Some(page),
+                    limit: Some(20),
+                    market_id: None,
+                }),
+                web::Data::new(Arc::new(OrderStore::new(unscaled()))),
+                web::Data::new(trading_repo.clone()),
+            )
+            .await
+            .unwrap();
+            let body = actix_web::body::to_bytes(response.into_body())
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                json["orders"].as_array().unwrap().len(),
+                orders,
+                "page {page}"
+            );
+            assert_eq!(json["has_next"], has_next, "page {page}");
+            assert_eq!(json["has_prev"], page > 1, "page {page}");
+            assert!(json.get("total").is_none() && json.get("total_pages").is_none());
+        }
 
         cleanup_test_data(&db, user_id).await;
     }
@@ -686,9 +721,7 @@ mod tests {
                 status: "STATUS_PARTIALLY_FILLED",
                 event_ts: Utc::now().timestamp(),
             };
-            insert_order_row(&db, "trading.orders", order)
-                .await
-                .unwrap();
+            insert_order_row(&db, order).await.unwrap();
         }
 
         let repo = PostgresTradingRepository::new(Arc::new(db.clone()));
@@ -697,40 +730,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(order_ids(&open_orders), [92002]);
-        assert_eq!(repo.count_open_orders(user_id, None).await.unwrap(), 1);
 
         cleanup_test_data(&db, user_id).await;
     }
 
     #[tokio::test]
-    async fn test_postgres_balances_come_from_the_latest_state_table() {
+    async fn test_postgres_balances_are_by_asset() {
         let Some(db) = require_database().await else {
             return;
         };
         let (_, user_id) = user_above_i64_max();
         cleanup_test_data(&db, user_id).await;
 
-        // trading.balances holds each asset's latest balance; its history must not leak in.
-        insert_balance_row(&db, "trading.balances", user_id, 2, 2_000, 0, 2_000, 20)
+        insert_balance_row(&db, user_id, 2, 2_000, 0, 2_000, 20)
             .await
             .unwrap();
-        insert_balance_row(&db, "trading.balances", user_id, 1, 700, 400, 1_100, 10)
+        insert_balance_row(&db, user_id, 1, 700, 400, 1_100, 10)
             .await
             .unwrap();
-        for (asset_id, available, event_ts) in [(1, 1_000, 5), (1, 900, 30), (3, 50, 1)] {
-            insert_balance_row(
-                &db,
-                "trading.balance_events",
-                user_id,
-                asset_id,
-                available,
-                0,
-                available,
-                event_ts,
-            )
-            .await
-            .unwrap();
-        }
 
         let repo = PostgresTradingRepository::new(Arc::new(db.clone()));
         let balances = repo.get_user_balances(user_id).await.unwrap();
@@ -768,21 +785,12 @@ mod tests {
 
         // 10 ETH (asset 3, 10^18 units each: above i64::MAX) and 1 USD available, 0.5 locked.
         let ten_eth = 10_000_000_000_000_000_000_u64;
-        insert_balance_row(&db, "trading.balances", user_id, 3, ten_eth, 0, ten_eth, 7)
+        insert_balance_row(&db, user_id, 3, ten_eth, 0, ten_eth, 7)
             .await
             .unwrap();
-        insert_balance_row(
-            &db,
-            "trading.balances",
-            user_id,
-            1,
-            1_000_000,
-            500_000,
-            1_500_000,
-            8,
-        )
-        .await
-        .unwrap();
+        insert_balance_row(&db, user_id, 1, 1_000_000, 500_000, 1_500_000, 8)
+            .await
+            .unwrap();
         // A bid for 2 ETH at 2,500 USD on ETH/USD (65539, quote_scale_k 10), 0.5 ETH filled, and
         // a filled one; both order ids above i64::MAX.
         let (open_id, filled_id) = ((1_u64 << 63) + 5, (1_u64 << 63) + 6);
@@ -807,9 +815,7 @@ mod tests {
                 status,
                 event_ts,
             };
-            insert_order_row(&db, "trading.orders", order)
-                .await
-                .unwrap();
+            insert_order_row(&db, order).await.unwrap();
         }
 
         let db = Arc::new(db);
@@ -854,13 +860,14 @@ mod tests {
         assert_eq!(usd["asset_id"], 1);
         assert_eq!(decimal(&usd["available"]), Decimal::ONE);
         assert_eq!(decimal(&usd["locked"]), Decimal::new(5, 1));
-        assert_eq!(usd["timestamp"], 8);
+        assert_eq!(usd["timestamp"], "8");
         assert_eq!(eth["asset_id"], 3);
         assert_eq!(decimal(&eth["available"]), Decimal::TEN);
         assert_eq!(decimal(&eth["total"]), Decimal::TEN);
 
         let open = get("/orders/open").await;
-        assert_eq!(open["total"], 1);
+        assert_eq!(open["orders"].as_array().unwrap().len(), 1);
+        assert_eq!(open["has_next"], false);
         let order = &open["orders"][0];
         assert_eq!(order["order_id"], open_id.to_string());
         assert_eq!(order["user_id"], user_id.to_string());
@@ -869,10 +876,9 @@ mod tests {
         // What remains: 1.5 ETH.
         assert_eq!(decimal(&order["size"]), Decimal::new(15, 1));
         assert_eq!(order["status"], "PartiallyFilled");
-        assert_eq!(order["timestamp"], 9);
+        assert_eq!(order["timestamp"], "9");
 
         let history = get("/orders/history").await;
-        assert_eq!(history["total"], 2);
         let ids: Vec<_> = history["orders"]
             .as_array()
             .unwrap()
@@ -1019,18 +1025,6 @@ mod tests {
         .unwrap();
         insert_test_order(
             &db,
-            1002,
-            user_id,
-            65538,
-            5100000,
-            200,
-            "SIDE_ASK",
-            "STATUS_PROCESSING",
-        )
-        .await
-        .unwrap();
-        insert_test_order(
-            &db,
             1003,
             user_id,
             65539,
@@ -1070,9 +1064,8 @@ mod tests {
 
                 assert!(orders_response["orders"].is_array());
                 let orders = orders_response["orders"].as_array().unwrap();
-                // Should have 2 open orders (Placed and Processing), not the Filled one
-                assert_eq!(orders.len(), 2);
-                assert_eq!(orders_response["total"], 2);
+                // The Placed order, not the Filled one
+                assert_eq!(orders.len(), 1);
                 assert_eq!(orders_response["page"], 1);
             }
             Err(e) => {
@@ -1135,10 +1128,9 @@ mod tests {
                 let bytes = actix_web::body::to_bytes(body).await.unwrap();
                 let orders_response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
-                assert_eq!(orders_response["total"], 5);
+                assert_eq!(orders_response["orders"].as_array().unwrap().len(), 2);
                 assert_eq!(orders_response["page"], 1);
                 assert_eq!(orders_response["limit"], 2);
-                assert_eq!(orders_response["total_pages"], 3); // 5 orders / 2 per page = 3 pages
                 assert_eq!(orders_response["has_next"], true);
                 assert_eq!(orders_response["has_prev"], false);
             }
@@ -1175,18 +1167,6 @@ mod tests {
         .unwrap();
         insert_test_order(
             &db,
-            4002,
-            user_id,
-            65538,
-            5100000,
-            200,
-            "SIDE_ASK",
-            "STATUS_PROCESSING",
-        )
-        .await
-        .unwrap();
-        insert_test_order(
-            &db,
             4003,
             user_id,
             65538,
@@ -1194,18 +1174,6 @@ mod tests {
             150,
             "SIDE_BID",
             "STATUS_PARTIALLY_FILLED",
-        )
-        .await
-        .unwrap();
-        insert_test_order(
-            &db,
-            4004,
-            user_id,
-            65539,
-            3000000,
-            200,
-            "SIDE_ASK",
-            "STATUS_PROCESSING",
         )
         .await
         .unwrap();
@@ -1231,18 +1199,6 @@ mod tests {
             300,
             "SIDE_ASK",
             "STATUS_CANCELLED",
-        )
-        .await
-        .unwrap();
-        insert_test_order(
-            &db,
-            4007,
-            user_id,
-            65539,
-            3500000,
-            100,
-            "SIDE_BID",
-            "STATUS_REJECTED",
         )
         .await
         .unwrap();
@@ -1275,10 +1231,8 @@ mod tests {
 
                 assert!(orders_response["orders"].is_array());
                 let orders = orders_response["orders"].as_array().unwrap();
-                // Should have 4 open orders: Placed, PartiallyFilled and two Processing
-                // Should NOT include: Filled, Cancelled, Rejected
-                assert_eq!(orders.len(), 4);
-                assert_eq!(orders_response["total"], 4);
+                // Placed and PartiallyFilled, not Filled or Cancelled
+                assert_eq!(orders.len(), 2);
 
                 // Verify all returned orders have open statuses
                 let statuses: Vec<String> = orders
@@ -1293,16 +1247,10 @@ mod tests {
                         .iter()
                         .any(|s| s.eq_ignore_ascii_case("PartiallyFilled"))
                 );
-                assert!(
-                    statuses
-                        .iter()
-                        .any(|s| s.eq_ignore_ascii_case("Processing"))
-                );
 
                 // Verify terminal statuses are NOT present
                 assert!(!statuses.iter().any(|s| s.eq_ignore_ascii_case("Filled")));
                 assert!(!statuses.iter().any(|s| s.eq_ignore_ascii_case("Cancelled")));
-                assert!(!statuses.iter().any(|s| s.eq_ignore_ascii_case("Rejected")));
             }
             Err(e) => {
                 panic!("Handler returned error: {}", e);
@@ -1402,150 +1350,6 @@ mod tests {
                 let orders = history_response["orders"].as_array().unwrap();
                 // Should have 3 history orders (Filled, Cancelled, PartiallyFilled), not the Placed one
                 assert_eq!(orders.len(), 3);
-                assert_eq!(history_response["total"], 3);
-            }
-            Err(e) => {
-                panic!("Handler returned error: {}", e);
-            }
-        }
-
-        cleanup_test_data(&db, user_id).await;
-    }
-
-    #[tokio::test]
-    async fn test_get_order_history_with_rejected() {
-        let Some(db) = require_database().await else {
-            return; // Skip test if database is unavailable
-        };
-        let user = database_test_user(101_007);
-        let user_id = uuid_to_u64(user);
-
-        cleanup_test_data(&db, user_id).await;
-
-        // Insert test orders - terminal statuses
-        // Note: Repository currently only includes Filled, Cancelled, and PartiallyFilled
-        // Rejected is a terminal state but is NOT currently included in history (may be a bug)
-        insert_test_order(
-            &db,
-            5001,
-            user_id,
-            65538,
-            5000000,
-            100,
-            "SIDE_BID",
-            "STATUS_FILLED",
-        )
-        .await
-        .unwrap();
-        insert_test_order(
-            &db,
-            5002,
-            user_id,
-            65538,
-            5100000,
-            200,
-            "SIDE_ASK",
-            "STATUS_CANCELLED",
-        )
-        .await
-        .unwrap();
-        insert_test_order(
-            &db,
-            5003,
-            user_id,
-            65539,
-            3000000,
-            150,
-            "SIDE_BID",
-            "STATUS_PARTIALLY_FILLED",
-        )
-        .await
-        .unwrap();
-        insert_test_order(
-            &db,
-            5004,
-            user_id,
-            65538,
-            5200000,
-            250,
-            "SIDE_ASK",
-            "STATUS_REJECTED",
-        )
-        .await
-        .unwrap();
-        // Open status - should not appear in history
-        insert_test_order(
-            &db,
-            5005,
-            user_id,
-            65538,
-            5300000,
-            300,
-            "SIDE_BID",
-            "STATUS_PLACED",
-        )
-        .await
-        .unwrap();
-
-        let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
-        let order_store = Arc::new(OrderStore::new(unscaled()));
-
-        let authenticated_user = create_authenticated_user_id(user);
-        let query = web::Query(OrdersQuery {
-            page: Some(1),
-            limit: Some(20),
-            market_id: None,
-        });
-
-        let result = get_order_history(
-            authenticated_user,
-            query,
-            web::Data::new(order_store.clone()),
-            web::Data::new(trading_repo.clone() as Arc<dyn TradingRepository>),
-        )
-        .await;
-
-        match result {
-            Ok(response) => {
-                assert_eq!(response.status(), 200);
-
-                let body = response.into_body();
-                let bytes = actix_web::body::to_bytes(body).await.unwrap();
-                let history_response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-
-                assert!(history_response["orders"].is_array());
-                let orders = history_response["orders"].as_array().unwrap();
-                // Should have 3 history orders: Filled, Cancelled, PartiallyFilled
-                // Note: Rejected is NOT currently included (repository filters it out)
-                // Should NOT include: Placed (open status), Rejected (not in repository filter)
-                assert_eq!(orders.len(), 3);
-                assert_eq!(history_response["total"], 3);
-
-                // Verify all returned orders have terminal statuses that are included
-                let statuses: Vec<String> = orders
-                    .iter()
-                    .map(|o| o["status"].as_str().unwrap().to_string())
-                    .collect();
-
-                // Check that included terminal statuses are present
-                assert!(statuses.iter().any(|s| s.eq_ignore_ascii_case("Filled")));
-                assert!(statuses.iter().any(|s| s.eq_ignore_ascii_case("Cancelled")));
-                assert!(
-                    statuses
-                        .iter()
-                        .any(|s| s.eq_ignore_ascii_case("PartiallyFilled"))
-                );
-
-                // Verify Rejected is NOT present (current repository implementation excludes it)
-                assert!(!statuses.iter().any(|s| s.eq_ignore_ascii_case("Rejected")));
-
-                // Verify open statuses are NOT present
-                assert!(!statuses.iter().any(|s| s.eq_ignore_ascii_case("Placed")));
-                assert!(
-                    !statuses
-                        .iter()
-                        .any(|s| s.eq_ignore_ascii_case("Processing"))
-                );
             }
             Err(e) => {
                 panic!("Handler returned error: {}", e);
@@ -1575,18 +1379,6 @@ mod tests {
             100,
             "SIDE_BID",
             "STATUS_PLACED",
-        )
-        .await
-        .unwrap(); // Market 65538
-        insert_test_order(
-            &db,
-            6002,
-            user_id,
-            65538,
-            5100000,
-            200,
-            "SIDE_ASK",
-            "STATUS_PROCESSING",
         )
         .await
         .unwrap(); // Market 65538
@@ -1643,10 +1435,9 @@ mod tests {
 
                 assert!(orders_response["orders"].is_array());
                 let orders = orders_response["orders"].as_array().unwrap();
-                // Should have 3 orders from market 65538 (Placed, Processing, PartiallyFilled)
+                // Should have 2 orders from market 65538 (Placed, PartiallyFilled)
                 // Should NOT include order from market 65539
-                assert_eq!(orders.len(), 3);
-                assert_eq!(orders_response["total"], 3);
+                assert_eq!(orders.len(), 2);
 
                 // Verify all returned orders are from the correct market
                 for order in orders {
@@ -1752,7 +1543,6 @@ mod tests {
                 // Should have 3 orders from market 65538 (Filled, Cancelled, Filled)
                 // Should NOT include order from market 65539
                 assert_eq!(orders.len(), 3);
-                assert_eq!(history_response["total"], 3);
 
                 // Verify all returned orders are from the correct market
                 for order in orders {
@@ -1778,9 +1568,7 @@ mod tests {
         cleanup_test_data(&db, user_id).await;
 
         // Insert favorite markets
-        // Note: PostgreSQL BIGINT is signed (i64), so we need to cast u64 to i64
-        // Mask to lower 63 bits to avoid producing negative values from high-bit u64s
-        let user_id_i64 = (user_id & 0x7FFF_FFFF_FFFF_FFFF) as i64;
+        let user_id_i64 = user_id as i64; // same bits, as the repository stores it
         let market_ids = vec![65538, 65539]; // BTC/USD and ETH/USD
         for market_id in &market_ids {
             let sql = format!(
@@ -1923,9 +1711,7 @@ mod tests {
         cleanup_test_data(&db, user_id).await;
 
         // First add a favorite
-        // Note: PostgreSQL BIGINT is signed (i64), so we need to cast u64 to i64
-        // Mask to lower 63 bits to avoid producing negative values from high-bit u64s
-        let user_id_i64 = (user_id & 0x7FFF_FFFF_FFFF_FFFF) as i64;
+        let user_id_i64 = user_id as i64; // same bits, as the repository stores it
         let sql = format!(
             "INSERT INTO user_favorite_markets (user_id, market_id) VALUES ({}, {})",
             user_id_i64, 65538
@@ -1972,6 +1758,145 @@ mod tests {
         cleanup_test_data(&db, user_id).await;
     }
 
+    /// A user above `i64::MAX`, stored negative with the same bits, finds the favourite they
+    /// added.
+    #[tokio::test]
+    async fn favourites_of_a_user_above_i64_max_round_trip() {
+        let Some(db) = require_database().await else {
+            return;
+        };
+        let (user, user_id) = user_above_i64_max();
+        cleanup_test_data(&db, user_id).await;
+        let trading_repo: Arc<dyn TradingRepository> =
+            Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
+
+        let toggled = toggle_favorite_market(
+            create_authenticated_user_id(user),
+            web::Json(ToggleFavoriteMarketRequest { market_id: 65538 }),
+            web::Data::new(trading_repo.clone()),
+        )
+        .await
+        .unwrap();
+        let body = actix_web::body::to_bytes(toggled.into_body())
+            .await
+            .unwrap();
+        let toggled: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(toggled["action"], "added");
+
+        let favorites = get_favorite_markets(
+            create_authenticated_user_id(user),
+            web::Data::new(trading_repo),
+        )
+        .await
+        .unwrap();
+        let body = actix_web::body::to_bytes(favorites.into_body())
+            .await
+            .unwrap();
+        let favorites: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(favorites["market_ids"], serde_json::json!([65538]));
+
+        cleanup_test_data(&db, user_id).await;
+    }
+
+    /// A market above `i32::MAX` (a quote asset from 32768 up), stored negative with the same bits
+    /// as the schema says, is listed among the favourites it was added to.
+    #[tokio::test]
+    async fn favourites_round_trip_a_market_id_above_i32_max() {
+        let Some(db) = require_database().await else {
+            return;
+        };
+        let user = database_test_user(101_017);
+        let user_id = uuid_to_u64(user);
+        cleanup_test_data(&db, user_id).await;
+        // Base asset 2, quote asset 32768.
+        let market_id: u32 = 0x8000_0002;
+        let quote_asset = 0x8000_u16 as i16;
+        db.execute_unprepared(&format!(
+            "INSERT INTO assets (asset_id, native_scale) VALUES ({quote_asset}, 1) \
+             ON CONFLICT DO NOTHING; \
+             INSERT INTO markets (market_id, base_asset, quote_asset, quote_scale_k) \
+             VALUES ({}, 2, {quote_asset}, 1) ON CONFLICT DO NOTHING",
+            market_id as i32
+        ))
+        .await
+        .unwrap();
+        let trading_repo: Arc<dyn TradingRepository> =
+            Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
+
+        let toggled = toggle_favorite_market(
+            create_authenticated_user_id(user),
+            web::Json(ToggleFavoriteMarketRequest { market_id }),
+            web::Data::new(trading_repo.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(toggled.status(), 200);
+
+        let favorites = get_favorite_markets(
+            create_authenticated_user_id(user),
+            web::Data::new(trading_repo),
+        )
+        .await
+        .unwrap();
+        let body = actix_web::body::to_bytes(favorites.into_body())
+            .await
+            .unwrap();
+        let favorites: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(favorites["market_ids"], serde_json::json!([market_id]));
+
+        cleanup_test_data(&db, user_id).await;
+    }
+
+    /// A favourite of a market the read model does not list is a 404, not a server error.
+    #[tokio::test]
+    async fn toggling_an_unknown_market_is_not_found() {
+        let Some(db) = require_database().await else {
+            return;
+        };
+        let user = database_test_user(101_015);
+        cleanup_test_data(&db, uuid_to_u64(user)).await;
+        let trading_repo: Arc<dyn TradingRepository> =
+            Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
+
+        let response = toggle_favorite_market(
+            create_authenticated_user_id(user),
+            web::Json(ToggleFavoriteMarketRequest {
+                market_id: 4_000_000_000,
+            }),
+            web::Data::new(trading_repo),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), 404);
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "unknown market");
+    }
+
+    /// Two toggles of a market that is not a favourite yet, at once, as a double click sends
+    /// them: neither fails on the other's row.
+    #[tokio::test]
+    async fn concurrent_toggles_both_succeed() {
+        let Some(db) = require_database().await else {
+            return;
+        };
+        let user_id = uuid_to_u64(database_test_user(101_016));
+        cleanup_test_data(&db, user_id).await;
+        let repo = PostgresTradingRepository::new(Arc::new(db.clone()));
+
+        for _ in 0..20 {
+            let (first, second) = tokio::join!(
+                repo.toggle_favorite_market(user_id, 65538),
+                repo.toggle_favorite_market(user_id, 65538)
+            );
+            assert!(first.is_ok() && second.is_ok(), "{first:?}, {second:?}");
+            cleanup_test_data(&db, user_id).await;
+        }
+    }
+
     // ============================================================================
     // Error Case Tests
     // ============================================================================
@@ -2002,55 +1927,6 @@ mod tests {
                 let error_response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
                 assert_eq!(error_response["error"], "failed to retrieve balances");
-                assert!(error_response["message"].is_string());
-                // Handlers return sanitized generic error message, not internal DB errors
-                assert_eq!(
-                    error_response["message"],
-                    "An internal error occurred. Please try again later."
-                );
-            }
-            Err(e) => {
-                panic!(
-                    "Handler should return Ok(HttpResponse) even on error, got: {}",
-                    e
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_get_open_orders_count_error() {
-        let user = create_test_user();
-        let authenticated_user = create_authenticated_user_id(user);
-
-        // Create mock repository that returns error on count_open_orders
-        let mock_repo =
-            Arc::new(ErrorMockTradingRepository::new().with_error_on("count_open_orders"));
-        let order_store = Arc::new(OrderStore::new(unscaled()));
-
-        let query = web::Query(OrdersQuery {
-            page: Some(1),
-            limit: Some(20),
-            market_id: None,
-        });
-
-        let result = get_open_orders(
-            authenticated_user,
-            query,
-            web::Data::new(order_store.clone()),
-            web::Data::new(mock_repo.clone() as Arc<dyn TradingRepository>),
-        )
-        .await;
-
-        match result {
-            Ok(response) => {
-                assert_eq!(response.status(), 500);
-
-                let body = response.into_body();
-                let bytes = actix_web::body::to_bytes(body).await.unwrap();
-                let error_response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-
-                assert_eq!(error_response["error"], "failed to retrieve open orders");
                 assert!(error_response["message"].is_string());
                 // Handlers return sanitized generic error message, not internal DB errors
                 assert_eq!(
@@ -2101,55 +1977,6 @@ mod tests {
 
                 assert_eq!(error_response["error"], "failed to retrieve open orders");
                 assert!(error_response["message"].is_string());
-            }
-            Err(e) => {
-                panic!(
-                    "Handler should return Ok(HttpResponse) even on error, got: {}",
-                    e
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_get_order_history_count_error() {
-        let user = create_test_user();
-        let authenticated_user = create_authenticated_user_id(user);
-
-        // Create mock repository that returns error on count_order_history
-        let mock_repo =
-            Arc::new(ErrorMockTradingRepository::new().with_error_on("count_order_history"));
-        let order_store = Arc::new(OrderStore::new(unscaled()));
-
-        let query = web::Query(OrdersQuery {
-            page: Some(1),
-            limit: Some(20),
-            market_id: None,
-        });
-
-        let result = get_order_history(
-            authenticated_user,
-            query,
-            web::Data::new(order_store.clone()),
-            web::Data::new(mock_repo.clone() as Arc<dyn TradingRepository>),
-        )
-        .await;
-
-        match result {
-            Ok(response) => {
-                assert_eq!(response.status(), 500);
-
-                let body = response.into_body();
-                let bytes = actix_web::body::to_bytes(body).await.unwrap();
-                let error_response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-
-                assert_eq!(error_response["error"], "failed to retrieve order history");
-                assert!(error_response["message"].is_string());
-                // Handlers return sanitized generic error message, not internal DB errors
-                assert_eq!(
-                    error_response["message"],
-                    "An internal error occurred. Please try again later."
-                );
             }
             Err(e) => {
                 panic!(

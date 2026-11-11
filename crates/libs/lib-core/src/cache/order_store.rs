@@ -17,16 +17,14 @@ impl OrderStore {
         Self { scaling_cache }
     }
 
-    /// Convert the stored status (STATUS_*) to the API's form
+    /// Convert the stored status (STATUS_*) to the API's form. vex-core publishes an order event
+    /// only for these four (processors/src/events.rs `publish_events`).
     fn normalize_status(status: &str) -> String {
         match status {
-            "STATUS_REJECTED" => "Rejected",
             "STATUS_PLACED" => "Placed",
             "STATUS_CANCELLED" => "Cancelled",
             "STATUS_PARTIALLY_FILLED" => "PartiallyFilled",
             "STATUS_FILLED" => "Filled",
-            "STATUS_PROCESSING" => "Processing",
-            "STATUS_PROCESSED" => "Processed",
             // An unknown value is passed through rather than guessed at.
             other => other,
         }
@@ -35,8 +33,7 @@ impl OrderStore {
 
     /// The stored side, or `None` (logged) when it is not one of core's `Side` names. Such a
     /// row is skipped: guessing a side would show the user an order on the wrong side of the
-    /// book. The handlers' `total` comes from the repository's count, so a page holding a
-    /// skipped row is short.
+    /// book. A page holding a skipped row is short.
     fn parse_side(model: &OrderModel) -> Option<Side> {
         match model.order_side.parse() {
             Ok(side) => Some(side),

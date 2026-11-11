@@ -100,7 +100,7 @@ jobs:
           - 6379:6379
       # The read model's ClickHouse, pinned as in readmodel/tests/compose.yml, for
       # lib-core/tests/portfolio_repository_clickhouse.rs: its user may create databases, users
-      # and roles, as the migrations need.
+      # and roles, as the migrations need, and flush and read the query log.
       clickhouse:
         image: clickhouse/clickhouse-server:26.8.36.3@sha256:d426d2f612e1e189c90f9a3f8dcd85a03c6851273833817a296bb327e63aa7a7
         env:

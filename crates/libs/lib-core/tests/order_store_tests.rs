@@ -110,4 +110,8 @@ fn u64_values_above_i64_max_are_decoded_from_their_bits() {
     let json = serde_json::to_value(&open).unwrap();
     assert_eq!(json["order_id"], ((1_u64 << 63) + 12345).to_string());
     assert_eq!(json["user_id"], u64::MAX.to_string());
+    // So do nanosecond timestamps, which a JavaScript number rounds to 256 ns.
+    assert_eq!(json["timestamp"], "1700000000000000000");
+    let json = serde_json::to_value(&history).unwrap();
+    assert_eq!(json["timestamp"], "1700000000000000000");
 }
