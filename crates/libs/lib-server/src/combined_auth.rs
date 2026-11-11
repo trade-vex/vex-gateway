@@ -618,7 +618,7 @@ mod tests {
     /// password change bumped the user's version, the expired token is refused, not renewed.
     #[actix_web::test]
     async fn expired_token_of_a_bumped_version_is_not_renewed() {
-        let (conn, token_service, session_service) = session_services().await;
+        let (mut conn, token_service, session_service) = session_services().await;
         let (user_id, session_id, _) =
             session_with_an_expired_token(&token_service, &session_service).await;
         token_service.bump_token_version(user_id).await.unwrap();
@@ -639,11 +639,7 @@ mod tests {
         let body: serde_json::Value = test::read_body_json(response).await;
         assert_eq!(body["error"]["code"], "token_revoked");
         session_service.delete_session(&session_id).await.unwrap();
-        let _: () = conn
-            .clone()
-            .del(format!("token_version:{user_id}"))
-            .await
-            .unwrap();
+        let _: () = conn.del(format!("token_version:{user_id}")).await.unwrap();
     }
 
     #[actix_web::test]
