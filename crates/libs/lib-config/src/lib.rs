@@ -329,7 +329,8 @@ impl Config {
     /// - `auth.otp.email_verification_expiry_minutes` and `password_reset_expiry_minutes` must be
     ///   positive
     /// - `auth.jwt.access_token_ttl_minutes` must be positive
-    /// - `clickhouse.user` cannot be empty, and `clickhouse.database` must be a plain identifier
+    /// - `clickhouse.url` must start with http://, `clickhouse.user` cannot be empty, and
+    ///   `clickhouse.database` must be a plain identifier
     ///
     /// ## Production Environment
     /// - Server port cannot be 0 (must be explicitly configured)
@@ -1121,10 +1122,19 @@ frontend_url_app = "vex://oauth""#
     }
 
     #[test]
-    fn test_clickhouse_user_and_database_are_validated() {
+    fn test_clickhouse_url_user_and_database_are_validated() {
         assert!(load_development_example(&[("APP__CLICKHOUSE__DATABASE", "_vex_2")]).is_ok());
-
         for (name, value, key) in [
+            (
+                "APP__CLICKHOUSE__URL",
+                "clickhouse.internal:8123",
+                "clickhouse.url",
+            ),
+            (
+                "APP__CLICKHOUSE__URL",
+                "https://clickhouse.internal:8443",
+                "clickhouse.url",
+            ),
             ("APP__CLICKHOUSE__USER", "", "clickhouse.user"),
             ("APP__CLICKHOUSE__USER", " ", "clickhouse.user"),
             ("APP__CLICKHOUSE__DATABASE", "", "clickhouse.database"),

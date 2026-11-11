@@ -130,8 +130,9 @@ The service validates configuration on startup:
   developer app must have "Request email from users" enabled (it needs Terms of Service and
   Privacy Policy URLs in the app settings): without it X sends no confirmed email and every X
   login is refused with 400 `USER_INFO_FAILED`. The code lifetimes in `[auth.otp]` and
-  `auth.jwt.access_token_ttl_minutes` must be positive, `clickhouse.user` must not be empty, `clickhouse.database` must be a plain
-  identifier, `metrics.bind` must be an IP address and a port, and every `rate_limit` setting
+  `auth.jwt.access_token_ttl_minutes` must be positive, `clickhouse.url` must start with
+  `http://`, `clickhouse.user` must not be empty, `clickhouse.database` must be a
+  plain identifier, `metrics.bind` must be an IP address and a port, and every `rate_limit` setting
   must be greater than 0
 
 ### OAuth Redirects
@@ -165,8 +166,9 @@ endpoints read from. Every key is required, with no default, and `APP__CLICKHOUS
 overrides one:
 
 - `url` (`APP__CLICKHOUSE__URL`): the HTTP endpoint, such as `http://clickhouse.internal:8123`.
-  The gateway's ClickHouse client speaks plain HTTP only, not HTTPS, so this endpoint must be
-  reachable only from the gateway's private network.
+  The gateway's ClickHouse client speaks plain HTTP only, not HTTPS (a URL that does not start
+  with `http://` stops the gateway at startup), so this endpoint must be reachable only from the
+  gateway's private network.
 - `user` (`APP__CLICKHOUSE__USER`): the user the gateway reads as, ClickHouse's gateway login
   ([Read Model](#read-model)). It must not be empty.
 - `password` (`APP__CLICKHOUSE__PASSWORD`): that user's password, never logged. Empty only for a
