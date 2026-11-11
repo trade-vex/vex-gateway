@@ -1,6 +1,6 @@
 use actix_web::{web, App, HttpResponse};
 use lib_middleware::api_key::{
-    middleware::{ApiKeyMiddleware, ApiKeyStore, CacheConfig, CacheMetrics, RouteSecurityConfig},
+    middleware::{ApiKeyMiddleware, ApiKeyStore, CacheConfig, RouteSecurityConfig},
     security::{ApiKeyConfig, SecurityType},
 };
 use std::sync::Arc;
@@ -117,120 +117,6 @@ fn test_cache_config_clone() {
     let cloned = config.clone();
     assert_eq!(config.l1_max_size, cloned.l1_max_size);
     assert_eq!(config.l1_ttl, cloned.l1_ttl);
-}
-
-#[test]
-fn test_cache_metrics_new() {
-    let metrics = CacheMetrics::new();
-
-    assert_eq!(
-        metrics.l1_hits.load(std::sync::atomic::Ordering::Relaxed),
-        0
-    );
-    assert_eq!(
-        metrics.l1_misses.load(std::sync::atomic::Ordering::Relaxed),
-        0
-    );
-    assert_eq!(
-        metrics
-            .db_queries
-            .load(std::sync::atomic::Ordering::Relaxed),
-        0
-    );
-}
-
-#[test]
-fn test_cache_metrics_operations() {
-    let metrics = CacheMetrics::new();
-
-    // Test increment operations
-    metrics
-        .l1_hits
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    metrics
-        .l1_misses
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    metrics
-        .db_queries
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-    assert_eq!(
-        metrics.l1_hits.load(std::sync::atomic::Ordering::Relaxed),
-        1
-    );
-    assert_eq!(
-        metrics.l1_misses.load(std::sync::atomic::Ordering::Relaxed),
-        1
-    );
-    assert_eq!(
-        metrics
-            .db_queries
-            .load(std::sync::atomic::Ordering::Relaxed),
-        1
-    );
-}
-
-#[test]
-fn test_cache_metrics_hit_ratios() {
-    let metrics = CacheMetrics::new();
-
-    // Add some hits and misses
-    for _ in 0..7 {
-        metrics
-            .l1_hits
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-    for _ in 0..3 {
-        metrics
-            .l1_misses
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    let l1_ratio = metrics.get_l1_hit_rate();
-
-    assert!((l1_ratio - 0.7).abs() < 0.01); // 7/10 = 0.7
-}
-
-#[test]
-fn test_cache_metrics_hit_ratio_no_requests() {
-    let metrics = CacheMetrics::new();
-
-    // With no requests, hit ratio should be 0.0
-    assert_eq!(metrics.get_l1_hit_rate(), 0.0);
-}
-
-#[test]
-fn test_cache_metrics_basic_usage() {
-    let metrics = CacheMetrics::new();
-
-    // Add some sample data
-    metrics
-        .l1_hits
-        .fetch_add(2, std::sync::atomic::Ordering::Relaxed);
-    metrics
-        .l1_misses
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    metrics
-        .db_queries
-        .fetch_add(2, std::sync::atomic::Ordering::Relaxed);
-
-    assert_eq!(
-        metrics.l1_hits.load(std::sync::atomic::Ordering::Relaxed),
-        2
-    );
-    assert_eq!(
-        metrics.l1_misses.load(std::sync::atomic::Ordering::Relaxed),
-        1
-    );
-    assert_eq!(
-        metrics
-            .db_queries
-            .load(std::sync::atomic::Ordering::Relaxed),
-        2
-    );
-
-    let hit_rate = metrics.get_l1_hit_rate();
-    assert!((hit_rate - 0.6666666666666666).abs() < 0.01); // 2/3
 }
 
 #[tokio::test]
@@ -350,49 +236,6 @@ fn test_api_key_store_send_sync() {
 
     assert_send::<ApiKeyStore>();
     assert_sync::<ApiKeyStore>();
-}
-
-#[test]
-fn test_cache_metrics_send_sync() {
-    // Ensure CacheMetrics is Send + Sync for async usage
-    fn assert_send<T: Send>() {}
-    fn assert_sync<T: Sync>() {}
-
-    assert_send::<CacheMetrics>();
-    assert_sync::<CacheMetrics>();
-}
-
-#[tokio::test]
-async fn test_cache_invalidation_l1() {
-    let api_key = ApiKeyConfig::new("test_key_123".to_string())
-        .with_hmac_secret("test_secret".to_string())
-        .with_permissions(vec![SecurityType::Trade, SecurityType::UserData]);
-    let key = "test_key_123";
-
-    let config = CacheConfig {
-        l1_max_size: 10,
-        l1_ttl: Duration::from_secs(60),
-    };
-    let store = ApiKeyStore::new(config).with_api_keys(vec![api_key.clone()]);
-
-    // First fetch populates L1 cache
-    let result1 = store.get_api_key(key).await.unwrap();
-    assert!(result1.is_some());
-
-    // Second fetch should hit L1
-    let result2 = store.get_api_key(key).await.unwrap();
-    assert!(result2.is_some());
-
-    // Invalidate the key
-    store.invalidate(key).await;
-
-    // Next fetch should miss L1 and fall back to memory store
-    let result3 = store.get_api_key(key).await.unwrap();
-    assert!(result3.is_some());
-
-    // Metrics should show misses
-    let metrics = store.metrics();
-    assert!(metrics.l1_misses.load(std::sync::atomic::Ordering::Relaxed) >= 1);
 }
 
 #[tokio::test]

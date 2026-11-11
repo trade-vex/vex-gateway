@@ -94,29 +94,6 @@ impl Model {
     pub fn is_valid(&self) -> bool {
         self.enabled && (self.expires_at.is_none() || self.expires_at.unwrap() > Utc::now())
     }
-
-    /// Check if the API key has the required permission
-    pub fn has_permission(&self, required_permission: &SecurityType) -> bool {
-        // let permissions = self
-        //     .permissions
-        //     .as_array()
-        //     .and_then(|arr| {
-        //         arr.iter()
-        //             .filter_map(|v| v.as_str())
-        //             .map(|s| match s {
-        //                 "none" => Some(SecurityType::None),
-        //                 "trade" => Some(SecurityType::Trade),
-        //                 "user_data" => Some(SecurityType::UserData),
-        //                 "user_stream" => Some(SecurityType::UserStream),
-        //                 _ => None,
-        //             })
-        //             .collect::<Option<Vec<_>>>()
-        //     })
-        //     .unwrap_or_else(|| vec![SecurityType::None]);
-
-        self.permissions.contains(required_permission)
-            || self.permissions.contains(&SecurityType::None)
-    }
 }
 
 /// Helper struct for creating new API keys

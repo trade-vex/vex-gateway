@@ -8,38 +8,11 @@ pub enum ApiKeyError {
     #[error("API key not found")]
     NotFound,
 
-    #[error("API key is disabled")]
-    Disabled,
-
-    #[error("API key has expired")]
-    Expired,
-
     #[error("Invalid signature: {0}")]
     InvalidSignature(String),
 
     #[error("Invalid timestamp: {0}")]
     InvalidTimestamp(String),
-
-    #[error("Request window exceeded")]
-    WindowExceeded,
-
-    #[error("IP address not whitelisted: {0}")]
-    IpNotWhitelisted(String),
-
-    #[error("Permission denied for security type: {0}")]
-    PermissionDenied(String),
-
-    #[error("Invalid key material: {0}")]
-    InvalidKeyMaterial(String),
-
-    #[error("Missing required header: {0}")]
-    MissingHeader(String),
-
-    #[error("Invalid header format: {0}")]
-    InvalidHeader(String),
-
-    #[error("Cache error: {0}")]
-    Cache(String),
 
     #[error("Serialization error: {0}")]
     Serialization(String),

@@ -216,22 +216,6 @@ impl ApiKeyRepository for MockApiKeyRepository {
         Ok(())
     }
 
-    async fn update_last_used(
-        &self,
-        _id: Uuid,
-        _timestamp: chrono::DateTime<Utc>,
-    ) -> Result<(), ApiKeyError> {
-        if self.should_fail {
-            return Err(ApiKeyError::Database("Mock database error".to_string()));
-        }
-
-        if self.not_found {
-            return Err(ApiKeyError::NotFound);
-        }
-
-        Ok(())
-    }
-
     async fn delete(&self, _id: Uuid) -> Result<(), ApiKeyError> {
         if self.should_fail {
             return Err(ApiKeyError::Database("Mock database error".to_string()));
@@ -242,118 +226,6 @@ impl ApiKeyRepository for MockApiKeyRepository {
         }
 
         Ok(())
-    }
-
-    async fn find_active_keys(
-        &self,
-        limit: Option<u64>,
-    ) -> Result<Vec<lib_middleware::models::api_key::Model>, ApiKeyError> {
-        if self.should_fail {
-            return Err(ApiKeyError::Database("Mock database error".to_string()));
-        }
-
-        let active_keys = vec![
-            lib_middleware::models::api_key::Model {
-                id: Uuid::new_v4(),
-                api_key: "active-key-1".to_string(),
-                key_material_type: Some(KeyMaterialType::HmacSecret),
-                key_material_value: Some("secret-1".to_string()),
-                permissions: vec![SecurityType::Trade],
-                recv_window: 5000,
-                enabled: true,
-                description: Some("Active trading key".to_string()),
-                ip_blacklist: vec![],
-                user_id: Some(Uuid::new_v4()),
-                created_at: Utc::now() - Duration::days(5),
-                updated_at: Utc::now() - Duration::hours(1),
-                expires_at: Some(Utc::now() + Duration::days(30)),
-                last_used_at: Some(Utc::now() - Duration::minutes(10)),
-            },
-            lib_middleware::models::api_key::Model {
-                id: Uuid::new_v4(),
-                api_key: "active-key-2".to_string(),
-                key_material_type: None,
-                key_material_value: None,
-                permissions: vec![SecurityType::UserStream],
-                recv_window: 5000,
-                enabled: true,
-                description: None,
-                ip_blacklist: vec![],
-                user_id: Some(Uuid::new_v4()),
-                created_at: Utc::now() - Duration::days(1),
-                updated_at: Utc::now() - Duration::hours(2),
-                expires_at: None, // No expiry
-                last_used_at: Some(Utc::now() - Duration::hours(1)),
-            },
-        ];
-
-        if let Some(limit) = limit {
-            Ok(active_keys.into_iter().take(limit as usize).collect())
-        } else {
-            Ok(active_keys)
-        }
-    }
-
-    async fn find_expiring_keys(
-        &self,
-        _days: i64,
-    ) -> Result<Vec<lib_middleware::models::api_key::Model>, ApiKeyError> {
-        if self.should_fail {
-            return Err(ApiKeyError::Database("Mock database error".to_string()));
-        }
-
-        Ok(vec![lib_middleware::models::api_key::Model {
-            id: Uuid::new_v4(),
-            api_key: "expiring-key".to_string(),
-            key_material_type: Some(KeyMaterialType::HmacSecret),
-            key_material_value: Some("expiring-secret".to_string()),
-            permissions: vec![SecurityType::Trade, SecurityType::UserData],
-            recv_window: 5000,
-            enabled: true,
-            description: Some("About to expire".to_string()),
-            ip_blacklist: vec![],
-            user_id: Some(Uuid::new_v4()),
-            created_at: Utc::now() - Duration::days(60),
-            updated_at: Utc::now() - Duration::days(1),
-            expires_at: Some(Utc::now() + Duration::days(2)), // Expires in 2 days
-            last_used_at: Some(Utc::now() - Duration::hours(6)),
-        }])
-    }
-
-    async fn count_by_user(&self, _user_id: Uuid) -> Result<u64, ApiKeyError> {
-        if self.should_fail {
-            return Err(ApiKeyError::Database("Mock database error".to_string()));
-        }
-
-        Ok(3) // Mock count
-    }
-
-    async fn find_by_permission(
-        &self,
-        permission: SecurityType,
-    ) -> Result<Vec<lib_middleware::models::api_key::Model>, ApiKeyError> {
-        if self.should_fail {
-            return Err(ApiKeyError::Database("Mock database error".to_string()));
-        }
-
-        let permission_str = permission.to_string();
-
-        Ok(vec![lib_middleware::models::api_key::Model {
-            id: Uuid::new_v4(),
-            api_key: format!("key-with-{}", permission_str.to_lowercase()),
-            key_material_type: Some(KeyMaterialType::HmacSecret),
-            key_material_value: Some("permission-test-secret".to_string()),
-            permissions: vec![permission],
-            recv_window: 5000,
-            enabled: true,
-            description: Some(format!("Key with {} permission", permission_str)),
-            ip_blacklist: vec![],
-            user_id: Some(Uuid::new_v4()),
-            created_at: Utc::now() - Duration::days(1),
-            updated_at: Utc::now(),
-            expires_at: None,
-            last_used_at: None,
-        }])
     }
 }
 
@@ -422,9 +294,6 @@ async fn test_repository_trait_object() {
 
     let result = repo.find_by_api_key("trait-test").await.unwrap();
     assert!(result.is_some());
-
-    let count = repo.count_by_user(Uuid::new_v4()).await.unwrap();
-    assert_eq!(count, 3);
 }
 
 #[test]
