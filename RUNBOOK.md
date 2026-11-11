@@ -118,9 +118,10 @@ optional setting.
 ### Configuration Validation
 
 The service validates configuration on startup:
-- **Production**: Cannot bind to localhost, cannot use debug logging, port must be > 0,
-  `auth.server.trusted_proxies`, `core.auth_key` and `clickhouse.password` must not be empty, and
-  `metrics.bind` needs a port of its own (not 0, and not `server.port`)
+- **Production**: Cannot bind to a loopback address (127.0.0.0/8, ::1, or a name resolving to
+  one), cannot use debug logging, port must be > 0, `auth.server.trusted_proxies`,
+  `core.auth_key` and `clickhouse.password` must not be empty, and `metrics.bind` needs a port of
+  its own (not 0, and not `server.port`)
 - **Development**: More lenient validation
 - **Every environment**: `auth.oauth.providers` may list only `google`, `github` and `twitter`;
   another provider stops the gateway at startup, and the error names it. A `google` provider needs

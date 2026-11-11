@@ -349,7 +349,7 @@ impl Config {
     ///
     /// ## Production Environment
     /// - Server port cannot be 0 (must be explicitly configured)
-    /// - Cannot bind to localhost (127.0.0.1 or localhost)
+    /// - Cannot bind to a loopback address (127.0.0.0/8, ::1, or a host name resolving to one)
     /// - Cannot use trace or debug logging levels
     /// - `auth.server.trusted_proxies` cannot be empty: production runs behind a load balancer
     /// - `core.auth_key` cannot be empty, as vex-core requires
@@ -488,7 +488,7 @@ impl Config {
                     ));
                 }
 
-                if self.server.host == "127.0.0.1" || self.server.host == "localhost" {
+                if self.server.socket_addr()?.ip().is_loopback() {
                     return Err(ConfigError::ValidationError(
                         "Production environment should not bind to localhost".to_string(),
                     ));
@@ -906,20 +906,21 @@ database = "vex_analytics"
     }
 
     #[test]
-    fn test_config_validation() {
-        let mut config = development_config();
-        assert!(config.validate().is_ok());
-
-        // Test production validation
-        config.environment = Environment::Production;
-        config.auth.server.trusted_proxies = vec!["10.0.0.0/16".to_string()];
-        config.core.auth_key = "-123456789".into();
-        config.server.host = "127.0.0.1".to_string();
-        assert!(config.validate().is_err());
-
-        config.server.host = "0.0.0.0".to_string();
-        config.logging.level = "debug".to_string();
-        assert!(config.validate().is_err());
+    fn production_rejects_loopback_debug_logging_and_port_0() {
+        for (line, replacement, names) in [
+            (r#"host = "0.0.0.0""#, r#"host = "127.0.0.1""#, "localhost"),
+            (r#"host = "0.0.0.0""#, r#"host = "127.0.0.2""#, "localhost"),
+            (r#"host = "0.0.0.0""#, r#"host = "::1""#, "localhost"),
+            (r#"level = "info""#, r#"level = "debug""#, "trace or debug"),
+            ("port = 8081", "port = 0", "cannot be 0"),
+        ] {
+            let error = load_edited_production(line, replacement).unwrap_err();
+            assert!(
+                matches!(error, ConfigError::ValidationError(_))
+                    && error.to_string().contains(names),
+                "{replacement}: unexpected error: {error}"
+            );
+        }
     }
 
     #[test]
@@ -1678,17 +1679,8 @@ frontend_url_app = "vex://oauth""#
 
     #[test]
     fn test_port_0_validation() {
-        // Test that port 0 is rejected in production environment
-        let mut production_config = development_config();
-        production_config.environment = Environment::Production;
-        production_config.auth.server.trusted_proxies = vec!["10.0.0.0/16".to_string()];
-        production_config.core.auth_key = "-123456789".into();
-        production_config.server.port = 0;
-        production_config.server.host = "0.0.0.0".to_string();
-        production_config.logging.level = "info".to_string();
-        assert!(production_config.validate().is_err());
-
-        // Test that port 0 is allowed in development environment
+        // Port 0 is allowed in development; production_rejects_loopback_debug_logging_and_port_0
+        // covers production.
         let mut dev_config = development_config();
         dev_config.server.port = 0;
         assert!(dev_config.validate().is_ok());
