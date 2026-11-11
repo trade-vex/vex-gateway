@@ -1138,6 +1138,12 @@ grep -i "memory\|oom" logs/app.log
 - `DELETE /api/api-key/{id}` - Delete API key
 - `PATCH /api/api-key/{id}/toggle` - Enable/disable API key
 
+A key holds the permissions `trade`, `user_data` or both, and every API-key request is signed.
+`trade` is needed to place and cancel orders (`POST /api/order`, `POST /api/cancel`); `user_data`
+for every other route an API key may reach (balances, orders, portfolio, charts, favorites,
+`/api/session-check`). `/api/api-key/*`, `/api/logout`, `/api/profile` and `/api/change-password`
+are for the signed-in person only: they answer an API key with 401 whatever its permissions.
+
 Deleting, disabling or changing a key takes effect at once on the gateway replica that served the
 request, and within 5 seconds on the others: each replica caches a key for at most 5 s.
 

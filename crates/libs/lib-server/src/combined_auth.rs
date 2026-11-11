@@ -580,4 +580,63 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(test::read_body(response).await, owner.to_string());
     }
+
+    #[actix_web::test]
+    async fn read_only_key_reads_but_cannot_trade() {
+        let redis_conn = crate::test_redis().await;
+        let secret = "read-only-test-secret";
+        let api_key_middleware = ApiKeyMiddleware::new()
+            .with_api_key(
+                ApiKeyConfig::new("read-only-test-key".to_string())
+                    .with_hmac_secret(secret.to_string())
+                    .with_permissions(vec![SecurityType::UserData]),
+            )
+            .with_replay_store(redis_conn.clone())
+            .with_route_configs(crate::state::api_key_route_configs())
+            .with_default_security(SecurityType::UserData);
+        let jwt_middleware = JwtAuthentication::new(
+            DecodingKey::from_secret(b"unused-test-secret"),
+            "vex-gateway".to_string(),
+            "api".to_string(),
+            redis_conn.clone(),
+        );
+        let session_service = Arc::new(SessionService::new(redis_conn, 300));
+        let app = test::init_service(
+            App::new()
+                .wrap(CombinedAuthMiddleware::new(
+                    jwt_middleware,
+                    api_key_middleware,
+                    session_service,
+                ))
+                .route("/api/balances", web::get().to(HttpResponse::Ok))
+                .route("/api/order", web::post().to(HttpResponse::Ok))
+                // A route for the signed-in person only, as `/api/profile` is.
+                .route(
+                    "/api/profile",
+                    web::get().to(|_: AuthenticatedUser| async { HttpResponse::Ok() }),
+                ),
+        )
+        .await;
+        let signed = |method: &str, path: &str| {
+            let query = format!("timestamp={}", Utc::now().timestamp_millis());
+            let payload = SignatureVerifier::build_request_payload(method, path, &query, "", false);
+            let signature = SignatureVerifier::generate_hmac(&payload, secret).unwrap();
+            test::TestRequest::default()
+                .method(method.parse().unwrap())
+                .uri(&format!("{path}?{query}&signature={signature}"))
+                .insert_header(("X-MBX-APIKEY", "read-only-test-key"))
+                .to_request()
+        };
+        let status = |result: Result<ServiceResponse, Error>| match result {
+            Ok(response) => response.status(),
+            Err(error) => error.as_response_error().status_code(),
+        };
+
+        let read = test::try_call_service(&app, signed("GET", "/api/balances")).await;
+        assert_eq!(status(read), StatusCode::OK);
+        let trade = test::try_call_service(&app, signed("POST", "/api/order")).await;
+        assert_eq!(status(trade), StatusCode::FORBIDDEN);
+        let profile = test::try_call_service(&app, signed("GET", "/api/profile")).await;
+        assert_eq!(status(profile), StatusCode::UNAUTHORIZED);
+    }
 }

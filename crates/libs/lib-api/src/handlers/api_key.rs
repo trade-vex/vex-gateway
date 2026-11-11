@@ -120,13 +120,13 @@ impl From<ApiKeyModel> for ApiKeyResponse {
     }
 }
 
-/// parse security type from string
+/// A key's permission: `trade` (place and cancel orders) or `user_data` (every other route an API
+/// key may reach). No route needs `none` or `user_stream`, so a key holding only those reaches
+/// nothing.
 fn parse_security_type(s: &str) -> Result<SecurityType, String> {
     match s.to_lowercase().as_str() {
-        "none" => Ok(SecurityType::None),
         "trade" => Ok(SecurityType::Trade),
         "user_data" => Ok(SecurityType::UserData),
-        "user_stream" => Ok(SecurityType::UserStream),
         _ => Err(format!("Invalid security type: {}", s)),
     }
 }

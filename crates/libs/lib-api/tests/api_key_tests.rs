@@ -259,7 +259,7 @@ mod tests {
         let request1 = create_test_request();
         let request2 = CreateApiKeyRequest {
             description: Some("Second API Key".to_string()),
-            permissions: vec!["user_stream".to_string()],
+            permissions: vec!["user_data".to_string()],
             recv_window: Some(10000),
             expires_at: None,
             ip_blacklist: None,
@@ -527,7 +527,7 @@ mod tests {
         };
 
         let update_request = UpdateApiKeyRequest {
-            permissions: vec!["user_stream".to_string()],
+            permissions: vec!["user_data".to_string()],
             ip_blacklist: None,
         };
 
@@ -558,7 +558,7 @@ mod tests {
                 assert!(api_key_response.api_key.contains("*"));
 
                 // Verifying the permissions were updated
-                assert_eq!(api_key_response.permissions, vec!["USER_STREAM"]);
+                assert_eq!(api_key_response.permissions, vec!["USER_DATA"]);
 
                 // Verifying the update in the database by fetching the API key
                 let updated_key = repo.find_by_id(api_key_id).await.unwrap().unwrap();
@@ -572,7 +572,7 @@ mod tests {
                     .into_iter()
                     .map(|p| p.to_string())
                     .collect();
-                assert_eq!(db_permissions, vec!["USER_STREAM"]);
+                assert_eq!(db_permissions, vec!["USER_DATA"]);
             }
             Err(e) => {
                 panic!("Update API key failed: {}", e);

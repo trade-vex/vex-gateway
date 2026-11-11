@@ -14,7 +14,7 @@ use lib_core::{
     OrderStore, PostgresTradingRepository, TradingRepository, UserBalanceStore,
     cache::scaling_cache::ScalingCache,
 };
-use lib_middleware::api_key::middleware::CacheConfig;
+use lib_middleware::api_key::middleware::{CacheConfig, RouteSecurityConfig};
 use lib_middleware::{
     ApiKeyMiddleware, SecurityType, TrustedProxies,
     repository::api_key_repository::{ApiKeyRepository, PostgresApiKeyRepository},
@@ -28,6 +28,19 @@ use tracing::{debug, info};
 use url::Url;
 
 use crate::rate_limit::RateLimiter;
+
+/// Placing and cancelling need a trading key; every other protected route is a signed read
+/// (`UserData`, the API-key middleware's default). A route for the signed-in person only (API-key
+/// management, logout, profile, change-password) takes lib_auth's `AuthenticatedUser`, which
+/// refuses API-key callers whatever their permissions.
+pub(crate) fn api_key_route_configs() -> Vec<RouteSecurityConfig> {
+    ["/api/order", "/api/cancel"]
+        .map(|path| RouteSecurityConfig {
+            path_pattern: path.into(),
+            security_type: SecurityType::Trade,
+        })
+        .into()
+}
 
 /// Central application state containing all dependencies
 ///
@@ -302,7 +315,8 @@ impl AppState {
         ApiKeyMiddleware::new()
             .with_repository(CacheConfig::default(), api_key_repo.clone())
             .with_replay_store(redis_conn)
-            .with_default_security(SecurityType::Trade)
+            .with_route_configs(api_key_route_configs())
+            .with_default_security(SecurityType::UserData)
     }
 
     /// Sanitize a URL string to remove credentials and sensitive information
