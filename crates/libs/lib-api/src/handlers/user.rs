@@ -61,21 +61,21 @@ use std::sync::Arc;
 /// ```json
 /// {
 ///   "error": "failed to retrieve balances",
-///   "message": "cache connection timeout"
+///   "message": "An internal error occurred. Please try again later."
 /// }
 /// ```
 ///
 /// # Data Source
-/// - Primary: Redis cache (sub-millisecond latency)
-/// - Fallback: PostgreSQL database (if cache miss)
-/// - Updates: Real-time via Kafka event streaming from VEX Core
+/// The read model's `trading.balances` in Postgres, which Kafka Connect fills from vex-core's
+/// events: as fresh as the connectors' lag.
 pub async fn get_balances(
     user: AuthenticatedUserId,
     balance_store: web::Data<Arc<UserBalanceStore>>,
+    trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
     let user_id = uuid_to_u64(user.0);
 
-    match balance_store.get_user_balances(user_id).await {
+    match trading_repo.get_user_balances(user_id).await {
         Ok(balances) => {
             let total_assets = balances.len();
             let balance_responses: Vec<UserBalanceResponse> = balances
@@ -158,9 +158,8 @@ pub async fn get_balances(
 /// ```
 ///
 /// # Data Source
-/// - Primary: Redis cache (sub-millisecond latency)
-/// - Fallback: PostgreSQL database (if cache miss)
-/// - Updates: Real-time via Kafka event streaming from VEX Core
+/// The read model's `trading.orders` in Postgres, which Kafka Connect fills from vex-core's
+/// events: as fresh as the connectors' lag.
 ///
 /// # Order States
 /// Only returns orders in "open" states:
@@ -212,13 +211,12 @@ pub async fn get_open_orders(
         }
     };
 
-    // Use trading_repo for paginated orders to ensure consistency with count
     match trading_repo
         .get_open_orders_paginated(user_id, offset, limit_u64, query.market_id)
         .await
     {
         Ok(orders) => {
-            // Use order_store.to_response for scaling
+            // order_store descales them
             let order_responses: Vec<OrderResponse> = orders
                 .into_iter()
                 .filter_map(|order| order_store.to_response(order))
@@ -311,9 +309,8 @@ pub async fn get_open_orders(
 /// ```
 ///
 /// # Data Source
-/// - Primary: Redis cache (sub-millisecond latency)
-/// - Fallback: PostgreSQL database (if cache miss)
-/// - Updates: Real-time via Kafka event streaming from VEX Core
+/// The read model's `trading.orders` in Postgres, which Kafka Connect fills from vex-core's
+/// events: as fresh as the connectors' lag.
 ///
 /// # Order States
 /// Returns orders in terminal states:
@@ -353,13 +350,12 @@ pub async fn get_order_history(
         }
     };
 
-    // Use trading_repo (not order_store cache) for consistency with count_order_history
     match trading_repo
         .get_order_history_paginated(user_id, offset, limit_u64, query.market_id)
         .await
     {
         Ok(orders) => {
-            // Use order_store.to_history_response for scaling
+            // order_store descales them
             let order_responses: Vec<OrderHistoryResponse> = orders
                 .into_iter()
                 .filter_map(|order| order_store.to_history_response(order))

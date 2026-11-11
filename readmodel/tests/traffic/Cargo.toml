@@ -8,5 +8,7 @@ publish = false
 common = { workspace = true }
 vex-config = { workspace = true }
 vex-networking = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 # The version vex-networking pins, for its embedded media driver.
 rusteron-media-driver = "=0.1.157"

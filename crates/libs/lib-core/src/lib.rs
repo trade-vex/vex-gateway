@@ -16,9 +16,9 @@ pub use repository::repository::{
     PostgresTradingRepository, Result as TradingResult, TradingError, TradingRepository,
 };
 
-pub use cache::user_store::{UserBalance, UserBalanceCacheConfig, UserBalanceStore};
+pub use cache::user_store::UserBalanceStore;
 
-pub use cache::order_store::{OrderCacheConfig, OrderData, OrderStore};
+pub use cache::order_store::OrderStore;
 
 pub use correlation::{
     generate_client_order_id, wait_for_response, CorrelationService, ResponseError,

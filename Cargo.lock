@@ -638,7 +638,7 @@ dependencies = [
 [[package]]
 name = "common"
 version = "0.1.0"
-source = "git+https://github.com/trade-vex/vex-core?rev=29092e3197b680f1e7a4b213cdb7f6e8cb860a35#29092e3197b680f1e7a4b213cdb7f6e8cb860a35"
+source = "git+https://github.com/trade-vex/vex-core?rev=194830ea73a488a5a9251857bfb91bdb57f18e37#194830ea73a488a5a9251857bfb91bdb57f18e37"
 dependencies = [
  "ahash 0.8.12",
  "borsh",
@@ -1004,19 +1004,6 @@ dependencies = [
  "darling_core 0.23.0",
  "quote",
  "syn 2.0.106",
-]
-
-[[package]]
-name = "dashmap"
-version = "5.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "978747c1d849a7d2ee5e8adc0159961c48fb7e5db2f06af6723b80123bb53856"
-dependencies = [
- "cfg-if",
- "hashbrown 0.14.5",
- "lock_api",
- "once_cell",
- "parking_lot_core",
 ]
 
 [[package]]
@@ -2310,8 +2297,7 @@ dependencies = [
  "chrono",
  "clickhouse",
  "common",
- "dashmap 6.1.0",
- "lib-db",
+ "dashmap",
  "num_cpus",
  "redis",
  "rust_decimal",
@@ -2324,26 +2310,6 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "vex-networking",
-]
-
-[[package]]
-name = "lib-db"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "dashmap 5.5.3",
- "futures",
- "once_cell",
- "rand 0.8.8",
- "redis",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -2384,7 +2350,7 @@ dependencies = [
  "chrono",
  "clickhouse",
  "common",
- "dashmap 6.1.0",
+ "dashmap",
  "futures-util",
  "jsonwebtoken",
  "lib-api",
@@ -3290,6 +3256,8 @@ version = "0.1.0"
 dependencies = [
  "common",
  "rusteron-media-driver",
+ "serde",
+ "serde_json",
  "vex-config",
  "vex-networking",
 ]
@@ -3701,7 +3669,7 @@ dependencies = [
 [[package]]
 name = "sbe_order"
 version = "0.1.0"
-source = "git+https://github.com/trade-vex/vex-core?rev=29092e3197b680f1e7a4b213cdb7f6e8cb860a35#29092e3197b680f1e7a4b213cdb7f6e8cb860a35"
+source = "git+https://github.com/trade-vex/vex-core?rev=194830ea73a488a5a9251857bfb91bdb57f18e37#194830ea73a488a5a9251857bfb91bdb57f18e37"
 
 [[package]]
 name = "schannel"
@@ -4547,7 +4515,6 @@ dependencies = [
  "lib-auth",
  "lib-config",
  "lib-core",
- "lib-db",
  "lib-server",
  "reqwest",
  "rust_decimal",
@@ -5081,7 +5048,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vex-config"
 version = "0.1.0"
-source = "git+https://github.com/trade-vex/vex-core?rev=29092e3197b680f1e7a4b213cdb7f6e8cb860a35#29092e3197b680f1e7a4b213cdb7f6e8cb860a35"
+source = "git+https://github.com/trade-vex/vex-core?rev=194830ea73a488a5a9251857bfb91bdb57f18e37#194830ea73a488a5a9251857bfb91bdb57f18e37"
 dependencies = [
  "common",
  "config",
@@ -5096,7 +5063,7 @@ dependencies = [
 [[package]]
 name = "vex-networking"
 version = "0.1.0"
-source = "git+https://github.com/trade-vex/vex-core?rev=29092e3197b680f1e7a4b213cdb7f6e8cb860a35#29092e3197b680f1e7a4b213cdb7f6e8cb860a35"
+source = "git+https://github.com/trade-vex/vex-core?rev=194830ea73a488a5a9251857bfb91bdb57f18e37#194830ea73a488a5a9251857bfb91bdb57f18e37"
 dependencies = [
  "arc-swap",
  "common",

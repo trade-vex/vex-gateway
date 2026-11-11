@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = [ "crates/bin" , "crates/tests" , "crates/libs/lib-api", "crates/libs/lib-server", "crates/libs/lib-config", "crates/libs/lib-auth", "crates/libs/lib-db", "crates/libs/lib-middleware", "crates/libs/lib-utils", "crates/libs/lib-core", "readmodel/seeds", "readmodel/tests/traffic"]
+members = [ "crates/bin" , "crates/tests" , "crates/libs/lib-api", "crates/libs/lib-server", "crates/libs/lib-config", "crates/libs/lib-auth", "crates/libs/lib-middleware", "crates/libs/lib-utils", "crates/libs/lib-core", "readmodel/seeds", "readmodel/tests/traffic"]
 
 [workspace.dependencies]
 # No HTTP/2, TLS or body (de)compression: the gateway listens on plain HTTP/1.1 behind the load
@@ -24,6 +24,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 reqwest = { version = "0.12", features = ["json"] }
 url = "2.5"
 
-vex-networking ={ git = "https://github.com/trade-vex/vex-core" , rev = "29092e3197b680f1e7a4b213cdb7f6e8cb860a35"}
-vex-config = { git = "https://github.com/trade-vex/vex-core" , rev = "29092e3197b680f1e7a4b213cdb7f6e8cb860a35"}
-common = { git = "https://github.com/trade-vex/vex-core" , rev = "29092e3197b680f1e7a4b213cdb7f6e8cb860a35"}
+vex-networking ={ git = "https://github.com/trade-vex/vex-core" , rev = "194830ea73a488a5a9251857bfb91bdb57f18e37"}
+vex-config = { git = "https://github.com/trade-vex/vex-core" , rev = "194830ea73a488a5a9251857bfb91bdb57f18e37"}
+common = { git = "https://github.com/trade-vex/vex-core" , rev = "194830ea73a488a5a9251857bfb91bdb57f18e37"}

@@ -211,18 +211,6 @@ Run Redis with `maxmemory-policy noeviction`. Two kinds of gateway state must ne
 
 With `noeviction`, a full Redis refuses writes and the affected requests fail instead.
 
-### Balance Cache
-
-The gateway only reads balances from Redis. It lists a user's assets from the set
-`user:<user_id>:balances` and then reads each `user:<user_id>:asset:<asset_id>:balance` hash.
-When the set is empty, or lists an asset without a readable hash, the gateway serves the user's
-balances from Postgres instead.
-
-The Events Handler must therefore `SADD` the asset id to that set in the same `MULTI`/`EXEC` as the
-`HSET` of the balance hash. A `SADD` that lands after the `HSET` leaves a window in which the new
-asset is missing from an otherwise complete answer. Until the writer maintains the set, every
-balance read is served from Postgres, which can lag Redis.
-
 ### Generate JWT Keys
 
 ```bash
@@ -241,7 +229,10 @@ openssl rsa -in private_key.pem -pubout -out public_key.pem
 The gateway's Postgres database holds the gateway's own tables (`users`, `api_keys`,
 `user_favorite_markets`, and `markets` and `assets`, which mirror vex-core's symbol configuration)
 and the `trading` schema: vex-core's Kafka events, which Kafka Connect writes there. The gateway
-may only read `trading`. Everything for it lives in `readmodel/`:
+may only read `trading`: `GET /api/balances` reads `trading.balances`, and `GET /api/orders/open`
+and `/api/orders/history` read `trading.orders`, as fresh as the connectors' lag. Redis holds only
+the gateway's own state (sessions, tokens, OTP and OAuth state, rate limits, API-key signatures,
+order idempotency claims). Everything for the read model lives in `readmodel/`:
 
 - `migrations/postgres/`: the schema, as forward-only plain SQL migrations for golang-migrate.
 - `seeds/`: `readmodel-seeds`, which writes the `markets` and `assets` rows from a vex-core
@@ -263,9 +254,12 @@ the unsigned value.
 
 In this order:
 
-1. **Topics.** vex-core's seven event topics (`balances`, `orders`, `orderbook`, `cancels`,
-   `trades`, `deposits`, `withdrawals`) exist before vex-core starts, with fixed partition counts
-   and replication factor 3. The brokers run with `auto.create.topics.enable=false`.
+1. **Topics.** Apply vex-core's `deploy/kafka/topics.toml`, at the vex-core revision being
+   deployed, with its `cargo xtask kafka apply` (vex-core `deploy/kafka/README.md`): the seven
+   event topics (`balances`, `orders`, `orderbook`, `cancels`, `trades`, `deposits`,
+   `withdrawals`), with fixed partition counts and replication factor 3, `vex-core.delivered`, and
+   the subjects' compatibility. The brokers run with `auto.create.topics.enable=false`, and
+   vex-core refuses to start without its topics.
 2. **Migrations,** on PostgreSQL 15 or later, as the database owner, which needs `CREATEROLE` the
    first time on a server:
    ```bash
@@ -341,10 +335,9 @@ In this order:
    with Connect's database login. Let only the deploy job and operators reach it (network
    policy). Its config providers read nothing but `KAFKA_BOOTSTRAP_SERVERS`, `SCHEMA_REGISTRY_URL`
    and the files in `/etc/vex-connect`.
-6. **vex-core.**
-7. **The gateway.** It still reads balances and orders from `trading.balances_events` and
-   `trading.orders_events`, which this schema does not have, so those endpoints fail until it
-   reads `trading.balances` and `trading.orders`.
+6. **vex-core.** Every start replays its journal, and re-publishes the events of the commands
+   that its last run may not have delivered: the connectors absorb the copies.
+7. **The gateway,** with the gateway login.
 
 ### Read Model Roles
 
@@ -366,7 +359,7 @@ principal of its own until it authenticates (step 5 of
 - `Create`, `Describe`, `DescribeConfigs`, `Read` and `Write` on the topics prefixed
   `vex-readmodel-connect-`, its internal topics.
 
-vex-core's principal needs `Write` and `Describe` on the seven event topics.
+vex-core's principal needs what vex-core's `deploy/kafka/README.md` ("ACLs") lists.
 
 ### Connector Failures
 
@@ -449,8 +442,10 @@ means the certificate does not name the host in `server`. Fix the file, the cert
 - A new `trading.proto` field needs its column, deployed before the vex-core that publishes it.
 - A new `trading` table needs its `keep_newer` trigger, its grants to `readmodel_connect` and
   `readmodel_gateway`, and a connector file.
-- `python3 readmodel/tests/run.py` checks all of these. It needs Docker and openssl, and runs the
-  stack with the vex-core rev `Cargo.lock` pins; CI runs it (the "Read model" job, which keeps
+- `python3 readmodel/tests/run.py` checks all of these, and that the latest-state tables hold the
+  engine's state after a restart of vex-core, a Kafka outage and a `kill -9` of vex-core. It needs
+  Docker and openssl, and runs the stack with the vex-core rev `Cargo.lock` pins, its topics from
+  that rev's `deploy/kafka/topics.toml`; CI runs it (the "Read model" job, which keeps
   the images' layers in the GitHub Actions cache) on pushes to `main` and `develop` and on pull
   requests that change `readmodel/`, `Cargo.lock`, the gateway's repository or model code, or
   `ci.yml`.
@@ -708,7 +703,7 @@ grep -i "memory\|oom" logs/app.log
 
 2. **Service Impact**
    - User registration/login may fail
-   - Order history queries will fail
+   - Balance, open-order and order-history queries will fail: they read the read model
    - API key management will fail
    - **Order placement may still work** (if VEX Core is up)
 

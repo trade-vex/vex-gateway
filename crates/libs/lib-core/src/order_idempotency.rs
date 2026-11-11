@@ -349,8 +349,8 @@ mod tests {
     };
 
     /// The store on `REDIS_URL` (default local 6379), or `None` when Redis is unreachable so the
-    /// calling test skips instead of failing a plain `cargo test` (same guard as the live tests
-    /// in `tests/order_store_tests.rs`). CI sets `REDIS_URL` to its Redis service.
+    /// calling test skips instead of failing a plain `cargo test`. CI sets `REDIS_URL` to its
+    /// Redis service.
     async fn store() -> Option<OrderIdempotencyStore> {
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());

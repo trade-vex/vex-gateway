@@ -1,7 +1,7 @@
 # The read model's test stack: a three-broker Redpanda (Kafka and Schema Registry), Postgres, the
-# Kafka Connect worker of readmodel/connect and the real vex-core at the rev Cargo.lock pins, built
-# from vex-core's own Dockerfile. run.py drives it; nothing publishes a fixed host port, and every
-# Aeron directory is inside a container.
+# Kafka Connect worker of readmodel/connect and the real vex-core at the rev Cargo.lock pins, with
+# the Aeron Archive that journals its commands, both built from vex-core's own Dockerfiles. run.py
+# drives it; nothing publishes a fixed host port, and every Aeron directory is inside a container.
 #
 # CORE_DIR is a checkout of trade-vex/vex-core at CORE_REV; TLS_DIR holds the throwaway CA and
 # server certificates run.py generates.
@@ -21,8 +21,12 @@ x-redpanda: &redpanda
       --kafka-addr=internal://0.0.0.0:9092 --advertise-kafka-addr=internal://$$HOSTNAME:9092
       --rpc-addr=0.0.0.0:33145 --advertise-rpc-addr=$$HOSTNAME:33145
       --set redpanda.auto_create_topics_enabled=false
+  # Healthy: the cluster is, and this broker's Schema Registry answers. docker pause marks a broker
+  # unhealthy until this passes again (run.py wait_for_kafka).
   healthcheck:
-    test: ["CMD-SHELL", "rpk cluster health | grep -Eq 'Healthy:.+true'"]
+    test:
+      - CMD-SHELL
+      - rpk cluster health | grep -Eq 'Healthy:.+true' && rpk registry subject list > /dev/null
     interval: 2s
     timeout: 5s
     retries: 60
@@ -87,6 +91,23 @@ services:
       timeout: 5s
       retries: 90
 
+  # The media driver the core uses, with the Aeron Archive that journals its commands, as the
+  # pinned vex-core's own test stack runs it (xtask/tests/archive.Dockerfile). The core shares its
+  # network and IPC namespaces, so the journal outlives a core that is stopped or killed, and the
+  # core replays it at every start.
+  aeron-archive:
+    build:
+      context: ${CORE_DIR:?}/xtask/tests
+      dockerfile: archive.Dockerfile
+    image: vex-readmodel-archive:${CORE_REV:?}
+    ipc: shareable
+    shm_size: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /dev/shm/aeron-test-server/cnc.dat"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
   core:
     build:
       context: ${CORE_DIR:?}
@@ -96,22 +117,21 @@ services:
       redpanda-0: {condition: service_healthy}
       redpanda-1: {condition: service_healthy}
       redpanda-2: {condition: service_healthy}
+      aeron-archive: {condition: service_healthy}
     environment:
       VEX_ENV: development
-      VEX_SERVER_HOST: core
+      # Set, it binds the core to every interface; it is reached as aeron-archive.
+      VEX_SERVER_HOST: aeron-archive
       VEX_SERVER_PORT: "3521"
       VEX__KAFKA_BROKER: redpanda-0:9092,redpanda-1:9092,redpanda-2:9092
       VEX__SCHEMA_REGISTRY_URL: http://redpanda-0:8081
-      # No Aeron Archive: these tests never restart the core.
-      VEX_DISABLE_ARCHIVE: "1"
-      AERON_DIR: /dev/shm/aeron-test-server
-      AERON_RESERVED_SESSION_ID_LOW: "1"
-      AERON_RESERVED_SESSION_ID_HIGH: "2147483647"
       LD_LIBRARY_PATH: /usr/local/lib
+      RUST_LOG: info
+    network_mode: service:aeron-archive
+    ipc: service:aeron-archive
     volumes:
       # The configuration readmodel/seeds/development.sql is generated from.
       - ${CORE_DIR:?}/config.dev.yaml:/etc/vex/config.dev.yaml:ro
-    shm_size: 512m
     healthcheck:
       test: ["CMD-SHELL", "pgrep -x test_server && test -f /dev/shm/aeron-test-server/cnc.dat"]
       interval: 2s

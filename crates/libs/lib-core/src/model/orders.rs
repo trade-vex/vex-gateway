@@ -1,36 +1,24 @@
-use sea_orm::prelude::*;
-use serde::{Deserialize, Serialize};
+use sea_orm::FromQueryResult;
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {}
-
-/// Order events from trading.orders_events table
-/// Populated by Kafka consumer from OrderEvent messages
-/// Note: order_order_id and order_user_id stored as Decimal to handle u64 range (> i64::MAX)
-/// Column names match the schema with flattened Order struct prefix (order_*)
-#[derive(Debug, Clone, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
-#[sea_orm(table_name = "orders_events", schema_name = "trading")]
+/// A row of `trading.orders`: an order after the latest command that changed it, which Kafka
+/// Connect writes from vex-core's `OrderEvent`s (the `Order` fields carry the `order_` prefix of
+/// Connect's Flatten). The gateway only reads it, so this is a query result, not an entity that
+/// could be written.
+///
+/// vex-core's `u64` values are stored with the same bits in these `BIGINT` columns: decode them
+/// with `as u64` (`as u32` for `market_id`). Side, time in force and status are vex-core's
+/// protobuf enum value names (`SIDE_*`, `TIF_*`, `STATUS_*`).
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
 pub struct Model {
-    #[sea_orm(primary_key, auto_increment = true)]
-    pub id: i64,
-    pub market_id: i32,
-    #[sea_orm(column_type = "BigInteger")]
     pub order_order_id: i64,
-    #[sea_orm(column_type = "BigInteger")]
     pub order_user_id: i64,
-    #[sea_orm(column_type = "BigInteger")]
     pub order_price: i64,
-    #[sea_orm(column_type = "BigInteger")]
     pub order_size: i64,
-    #[sea_orm(column_type = "BigInteger")]
     pub order_filled_size: i64,
     pub order_side: String,
     pub order_time_in_force: String,
     pub order_status: String,
-    #[sea_orm(column_type = "BigInteger")]
-    pub order_timestamp: i64,
-    #[sea_orm(column_type = "Timestamp")]
-    pub created_at: Option<DateTime>,
+    /// The command's engine timestamp, in nanoseconds since the Unix epoch.
+    pub event_ts: i64,
+    pub market_id: i64,
 }
-
-impl ActiveModelBehavior for ActiveModel {}

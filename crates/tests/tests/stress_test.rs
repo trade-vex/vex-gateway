@@ -19,9 +19,8 @@
 use actix_web::{App, HttpResponse, HttpServer, Result, web};
 use common::{OrderCommand, OrderCommandType, Side, Status, TimeInForce, UserBalance};
 use lib_core::{
-    CorrelationService, OrderCacheConfig, OrderStore, OrdersListResponse,
-    PostgresTradingRepository, Publisher, UserBalanceCacheConfig, UserBalanceStore,
-    generate_client_order_id, wait_for_response,
+    CorrelationService, OrdersListResponse, PostgresTradingRepository, Publisher,
+    TradingRepository, generate_client_order_id, wait_for_response,
 };
 use sea_orm::{Database, DatabaseConnection};
 use serde::{Deserialize, Serialize};
@@ -275,20 +274,21 @@ struct TestBalancesList {
 
 async fn test_get_balances(
     user_id: web::Path<u64>,
-    balance_store: web::Data<Arc<UserBalanceStore>>,
+    trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
     let user_id = *user_id;
 
-    match balance_store.get_user_balances(user_id).await {
+    match trading_repo.get_user_balances(user_id).await {
         Ok(balances) => {
             let total_assets = balances.len();
             let balance_responses: Vec<_> = balances
                 .into_iter()
+                // The columns hold vex-core's u64 values with the same bits.
                 .map(|b| TestUserBalance {
                     asset_id: b.asset_id as u32,
-                    available: b.available.to_string(),
-                    locked: b.locked.to_string(),
-                    total: b.total.to_string(),
+                    available: (b.available as u64).to_string(),
+                    locked: (b.locked as u64).to_string(),
+                    total: (b.total as u64).to_string(),
                 })
                 .collect();
 
@@ -306,11 +306,14 @@ async fn test_get_balances(
 
 async fn test_get_open_orders(
     user_id: web::Path<u64>,
-    order_store: web::Data<Arc<OrderStore>>,
+    trading_repo: web::Data<Arc<dyn TradingRepository>>,
 ) -> Result<HttpResponse> {
     let user_id = *user_id;
 
-    match order_store.get_user_orders(user_id).await {
+    match trading_repo
+        .get_open_orders_paginated(user_id, 0, 100, None)
+        .await
+    {
         Ok(orders) => {
             let total = orders.len();
             Ok(HttpResponse::Ok().json(OrdersListResponse {
@@ -333,23 +336,19 @@ async fn test_get_open_orders(
 fn spawn_test_server(
     publisher: Publisher,
     correlation_service: CorrelationService,
-    balance_store: UserBalanceStore,
-    order_store: OrderStore,
+    trading_repo: Arc<dyn TradingRepository>,
 ) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to bind random port");
     let port = listener.local_addr().unwrap().port();
 
     let publisher = Arc::new(publisher);
     let correlation_service = Arc::new(correlation_service);
-    let balance_store = Arc::new(balance_store);
-    let order_store = Arc::new(order_store);
 
     let server = HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(publisher.clone()))
             .app_data(web::Data::new(correlation_service.clone()))
-            .app_data(web::Data::new(balance_store.clone()))
-            .app_data(web::Data::new(order_store.clone()))
+            .app_data(web::Data::new(trading_repo.clone()))
             .route("/test/faucet/deposit", web::post().to(test_deposit_funds))
             .route("/test/order/place", web::post().to(test_place_order))
             .route("/test/order/cancel", web::post().to(test_cancel_order))
@@ -391,8 +390,6 @@ async fn test_high_frequency_stress_test() {
     println!("╚═══════════════════════════════════════════════════════════════╝\n");
 
     // Setup
-    let redis_url =
-        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6380".to_string());
     let db = init_database().await;
 
     // Initialize VEX Gateway
@@ -413,42 +410,10 @@ async fn test_high_frequency_stress_test() {
         .start(handler)
         .expect("Failed to start VexGateway");
 
-    let balance_store = if let Some(ref db_conn) = db {
-        let trading_repo = Arc::new(PostgresTradingRepository::new(db_conn.clone()));
-        UserBalanceStore::with_redis_cache(
-            UserBalanceCacheConfig { enabled: true },
-            redis_url.clone(),
-            Some(trading_repo),
-        )
-        .await
-        .expect("Failed to create UserBalanceStore")
-    } else {
-        UserBalanceStore::with_redis_cache(
-            UserBalanceCacheConfig { enabled: true },
-            redis_url.clone(),
-            None,
-        )
-        .await
-        .expect("Failed to create UserBalanceStore")
-    };
+    let db = db.expect("balances and orders are read from the read model's Postgres");
+    let trading_repo: Arc<dyn TradingRepository> = Arc::new(PostgresTradingRepository::new(db));
 
-    let order_store = if let Some(ref db_conn) = db {
-        let trading_repo = Arc::new(PostgresTradingRepository::new(db_conn.clone()));
-        OrderStore::with_redis_cache(
-            OrderCacheConfig { enabled: true },
-            redis_url.clone(),
-            Some(trading_repo),
-        )
-        .await
-        .expect("Failed to create OrderStore")
-    } else {
-        OrderStore::with_redis_cache(OrderCacheConfig { enabled: true }, redis_url.clone(), None)
-            .await
-            .expect("Failed to create OrderStore")
-    };
-
-    let server_address =
-        spawn_test_server(publisher, correlation_service, balance_store, order_store);
+    let server_address = spawn_test_server(publisher, correlation_service, trading_repo);
 
     println!("🚀 Server: {}", server_address);
     println!("⏳ Waiting 10s for Kafka topics to initialize...");
@@ -592,7 +557,7 @@ async fn test_high_frequency_stress_test() {
             let cancel_count = (orders_data.total / 2).max(1); // Cancel at least 1
             for i in 0..cancel_count.min(orders_data.orders.len()) {
                 let order = &orders_data.orders[i];
-                let order_id: u64 = order.order_id.try_into().unwrap_or(0); // Convert Decimal to u64
+                let order_id = order.order_id;
 
                 let resp = post_expecting_success(
                     &client,
