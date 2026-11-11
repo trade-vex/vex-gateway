@@ -3,9 +3,9 @@
 use actix_web::{HttpRequest, HttpResponse, http::StatusCode, web};
 use common::{OrderCommand, OrderCommandType, Side, Status, TimeInForce, UserBalance};
 use lib_core::{
-    CompletionWait, CorrelationService, IdempotentOrderOutcome, OrderClaim, OrderIdempotencyError,
-    OrderIdempotencyStore, Publisher, ReleaseReason, ResponseError, generate_client_order_id,
-    wait_for_response,
+    CompletionWait, CorrelationService, EngineLink, IdempotentOrderOutcome, OrderClaim,
+    OrderIdempotencyError, OrderIdempotencyStore, ReleaseReason, ResponseError,
+    generate_client_order_id, wait_for_response,
 };
 use lib_utils::{AuthenticatedUserId, uuid_to_u64};
 use serde::{Deserialize, Serialize};
@@ -165,13 +165,6 @@ pub struct OrderResponse {
     pub message: String,
 }
 
-fn gateway_error_status(error: &GatewayError) -> StatusCode {
-    match error {
-        GatewayError::Busy | GatewayError::NotConnected => StatusCode::SERVICE_UNAVAILABLE,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-    }
-}
-
 const ENGINE_BUSY_MESSAGE: &str = "Matching engine is busy; please retry";
 const ENGINE_BUSY_RETRY_AFTER_SECS: u32 = 1;
 
@@ -192,26 +185,47 @@ fn engine_busy_response(order_id: u64, client_order_id: u64) -> HttpResponse {
         })
 }
 
-/// Answers a publish that failed, so nothing reached the engine. A busy engine is expected back
-/// shortly; a disconnected one (down or restarting) is not, so it gets no `Retry-After`. Any other
-/// error means this gateway's own publication is unusable.
+const ENGINE_UNAVAILABLE_MESSAGE: &str = "Matching engine unavailable";
+/// The gateway reconnects to the engine on its own: an attempt waiting for the engine connects as
+/// soon as it is back, and failed attempts are at most 10 s apart.
+const ENGINE_UNAVAILABLE_RETRY_AFTER_SECS: u32 = 5;
+
+/// The one answer while there is no link to the engine (it is down or restarting, and the gateway
+/// is reconnecting): the request was not executed, or it is a cancel, which is safe to send
+/// again, so the client may resend it after `Retry-After`.
+fn engine_unavailable_response(order_id: u64, client_order_id: u64) -> HttpResponse {
+    HttpResponse::ServiceUnavailable()
+        .insert_header((
+            actix_web::http::header::RETRY_AFTER,
+            ENGINE_UNAVAILABLE_RETRY_AFTER_SECS,
+        ))
+        .json(OrderResponse {
+            order_id,
+            client_order_id,
+            status: "error".to_string(),
+            message: ENGINE_UNAVAILABLE_MESSAGE.to_string(),
+        })
+}
+
+/// Answers a publish that failed, so nothing reached the engine: busy or unavailable, both
+/// retryable, or a 500 for any other error, which means this gateway's own publication is
+/// unusable.
 fn send_failure_response(
     error: &GatewayError,
     request: &str,
     order_id: u64,
     client_order_id: u64,
 ) -> HttpResponse {
-    let message = match error {
-        GatewayError::Busy => return engine_busy_response(order_id, client_order_id),
-        GatewayError::NotConnected => "Matching engine unavailable".to_string(),
-        _ => format!("Failed to send {request}: {error}"),
-    };
-    HttpResponse::build(gateway_error_status(error)).json(OrderResponse {
-        order_id,
-        client_order_id,
-        status: "error".to_string(),
-        message,
-    })
+    match error {
+        GatewayError::Busy => engine_busy_response(order_id, client_order_id),
+        GatewayError::NotConnected => engine_unavailable_response(order_id, client_order_id),
+        _ => HttpResponse::InternalServerError().json(OrderResponse {
+            order_id,
+            client_order_id,
+            status: "error".to_string(),
+            message: format!("Failed to send {request}: {error}"),
+        }),
+    }
 }
 
 /// Why a failed publish gives its idempotency claim back. A request waiting on the claim then gets
@@ -404,7 +418,7 @@ async fn await_in_flight_order(
             engine_busy_response(0, client_order_id)
         }
         Ok(CompletionWait::Released(ReleaseReason::EngineUnavailable)) => {
-            send_failure_response(&GatewayError::NotConnected, "order", 0, client_order_id)
+            engine_unavailable_response(0, client_order_id)
         }
         Ok(CompletionWait::Unresolved) => HttpResponse::RequestTimeout().json(OrderResponse {
             order_id: 0,
@@ -457,6 +471,23 @@ async fn settle_idempotent_order(
     complete_idempotent_order(store, user_id, idempotency_key, fingerprint, outcome).await
 }
 
+/// The answer to an order sent on a link that was lost before the engine answered. The engine may
+/// have executed it, so it is a timeout's answer, given at once: a 503 would tell the client that
+/// nothing was executed.
+fn link_lost_outcome(client_order_id: u64) -> IdempotentOrderOutcome {
+    IdempotentOrderOutcome {
+        http_status: StatusCode::REQUEST_TIMEOUT.as_u16(),
+        order_id: 0,
+        client_order_id,
+        status: "outcome_unknown".to_string(),
+        message: outcome_unknown_message(
+            "The link to the matching engine was lost after the order was sent, so its outcome \
+             is unknown.",
+            client_order_id,
+        ),
+    }
+}
+
 fn parse_order_id(order_id: &str) -> Result<u64, std::num::ParseIntError> {
     order_id.parse()
 }
@@ -481,7 +512,10 @@ fn parse_order_id(order_id: &str) -> Result<u64, std::num::ParseIntError> {
 /// # Response
 /// Returns [`OrderResponse`] with order details and status.
 /// A matching-engine `Rejected` status is returned as HTTP 422 Unprocessable Entity, and a `Busy`
-/// one (the engine was too busy to accept the request) as 503 with `Retry-After`.
+/// one (the engine was too busy to accept the request) as 503 with `Retry-After`. While there is
+/// no link to the engine, the order is not sent and the answer is 503 `Matching engine
+/// unavailable` with `Retry-After`. An order whose link is lost after it was sent gets the 408
+/// `outcome_unknown` of a timeout at once, recorded under its idempotency key.
 ///
 /// # Example Request
 /// ```bash
@@ -535,7 +569,7 @@ pub async fn place_order(
     request: HttpRequest,
     order_data: web::Json<OrderRequest>,
     auth_user: AuthenticatedUserId,
-    publisher: web::Data<Arc<Publisher>>,
+    engine_link: web::Data<EngineLink>,
     correlation_service: web::Data<Arc<CorrelationService>>,
     idempotency_store: web::Data<Arc<OrderIdempotencyStore>>,
 ) -> HttpResponse {
@@ -681,7 +715,7 @@ pub async fn place_order(
     };
 
     // Send to VEX Core
-    let send_result = publisher.try_send_order_command(&command);
+    let send_result = engine_link.try_send_order_command(&command);
 
     if let Err(e) = send_result {
         correlation_service.cancel_request(client_order_id);
@@ -780,24 +814,22 @@ pub async fn place_order(
             )
             .await
         }
-        Err(ResponseError::Cancelled) => {
-            error!(
+        Err(ResponseError::LinkLost) => {
+            warn!(
                 client_order_id = client_order_id,
-                "Response channel cancelled"
+                user_id = user_id,
+                "Engine link lost before the order's response"
             );
 
+            // The order was sent, so the engine may have executed it: the outcome is recorded
+            // like a timeout's instead of the claim being released, so a retry with this key
+            // cannot place it twice.
             complete_idempotent_order(
                 &idempotency_store,
                 user_id,
                 &idempotency_key,
                 &fingerprint,
-                IdempotentOrderOutcome {
-                    http_status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-                    order_id: 0,
-                    client_order_id,
-                    status: "error".to_string(),
-                    message: "Internal error".to_string(),
-                },
+                link_lost_outcome(client_order_id),
             )
             .await
         }
@@ -821,7 +853,10 @@ pub async fn place_order(
 /// # Response
 /// Returns [`OrderResponse`] with cancellation status.
 /// A matching-engine `Rejected` status is returned as HTTP 422 Unprocessable Entity, and a `Busy`
-/// one (the engine was too busy to accept the request) as 503 with `Retry-After`.
+/// one (the engine was too busy to accept the request) as 503 with `Retry-After`. While there is
+/// no link to the engine, or when it is lost before the engine answers, the answer is 503
+/// `Matching engine unavailable` with `Retry-After`. A lost link may have delivered the cancel,
+/// but sending it again is safe: it is rejected (422) once the order is no longer open.
 ///
 /// # Example Request
 /// ```bash
@@ -866,7 +901,7 @@ pub async fn place_order(
 pub async fn cancel_order(
     cancel_data: web::Json<CancelOrderRequest>,
     auth_user: AuthenticatedUserId,
-    publisher: web::Data<Arc<Publisher>>,
+    engine_link: web::Data<EngineLink>,
     correlation_service: web::Data<Arc<CorrelationService>>,
 ) -> HttpResponse {
     let start = Instant::now();
@@ -917,7 +952,7 @@ pub async fn cancel_order(
     };
 
     // Send cancel command
-    let send_result = publisher.try_send_order_command(&command);
+    let send_result = engine_link.try_send_order_command(&command);
 
     if let Err(e) = send_result {
         correlation_service.cancel_request(client_order_id);
@@ -961,12 +996,7 @@ pub async fn cancel_order(
                 message: "Cancel timeout".to_string(),
             })
         }
-        Err(ResponseError::Cancelled) => HttpResponse::InternalServerError().json(OrderResponse {
-            order_id,
-            client_order_id,
-            status: "error".to_string(),
-            message: "Internal error".to_string(),
-        }),
+        Err(ResponseError::LinkLost) => engine_unavailable_response(order_id, client_order_id),
     }
 }
 
@@ -975,16 +1005,6 @@ mod tests {
     use super::*;
     use actix_web::http::StatusCode;
     use vex_networking::client::GatewayError;
-
-    #[test]
-    fn busy_and_not_connected_map_to_service_unavailable() {
-        for error in [GatewayError::Busy, GatewayError::NotConnected] {
-            assert_eq!(
-                gateway_error_status(&error),
-                StatusCode::SERVICE_UNAVAILABLE
-            );
-        }
-    }
 
     async fn body_message(response: HttpResponse) -> String {
         let body = actix_web::body::to_bytes(response.into_body())
@@ -1012,17 +1032,110 @@ mod tests {
         }
     }
 
+    /// The gateway reconnects on its own, so a client may resend after `Retry-After`.
+    fn assert_engine_unavailable_headers(response: &HttpResponse) {
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(actix_web::http::header::RETRY_AFTER)
+                .unwrap(),
+            "5"
+        );
+    }
+
     #[actix_web::test]
-    async fn disconnected_engine_is_an_unavailable_503_without_retry_after() {
+    async fn disconnected_engine_is_a_retryable_unavailable_503() {
         let response = send_failure_response(&GatewayError::NotConnected, "cancel", 9, 7);
 
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_engine_unavailable_headers(&response);
+        assert_eq!(body_message(response).await, ENGINE_UNAVAILABLE_MESSAGE);
+    }
+
+    /// An order sent before the link was lost may have executed: it gets a timeout's answer, which
+    /// never invites a resend, unlike the 503s.
+    #[actix_web::test]
+    async fn order_whose_link_was_lost_has_an_unknown_outcome_and_no_retry_after() {
+        let response = response_from_outcome(link_lost_outcome(7));
+
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
         assert!(
             !response
                 .headers()
                 .contains_key(actix_web::http::header::RETRY_AFTER)
         );
-        assert_eq!(body_message(response).await, "Matching engine unavailable");
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["status"], "outcome_unknown");
+        assert_eq!(
+            body["message"],
+            "The link to the matching engine was lost after the order was sent, so its outcome is \
+             unknown. Retain client_order_id 7 and check open orders or order history after \
+             asynchronous persistence catches up. Do not retry this idempotency key."
+        );
+    }
+
+    #[actix_web::test]
+    async fn order_endpoints_answer_unavailable_while_the_engine_link_is_down() {
+        use actix_web::HttpMessage as _;
+        use actix_web::dev::Service as _;
+
+        let Some(store) = live_idempotency_store().await else {
+            return;
+        };
+        // No engine link has been established, and the caller is authenticated.
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(EngineLink::new()))
+                .app_data(web::Data::new(Arc::new(CorrelationService::new())))
+                .app_data(web::Data::new(Arc::new(store)))
+                .wrap_fn(|request, service| {
+                    request.extensions_mut().insert(
+                        lib_auth::middleware::jwt_auth::AuthenticatedUser {
+                            user_id: uuid::Uuid::new_v4(),
+                        },
+                    );
+                    service.call(request)
+                })
+                .configure(crate::routes::order_route::configure),
+        )
+        .await;
+
+        let order = actix_web::test::TestRequest::post()
+            .uri("/order")
+            .insert_header((
+                IDEMPOTENCY_KEY_HEADER,
+                format!("no-link-{}", generate_client_order_id()),
+            ))
+            .set_json(serde_json::json!({
+                "price": 100,
+                "volume": 1,
+                "market_id": 1,
+                "side": "Bid",
+                "time_in_force": "Gtc",
+                "order_type": "Limit",
+            }))
+            .to_request();
+        let cancel = actix_web::test::TestRequest::post()
+            .uri("/cancel")
+            .set_json(serde_json::json!({ "order_id": "9", "market_id": 1 }))
+            .to_request();
+
+        for request in [order, cancel] {
+            let response = actix_web::test::call_service(&app, request).await;
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(actix_web::http::header::RETRY_AFTER)
+                    .unwrap(),
+                "5"
+            );
+            let body: serde_json::Value = actix_web::test::read_body_json(response).await;
+            assert_eq!(body["message"], ENGINE_UNAVAILABLE_MESSAGE);
+        }
     }
 
     #[actix_web::test]
@@ -1122,19 +1235,15 @@ mod tests {
     }
 
     #[test]
-    fn send_error_maps_to_internal_server_error() {
-        assert_eq!(
-            gateway_error_status(&GatewayError::SendError("send failed".to_string())),
-            StatusCode::INTERNAL_SERVER_ERROR
+    fn protocol_error_is_a_500() {
+        let response = send_failure_response(
+            &GatewayError::ProtocolError("invalid command".to_string()),
+            "order",
+            0,
+            7,
         );
-    }
 
-    #[test]
-    fn protocol_error_maps_to_internal_server_error() {
-        assert_eq!(
-            gateway_error_status(&GatewayError::ProtocolError("invalid command".to_string())),
-            StatusCode::INTERNAL_SERVER_ERROR
-        );
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     use std::sync::{Arc, Mutex};
@@ -1407,13 +1516,8 @@ mod tests {
         let response =
             await_in_flight_order(&store, user_id, &key, "payload", client_order_id).await;
 
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert!(
-            !response
-                .headers()
-                .contains_key(actix_web::http::header::RETRY_AFTER)
-        );
-        assert_eq!(body_message(response).await, "Matching engine unavailable");
+        assert_engine_unavailable_headers(&response);
+        assert_eq!(body_message(response).await, ENGINE_UNAVAILABLE_MESSAGE);
     }
 
     #[tokio::test]

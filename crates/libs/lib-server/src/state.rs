@@ -8,9 +8,8 @@ use lib_auth::config::{AuthConfig, JwtConfig, RedisConfig};
 use lib_auth::repository::{PostgresUserRepository, UserRepository};
 use lib_auth::service::{EmailService, OAuthService, SessionService, TokenService};
 use lib_config::ClickHouseConfig;
-use lib_core::Publisher;
 use lib_core::repository::repository::{ClickHousePortfolioRepository, PortfolioRepository};
-use lib_core::{CorrelationService, OrderIdempotencyStore};
+use lib_core::{CorrelationService, EngineLink, OrderIdempotencyStore};
 use lib_core::{
     OrderStore, PostgresTradingRepository, TradingRepository, UserBalanceStore,
     cache::scaling_cache::ScalingCache,
@@ -51,9 +50,9 @@ pub struct AppState {
     pub email_service: EmailService,
     pub session_service: SessionService,
 
-    // Gateway publisher for order processing, shared without a lock: publishing offers once to a
-    // concurrent Aeron publication through `&self`
-    pub gateway_publisher: Arc<Publisher>,
+    // The link to vex-core that orders are published on. Requests read it without a lock; the
+    // engine link supervisor swaps it when it reconnects.
+    pub engine_link: EngineLink,
 
     // API key middleware for dynamic updates
     pub api_key_middleware: ApiKeyMiddleware,
@@ -77,7 +76,7 @@ impl AppState {
     pub async fn new(
         config: &AuthConfig,
         clickhouse: &ClickHouseConfig,
-        gateway_publisher: Publisher,
+        engine_link: EngineLink,
         correlation_service: CorrelationService,
     ) -> Result<Arc<Self>, Box<dyn std::error::Error + Send + Sync>> {
         info!("Initializing App State");
@@ -171,7 +170,7 @@ impl AppState {
             oauth_service,
             email_service,
             session_service,
-            gateway_publisher: Arc::new(gateway_publisher),
+            engine_link,
             api_key_middleware,
             trusted_proxies,
             api_key_repository,
@@ -358,13 +357,14 @@ mod tests {
         assert_eq!(sanitized, "redis://localhost:6379/1");
     }
 
-    /// Compile-time: the handlers share the one `Publisher` directly. A lock around it would
-    /// serialise every order and cancel publish across all workers, and it needs none: publishing
-    /// offers once through `&self` to a concurrent Aeron publication, which is `Send + Sync`.
+    /// Compile-time: the handlers share the one `EngineLink` directly. A lock around it would
+    /// serialise every order and cancel publish across all workers, and it needs none: a request
+    /// reads the current publisher without a lock and offers once to a concurrent Aeron
+    /// publication through `&self`.
     #[test]
-    fn handlers_share_the_publisher_without_a_lock() {
-        fn shared_directly<T: Send + Sync>(_field: fn(&AppState) -> &Arc<T>) {}
-        shared_directly::<Publisher>(|state| &state.gateway_publisher);
+    fn handlers_share_the_engine_link_without_a_lock() {
+        fn shared_directly(_field: fn(&AppState) -> &EngineLink) {}
+        shared_directly(|state| &state.engine_link);
     }
 
     #[test]

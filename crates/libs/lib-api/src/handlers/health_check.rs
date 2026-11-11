@@ -1,23 +1,30 @@
 //! lib-api/src/handlers/health_check.rs
 
 use actix_web::{HttpResponse, web};
-use lib_core::{CorrelationService, Publisher};
+use lib_core::{CorrelationService, EngineLink};
 use std::sync::Arc;
 
-/// Returns whether the VEX Core link is healthy.
-pub async fn health_check(
-    publisher: web::Data<Arc<Publisher>>,
-    correlation_service: web::Data<Arc<CorrelationService>>,
-) -> HttpResponse {
-    // A lock-free read of the publication's connection flag, which Aeron clears a few seconds
-    // after the core stops reading it.
-    engine_link_health(publisher.publication.is_connected(), &correlation_service)
+/// Liveness: 200 while the process serves requests. It does not depend on vex-core, so a core
+/// outage never gets a gateway restarted or taken out of a load balancer, and the endpoints that
+/// do not need the core keep serving; [`readiness_check`] reports the engine link.
+pub async fn health_check() -> HttpResponse {
+    HttpResponse::Ok().finish()
 }
 
-/// Down while no core reads this gateway's publication: the core is down, or it restarted and
-/// lost this gateway's session, which the gateway does not re-establish. Every publish then fails
-/// at once, so no request times out. Also down while requests keep timing out (see
-/// [`CorrelationService::is_engine_link_healthy`]).
+/// Readiness of the link to vex-core, which orders need.
+pub async fn readiness_check(
+    engine_link: web::Data<EngineLink>,
+    correlation_service: web::Data<Arc<CorrelationService>>,
+) -> HttpResponse {
+    // A lock-free read of the current publication's connection flag, which Aeron clears a few
+    // seconds after the core stops reading it.
+    engine_link_health(engine_link.is_connected(), &correlation_service)
+}
+
+/// Down while no core reads this gateway's publication: the core is down, or the gateway is
+/// still establishing the link to it, at startup or after losing it. Every publish then fails at
+/// once, so no request times out. Also down while requests keep timing out (see
+/// [`CorrelationService::is_engine_link_healthy`]), until the supervisor replaces that link.
 fn engine_link_health(
     core_connected: bool,
     correlation_service: &CorrelationService,
@@ -47,6 +54,27 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn gateway_is_live_but_not_ready_without_a_core() {
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(EngineLink::new()))
+                .app_data(web::Data::new(Arc::new(CorrelationService::new())))
+                .configure(crate::routes::health_check_route::configure),
+        )
+        .await;
+
+        let health = actix_web::test::TestRequest::get().uri("/health");
+        let health = actix_web::test::call_service(&app, health.to_request()).await;
+        assert_eq!(health.status(), StatusCode::OK);
+
+        let ready = actix_web::test::TestRequest::get().uri("/ready");
+        let ready = actix_web::test::call_service(&app, ready.to_request()).await;
+        assert_eq!(ready.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = actix_web::test::read_body(ready).await;
+        assert_eq!(body, "engine_link: not connected to vex-core");
+    }
+
+    #[actix_web::test]
     async fn healthy_state_returns_ok() {
         let correlation_service = CorrelationService::new();
 
@@ -57,7 +85,7 @@ mod tests {
 
     #[actix_web::test]
     async fn disconnected_core_is_down_although_nothing_timed_out() {
-        // After a core restart every publish fails at once with NotConnected: no request times
+        // While the core is down every publish fails at once with NotConnected: no request times
         // out, so the timeout window alone would stay healthy.
         let correlation_service = CorrelationService::new();
 

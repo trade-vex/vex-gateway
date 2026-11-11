@@ -20,6 +20,8 @@ thiserror = { workspace = true }
 num_cpus = "1.16"
 clickhouse = "0.12"
 rust_decimal = "1.40"
+arc-swap = "1.7.1"
+rand = "0.8"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

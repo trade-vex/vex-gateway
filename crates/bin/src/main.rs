@@ -4,10 +4,9 @@
 //! It initializes the server configuration and starts the HTTP server.
 
 use lib_config::Config;
-use lib_server::{CorrelationHandler, CorrelationService};
+use lib_server::CorrelationService;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, filter::LevelFilter, fmt};
-use vex_networking::client::VexGateway;
 
 /// Main entry point for the VEX Gateway Service
 ///
@@ -47,30 +46,18 @@ async fn main() -> std::io::Result<()> {
 
     info!("Starting VEX Gateway Service");
 
-    // Initialize VexGateway client
-    info!("Initializing VexGateway client");
-
-    // The [core] link settings, validated with the rest of the configuration
-    let mut gateway_client = VexGateway::new(config.core.networking())
-        .map_err(|e| std::io::Error::other(format!("Failed to initialize VexGateway: {}", e)))?;
-
     // Create correlation service
     let correlation_service = CorrelationService::new();
     info!("Initialized correlation service");
 
-    // Create Aeron handler with correlation service
-    let handler = CorrelationHandler::new(gateway_client.gateway_id(), correlation_service.clone());
-    info!("Initialized handler");
+    // The gateway serves without vex-core: the link to it is established in the background with
+    // the [core] settings, validated with the rest of the configuration, and again after a loss.
+    let engine_link =
+        lib_server::spawn_engine_link(config.core.networking(), correlation_service.clone())?;
+    info!("Connecting to vex-core in the background");
 
-    // Start the gateway client and get the publisher
-    info!("Starting VexGateway with correlation handler");
-    let publisher = gateway_client
-        .start(handler)
-        .map_err(|e| std::io::Error::other(format!("Failed to start VexGateway: {}", e)))?;
-    info!("VexGateway client started successfully");
-
-    // Initialize and start the server with publisher and correlation service
-    let server = lib_server::initialize_server(&config, publisher, correlation_service)
+    // Initialize and start the server with the engine link and correlation service
+    let server = lib_server::initialize_server(&config, engine_link, correlation_service)
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
 
