@@ -14,8 +14,6 @@ use std::str::FromStr;
 pub enum Environment {
     /// Development environment
     Development,
-    /// Testing environment
-    Testing,
     /// Production environment
     Production,
 }
@@ -27,7 +25,6 @@ impl FromStr for Environment {
     ///
     /// Supports both full names and abbreviations:
     /// - "development" or "dev" → Development
-    /// - "testing" or "test" → Testing  
     /// - "production" or "prod" → Production
     ///
     /// # Arguments
@@ -41,7 +38,6 @@ impl FromStr for Environment {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "development" | "dev" => Ok(Environment::Development),
-            "testing" | "test" => Ok(Environment::Testing),
             "production" | "prod" => Ok(Environment::Production),
             _ => Err(ConfigError::InvalidEnvironment),
         }
@@ -56,7 +52,6 @@ impl Environment {
     pub fn config_file_name(&self) -> &'static str {
         match self {
             Environment::Development => "development.toml",
-            Environment::Testing => "testing.toml",
             Environment::Production => "production.toml",
         }
     }

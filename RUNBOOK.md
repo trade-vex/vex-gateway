@@ -51,7 +51,7 @@ APP_ENV=production ./target/release/gateway
 
 The gateway reads two environment variables by name, and does not read a `.env` file:
 
-- `APP_ENV` (required): `development`, `testing` or `production`. Selects `<APP_ENV>.toml`, whose
+- `APP_ENV` (required): `development` or `production`. Selects `<APP_ENV>.toml`, whose
   `environment` key must name the same environment.
 - `APP_CONFIG_DIR` (optional): the directory holding that file. The gateway refuses to start
   when it does not name a directory. When it is unset, the gateway uses the nearest `config/`
@@ -81,10 +81,9 @@ Configuration is loaded from TOML files in the `config/` directory:
 
 - `config/development.toml` - Development settings; `scripts/setup_dev.sh` creates it from the
   committed `config/development.toml.example`
-- `config/testing.toml` - Testing settings
 - `config/production.toml` - Production settings
 
-The three environment files are gitignored. The selected environment's file must exist: without
+The two environment files are gitignored. The selected environment's file must exist: without
 it the gateway does not start.
 
 ### Configuration Precedence
@@ -123,7 +122,6 @@ The service validates configuration on startup:
   `auth.server.trusted_proxies`, `core.auth_key` and `clickhouse.password` must not be empty, and
   `metrics.bind` needs a port of its own (not 0, and not `server.port`)
 - **Development**: More lenient validation
-- **Testing**: Allows ephemeral ports (port 0)
 - **Every environment**: `auth.oauth.providers` may list only `google`, `github` and `twitter`;
   another provider stops the gateway at startup, and the error names it. A `google` provider needs
   `issuer_url = "https://accounts.google.com"`, where the gateway discovers Google's endpoints at

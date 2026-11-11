@@ -25,14 +25,13 @@
 //! ```text
 //! config/
 //! +-- development.toml  # Development environment settings
-//! +-- testing.toml      # Testing environment settings  
 //! +-- production.toml   # Production environment settings (gitignored)
 //! ```
 //!
 //! # Environment Variables
 //!
 //! Only two variables are read by name, because they select the configuration file and so cannot
-//! be set in it: `APP_ENV` (required: `development`, `testing` or `production`) and
+//! be set in it: `APP_ENV` (required: `development` or `production`) and
 //! `APP_CONFIG_DIR` (optional: the directory holding `<environment>.toml`).
 //!
 //! Any setting can be overridden with `APP__<SECTION>__<KEY>`: its key path in upper case with `__`
@@ -129,7 +128,7 @@ impl Config {
     /// Load configuration for the specified environment.
     ///
     /// This method loads configuration in the following order:
-    /// 1. Environment-specific configuration file (e.g., production.toml, development.toml, testing.toml),
+    /// 1. Environment-specific configuration file (production.toml or development.toml),
     ///    which must exist
     /// 2. `APP__<SECTION>__<KEY>` environment variables
     ///
@@ -363,10 +362,6 @@ impl Config {
     /// - `core.auth_key` cannot be empty, as vex-core requires
     /// - `clickhouse.password` cannot be empty
     /// - `metrics.bind` needs a port of its own: not 0, and not `server.port`
-    ///
-    /// ## Testing Environment
-    /// - Port 0 is allowed for ephemeral port usage
-    /// - If port is not 0, should use non-privileged ports (>= 1024)
     pub fn validate(&self) -> Result<(), ConfigError> {
         debug!(
             "Validating configuration for environment: {:?}",
@@ -555,17 +550,6 @@ impl Config {
             Environment::Development => {
                 debug!("Applying development-specific validation rules");
             }
-            Environment::Testing => {
-                debug!("Applying testing-specific validation rules");
-
-                // Testing-specific validations
-                // Port 0 is allowed for ephemeral ports, but if a specific port is used, it should be non-privileged
-                if self.server.port != 0 && self.server.port < 1024 {
-                    return Err(ConfigError::ValidationError(
-                        "Testing environment should use non-privileged ports (>= 1024) or port 0 for ephemeral ports".to_string(),
-                    ));
-                }
-            }
         }
 
         debug!("Configuration validation passed");
@@ -679,7 +663,7 @@ fn load_error(
                 || message.starts_with("value of enum Environment ") =>
         {
             format!(
-                "{} must be one of: development, testing, production",
+                "{} must be one of: development, production",
                 setting("environment", overridden, file)
             )
         }
@@ -774,13 +758,10 @@ mod tests {
             Environment::from_str("prod").unwrap(),
             Environment::Production
         );
-        assert_eq!(
-            Environment::from_str("testing").unwrap(),
-            Environment::Testing
-        );
-        assert_eq!(Environment::from_str("test").unwrap(), Environment::Testing);
-
-        assert!(Environment::from_str("invalid").is_err());
+        // No third environment: `testing` selected a file nothing ships.
+        for name in ["invalid", "testing", "test"] {
+            assert!(Environment::from_str(name).is_err(), "{name}");
+        }
     }
 
     #[test]
@@ -790,7 +771,7 @@ mod tests {
         assert!(matches!(error, ConfigError::MissingEnvironment));
         assert_eq!(
             error.to_string(),
-            "APP_ENV must be set explicitly to one of: development, testing, production"
+            "APP_ENV must be set explicitly to one of: development, production"
         );
     }
 
@@ -1664,8 +1645,7 @@ frontend_url_app = "vex://oauth""#
         );
         expect(
             load_development_example(&[("APP__ENVIRONMENT", secret)]).unwrap_err(),
-            "Failed to load configuration: APP__ENVIRONMENT must be one of: development, testing, \
-             production",
+            "Failed to load configuration: APP__ENVIRONMENT must be one of: development, production",
         );
         let (result, file) = load_edited_example(
             "environment = \"development\"",
@@ -1675,7 +1655,7 @@ frontend_url_app = "vex://oauth""#
             result.unwrap_err(),
             &format!(
                 "Failed to load configuration: environment (in {}) must be one of: development, \
-                 testing, production",
+                 production",
                 file.display()
             ),
         );
@@ -1760,12 +1740,6 @@ frontend_url_app = "vex://oauth""#
 
     #[test]
     fn test_port_0_validation() {
-        // Test that port 0 is allowed in testing environment
-        let mut testing_config = development_config();
-        testing_config.environment = Environment::Testing;
-        testing_config.server.port = 0;
-        assert!(testing_config.validate().is_ok());
-
         // Test that port 0 is rejected in production environment
         let mut production_config = development_config();
         production_config.environment = Environment::Production;
