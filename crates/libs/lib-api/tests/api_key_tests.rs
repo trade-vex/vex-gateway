@@ -904,4 +904,56 @@ mod tests {
         assert_eq!(response.status(), 401);
         assert!(repo.find_by_user_id(user_id).await.unwrap().is_empty());
     }
+
+    /// Every route that changes a key checks its owner; dropping one check must fail here.
+    #[tokio::test]
+    async fn another_users_key_is_forbidden_on_update_delete_and_toggle() {
+        let Some(db) = require_database().await else {
+            return; // Skip test if database is unavailable
+        };
+        let (owner, other) = (create_test_user(), create_test_user());
+        let repo: Arc<dyn ApiKeyRepository> = Arc::new(
+            lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(
+                Arc::new(db.clone()),
+            ),
+        );
+        let repo_data = || web::Data::new(repo.clone());
+        create_api_key(web::Json(create_test_request()), repo_data(), owner.clone())
+            .await
+            .unwrap();
+        let key = repo.find_by_user_id(owner.user_id).await.unwrap().remove(0);
+
+        let update = update_api_key(
+            web::Path::from(key.id),
+            web::Json(UpdateApiKeyRequest {
+                permissions: vec!["user_data".to_string()],
+                ip_blacklist: Some(vec![]),
+            }),
+            repo_data(),
+            None,
+            other.clone(),
+        )
+        .await
+        .unwrap();
+        let delete = delete_api_key(web::Path::from(key.id), repo_data(), None, other.clone())
+            .await
+            .unwrap();
+        let toggle = toggle_api_key(
+            web::Path::from(key.id),
+            web::Json(serde_json::json!({"enabled": false})),
+            repo_data(),
+            None,
+            other.clone(),
+        )
+        .await
+        .unwrap();
+
+        for response in [update, delete, toggle] {
+            assert_eq!(response.status(), 403);
+        }
+        let unchanged = repo.find_by_id(key.id).await.unwrap().unwrap();
+        assert_eq!(unchanged, key);
+
+        cleanup_test_data(&db, owner.user_id).await;
+    }
 }

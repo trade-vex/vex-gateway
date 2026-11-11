@@ -241,6 +241,31 @@ pub async fn create_api_key(
     }
 }
 
+/// Key `id` if it belongs to `user_id`, else the response to send (403, 404 or 500).
+async fn owned_key(
+    repo: &dyn ApiKeyRepository,
+    id: Uuid,
+    user_id: Uuid,
+) -> Result<ApiKeyModel, HttpResponse> {
+    match repo.find_by_id(id).await {
+        Ok(Some(key)) if key.user_id == Some(user_id) => Ok(key),
+        Ok(Some(_)) => Err(HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "Access denied",
+            "message": "You don't have permission to access this API key"
+        }))),
+        Ok(None) => Err(HttpResponse::NotFound().json(serde_json::json!({
+            "error": "API key not found"
+        }))),
+        Err(e) => {
+            tracing::error!(user_id = %user_id, api_key_id = %id, error = %e, "failed to find API key");
+            Err(HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to find API key",
+                "message": INTERNAL_ERROR_MESSAGE
+            })))
+        }
+    }
+}
+
 /// get all API keys for the authenticated user
 pub async fn list_api_keys(
     repo: web::Data<Arc<dyn ApiKeyRepository>>,
@@ -275,31 +300,9 @@ pub async fn get_api_key(
 ) -> Result<HttpResponse> {
     let api_key_id = path.into_inner();
 
-    let user_id = auth_user.user_id;
-
-    match repo.as_ref().as_ref().find_by_id(api_key_id).await {
-        Ok(Some(api_key)) => {
-            // checking if the API key belongs to the authenticated user
-            if api_key.user_id != Some(user_id) {
-                return Ok(HttpResponse::Forbidden().json(serde_json::json!({
-                    "error": "Access denied",
-                    "message": "You don't have permission to access this API key"
-                })));
-            }
-
-            let response = ApiKeyResponse::from(api_key);
-            Ok(HttpResponse::Ok().json(response))
-        }
-        Ok(None) => Ok(HttpResponse::NotFound().json(serde_json::json!({
-            "error": "API key not found"
-        }))),
-        Err(e) => {
-            tracing::error!(user_id = %user_id, api_key_id = %api_key_id, error = %e, "failed to get API key");
-            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to get API key",
-                "message": INTERNAL_ERROR_MESSAGE
-            })))
-        }
+    match owned_key(repo.as_ref().as_ref(), api_key_id, auth_user.user_id).await {
+        Ok(api_key) => Ok(HttpResponse::Ok().json(ApiKeyResponse::from(api_key))),
+        Err(response) => Ok(response),
     }
 }
 
@@ -315,29 +318,9 @@ pub async fn update_api_key(
 
     let user_id = auth_user.user_id;
 
-    // checking if the API key exists and belongs to the user
-    let api_key = match repo.as_ref().find_by_id(api_key_id).await {
-        Ok(Some(api_key)) => {
-            if api_key.user_id != Some(user_id) {
-                return Ok(HttpResponse::Forbidden().json(serde_json::json!({
-                    "error": "Access denied",
-                    "message": "You don't have permission to update this API key"
-                })));
-            }
-            api_key
-        }
-        Ok(None) => {
-            return Ok(HttpResponse::NotFound().json(serde_json::json!({
-                "error": "API key not found"
-            })));
-        }
-        Err(e) => {
-            tracing::error!(user_id = %user_id, api_key_id = %api_key_id, error = %e, "failed to find API key for update");
-            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to find API key",
-                "message": INTERNAL_ERROR_MESSAGE
-            })));
-        }
+    let api_key = match owned_key(repo.as_ref().as_ref(), api_key_id, user_id).await {
+        Ok(api_key) => api_key,
+        Err(response) => return Ok(response),
     };
 
     // parsing permissions
@@ -395,29 +378,9 @@ pub async fn delete_api_key(
 
     let user_id = auth_user.user_id;
 
-    // first, check if the API key exists and belongs to the user
-    let api_key = match repo.as_ref().find_by_id(api_key_id).await {
-        Ok(Some(api_key)) => {
-            if api_key.user_id != Some(user_id) {
-                return Ok(HttpResponse::Forbidden().json(serde_json::json!({
-                    "error": "Access denied",
-                    "message": "You don't have permission to delete this API key"
-                })));
-            }
-            api_key
-        }
-        Ok(None) => {
-            return Ok(HttpResponse::NotFound().json(serde_json::json!({
-                "error": "API key not found"
-            })));
-        }
-        Err(e) => {
-            tracing::error!(user_id = %user_id, api_key_id = %api_key_id, error = %e, "failed to find API key for deletion");
-            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to find API key",
-                "message": INTERNAL_ERROR_MESSAGE
-            })));
-        }
+    let api_key = match owned_key(repo.as_ref().as_ref(), api_key_id, user_id).await {
+        Ok(api_key) => api_key,
+        Err(response) => return Ok(response),
     };
 
     match repo.as_ref().delete(api_key_id).await {
@@ -453,29 +416,9 @@ pub async fn toggle_api_key(
 
     let user_id = auth_user.user_id;
 
-    // First, check if the API key exists and belongs to the user
-    let api_key = match repo.as_ref().find_by_id(api_key_id).await {
-        Ok(Some(api_key)) => {
-            if api_key.user_id != Some(user_id) {
-                return Ok(HttpResponse::Forbidden().json(serde_json::json!({
-                    "error": "Access denied",
-                    "message": "You don't have permission to modify this API key"
-                })));
-            }
-            api_key
-        }
-        Ok(None) => {
-            return Ok(HttpResponse::NotFound().json(serde_json::json!({
-                "error": "API key not found"
-            })));
-        }
-        Err(e) => {
-            tracing::error!(user_id = %user_id, api_key_id = %api_key_id, error = %e, "failed to find API key for toggle");
-            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to find API key",
-                "message": INTERNAL_ERROR_MESSAGE
-            })));
-        }
+    let api_key = match owned_key(repo.as_ref().as_ref(), api_key_id, user_id).await {
+        Ok(api_key) => api_key,
+        Err(response) => return Ok(response),
     };
 
     match repo.as_ref().set_enabled(api_key_id, enabled).await {
