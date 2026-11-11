@@ -140,7 +140,7 @@ pub async fn signup(
 
     // Send verification email (skip in development if SMTP is not available)
     if let Err(e) = email_service
-        .send_verification_email(&created_user.email, &created_user.username)
+        .send_verification_email(&created_user.email)
         .await
     {
         tracing::warn!(
@@ -662,9 +662,7 @@ pub async fn forgot_password(
         }
 
         // User exists and has password - send OTP
-        email_service
-            .send_password_reset_otp(&req.email, &user.username)
-            .await?;
+        email_service.send_password_reset_otp(&req.email).await?;
     } else {
         // User not exist
         tracing::debug!(

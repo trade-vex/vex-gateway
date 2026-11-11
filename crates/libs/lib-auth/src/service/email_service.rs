@@ -164,123 +164,46 @@ impl EmailService {
         Ok(())
     }
 
-    /// Send verification email with OTP
-    pub async fn send_verification_email(
-        &self,
-        recipient_email: &str,
-        recipient_name: &str,
-    ) -> Result<(), AuthError> {
-        tracing::info!("Starting verification email send process");
-        tracing::info!("Recipient: {} <{}>", recipient_name, recipient_email);
-
+    /// Store a new verification code for `email` and send it there.
+    pub async fn send_verification_email(&self, email: &str) -> Result<(), AuthError> {
         let otp = self.generate_otp();
-
-        // Store OTP in Redis
-        tracing::debug!("Storing OTP in Redis for email: {}", recipient_email);
-        self.store_otp(recipient_email, &otp).await?;
-        tracing::debug!("OTP stored successfully in Redis");
-
-        let subject = "Verify Your Email";
-        tracing::debug!("Email subject: {}", subject);
-
-        let text_content = format!(
-            r#"Hello {},
-
-Thank you for signing up! Your verification code is:
-
-{}
-
-This code will expire in {} minutes.
-
-If you didn't create an account, please ignore this email.
-
-Best regards,
-The Team"#,
-            recipient_name, otp, self.otp_expiry_minutes
-        );
-
-        let html_content = format!(
-            r#"<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <style>
-        body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-        .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-        .header {{ background-color: #f8f9fa; padding: 20px; text-align: center; }}
-        .content {{ padding: 20px; }}
-        .otp {{ font-size: 32px; font-weight: bold; text-align: center; 
-               padding: 20px; margin: 20px 0; background-color: #f0f0f0; 
-               border-radius: 8px; letter-spacing: 8px; }}
-        .footer {{ text-align: center; padding: 20px; color: #666; font-size: 14px; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h2>Email Verification</h2>
-        </div>
-        <div class="content">
-            <p>Hello {},</p>
-            <p>Thank you for signing up! Please use the verification code below to complete your registration:</p>
-            <div class="otp">{}</div>
-            <p>This code will expire in {} minutes.</p>
-            <p>If you didn't create an account, please ignore this email.</p>
-        </div>
-        <div class="footer">
-            <p>Best regards,<br>The Team</p>
-        </div>
-    </div>
-</body>
-</html>"#,
-            recipient_name, otp, self.otp_expiry_minutes
-        );
-
-        tracing::debug!("Email content prepared, calling send_email");
-        tracing::debug!("Text content length: {} chars", text_content.len());
-        tracing::debug!("HTML content length: {} chars", html_content.len());
-
-        let result = self
-            .send_email(
-                recipient_email,
-                recipient_name,
-                subject,
-                &html_content,
-                &text_content,
-            )
-            .await;
-
-        match &result {
-            Ok(_) => {
-                tracing::info!(
-                    "Verification email sent successfully to: {}",
-                    recipient_email
-                );
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Failed to send verification email to {}: {}",
-                    recipient_email,
-                    e
-                );
-            }
-        }
-
-        result
+        self.store_otp(email, &otp).await?;
+        self.send_code(
+            email,
+            "Verify Your Email",
+            "Email Verification",
+            "Thank you for signing up! Your verification code is:",
+            &otp,
+            self.otp_expiry_minutes,
+        )
+        .await
     }
 
-    /// Send email
+    /// Send `otp` to `recipient_email` in the one code email (`code_email`).
+    async fn send_code(
+        &self,
+        recipient_email: &str,
+        subject: &str,
+        heading: &str,
+        intro: &str,
+        otp: &str,
+        minutes: i64,
+    ) -> Result<(), AuthError> {
+        let (text, html) = code_email(heading, intro, otp, minutes);
+        self.send_email(recipient_email, subject, &html, &text)
+            .await
+    }
+
+    /// Send an email to the bare address: nothing the user typed goes into the mail.
     async fn send_email(
         &self,
         recipient_email: &str,
-        recipient_name: &str,
         subject: &str,
         html_content: &str,
         text_content: &str,
     ) -> Result<(), AuthError> {
         tracing::info!("Building email message");
         tracing::debug!("From: {}", self.from_email);
-        tracing::debug!("To: {} <{}>", recipient_name, recipient_email);
         tracing::debug!("Subject: {}", subject);
 
         let email = lettre::Message::builder()
@@ -288,17 +211,10 @@ The Team"#,
                 tracing::error!("Invalid from email '{}': {}", self.from_email, e);
                 AuthError::InternalError(format!("Invalid from email: {}", e))
             })?)
-            .to(format!("{} <{}>", recipient_name, recipient_email)
-                .parse()
-                .map_err(|e| {
-                    tracing::error!(
-                        "Invalid recipient email '{} <{}>': {}",
-                        recipient_name,
-                        recipient_email,
-                        e
-                    );
-                    AuthError::InternalError(format!("Invalid recipient email: {}", e))
-                })?)
+            .to(recipient_email.parse().map_err(|e| {
+                tracing::error!("Invalid recipient email: {}", e);
+                AuthError::InternalError(format!("Invalid recipient email: {}", e))
+            })?)
             .subject(subject)
             .multipart(
                 lettre::message::MultiPart::alternative()
@@ -609,101 +525,19 @@ return count
         Ok(())
     }
 
-    /// Send password reset OTP email
-    pub async fn send_password_reset_otp(
-        &self,
-        recipient_email: &str,
-        recipient_name: &str,
-    ) -> Result<(), AuthError> {
-        tracing::info!("Starting password reset OTP email send process");
-        tracing::info!("Recipient: {} <{}>", recipient_name, recipient_email);
-
+    /// Store a new password-reset code for `email` and send it there.
+    pub async fn send_password_reset_otp(&self, email: &str) -> Result<(), AuthError> {
         let otp = self.generate_otp();
-
-        // Store OTP in Redis
-        self.store_password_reset_otp(recipient_email, &otp).await?;
-
-        let subject = "Reset Your Password";
-        let text_content = format!(
-            r#"Hello {},
-
-You requested to reset your password. Your verification code is:
-
-{}
-
-This code will expire in {} minutes.
-
-If you didn't request this, please ignore this email.
-
-Best regards,
-The Team"#,
-            recipient_name, otp, self.password_reset_expiry_minutes
-        );
-
-        let html_content = format!(
-            r#"<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <style>
-        body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-        .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-        .header {{ background-color: #f8f9fa; padding: 20px; text-align: center; }}
-        .content {{ padding: 20px; }}
-        .otp {{ font-size: 32px; font-weight: bold; text-align: center; 
-               padding: 20px; margin: 20px 0; background-color: #f0f0f0; 
-               border-radius: 8px; letter-spacing: 8px; }}
-        .footer {{ text-align: center; padding: 20px; color: #666; font-size: 14px; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h2>Reset Your Password</h2>
-        </div>
-        <div class="content">
-            <p>Hello {},</p>
-            <p>You requested to reset your password. Please use the verification code below:</p>
-            <div class="otp">{}</div>
-            <p>This code will expire in <strong>{} minutes</strong>.</p>
-            <p>If you didn't request this, please ignore this email.</p>
-        </div>
-        <div class="footer">
-            <p>Best regards,<br>The Team</p>
-        </div>
-    </div>
-</body>
-</html>"#,
-            recipient_name, otp, self.password_reset_expiry_minutes
-        );
-
-        let result = self
-            .send_email(
-                recipient_email,
-                recipient_name,
-                subject,
-                &html_content,
-                &text_content,
-            )
-            .await;
-
-        match &result {
-            Ok(_) => {
-                tracing::info!(
-                    "Password reset OTP email sent successfully to: {}",
-                    recipient_email
-                );
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Failed to send password reset OTP email to {}: {}",
-                    recipient_email,
-                    e
-                );
-            }
-        }
-
-        result
+        self.store_password_reset_otp(email, &otp).await?;
+        self.send_code(
+            email,
+            "Reset Your Password",
+            "Password Reset",
+            "You requested to reset your password. Your verification code is:",
+            &otp,
+            self.password_reset_expiry_minutes,
+        )
+        .await
     }
 
     /// Verify password reset OTP
@@ -812,6 +646,30 @@ The Team"#,
     }
 }
 
+/// The text and HTML bodies of a code email, the same for every code the gateway sends.
+fn code_email(heading: &str, intro: &str, otp: &str, minutes: i64) -> (String, String) {
+    let text = format!(
+        "Hello,\n\n{intro}\n\n{otp}\n\nThis code will expire in {minutes} minutes.\n\n\
+         If you didn't request this code, please ignore this email.\n\nBest regards,\nThe Team"
+    );
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+    <h2 style="text-align: center;">{heading}</h2>
+    <p>Hello,</p>
+    <p>{intro}</p>
+    <div style="font-size: 32px; font-weight: bold; letter-spacing: 8px; text-align: center; padding: 20px; margin: 20px 0; background-color: #f0f0f0; border-radius: 8px;">{otp}</div>
+    <p>This code will expire in <strong>{minutes} minutes</strong>.</p>
+    <p>If you didn't request this code, please ignore this email.</p>
+    <p>Best regards,<br>The Team</p>
+</body>
+</html>"#
+    );
+    (text, html)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -916,6 +774,19 @@ mod tests {
 
         service.store_otp(&email, "654321").await.unwrap();
         service.verify_otp(&email, "654321").await.unwrap();
+    }
+
+    #[test]
+    fn code_email_carries_the_code_and_its_lifetime() {
+        let (text, html) = code_email("Heading", "Your code is:", "123456", 15);
+
+        for body in [&text, &html] {
+            assert!(body.contains("Your code is:"), "{body}");
+            assert!(body.contains("123456"), "{body}");
+            assert!(body.contains("15 minutes"), "{body}");
+        }
+        assert!(text.starts_with("Hello,\n"), "{text}");
+        assert!(html.contains("<h2 style=\"text-align: center;\">Heading</h2>"));
     }
 
     #[test]
