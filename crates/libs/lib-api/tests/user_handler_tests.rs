@@ -783,9 +783,10 @@ mod tests {
         let (user, user_id) = user_above_i64_max();
         cleanup_test_data(&db, user_id).await;
 
-        // 10 ETH (asset 3, 10^18 units each: above i64::MAX) and 1 USD available, 0.5 locked.
-        let ten_eth = 10_000_000_000_000_000_000_u64;
-        insert_balance_row(&db, user_id, 3, ten_eth, 0, ten_eth, 7)
+        // 10^10 ETH (asset 3, 10^9 units each: 10^19 units, above i64::MAX) and 1 USD available,
+        // 0.5 locked.
+        let eth = 10_000_000_000_000_000_000_u64;
+        insert_balance_row(&db, user_id, 3, eth, 0, eth, 7)
             .await
             .unwrap();
         insert_balance_row(&db, user_id, 1, 1_000_000, 500_000, 1_500_000, 8)
@@ -795,20 +796,15 @@ mod tests {
         // a filled one; both order ids above i64::MAX.
         let (open_id, filled_id) = ((1_u64 << 63) + 5, (1_u64 << 63) + 6);
         for (order_id, status, filled, event_ts) in [
-            (
-                open_id,
-                "STATUS_PARTIALLY_FILLED",
-                500_000_000_000_000_000,
-                9,
-            ),
-            (filled_id, "STATUS_FILLED", 2_000_000_000_000_000_000, 10),
+            (open_id, "STATUS_PARTIALLY_FILLED", 500_000_000, 9),
+            (filled_id, "STATUS_FILLED", 2_000_000_000, 10),
         ] {
             let order = OrderRow {
                 order_id,
                 user_id,
                 market_id: 65539,
                 price: 25_000,
-                size: 2_000_000_000_000_000_000,
+                size: 2_000_000_000,
                 filled,
                 side: "SIDE_BID",
                 time_in_force: "TIF_GTC",
@@ -862,8 +858,11 @@ mod tests {
         assert_eq!(decimal(&usd["locked"]), Decimal::new(5, 1));
         assert_eq!(usd["timestamp"], "8");
         assert_eq!(eth["asset_id"], 3);
-        assert_eq!(decimal(&eth["available"]), Decimal::TEN);
-        assert_eq!(decimal(&eth["total"]), Decimal::TEN);
+        assert_eq!(
+            decimal(&eth["available"]),
+            Decimal::from(10_000_000_000_u64)
+        );
+        assert_eq!(decimal(&eth["total"]), Decimal::from(10_000_000_000_u64));
 
         let open = get("/orders/open").await;
         assert_eq!(open["orders"].as_array().unwrap().len(), 1);

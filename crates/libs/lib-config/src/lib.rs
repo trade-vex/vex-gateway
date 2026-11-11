@@ -44,7 +44,7 @@
 //! export APP__SERVER__HOST=0.0.0.0                       # server.host
 //! export APP__LOGGING__LEVEL=info                        # logging.level
 //! export APP__AUTH__SERVER__TRUSTED_PROXIES=10.0.1.0/24  # auth.server.trusted_proxies
-//! export APP__CORE__AUTH_KEY=123456                      # core.auth_key
+//! export APP__CORE__AUTH_KEY=<openssl rand -hex 32>      # core.auth_key
 //! export APP__CLICKHOUSE__PASSWORD=<password>            # clickhouse.password
 //! export APP__METRICS__BIND=0.0.0.0:9091                 # metrics.bind
 //! export APP__RATE_LIMIT__ORDERS__MAX_REQUESTS=600       # rate_limit.orders.max_requests
@@ -317,7 +317,8 @@ impl Config {
     /// - Server host cannot be empty
     /// - Log level must be valid
     /// - The `core` link settings must pass vex-core's own rules (distinct non-zero ports,
-    ///   gateway id below 16, an empty or signed 32-bit `auth_key`, non-empty `context_dir`), and
+    ///   gateway id below 16, an empty `auth_key` or one of at least 32 characters without
+    ///   whitespace, non-empty `context_dir`), and
     ///   `core.address` cannot be empty
     /// - Every `auth.server.trusted_proxies` entry must be an IP address or CIDR range, not /0
     /// - `metrics.bind` must be an IP address and a port
@@ -499,7 +500,7 @@ impl Config {
                 }
 
                 // vex-core refuses to run without a key in production. Without one here the
-                // gateway would send a random credential and fail later with an opaque handshake
+                // gateway would send no credential and fail later with an opaque handshake
                 // REJECT whose cause only the core logs.
                 if self.core.auth_key.is_empty() {
                     return Err(ConfigError::ValidationError(
@@ -620,6 +621,9 @@ mod tests {
     use lib_middleware::rate_limit::Limit;
     use secrecy::SecretString;
     use std::fs;
+
+    /// The `auth_key` of the test configurations (`openssl rand -hex 32`).
+    const AUTH_KEY: &str = "d2eeaf61d4e3992c6f3b3a8bb344bd5f17fb09edaf4c44432e9ea09641fef461";
 
     fn limit(max_requests: u64, window_seconds: u64) -> Limit {
         Limit {
@@ -777,7 +781,7 @@ password_reset_expiry_minutes = 10
 
 [core]
 gateway_id = 3
-auth_key = "-123456789"
+auth_key = "d2eeaf61d4e3992c6f3b3a8bb344bd5f17fb09edaf4c44432e9ea09641fef461"
 address = "core.internal"
 port = 3521
 control_port = 3522
@@ -838,7 +842,7 @@ database = "vex_analytics"
         );
         let link = config.core.networking();
         assert_eq!(link.gateway_id, 3);
-        assert_eq!(link.gateway_authentication_key.as_i32(), Some(-123456789));
+        assert_eq!(link.gateway_authentication_key.as_str(), AUTH_KEY);
         assert_eq!(link.core_address, "core.internal");
         assert_eq!((link.core_port, link.core_control_port), (3521, 3522));
         assert_eq!(link.context_dir, "/var/lib/vex/aeron-gateway");
@@ -906,7 +910,7 @@ database = "vex_analytics"
         config.environment = Environment::Production;
         config.server.host = "0.0.0.0".to_string();
         config.logging.level = "info".to_string();
-        config.core.auth_key = "-123456789".into();
+        config.core.auth_key = AUTH_KEY.into();
         config.auth.server.trusted_proxies = Vec::new();
 
         let error = config.validate().unwrap_err();
@@ -1222,7 +1226,7 @@ frontend_url_app = "vex://oauth""#
     fn test_app_overrides_reach_every_core_link_key() {
         let config = load_development_example(&[
             ("APP__CORE__GATEWAY_ID", "7"),
-            ("APP__CORE__AUTH_KEY", "-123456789"),
+            ("APP__CORE__AUTH_KEY", AUTH_KEY),
             ("APP__CORE__ADDRESS", "core.internal"),
             ("APP__CORE__PORT", "40001"),
             ("APP__CORE__CONTROL_PORT", "40002"),
@@ -1232,7 +1236,7 @@ frontend_url_app = "vex://oauth""#
 
         let link = config.core.networking();
         assert_eq!(link.gateway_id, 7);
-        assert_eq!(link.gateway_authentication_key.as_i32(), Some(-123456789));
+        assert_eq!(link.gateway_authentication_key.as_str(), AUTH_KEY);
         assert_eq!(link.core_address, "core.internal");
         assert_eq!((link.core_port, link.core_control_port), (40001, 40002));
         assert_eq!(link.context_dir, "/dev/shm/aeron-gateway-7");
@@ -1278,7 +1282,10 @@ frontend_url_app = "vex://oauth""#
             ("APP__CORE__PORT", "0"),
             ("APP__CORE__PORT", "3522"),
             ("APP__CORE__AUTH_KEY", "not-a-key"),
-            ("APP__CORE__AUTH_KEY", "2147483648"),
+            (
+                "APP__CORE__AUTH_KEY",
+                "d2eeaf61d4e3992c6f3b3a8bb344bd5f 17fb09edaf4c44432e9ea09641fef461",
+            ),
             ("APP__CORE__CONTEXT_DIR", ""),
         ] {
             let error = load_development_example(&[(name, value)]).unwrap_err();
@@ -1304,7 +1311,7 @@ frontend_url_app = "vex://oauth""#
             "unexpected error: {error}"
         );
 
-        config.core.auth_key = "-123456789".into();
+        config.core.auth_key = AUTH_KEY.into();
         config.clickhouse.password = SecretString::new("configured".to_string());
         assert!(config.validate().is_ok());
     }
@@ -1385,7 +1392,7 @@ frontend_url_app = "vex://oauth""#
         config.server.host = "0.0.0.0".to_string();
         config.logging.level = "info".to_string();
         config.auth.server.trusted_proxies = vec!["10.0.0.0/16".to_string()];
-        config.core.auth_key = "-123456789".into();
+        config.core.auth_key = AUTH_KEY.into();
         config.clickhouse.password = SecretString::new("configured".to_string());
         assert_eq!(config.server.port, 8081);
 

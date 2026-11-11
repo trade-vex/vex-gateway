@@ -10,9 +10,10 @@ pub struct CoreLinkConfig {
     /// This gateway's id at the core, below `common::MAX_GATEWAYS` (16) and unique among the
     /// gateways connected to it.
     pub gateway_id: u8,
-    /// The handshake credential: a signed 32-bit integer equal to vex-core's
-    /// `VEX__GATEWAY_NETWORKING__GATEWAY_AUTHENTICATION_KEY`. Empty only for a core running
-    /// without authentication; production requires it.
+    /// The handshake credential: an opaque key of at least 32 characters without whitespace
+    /// (`openssl rand -hex 32`), equal to vex-core's
+    /// `VEX__CORE_NETWORKING__GATEWAY_AUTHENTICATION_KEY`. Empty only for a core running without
+    /// authentication; production requires it.
     pub auth_key: GatewayAuthenticationKey,
     /// vex-core's Aeron address.
     pub address: String,
@@ -25,8 +26,8 @@ pub struct CoreLinkConfig {
 }
 
 impl CoreLinkConfig {
-    /// The vex-core client settings: these keys, over vex-core's gateway defaults for the rest
-    /// (heartbeat, timeouts, buffer size, and `local_address`, which the client never reads).
+    /// The vex-core client settings: these keys, over vex-core's gateway default for the rest
+    /// (`max_message_size`).
     pub fn networking(&self) -> GatewayNetworkingConfig {
         GatewayNetworkingConfig {
             context_dir: self.context_dir.clone(),

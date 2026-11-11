@@ -36,7 +36,7 @@ const BTC: u64 = 2;
 /// BTC/USD (quote asset 1 << 16 | base asset 2): BTC's native scale is 10^8, quote_scale_k 1.
 const BTC_USD: u64 = 65538;
 const BTC_SCALE: u64 = 100_000_000;
-/// Asset 3 quoted in USD (1 << 16 | 3): asset 3's native scale is 10^18.
+/// Asset 3 quoted in USD (1 << 16 | 3): asset 3's native scale is 10^9.
 const ASSET_3_USD: u64 = 65539;
 
 fn readmodel() -> &'static Path {
@@ -669,7 +669,7 @@ async fn each_request_reads_each_view_once() {
     // 2024-09-01T00:00:00Z: the year before it holds BTC prices, but no other test's price of
     // asset 3, which the user holds alone.
     let now = 1_725_148_800;
-    let unit = 1_000_000_000_000_000_000;
+    let unit = 1_000_000_000;
     ch.balance(user, 3, unit, now - HOUR).await;
     ch.fill(ASSET_3_USD, 5, unit, 990, 991, now - HOUR).await;
     ch.fill(BTC_USD, 100, BTC_SCALE, 990, 991, now - HOUR).await;

@@ -82,8 +82,8 @@ TOPIC_MESSAGES = {
     "deposits": "DepositEvent",
     "withdrawals": "WithdrawEvent",
 }
-# trading.proto's other messages: Order is nested in OrderEvent; order-book levels travel as JSON.
-NOT_EVENTS = {"Order", "OrderbookLevel"}
+# trading.proto's other message: Order is nested in OrderEvent.
+NOT_EVENTS = {"Order"}
 BROKERS = ("redpanda-0", "redpanda-1", "redpanda-2")
 # The column type of each proto field type (design doc §3.4), in Postgres and in ClickHouse. A
 # type missing here has none yet.
@@ -1162,7 +1162,11 @@ def check_u64_round_trip(stack, connectors):
         f"WHERE user_id = {WHALE} AND asset_id = {ETH} ORDER BY minute DESC LIMIT 1",
         user="readmodel_gateway_login",
     )
-    expect(scaled == "10", f"the gateway reads the balance of 10^19 ETH units as {scaled} ETH")
+    # ETH's native scale is 10^9 (gwei).
+    expect(
+        scaled == "10000000000",
+        f"the gateway reads the balance of 10^19 ETH units as {scaled} ETH",
+    )
     # vex-core's order ids reach 2^63 around 2029, so this one is produced here, encoded with the
     # schema the core registered.
     order_id = 2**63 + 12345

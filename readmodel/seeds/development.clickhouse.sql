@@ -2,7 +2,7 @@
 INSERT INTO assets (asset_id, native_scale) VALUES
     (1, 1000000),
     (2, 100000000),
-    (3, 1000000000000000000);
+    (3, 1000000000);
 INSERT INTO markets (market_id, base_asset, quote_asset, quote_scale_k) VALUES
     (65538, 2, 1, 1),
     (65539, 3, 1, 10);
