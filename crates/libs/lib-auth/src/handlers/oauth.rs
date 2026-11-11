@@ -384,6 +384,58 @@ mod tests {
         }
     }
 
+    /// The provider still knows the state, but this browser holds another one: a login CSRF.
+    #[actix_web::test]
+    async fn callback_with_a_state_cookie_that_differs_from_the_query_state_is_refused() {
+        let (_, state) = test_service(&oauth_config())
+            .await
+            .get_auth_url_with_platform("github", None, None)
+            .await
+            .unwrap();
+
+        let response = callback(
+            TestRequest::get()
+                .uri(&format!("/oauth/github/callback?code=c&state={state}"))
+                .cookie(Cookie::new("oauth_state_github", "another")),
+        )
+        .await;
+
+        let error = response.response().error().unwrap();
+        assert!(matches!(
+            error.as_error::<AuthError>(),
+            Some(AuthError::StateMismatch)
+        ));
+    }
+
+    #[actix_web::test]
+    async fn exchange_with_the_wrong_verifier_is_refused_and_consumes_the_code() {
+        let verifier = "v".repeat(43);
+        let (_, _, session_service) = test_services().await;
+        let login_code = session_service
+            .create_login_code(
+                "session".to_string(),
+                "{}".to_string(),
+                crate::utils::pkce::s256_challenge(&verifier).unwrap(),
+            )
+            .await
+            .unwrap();
+        let exchange = |verifier: String| {
+            exchange_oauth_login_code(
+                web::Json(OAuthExchangeRequest {
+                    login_code: login_code.clone(),
+                    verifier,
+                }),
+                web::Data::new(session_service.clone()),
+            )
+        };
+
+        let wrong = exchange("w".repeat(43)).await;
+        assert!(matches!(wrong, Err(AuthError::InvalidRequest)));
+        // The code was used up: the right verifier no longer redeems it.
+        let right = exchange(verifier).await;
+        assert!(matches!(right, Err(AuthError::InvalidRequest)));
+    }
+
     #[test]
     fn the_mobile_redirect_keeps_an_existing_query_on_the_app_url() {
         for (base, redirect) in [
