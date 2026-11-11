@@ -23,7 +23,8 @@ impl LoggingConfig {
     /// with a descriptive message if validation fails.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let valid_levels = ["trace", "debug", "info", "warn", "error"];
-        let level = self.level.trim().to_lowercase();
+        // Not trimmed: main parses the level as it is, and a padded one would run at INFO.
+        let level = self.level.to_lowercase();
         if !valid_levels.contains(&level.as_str()) {
             return Err(ConfigError::ValidationError(format!(
                 "logging.level must be one of: {}",

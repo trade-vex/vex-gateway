@@ -471,7 +471,7 @@ impl Config {
                     ));
                 }
 
-                let log_level = self.logging.level.trim().to_lowercase();
+                let log_level = self.logging.level.to_lowercase();
                 if log_level == "trace" || log_level == "debug" {
                     return Err(ConfigError::ValidationError(
                         "Production environment should not use trace or debug logging".to_string(),
@@ -1600,6 +1600,17 @@ frontend_url_app = "vex://oauth""#
             let text = format!("{error} {error:?}").to_lowercase();
             assert!(!text.contains(&secret.to_lowercase()), "{text}");
         }
+    }
+
+    #[test]
+    fn test_log_level_is_not_trimmed() {
+        let error = load_development_example(&[("APP__LOGGING__LEVEL", "error ")]).unwrap_err();
+        assert!(
+            matches!(error, ConfigError::ValidationError(_))
+                && error.to_string().contains("logging.level"),
+            "unexpected error: {error}"
+        );
+        assert!(load_development_example(&[("APP__LOGGING__LEVEL", "ERROR")]).is_ok());
     }
 
     #[test]
