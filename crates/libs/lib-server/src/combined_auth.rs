@@ -1,9 +1,13 @@
 use actix_web::{
     Error, HttpRequest,
     dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready},
+    error::InternalError,
 };
 use futures_util::future::LocalBoxFuture;
-use lib_auth::middleware::jwt_auth::{JwtAuthentication, JwtAuthenticationMiddleware};
+use lib_auth::AuthError;
+use lib_auth::middleware::jwt_auth::{
+    JwtAuthentication, JwtAuthenticationMiddleware, service_unavailable,
+};
 use lib_auth::service::session_service::SessionService;
 use lib_middleware::api_key::middleware::{ApiKeyMiddleware, ApiKeyMiddlewareService};
 use lib_middleware::metrics::{self, AuthMethod};
@@ -187,12 +191,22 @@ where
                                 // Now pass to JWT middleware for proper validation
                                 jwt_service.call(req).await
                             }
-                            Err(e) => {
-                                tracing::warn!("Session auth: Invalid session: {}", e);
+                            Err(AuthError::InvalidRequest) => {
+                                tracing::warn!("Session auth: unknown or expired session");
                                 metrics::auth_failures(AuthMethod::Jwt).inc();
                                 Err(actix_web::error::ErrorUnauthorized(
                                     "Invalid or expired session",
                                 ))
+                            }
+                            // A store error is not a logout: 503, as the JWT middleware answers.
+                            Err(e) => {
+                                tracing::error!("Session auth: session store unavailable: {}", e);
+                                let message = "Authentication service temporarily unavailable";
+                                Err(InternalError::from_response(
+                                    message,
+                                    service_unavailable(message),
+                                )
+                                .into())
                             }
                         }
                     } else {
@@ -295,6 +309,7 @@ mod tests {
     use lib_middleware::SignatureVerifier;
     use lib_utils::AuthenticatedUserId;
     use redis::AsyncCommands;
+    use redis::aio::ConnectionManager;
     use rsa::{
         Generate, PrivateKey,
         pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding},
@@ -415,6 +430,136 @@ mod tests {
             // concurrently, so the count can rise by more.
             assert!(failures.get() > before, "{method:?}");
         }
+    }
+
+    const ISSUER: &str = "combined-auth-test";
+    const AUDIENCE: &str = "combined-auth-audience";
+
+    /// A gateway's Redis, token service and session service, signing with `test_keys`.
+    async fn session_services() -> (ConnectionManager, Arc<TokenService>, Arc<SessionService>) {
+        let redis_conn = crate::test_redis().await;
+        let (encoding_key, decoding_key) = test_keys();
+        let token_service = TokenService::new(
+            Arc::new(JwtConfig {
+                private_key_path: String::new(),
+                public_key_path: String::new(),
+                access_token_ttl_minutes: 60,
+                refresh_token_ttl_days: 1,
+                issuer: ISSUER.to_string(),
+                audience: AUDIENCE.to_string(),
+            }),
+            redis_conn.clone(),
+            Arc::new(encoding_key),
+            Arc::new(decoding_key),
+        );
+        let session_service = SessionService::new(redis_conn.clone(), 300);
+        (
+            redis_conn,
+            Arc::new(token_service),
+            Arc::new(session_service),
+        )
+    }
+
+    /// The gateway's authentication with these services, built as `create_app` builds it.
+    fn session_auth(
+        redis_conn: ConnectionManager,
+        token_service: Arc<TokenService>,
+        session_service: Arc<SessionService>,
+    ) -> CombinedAuthMiddleware {
+        let jwt_middleware = JwtAuthentication::with_auto_refresh(
+            test_keys().1,
+            ISSUER.to_string(),
+            AUDIENCE.to_string(),
+            redis_conn,
+            token_service,
+            session_service.clone(),
+        );
+        CombinedAuthMiddleware::new(jwt_middleware, ApiKeyMiddleware::new(), session_service)
+    }
+
+    /// A protected route that answers its user's id.
+    async fn user_id_handler(user: AuthenticatedUser) -> HttpResponse {
+        HttpResponse::Ok().body(user.user_id.to_string())
+    }
+
+    fn with_session(session_id: &str) -> test::TestRequest {
+        test::TestRequest::get()
+            .uri("/protected")
+            .cookie(actix_web::cookie::Cookie::new("session_id", session_id))
+    }
+
+    fn status_of(result: Result<ServiceResponse, Error>) -> StatusCode {
+        match result {
+            Ok(response) => response.status(),
+            Err(error) => error.error_response().status(),
+        }
+    }
+
+    /// A Redis error reading the session is a 503, not the 401 that logs the browser out.
+    #[actix_web::test]
+    async fn a_session_store_error_is_503_not_a_logout() {
+        let (mut conn, token_service, session_service) = session_services().await;
+        let session_id = Uuid::new_v4().to_string();
+        let session_key = format!("session:{session_id}");
+        // Any Redis error will do: GET of a key that holds a set answers WRONGTYPE.
+        let _: () = conn.sadd(&session_key, "not-a-session").await.unwrap();
+        let app = test::init_service(
+            App::new()
+                .wrap(session_auth(conn.clone(), token_service, session_service))
+                .route("/protected", web::get().to(user_id_handler)),
+        )
+        .await;
+
+        let result = test::try_call_service(&app, with_session(&session_id).to_request()).await;
+
+        assert_eq!(status_of(result), StatusCode::SERVICE_UNAVAILABLE);
+        let _: () = conn.del(&session_key).await.unwrap();
+    }
+
+    /// A Redis error extending a live session is a 503, and the session's token is not revoked.
+    #[actix_web::test]
+    async fn a_store_error_extending_the_session_is_503_and_revokes_nothing() {
+        let (mut conn, token_service, session_service) = session_services().await;
+        let user_id = Uuid::new_v4();
+        let tokens = token_service.mint_tokens(user_id).await.unwrap();
+        let session_id = session_service
+            .create_session(
+                user_id,
+                tokens.access_token.clone(),
+                tokens.refresh_token.clone(),
+            )
+            .await
+            .unwrap();
+        // Any Redis error will do: SADD to the user's session index answers WRONGTYPE once the
+        // index holds a string.
+        let index_key = format!("user:{user_id}:sessions");
+        let _: () = conn.set(&index_key, "not-a-set").await.unwrap();
+        let app = test::init_service(
+            App::new()
+                .wrap(session_auth(
+                    conn.clone(),
+                    token_service.clone(),
+                    session_service.clone(),
+                ))
+                .route("/protected", web::get().to(user_id_handler)),
+        )
+        .await;
+
+        let result = test::try_call_service(&app, with_session(&session_id).to_request()).await;
+
+        assert_eq!(status_of(result), StatusCode::SERVICE_UNAVAILABLE);
+        let jti = token_service
+            .validate_jwt(&tokens.access_token)
+            .unwrap()
+            .jti;
+        let blacklisted: bool = conn.exists(format!("blacklist:{jti}")).await.unwrap();
+        assert!(!blacklisted, "a store error must not revoke the token");
+        let _: () = conn.del(&index_key).await.unwrap();
+        session_service.delete_session(&session_id).await.unwrap();
+        let _: () = conn
+            .del(format!("refresh:{}", tokens.refresh_token))
+            .await
+            .unwrap();
     }
 
     #[actix_web::test]

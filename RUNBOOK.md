@@ -1036,15 +1036,14 @@ grep -i "memory\|oom" logs/app.log
    ```
 
 2. **Service Impact**
-   - Every JWT-authenticated request gets 503 (`service_unavailable`): the token revocation
-     checks read Redis.
+   - Every JWT-authenticated request, session cookies included, gets 503 (`service_unavailable`):
+     the token revocation checks and the sessions read Redis. No one is logged out by it.
    - Every API-key request gets 503 (`API key store is unavailable`): each client IP's budget
      of refused API-key authentications, and every signature (against replay), are kept in Redis.
    - **Order placement fails**: every order's idempotency claim is kept in Redis, so nothing is
      sent to the engine. An order that gets past authentication is answered 503 (`Order was not
      sent because idempotency storage is unavailable`).
    - OAuth flows will fail (state storage)
-   - Session refresh may fail
 
 3. **Mitigation**
    - Restart Redis

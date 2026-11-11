@@ -1,3 +1,4 @@
+use crate::error::auth_error::AuthError;
 use actix_web::http::header::{AUTHORIZATION, HeaderValue};
 use actix_web::{
     Error, HttpMessage, HttpResponse,
@@ -62,6 +63,14 @@ pub fn service_unavailable(message: &str) -> HttpResponse {
             "status": 503
         }
     }))
+}
+
+/// Refuses the request with 503 because Redis failed: a store error is not the caller's fault,
+/// so it neither logs the caller out nor revokes its token.
+fn unavailable(req: ServiceRequest) -> Result<ServiceResponse<BoxBody>, Error> {
+    Ok(req.into_response(service_unavailable(
+        "Authentication service temporarily unavailable",
+    )))
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -312,7 +321,7 @@ where
                                                     cookie.value()
                                                 );
                                             }
-                                            Err(_) => {
+                                            Err(AuthError::InvalidRequest) => {
                                                 // Session missing → idle-expired: blacklist and 401
                                                 let now = chrono::Utc::now().timestamp();
                                                 if token_exp > now {
@@ -346,6 +355,13 @@ where
                                                     "Session expired due to inactivity",
                                                 );
                                             }
+                                            Err(e) => {
+                                                tracing::error!(
+                                                    "Failed to refresh session TTL: {}",
+                                                    e
+                                                );
+                                                return unavailable(req);
+                                            }
                                         }
                                     }
 
@@ -353,14 +369,8 @@ where
                                     let res = svc.call(req).await?;
                                     Ok(res.map_into_boxed_body())
                                 }
-                                Err(_) => {
-                                    // Redis failure - fail closed with service unavailable
-                                    let (req, _) = req.into_parts();
-                                    let response = service_unavailable(
-                                        "Authentication service temporarily unavailable",
-                                    );
-                                    Ok(ServiceResponse::new(req, response).map_into_boxed_body())
-                                }
+                                // Redis failure - fail closed with service unavailable
+                                Err(_) => unavailable(req),
                             }
                         });
                     }
@@ -466,14 +476,7 @@ where
                                                                     "Failed to check refreshed token revocation: {}",
                                                                     e
                                                                 );
-                                                                let (req, _) = req.into_parts();
-                                                                let response = service_unavailable(
-                                                                    "Authentication service temporarily unavailable",
-                                                                );
-                                                                return Ok(ServiceResponse::new(
-                                                                    req, response,
-                                                                )
-                                                                .map_into_boxed_body());
+                                                                return unavailable(req);
                                                             }
                                                         }
 
