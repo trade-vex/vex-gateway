@@ -224,73 +224,41 @@ impl SessionService {
         user_id: Uuid,
         keep_session_id: &str,
     ) -> Result<usize, AuthError> {
-        let mut conn = self.conn.clone();
-        let session_ids = self.user_session_ids(user_id).await?;
-        let session_index_key = Self::session_index_key(user_id);
-        let keep_session_exists = session_ids.contains(keep_session_id);
-
-        let mut revoked_count = 0;
-
-        for session_id in session_ids {
-            if session_id != keep_session_id {
-                let (deleted,): (usize,) = redis::pipe()
-                    .atomic()
-                    .cmd("DEL")
-                    .arg(format!("session:{}", session_id))
-                    .cmd("SREM")
-                    .arg(&session_index_key)
-                    .arg(&session_id)
-                    .ignore()
-                    .query_async(&mut conn)
-                    .await
-                    .map_err(|e| AuthError::Redis(format!("Failed to delete session: {}", e)))?;
-                revoked_count += deleted;
-            }
-        }
-
-        if keep_session_exists {
-            let _: () = redis::pipe()
-                .atomic()
-                .cmd("SADD")
-                .arg(&session_index_key)
-                .arg(keep_session_id)
-                .ignore()
-                .cmd("EXPIRE")
-                .arg(&session_index_key)
-                .arg(self.session_ttl_seconds)
-                .ignore()
-                .query_async(&mut conn)
-                .await
-                .map_err(|e| AuthError::Redis(format!("Failed to keep session indexed: {}", e)))?;
-        }
-
-        Ok(revoked_count)
+        let mut session_ids = self.user_session_ids(user_id).await?;
+        session_ids.remove(keep_session_id);
+        self.delete_user_sessions(user_id, session_ids).await
     }
 
     /// Revoke all sessions for a user
     pub async fn revoke_all_user_sessions(&self, user_id: Uuid) -> Result<usize, AuthError> {
-        let mut conn = self.conn.clone();
         let session_ids = self.user_session_ids(user_id).await?;
-        let session_index_key = Self::session_index_key(user_id);
+        self.delete_user_sessions(user_id, session_ids).await
+    }
 
-        let mut revoked_count = 0;
-
-        for session_id in session_ids {
-            let (deleted,): (usize,) = redis::pipe()
-                .atomic()
-                .cmd("DEL")
-                .arg(format!("session:{}", session_id))
-                .cmd("SREM")
-                .arg(&session_index_key)
-                .arg(&session_id)
-                .ignore()
-                .query_async(&mut conn)
-                .await
-                .map_err(|e| AuthError::Redis(format!("Failed to delete session: {}", e)))?;
-            revoked_count += deleted;
+    /// Deletes these sessions of `user_id` and drops them from its index, in one atomic round
+    /// trip. Returns how many still existed.
+    async fn delete_user_sessions(
+        &self,
+        user_id: Uuid,
+        session_ids: HashSet<String>,
+    ) -> Result<usize, AuthError> {
+        if session_ids.is_empty() {
+            return Ok(0);
         }
-
-        Ok(revoked_count)
+        let session_keys: Vec<String> = session_ids
+            .iter()
+            .map(|session_id| format!("session:{}", session_id))
+            .collect();
+        let mut conn = self.conn.clone();
+        let (deleted,): (usize,) = redis::pipe()
+            .atomic()
+            .del(session_keys)
+            .srem(Self::session_index_key(user_id), session_ids)
+            .ignore()
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to delete sessions: {}", e)))?;
+        Ok(deleted)
     }
 
     async fn user_session_ids(&self, user_id: Uuid) -> Result<HashSet<String>, AuthError> {
