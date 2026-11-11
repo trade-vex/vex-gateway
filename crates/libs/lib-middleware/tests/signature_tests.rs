@@ -287,6 +287,14 @@ fn test_validate_timestamp_valid() {
 
     let result = SignatureVerifier::validate_timestamp(valid_timestamp, recv_window, server_time);
     assert!(result.is_ok());
+
+    // Boundaries: 1 s of future drift is allowed, recv_window of age is allowed, one ms more is not.
+    let validate =
+        |timestamp| SignatureVerifier::validate_timestamp(timestamp, recv_window, server_time);
+    assert!(validate(server_time + 1000).is_ok());
+    assert!(validate(server_time + 1001).is_err());
+    assert!(validate(server_time - recv_window).is_ok());
+    assert!(validate(server_time - recv_window - 1).is_err());
 }
 
 #[test]
@@ -308,18 +316,6 @@ fn test_validate_timestamp_future() {
         }
         _ => panic!("Expected FutureTimestamp error"),
     }
-}
-
-#[test]
-fn test_validate_timestamp_edge_cases() {
-    let server_time = 1640995200000;
-    let recv_window = 5000;
-
-    // Test edge case where implementation might have integer overflow
-    // Use a small past timestamp that won't cause overflow
-    let past_timestamp = server_time - 1000;
-    let result = SignatureVerifier::validate_timestamp(past_timestamp, recv_window, server_time);
-    assert!(result.is_ok()); // Should be valid as it's within window
 }
 
 #[test]
