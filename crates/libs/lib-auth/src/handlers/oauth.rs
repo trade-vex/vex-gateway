@@ -161,13 +161,9 @@ pub async fn handle_oauth_callback(
             let user_id = response.user.user_id;
             let user_info = response.user.clone();
 
-            // Create session with user_id and tokens
+            // Create session with user_id and its access token
             let session_id = session_service
-                .create_session(
-                    user_id,
-                    response.access_token.clone(),
-                    response.refresh_token.clone(),
-                )
+                .create_session(user_id, response.access_token.clone())
                 .await
                 .map_err(|e| {
                     AuthError::CodeExchangeFailed(format!("Failed to create session: {}", e))

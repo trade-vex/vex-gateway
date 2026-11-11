@@ -695,7 +695,6 @@ impl OAuthService {
     ///
     /// An `OAuthLoginResponse` containing:
     /// - `access_token`: JWT for API authentication
-    /// - `refresh_token`: JWT for token refresh
     /// - `expires_in`: Token expiry time in seconds
     /// - `user`: User information
     ///
@@ -777,7 +776,6 @@ impl OAuthService {
         Ok((
             OAuthLoginResponse {
                 access_token: tokens.access_token,
-                refresh_token: tokens.refresh_token,
                 expires_in: tokens.expires_in,
                 user: user.into(),
             },

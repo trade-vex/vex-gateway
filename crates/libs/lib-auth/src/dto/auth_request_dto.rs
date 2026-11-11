@@ -9,11 +9,6 @@ pub struct LoginRequest {
     pub password: String,
 }
 
-#[derive(Deserialize)]
-pub struct RefreshTokenRequest {
-    pub refresh_token: String,
-}
-
 #[derive(Deserialize, Validate)]
 pub struct SignupRequest {
     #[validate(email)]

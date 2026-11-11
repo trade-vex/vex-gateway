@@ -64,7 +64,6 @@ impl TokenService {
         password_timestamp: i64,
         token_version: u64,
     ) -> Result<JwtTokenResponse, AuthError> {
-        let mut conn = self.conn.clone();
         let jti = Uuid::new_v4().to_string();
         let now = Utc::now();
 
@@ -88,79 +87,14 @@ impl TokenService {
         )
         .map_err(|e| AuthError::InternalError(format!("JWT encoding failed: {}", e)))?;
 
-        // Refresh Token
-        let refresh_token = Uuid::new_v4().to_string();
-        let refresh_ttl_secs = self.jwt_config.refresh_token_ttl_days * 24 * 3600;
-        let redis_key = format!("refresh:{}", refresh_token);
-        let redis_val = format!("{}:{}:{}", user_id, jti, token_version);
-
-        // Convert to u64 using fallible conversion to handle overflow
-        let refresh_ttl_secs_u64 = refresh_ttl_secs
-            .try_into()
-            .map_err(|_| AuthError::Validation("Refresh token TTL is too large".to_string()))?;
-
-        let _: () = conn
-            .set_ex(redis_key, redis_val, refresh_ttl_secs_u64)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to store refresh token: {}", e)))?;
-
         let expires_in = (self.jwt_config.access_token_ttl_minutes * 60)
             .try_into()
             .map_err(|_| AuthError::Validation("Access token TTL is too large".to_string()))?;
 
         Ok(JwtTokenResponse {
             access_token,
-            refresh_token,
             expires_in,
         })
-    }
-
-    // Fixed refresh_tokens method
-    pub async fn refresh_tokens(
-        &self,
-        old_refresh_token: &str,
-    ) -> Result<JwtTokenResponse, AuthError> {
-        let mut conn = self.conn.clone();
-
-        let redis_key = format!("refresh:{}", old_refresh_token);
-
-        // Get and delete the refresh token in one operation
-        let entry: Option<String> = conn
-            .get_del(&redis_key)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get refresh token: {}", e)))?;
-
-        if let Some(val) = entry {
-            let parts: Vec<&str> = val.split(':').collect();
-            let [user_id, old_jti, token_version] = parts[..] else {
-                return Err(AuthError::InvalidResetToken);
-            };
-
-            let user_id = Uuid::parse_str(user_id).map_err(|_| AuthError::InvalidResetToken)?;
-            let token_version = token_version
-                .parse::<u64>()
-                .map_err(|_| AuthError::InvalidResetToken)?;
-
-            if token_version < self.get_token_version(user_id).await? {
-                return Err(AuthError::TokenRevoked);
-            }
-
-            // Blacklist the old access token's JTI
-            let blacklist_key = format!("blacklist:{}", old_jti);
-            let blacklist_ttl = self.jwt_config.access_token_ttl_minutes * 60;
-            let blacklist_ttl_u64 = blacklist_ttl
-                .try_into()
-                .map_err(|_| AuthError::Validation("Blacklist TTL is too large".to_string()))?;
-            let _: () = conn
-                .set_ex(blacklist_key, "1", blacklist_ttl_u64)
-                .await
-                .map_err(|e| AuthError::Redis(format!("Failed to blacklist token: {}", e)))?;
-
-            // Mint a fresh pair of tokens
-            self.mint_tokens_at_version(user_id, token_version).await
-        } else {
-            Err(AuthError::InvalidResetToken)
-        }
     }
 
     // Validate JWT token
@@ -266,7 +200,6 @@ mod tests {
                 private_key_path: String::new(),
                 public_key_path: String::new(),
                 access_token_ttl_minutes: 60,
-                refresh_token_ttl_days: 30,
                 issuer: "vex-gateway".to_string(),
                 audience: "vex-api".to_string(),
             }),
@@ -288,27 +221,5 @@ mod tests {
             .mint_tokens_at_version(user_id, captured_version)
             .await;
         assert!(matches!(result, Err(AuthError::TokenRevoked)));
-    }
-
-    #[tokio::test]
-    async fn refresh_record_without_a_version_is_rejected() {
-        let mut conn = crate::test_redis().await;
-        let service = test_service(conn.clone());
-        let refresh_token = Uuid::new_v4().to_string();
-        let jti = Uuid::new_v4().to_string();
-        let _: () = conn
-            .set_ex(
-                format!("refresh:{}", refresh_token),
-                format!("{}:{}", Uuid::new_v4(), jti),
-                60_u64,
-            )
-            .await
-            .unwrap();
-
-        let result = service.refresh_tokens(&refresh_token).await;
-
-        assert!(matches!(result, Err(AuthError::InvalidResetToken)));
-        let blacklisted: bool = conn.exists(format!("blacklist:{}", jti)).await.unwrap();
-        assert!(!blacklisted, "a rejected record must not be acted on");
     }
 }

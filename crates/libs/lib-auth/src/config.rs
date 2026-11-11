@@ -7,7 +7,6 @@ pub struct JwtConfig {
     pub private_key_path: String,
     pub public_key_path: String,
     pub access_token_ttl_minutes: i64,
-    pub refresh_token_ttl_days: i64,
     pub issuer: String,
     pub audience: String,
 }

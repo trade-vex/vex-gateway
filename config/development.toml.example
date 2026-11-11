@@ -36,7 +36,6 @@ level = "debug"
 private_key_path = "crates/libs/lib-auth/src/keys/private_key.pem"
 public_key_path = "crates/libs/lib-auth/src/keys/public_key.pem"
 access_token_ttl_minutes = 60
-refresh_token_ttl_days = 30
 issuer = "vex-gateway-dev"
 audience = "vex-api-dev"
 

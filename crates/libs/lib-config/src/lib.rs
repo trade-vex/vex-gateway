@@ -810,7 +810,6 @@ level = "info"
 private_key_path = "/run/secrets/jwt-private.pem"
 public_key_path = "/run/secrets/jwt-public.pem"
 access_token_ttl_minutes = 15
-refresh_token_ttl_days = 7
 issuer = "vex-gateway"
 audience = "vex-api"
 

@@ -5,12 +5,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use uuid::Uuid;
 
-/// Session data stored in Redis - only tokens and user_id
+/// Session data stored in Redis: the user and its current access token. The session is the only
+/// credential that outlives the access token: at expiry the JWT middleware mints a new one for it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionData {
     pub user_id: Uuid,
     pub access_token: String,
-    pub refresh_token: String,
 }
 
 /// One-time login code data for mobile OAuth exchange (short TTL)
@@ -60,7 +60,6 @@ impl SessionService {
         &self,
         user_id: Uuid,
         access_token: String,
-        refresh_token: String,
     ) -> Result<String, AuthError> {
         let session_id = Uuid::new_v4().to_string();
         let session_key = format!("session:{}", session_id);
@@ -69,7 +68,6 @@ impl SessionService {
         let session_data = SessionData {
             user_id,
             access_token,
-            refresh_token,
         };
 
         let session_json = serde_json::to_string(&session_data)
@@ -178,24 +176,21 @@ impl SessionService {
         Ok(())
     }
 
-    /// Update tokens in an existing session
-    /// Uses a single Redis connection for read-modify-write to minimize race conditions
-    pub async fn update_session_tokens(
+    /// Replaces the session's access token: the JWT middleware renewed it at expiry, or a password
+    /// change minted a new one.
+    pub async fn update_session_access_token(
         &self,
         session_id: &str,
         access_token: String,
-        refresh_token: String,
     ) -> Result<(), AuthError> {
         let session_key = format!("session:{}", session_id);
 
         // Get existing session to preserve user_id
         let session_data = self.get_session(session_id).await?;
 
-        // Create updated session data with new tokens
         let updated_session = SessionData {
             user_id: session_data.user_id,
             access_token,
-            refresh_token,
         };
 
         let updated_json = serde_json::to_string(&updated_session)
@@ -204,7 +199,6 @@ impl SessionService {
         let mut conn = self.conn.clone();
         let session_index_key = Self::session_index_key(session_data.user_id);
 
-        // Update the session with new tokens
         let _: () = redis::pipe()
             .atomic()
             .cmd("SET")
@@ -409,15 +403,15 @@ mod tests {
         let user_id = Uuid::new_v4();
         let other_user_id = Uuid::new_v4();
         let keep_session = service
-            .create_session(user_id, "access-keep".into(), "refresh-keep".into())
+            .create_session(user_id, "access-keep".into())
             .await
             .unwrap();
         let revoke_session = service
-            .create_session(user_id, "access-revoke".into(), "refresh-revoke".into())
+            .create_session(user_id, "access-revoke".into())
             .await
             .unwrap();
         let other_session = service
-            .create_session(other_user_id, "access-other".into(), "refresh-other".into())
+            .create_session(other_user_id, "access-other".into())
             .await
             .unwrap();
 

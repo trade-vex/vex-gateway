@@ -263,10 +263,9 @@ The routes:
 - `general`, per user: every other authenticated route: `POST /api/cancel`, `/api/balances`,
   `/api/orders/open`, `/api/orders/history`, `/api/portfolio`, `/api/balance-chart`,
   `/api/pnl-chart`, `/api/favorites`, `/api/api-key/*`, `/api/session-check`, `/api/profile`,
-  `/api/logout`, `/api/change-password`, `/api/session/info`, `/api/session/refresh`.
+  `/api/logout`, `/api/change-password`, `/api/session/info`.
 - `general`, per client IP: `GET /api/oauth/providers`, `POST /api/oauth/exchange`,
-  `POST /api/refresh`, `POST /api/session/refresh-tokens`, `POST /api/forgot-password`,
-  `POST /api/verify-reset-otp`, `POST /api/reset-password`.
+  `POST /api/forgot-password`, `POST /api/verify-reset-otp`, `POST /api/reset-password`.
 - Neither budget: the routes with fixed limits of their own per client IP (and some per email or
   username too): `POST /api/signup`, `POST /api/login`, `POST /api/verify-email`,
   `GET /api/oauth/{provider}`, `GET /api/oauth/{provider}/callback`. And `GET /api/health`, the
@@ -382,8 +381,8 @@ Production runs behind an AWS Application Load Balancer (ALB):
 
 Run Redis with `maxmemory-policy noeviction`. Two kinds of gateway state must never be evicted:
 
-- `token_version:<user_id>` has no TTL and is what revokes a user's outstanding access and refresh
-  tokens after logout, password change or password reset. An `allkeys-*` policy can evict it, which
+- `token_version:<user_id>` has no TTL and is what revokes a user's outstanding access tokens
+  after logout, password change or password reset. An `allkeys-*` policy can evict it, which
   silently makes those tokens valid again.
 - Order idempotency claims (`vex:order-idempotency:*`, 24-hour TTL) stop a retried order from being
   published twice. A `volatile-*` or `allkeys-*` policy can evict a claim early, and the retry is
@@ -1130,7 +1129,6 @@ grep -i "memory\|oom" logs/app.log
 - `POST /api/verify-email` - Takes the email, the password chosen at sign-up and the emailed code.
   An unknown or already verified email and a wrong password all get the login's 401
 - `POST /api/login` - User login
-- `POST /api/refresh` - Refresh JWT token
 - `GET /api/oauth/providers` - List OAuth providers
 - `GET /api/oauth/{provider}` - Initiate OAuth flow
 - `GET /api/oauth/{provider}/callback` - OAuth callback. Refused with 403 `EMAIL_NOT_VERIFIED`
@@ -1173,6 +1171,10 @@ request, and within 5 seconds on the others: each replica caches a key for at mo
 
 #### Session
 - `GET /api/session-check` - Check session validity
+- `GET /api/session/info` - The session's user and access token. There are no refresh tokens: the
+  session (30 minutes idle) renews its access token when it expires. A Bearer client whose access
+  token expired calls `GET /api/session/info` with its session cookie; the middleware renews the
+  token on that call and the response carries the new one.
 
 ### Authentication Methods
 

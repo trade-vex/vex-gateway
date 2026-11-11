@@ -51,14 +51,6 @@ pub fn configure_public_auth_services(
         .route("/signup", web::post().to(handlers::auth::signup))
         .route("/login", web::post().to(handlers::auth::login))
         .route(
-            "/refresh",
-            rate_limited(web::post().to(handlers::auth::refresh_token)),
-        )
-        .route(
-            "/session/refresh-tokens",
-            rate_limited(web::post().to(handlers::session::refresh_session_tokens)),
-        )
-        .route(
             "/verify-email",
             web::post().to(handlers::auth::verify_email_with_otp),
         )
@@ -91,10 +83,6 @@ pub fn configure_protected_auth_services(cfg: &mut web::ServiceConfig) {
         .route(
             "/session/info",
             web::get().to(handlers::session::get_session_info),
-        )
-        .route(
-            "/session/refresh",
-            web::post().to(handlers::session::refresh_session),
         );
 }
 
@@ -143,8 +131,6 @@ mod route_tests {
             (Method::POST, "/oauth/exchange", true),
             (Method::POST, "/signup", false),
             (Method::POST, "/login", false),
-            (Method::POST, "/refresh", true),
-            (Method::POST, "/session/refresh-tokens", true),
             (Method::POST, "/verify-email", false),
             (Method::POST, "/forgot-password", true),
             (Method::POST, "/verify-reset-otp", true),

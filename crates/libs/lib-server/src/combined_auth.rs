@@ -160,7 +160,7 @@ where
                         // reader could replay it as a cookie to authenticate as this user.
                         tracing::debug!("Session auth: found session_id cookie");
 
-                        // Get session from Redis (contains access_token and refresh_token)
+                        // Get session from Redis (contains the access token)
                         match session_service.get_session(&session_id).await {
                             Ok(session_data) => {
                                 tracing::debug!(
@@ -444,7 +444,6 @@ mod tests {
                 private_key_path: String::new(),
                 public_key_path: String::new(),
                 access_token_ttl_minutes: 60,
-                refresh_token_ttl_days: 1,
                 issuer: ISSUER.to_string(),
                 audience: AUDIENCE.to_string(),
             }),
@@ -523,11 +522,7 @@ mod tests {
         let user_id = Uuid::new_v4();
         let tokens = token_service.mint_tokens(user_id).await.unwrap();
         let session_id = session_service
-            .create_session(
-                user_id,
-                tokens.access_token.clone(),
-                tokens.refresh_token.clone(),
-            )
+            .create_session(user_id, tokens.access_token.clone())
             .await
             .unwrap();
         // Any Redis error will do: SADD to the user's session index answers WRONGTYPE once the
@@ -556,54 +551,14 @@ mod tests {
         assert!(!blacklisted, "a store error must not revoke the token");
         let _: () = conn.del(&index_key).await.unwrap();
         session_service.delete_session(&session_id).await.unwrap();
-        let _: () = conn
-            .del(format!("refresh:{}", tokens.refresh_token))
-            .await
-            .unwrap();
     }
 
-    #[actix_web::test]
-    async fn refreshes_expired_access_token_for_live_session() {
-        let redis_conn = crate::test_redis().await;
-        let (encoding_key, decoding_key) = test_keys();
-        let issuer = "combined-auth-test".to_string();
-        let audience = "combined-auth-audience".to_string();
-        let jwt_config = Arc::new(JwtConfig {
-            private_key_path: String::new(),
-            public_key_path: String::new(),
-            access_token_ttl_minutes: 60,
-            refresh_token_ttl_days: 1,
-            issuer: issuer.clone(),
-            audience: audience.clone(),
-        });
-        let encoding_key = Arc::new(encoding_key);
-        let decoding_key = Arc::new(decoding_key);
-        let token_service = Arc::new(TokenService::new(
-            jwt_config,
-            redis_conn.clone(),
-            encoding_key.clone(),
-            decoding_key.clone(),
-        ));
-        let session_service = Arc::new(SessionService::new(redis_conn.clone(), 300));
+    /// A live session of a new user, holding an access token that expired two minutes ago.
+    async fn session_with_an_expired_token(
+        token_service: &TokenService,
+        session_service: &SessionService,
+    ) -> (Uuid, String, String) {
         let user_id = Uuid::new_v4();
-        let tokens = token_service
-            .mint_tokens(user_id)
-            .await
-            .expect("initial token mint must succeed");
-
-        let refresh_key = format!("refresh:{}", tokens.refresh_token);
-        let mut cleanup_conn = redis_conn.clone();
-        let refresh_value: String = cleanup_conn
-            .get(&refresh_key)
-            .await
-            .expect("refresh token must be stored");
-        let record: Vec<&str> = refresh_value.split(':').collect();
-        let [_, old_jti, token_version] = record[..] else {
-            panic!("refresh token value must be user:jti:version, got {refresh_value}");
-        };
-        let old_jti = old_jti.to_string();
-        let token_version: u64 = token_version.parse().expect("token version must be a u64");
-
         let now = Utc::now().timestamp();
         let expired_access_token = encode(
             &Header::new(Algorithm::RS256),
@@ -611,69 +566,85 @@ mod tests {
                 sub: user_id.to_string(),
                 exp: now - 120,
                 iat: now - 3600,
-                iss: issuer.clone(),
-                aud: audience.clone(),
-                jti: old_jti.clone(),
+                iss: ISSUER.to_string(),
+                aud: AUDIENCE.to_string(),
+                jti: Uuid::new_v4().to_string(),
                 pwd: now - 3600,
-                token_version,
+                token_version: token_service.get_token_version(user_id).await.unwrap(),
             },
-            &encoding_key,
+            &test_keys().0,
         )
-        .expect("expired access token must encode");
+        .unwrap();
         let session_id = session_service
-            .create_session(user_id, expired_access_token.clone(), tokens.refresh_token)
+            .create_session(user_id, expired_access_token.clone())
             .await
-            .expect("live session must be created");
+            .unwrap();
+        (user_id, session_id, expired_access_token)
+    }
 
-        let jwt_middleware = JwtAuthentication::with_auto_refresh(
-            (*decoding_key).clone(),
-            issuer,
-            audience,
-            redis_conn,
-            token_service,
-            session_service.clone(),
-        );
-        let middleware = CombinedAuthMiddleware::new(
-            jwt_middleware,
-            ApiKeyMiddleware::new(),
-            session_service.clone(),
-        );
-        let app = test::init_service(App::new().wrap(middleware).route(
-            "/protected",
-            web::get().to(|user: AuthenticatedUser| async move {
-                HttpResponse::Ok().body(user.user_id.to_string())
-            }),
-        ))
+    /// Requests a browser sends together once its access token expired are all served: each
+    /// renews the token, and the session keeps the last one.
+    #[actix_web::test]
+    async fn two_parallel_requests_with_an_expired_access_token_both_succeed() {
+        let (conn, token_service, session_service) = session_services().await;
+        let (user_id, session_id, expired_access_token) =
+            session_with_an_expired_token(&token_service, &session_service).await;
+        let app = test::init_service(
+            App::new()
+                .wrap(session_auth(
+                    conn,
+                    token_service.clone(),
+                    session_service.clone(),
+                ))
+                .route("/protected", web::get().to(user_id_handler)),
+        )
         .await;
 
-        let request = test::TestRequest::get()
-            .uri("/protected")
-            .cookie(actix_web::cookie::Cookie::new(
-                "session_id",
-                session_id.clone(),
-            ))
-            .to_request();
-        let response = test::call_service(&app, request).await;
+        let (first, second) = futures_util::future::join(
+            test::try_call_service(&app, with_session(&session_id).to_request()),
+            test::try_call_service(&app, with_session(&session_id).to_request()),
+        )
+        .await;
 
-        assert_eq!(response.status(), StatusCode::OK);
-        let updated_session = session_service
-            .get_session(&session_id)
-            .await
-            .expect("live session must remain available");
-        assert_ne!(updated_session.access_token, expired_access_token);
+        assert_eq!(status_of(first), StatusCode::OK);
+        assert_eq!(status_of(second), StatusCode::OK);
+        let session = session_service.get_session(&session_id).await.unwrap();
+        assert_ne!(session.access_token, expired_access_token);
+        let claims = token_service.validate_jwt(&session.access_token).unwrap();
+        assert_eq!(claims.sub, user_id.to_string());
+        session_service.delete_session(&session_id).await.unwrap();
+    }
 
-        session_service
-            .delete_session(&session_id)
+    /// A session's token is renewed at the version it was issued at: after a logout or a
+    /// password change bumped the user's version, the expired token is refused, not renewed.
+    #[actix_web::test]
+    async fn expired_token_of_a_bumped_version_is_not_renewed() {
+        let (conn, token_service, session_service) = session_services().await;
+        let (user_id, session_id, _) =
+            session_with_an_expired_token(&token_service, &session_service).await;
+        token_service.bump_token_version(user_id).await.unwrap();
+        let app = test::init_service(
+            App::new()
+                .wrap(session_auth(
+                    conn.clone(),
+                    token_service,
+                    session_service.clone(),
+                ))
+                .route("/protected", web::get().to(user_id_handler)),
+        )
+        .await;
+
+        let response = test::call_service(&app, with_session(&session_id).to_request()).await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body: serde_json::Value = test::read_body_json(response).await;
+        assert_eq!(body["error"]["code"], "token_revoked");
+        session_service.delete_session(&session_id).await.unwrap();
+        let _: () = conn
+            .clone()
+            .del(format!("token_version:{user_id}"))
             .await
-            .expect("test session cleanup must succeed");
-        let _: () = cleanup_conn
-            .del(format!("refresh:{}", updated_session.refresh_token))
-            .await
-            .expect("test refresh token cleanup must succeed");
-        let _: () = cleanup_conn
-            .del(format!("blacklist:{}", old_jti))
-            .await
-            .expect("test blacklist cleanup must succeed");
+            .unwrap();
     }
 
     #[actix_web::test]
@@ -798,7 +769,6 @@ mod tests {
                 private_key_path: String::new(),
                 public_key_path: String::new(),
                 access_token_ttl_minutes: 60,
-                refresh_token_ttl_days: 1,
                 issuer: issuer.to_string(),
                 audience: audience.to_string(),
             }),
@@ -838,10 +808,5 @@ mod tests {
         };
 
         assert_eq!(status, StatusCode::OK);
-        let _: () = redis_conn
-            .clone()
-            .del(format!("refresh:{}", tokens.refresh_token))
-            .await
-            .expect("test refresh token cleanup must succeed");
     }
 }

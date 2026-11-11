@@ -6,10 +6,10 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::dto::auth_request_dto::{
-    ChangePasswordRequest, ForgotPasswordRequest, LoginRequest, RefreshTokenRequest,
-    ResetPasswordRequest, SignupRequest, VerifyEmailRequest, VerifyResetOtpRequest,
+    ChangePasswordRequest, ForgotPasswordRequest, LoginRequest, ResetPasswordRequest,
+    SignupRequest, VerifyEmailRequest, VerifyResetOtpRequest,
 };
-use crate::dto::auth_response_dto::{RefreshTokenResponse, SignupResponse, UserInfo, UserProfile};
+use crate::dto::auth_response_dto::{SignupResponse, UserInfo, UserProfile};
 use crate::error::auth_error::AuthError;
 use crate::middleware::jwt_auth::AuthenticatedUser;
 use crate::models::user::{Model, UserStatus};
@@ -297,13 +297,9 @@ pub async fn login(
     // Update last login
     user_repo.update_last_login(user_id).await?;
 
-    // Create session (store user_id and tokens in Redis)
+    // Create session (store user_id and its access token in Redis)
     let session_id = session_service
-        .create_session(
-            user_id,
-            tokens.access_token.clone(),
-            tokens.refresh_token.clone(),
-        )
+        .create_session(user_id, tokens.access_token)
         .await?;
 
     // Create session cookie
@@ -393,24 +389,6 @@ pub async fn get_profile(
     Ok(HttpResponse::Ok().json(profile))
 }
 
-// Refresh token handler
-pub async fn refresh_token(
-    req: web::Json<RefreshTokenRequest>,
-    token_service: web::Data<Arc<TokenService>>,
-) -> Result<HttpResponse, AuthError> {
-    tracing::debug!("Token refresh request");
-
-    let new_tokens = token_service.refresh_tokens(&req.refresh_token).await?;
-
-    let response = RefreshTokenResponse {
-        access_token: new_tokens.access_token,
-        token_type: "Bearer".to_string(),
-        expires_in: new_tokens.expires_in,
-    };
-
-    Ok(HttpResponse::Ok().json(response))
-}
-
 // Verify email with OTP handler (public endpoint)
 pub async fn verify_email_with_otp(
     http_req: HttpRequest,
@@ -477,13 +455,9 @@ pub async fn verify_email_with_otp(
 
     tracing::debug!("Creating session for user_id: {}", user.user_id);
 
-    // Create session (stores user_id and tokens in Redis)
+    // Create session (stores user_id and its access token in Redis)
     let session_id = session_service
-        .create_session(
-            user.user_id,
-            tokens.access_token.clone(),
-            tokens.refresh_token.clone(),
-        )
+        .create_session(user.user_id, tokens.access_token)
         .await
         .map_err(|e| {
             tracing::error!("Failed to create session: {}", e);
@@ -568,8 +542,8 @@ pub async fn change_password(
     .map_err(|e| AuthError::InternalError(format!("Join error: {}", e)))?
     .map_err(|e| AuthError::InternalError(format!("Password hashing failed: {}", e)))?;
 
-    // Invalidate all previously issued access and refresh tokens first: if the update then fails,
-    // the user is logged out everywhere, never the reverse.
+    // Invalidate all previously issued access tokens first: if the update then fails, the user is
+    // logged out everywhere, never the reverse.
     token_service.bump_token_version(user.user_id).await?;
     user_repo
         .update_password(user.user_id, &new_password_hash)
@@ -582,13 +556,9 @@ pub async fn change_password(
     let current_session_id = req.cookie("session_id").map(|c| c.value().to_string());
 
     if let Some(session_id) = current_session_id {
-        // Update current session with new tokens (keep user logged in)
+        // Update current session with the new token (keep user logged in)
         session_service
-            .update_session_tokens(
-                &session_id,
-                new_tokens.access_token.clone(),
-                new_tokens.refresh_token.clone(),
-            )
+            .update_session_access_token(&session_id, new_tokens.access_token)
             .await
             .map_err(|e| {
                 tracing::warn!("Failed to update current session tokens: {}", e);
@@ -754,8 +724,8 @@ pub async fn reset_password(
     .map_err(|e| AuthError::InternalError(format!("Join error: {}", e)))?
     .map_err(|e| AuthError::InternalError(format!("Password hashing failed: {}", e)))?;
 
-    // Invalidate all previously issued access and refresh tokens first: if the update then fails,
-    // the user is logged out everywhere, never the reverse.
+    // Invalidate all previously issued access tokens first: if the update then fails, the user is
+    // logged out everywhere, never the reverse.
     token_service.bump_token_version(user_id).await?;
     user_repo
         .update_password(user_id, &new_password_hash)
@@ -822,16 +792,16 @@ mod tests {
         assert!(!get_cookie_config(&plain).0);
     }
 
+    /// The JWT middleware renews a session's expired token at the version it was issued at; after
+    /// a logout no token of an earlier version is renewed.
     #[tokio::test]
-    async fn refresh_token_stops_working_after_logout() {
+    async fn session_tokens_are_not_renewed_after_logout() {
         let user_id = Uuid::new_v4();
-        let refresh_token = Uuid::new_v4().to_string();
         let redis_conn = crate::test_redis().await;
         let jwt_config = Arc::new(JwtConfig {
             private_key_path: String::new(),
             public_key_path: String::new(),
             access_token_ttl_minutes: 60,
-            refresh_token_ttl_days: 30,
             issuer: "vex-gateway".to_string(),
             audience: "vex-api".to_string(),
         });
@@ -841,17 +811,8 @@ mod tests {
             Arc::new(EncodingKey::from_secret(b"unused")),
             Arc::new(DecodingKey::from_secret(b"unused")),
         ));
-        let session_service = Arc::new(SessionService::new(redis_conn.clone(), 3600));
-
-        let mut conn = redis_conn;
-        let _: () = conn
-            .set_ex(
-                format!("refresh:{}", refresh_token),
-                format!("{}:{}:0", user_id, Uuid::new_v4()),
-                3600,
-            )
-            .await
-            .unwrap();
+        let session_service = Arc::new(SessionService::new(redis_conn, 3600));
+        let version = token_service.get_token_version(user_id).await.unwrap();
 
         let response = logout(
             actix_web::test::TestRequest::default().to_http_request(),
@@ -863,7 +824,7 @@ mod tests {
         .unwrap();
         assert_eq!(response.status(), actix_web::http::StatusCode::OK);
 
-        let result = token_service.refresh_tokens(&refresh_token).await;
+        let result = token_service.mint_tokens_at_version(user_id, version).await;
         assert!(matches!(result, Err(AuthError::TokenRevoked)));
     }
 
@@ -1085,7 +1046,6 @@ mod tests {
             private_key_path: String::new(),
             public_key_path: String::new(),
             access_token_ttl_minutes: 15,
-            refresh_token_ttl_days: 1,
             issuer: "test".to_string(),
             audience: "test".to_string(),
         });
@@ -1949,27 +1909,19 @@ mod tests {
     ) -> (String, JwtTokenResponse) {
         let tokens = token_service.mint_tokens(user_id).await.unwrap();
         let session_id = session_service
-            .create_session(
-                user_id,
-                tokens.access_token.clone(),
-                tokens.refresh_token.clone(),
-            )
+            .create_session(user_id, tokens.access_token.clone())
             .await
             .unwrap();
         (session_id, tokens)
     }
 
-    /// Tokens minted before the version bump are refused: the refresh token by `refresh_tokens`,
-    /// the access token by the version check every JWT request passes (jwt_auth.rs).
+    /// Tokens minted before the version bump are refused by the version check every JWT request
+    /// passes, and not renewed at expiry (jwt_auth.rs).
     async fn assert_tokens_revoked(
         token_service: &TokenService,
         user_id: Uuid,
         tokens: &JwtTokenResponse,
     ) {
-        assert!(matches!(
-            token_service.refresh_tokens(&tokens.refresh_token).await,
-            Err(AuthError::TokenRevoked)
-        ));
         let claims = token_service.validate_jwt(&tokens.access_token).unwrap();
         assert!(claims.token_version < token_service.get_token_version(user_id).await.unwrap());
     }
@@ -2095,11 +2047,10 @@ mod tests {
         assert_eq!(response.status(), actix_web::http::StatusCode::OK);
         // The device that changed the password stays signed in on tokens minted after the bump.
         let kept = session_service.get_session(&current_session).await.unwrap();
-        assert!(
-            token_service
-                .refresh_tokens(&kept.refresh_token)
-                .await
-                .is_ok()
+        let kept_claims = token_service.validate_jwt(&kept.access_token).unwrap();
+        assert_eq!(
+            kept_claims.token_version,
+            token_service.get_token_version(user_id).await.unwrap()
         );
         // The other device, and every token minted before the change, is revoked.
         assert!(session_service.get_session(&other_session).await.is_err());
