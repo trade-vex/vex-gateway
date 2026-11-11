@@ -272,10 +272,9 @@ where
                                             .await
                                         {
                                             Ok(()) => {
-                                                tracing::debug!(
-                                                    "Session TTL refreshed for session_id={}",
-                                                    cookie.value()
-                                                );
+                                                // Never log the session id: it is a bearer
+                                                // credential (see combined_auth.rs).
+                                                tracing::debug!("Session TTL refreshed");
                                             }
                                             Err(AuthError::InvalidRequest) => {
                                                 // Session missing → idle-expired: blacklist and 401

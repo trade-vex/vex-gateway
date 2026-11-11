@@ -902,15 +902,6 @@ impl OAuthService {
             AuthError::UserInfoFetchFailed(format!("Failed to parse user info: {}", e))
         })?;
 
-        // Debug logging for Google OAuth issues
-        if provider == "google" {
-            tracing::debug!(
-                "Google user info response: {}",
-                serde_json::to_string_pretty(&user_info)
-                    .unwrap_or_else(|_| "Failed to serialize".to_string())
-            );
-        }
-
         // Special handling for GitHub - fetch emails separately
         if provider == "github" {
             match self.fetch_github_emails(access_token).await {
@@ -1021,12 +1012,6 @@ impl OAuthService {
     /// }
     /// ```
     fn parse_google_user_info(&self, data: Value) -> Result<OAuthUserInfo, AuthError> {
-        tracing::debug!(
-            "Parsing Google user info: {}",
-            serde_json::to_string_pretty(&data)
-                .unwrap_or_else(|_| "Failed to serialize".to_string())
-        );
-
         let provider_id = data["sub"]
             .as_str()
             .ok_or_else(|| {
@@ -1035,10 +1020,8 @@ impl OAuthService {
                     .map(|obj| obj.keys().cloned().collect())
                     .unwrap_or_default();
                 AuthError::UserInfoFetchFailed(format!(
-                    "Missing Google 'sub' field. Available fields: {:?}. Response: {}",
-                    available_fields,
-                    serde_json::to_string(&data)
-                        .unwrap_or_else(|_| "Failed to serialize".to_string())
+                    "Missing Google 'sub' field. Available fields: {:?}",
+                    available_fields
                 ))
             })?
             .to_string();
