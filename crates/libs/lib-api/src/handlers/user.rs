@@ -7,7 +7,7 @@ use lib_core::{
     OrderStore, OrdersHistoryListResponse, OrdersListResponse, ToggleFavoriteMarketRequest,
     UserBalanceResponse, UserBalanceStore,
 };
-use lib_core::{PnlResolution, PortfolioRepository, TradingRepository};
+use lib_core::{PnlResolution, PortfolioRepository, TradingError, TradingRepository};
 use lib_utils::{AuthenticatedUserId, uuid_to_u64};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -705,6 +705,14 @@ pub async fn get_favorite_markets(
 /// }
 /// ```
 ///
+/// # Example Error Response (404), for a market the read model does not list
+/// ```json
+/// {
+///   "error": "unknown market",
+///   "market_id": 4000000000
+/// }
+/// ```
+///
 /// # Example Error Response (500)
 /// ```json
 /// {
@@ -723,7 +731,6 @@ pub async fn toggle_favorite_market(
     let user_id = uuid_to_u64(user.0);
     let market_id = request.market_id;
 
-    // Use atomic toggle operation to prevent race conditions
     match trading_repo
         .toggle_favorite_market(user_id, market_id)
         .await
@@ -733,6 +740,12 @@ pub async fn toggle_favorite_market(
             Ok(HttpResponse::Ok().json(serde_json::json!({
                 "success": true,
                 "action": action,
+                "market_id": market_id
+            })))
+        }
+        Err(TradingError::UnknownMarket(_)) => {
+            Ok(HttpResponse::NotFound().json(serde_json::json!({
+                "error": "unknown market",
                 "market_id": market_id
             })))
         }

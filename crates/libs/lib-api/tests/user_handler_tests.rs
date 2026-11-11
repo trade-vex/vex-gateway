@@ -1876,6 +1876,56 @@ mod tests {
         cleanup_test_data(&db, user_id).await;
     }
 
+    /// A favourite of a market the read model does not list is a 404, not a server error.
+    #[tokio::test]
+    async fn toggling_an_unknown_market_is_not_found() {
+        let Some(db) = require_database().await else {
+            return;
+        };
+        let user = database_test_user(101_015);
+        cleanup_test_data(&db, uuid_to_u64(user)).await;
+        let trading_repo: Arc<dyn TradingRepository> =
+            Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
+
+        let response = toggle_favorite_market(
+            create_authenticated_user_id(user),
+            web::Json(ToggleFavoriteMarketRequest {
+                market_id: 4_000_000_000,
+            }),
+            web::Data::new(trading_repo),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), 404);
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "unknown market");
+    }
+
+    /// Two toggles of a market that is not a favourite yet, at once, as a double click sends
+    /// them: neither fails on the other's row.
+    #[tokio::test]
+    async fn concurrent_toggles_both_succeed() {
+        let Some(db) = require_database().await else {
+            return;
+        };
+        let user_id = uuid_to_u64(database_test_user(101_016));
+        cleanup_test_data(&db, user_id).await;
+        let repo = PostgresTradingRepository::new(Arc::new(db.clone()));
+
+        for _ in 0..20 {
+            let (first, second) = tokio::join!(
+                repo.toggle_favorite_market(user_id, 65538),
+                repo.toggle_favorite_market(user_id, 65538)
+            );
+            assert!(first.is_ok() && second.is_ok(), "{first:?}, {second:?}");
+            cleanup_test_data(&db, user_id).await;
+        }
+    }
+
     // ============================================================================
     // Error Case Tests
     // ============================================================================

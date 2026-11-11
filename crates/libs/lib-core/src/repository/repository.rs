@@ -18,12 +18,15 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub enum TradingError {
     Database(String),
+    /// A market the read model's `markets` does not list.
+    UnknownMarket(u32),
 }
 
 impl std::fmt::Display for TradingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TradingError::Database(msg) => write!(f, "Database error: {}", msg),
+            TradingError::UnknownMarket(market_id) => write!(f, "Unknown market {market_id}"),
         }
     }
 }
@@ -64,8 +67,9 @@ pub trait TradingRepository: Send + Sync {
     // Favorite markets operations
     async fn get_user_favorite_markets(&self, user_id: u64)
         -> Result<Vec<UserFavoriteMarketModel>>;
-    /// Atomically toggle a market's favorite status.
-    /// Returns Ok(true) if the market was added to favorites, Ok(false) if removed.
+    /// Removes the market from the user's favorites if it is one, else adds it: Ok(false) if
+    /// removed, Ok(true) if added, also when a concurrent toggle added it first.
+    /// Err(UnknownMarket) for a market `markets` does not list.
     async fn toggle_favorite_market(&self, user_id: u64, market_id: u32) -> Result<bool>;
 }
 
@@ -281,50 +285,43 @@ impl TradingRepository for PostgresTradingRepository {
     }
 
     async fn toggle_favorite_market(&self, user_id: u64, market_id: u32) -> Result<bool> {
-        use sea_orm::TransactionTrait;
-
-        let market_id_i32 = market_id as i32;
-
-        // Use a transaction to ensure atomicity
-        let txn = self.db.begin().await?;
-
-        // Check if already favorited within the transaction
-        let existing = UserFavoriteMarketEntity::find()
+        // One statement each: two toggles at once need no transaction to stay apart.
+        let removed = UserFavoriteMarketEntity::delete_many()
             .filter(
                 UserFavoriteMarketColumn::UserId
                     .eq(user_id as i64)
-                    .and(UserFavoriteMarketColumn::MarketId.eq(market_id_i32)),
+                    .and(UserFavoriteMarketColumn::MarketId.eq(market_id as i32)),
             )
-            .one(&txn)
+            .exec(&*self.db)
             .await?;
-
-        let was_added = if existing.is_some() {
-            // Remove the favorite
-            UserFavoriteMarketEntity::delete_many()
-                .filter(
-                    UserFavoriteMarketColumn::UserId
-                        .eq(user_id as i64)
-                        .and(UserFavoriteMarketColumn::MarketId.eq(market_id_i32)),
-                )
-                .exec(&txn)
-                .await?;
-            false
-        } else {
-            // Add the favorite
-            let favorite = UserFavoriteMarketActiveModel {
-                user_id: Set(user_id as i64),
-                market_id: Set(market_id_i32),
-                favorited_at: Set(Some(chrono::Utc::now())),
-                ..Default::default()
-            };
-            UserFavoriteMarketEntity::insert(favorite)
-                .exec(&txn)
-                .await?;
-            true
+        if removed.rows_affected > 0 {
+            return Ok(false);
+        }
+        let favorite = UserFavoriteMarketActiveModel {
+            user_id: Set(user_id as i64),
+            market_id: Set(market_id as i32),
+            favorited_at: Set(Some(chrono::Utc::now())),
+            ..Default::default()
         };
-
-        txn.commit().await?;
-        Ok(was_added)
+        match UserFavoriteMarketEntity::insert(favorite)
+            .on_conflict(
+                sea_orm::sea_query::OnConflict::columns([
+                    UserFavoriteMarketColumn::UserId,
+                    UserFavoriteMarketColumn::MarketId,
+                ])
+                .do_nothing()
+                .to_owned(),
+            )
+            .exec(&*self.db)
+            .await
+        {
+            // RecordNotInserted: a concurrent toggle added it first.
+            Ok(_) | Err(DbErr::RecordNotInserted) => Ok(true),
+            Err(e) if matches!(e.sql_err(), Some(SqlErr::ForeignKeyConstraintViolation(_))) => {
+                Err(TradingError::UnknownMarket(market_id))
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
