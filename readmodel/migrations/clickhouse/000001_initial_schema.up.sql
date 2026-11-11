@@ -103,6 +103,8 @@ CREATE TABLE trade_events (
     taker_order_id UInt64,
     taker_side     LowCardinality(String),
     event_ts       UInt64,
+    maker_fee      UInt64,
+    taker_fee      UInt64,
     ts             DateTime64(9, 'UTC') MATERIALIZED fromUnixTimestamp64Nano(toInt64(event_ts))
 ) ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMM(ts)
