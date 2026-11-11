@@ -1,7 +1,7 @@
 //! lib-config/src/environment.rs
 
 use crate::ConfigError;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::str::FromStr;
 
 /// Supported runtime environments for the VEX Gateway Service.
@@ -9,7 +9,7 @@ use std::str::FromStr;
 /// Each environment has different configuration requirements and validation rules.
 /// The environment determines which configuration file is loaded and what
 /// validation rules are applied.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Environment {
     /// Development environment

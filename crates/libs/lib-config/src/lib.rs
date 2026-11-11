@@ -12,7 +12,6 @@
 //!     let config = Config::load_auto()?;
 //!
 //!     // Use the configuration
-//!     let server_addr = config.server_address()?;
 //!     println!("Server: {}:{}", config.server.host, config.server.port);
 //!     Ok(())
 //! }
@@ -60,13 +59,13 @@
 
 mod clickhouse;
 mod core_link;
-pub mod environment;
+mod environment;
 mod error;
-pub mod logging;
+mod logging;
 mod metrics;
 mod rate_limit;
-pub mod server;
-pub mod util;
+mod server;
+mod util;
 
 // Re-export commonly used types for convenience
 pub use clickhouse::ClickHouseConfig;
@@ -83,7 +82,6 @@ use secrecy::ExposeSecret;
 use serde::Deserialize;
 use std::env::VarError;
 use std::ffi::OsString;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tracing::{debug, info};
@@ -549,31 +547,6 @@ impl Config {
 
         debug!("Configuration validation passed");
         Ok(())
-    }
-
-    /// Get the server socket address for binding.
-    ///
-    /// Converts the server configuration into a SocketAddr suitable
-    /// for binding a TCP listener.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Result<SocketAddr, ConfigError>` - The parsed socket address for server binding.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use lib_config::Config;
-    ///
-    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
-    ///     let config = Config::load_auto()?;
-    ///     let addr = config.server_address()?;
-    ///     // Use addr with your web framework
-    ///     Ok(())
-    /// }
-    /// ```
-    pub fn server_address(&self) -> Result<SocketAddr, ConfigError> {
-        self.server.socket_addr()
     }
 }
 
@@ -1698,7 +1671,7 @@ frontend_url_app = "vex://oauth""#
     #[test]
     fn test_server_address_parsing() {
         let config = development_config();
-        let addr = config.server_address().unwrap();
+        let addr = config.server.socket_addr().unwrap();
         assert_eq!(addr.ip().to_string(), "127.0.0.1");
         assert_eq!(addr.port(), 8081);
     }

@@ -45,7 +45,7 @@ pub async fn initialize_server(
     let api_key_store = app_state.api_key_middleware.api_key_store();
 
     // Create TCP listener
-    let listener = TcpListener::bind(config.server_address()?)?;
+    let listener = TcpListener::bind(config.server.socket_addr()?)?;
     info!("Server listening on {}", listener.local_addr().unwrap());
     let metrics_listener = TcpListener::bind(config.metrics.socket_addr()?)?;
     info!("Metrics listening on {}", metrics_listener.local_addr()?);

@@ -1,12 +1,12 @@
 //! lib-config/src/logging.rs
 
 use crate::ConfigError;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 /// Logging configuration for the VEX Gateway Service.
 ///
 /// The application's log level.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct LoggingConfig {
     /// Log level (trace, debug, info, warn, error)
     pub level: String,
