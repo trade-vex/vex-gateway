@@ -36,6 +36,8 @@ const BTC: u64 = 2;
 /// BTC/USD (quote asset 1 << 16 | base asset 2): BTC's native scale is 10^8, quote_scale_k 1.
 const BTC_USD: u64 = 65538;
 const BTC_SCALE: u64 = 100_000_000;
+/// Asset 3 quoted in USD (1 << 16 | 3): asset 3's native scale is 10^18.
+const ASSET_3_USD: u64 = 65539;
 
 fn readmodel() -> &'static Path {
     Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../readmodel"))
@@ -118,12 +120,13 @@ impl ClickHouse {
         )
     }
 
-    /// Each query that ran with the log comment `comment`: its text and the rows it read.
-    async fn logged(&self, comment: &str) -> Vec<(String, u64)> {
+    /// Each query that ran with the log comment `comment`: its text, the rows it read and the rows
+    /// it returned.
+    async fn logged(&self, comment: &str) -> Vec<(String, u64, u64)> {
         self.execute("SYSTEM FLUSH LOGS").await;
         self.admin
             .query(
-                "SELECT query, read_rows FROM system.query_log \
+                "SELECT query, read_rows, result_rows FROM system.query_log \
                  WHERE log_comment = ? AND type = 'QueryFinish' ORDER BY event_time_microseconds",
             )
             .bind(comment)
@@ -655,27 +658,46 @@ async fn year_charts_end_now() {
     assert_eq!(timestamps, expected);
 }
 
-/// A portfolio reads each view it needs once, a balance chart only balances and prices.
+/// A portfolio reads each view it needs once, a balance chart only balances and prices, and the
+/// prices only of the assets the user holds.
 #[tokio::test]
 async fn each_request_reads_each_view_once() {
     let Some(ch) = clickhouse().await else {
         return;
     };
-    let now = this_minute();
+    let user = 49;
+    // 2024-09-01T00:00:00Z: the year before it holds BTC prices, but no other test's price of
+    // asset 3, which the user holds alone.
+    let now = 1_725_148_800;
+    let unit = 1_000_000_000_000_000_000;
+    ch.balance(user, 3, unit, now - HOUR).await;
+    ch.fill(ASSET_3_USD, 5, unit, 990, 991, now - HOUR).await;
+    ch.fill(BTC_USD, 100, BTC_SCALE, 990, 991, now - HOUR).await;
+    let prices = |logged: &[(String, u64, u64)]| {
+        let (_, _, rows) = logged
+            .iter()
+            .find(|(query, ..)| query.contains("asset_prices_per_minute"))
+            .unwrap();
+        *rows
+    };
 
     let (repository, comment) = ch.logging_gateway();
     repository
-        .get_portfolio(1, now, PnlResolution::Year)
+        .get_portfolio(user, now, PnlResolution::Year)
         .await
         .unwrap();
-    assert_eq!(ch.logged(&comment).await.len(), 4);
+    let logged = ch.logged(&comment).await;
+    assert_eq!(logged.len(), 4);
+    assert_eq!(prices(&logged), 1);
 
     let (repository, comment) = ch.logging_gateway();
     repository
-        .get_balance_chart(1, now, PnlResolution::Year)
+        .get_balance_chart(user, now, PnlResolution::Year)
         .await
         .unwrap();
-    assert_eq!(ch.logged(&comment).await.len(), 2);
+    let logged = ch.logged(&comment).await;
+    assert_eq!(logged.len(), 2);
+    assert_eq!(prices(&logged), 1);
 }
 
 /// The 24-hour volume is in USD: a fill in a market quoted in another asset is not in it.
@@ -735,9 +757,9 @@ async fn volume_24h_reads_only_the_users_fills() {
         .unwrap();
     assert_eq!(portfolio.volume_24h, decimal("100"));
     let logged = ch.logged(&comment).await;
-    let (_, read_rows) = logged
+    let (_, read_rows, _) = logged
         .iter()
-        .find(|(query, _)| query.contains("trade_volumes"))
+        .find(|(query, ..)| query.contains("trade_volumes"))
         .unwrap();
     assert!(*read_rows < 1000, "the volume read {read_rows} rows");
 }

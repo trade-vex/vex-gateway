@@ -5,7 +5,7 @@ use crate::model::user_favorite_markets::{
     Entity as UserFavoriteMarketEntity, Model as UserFavoriteMarketModel,
 };
 use async_trait::async_trait;
-use clickhouse::Client as ClickHouseClient;
+use clickhouse::{sql::Bind, Client as ClickHouseClient};
 use rust_decimal::Decimal;
 use sea_orm::prelude::*;
 use sea_orm::*;
@@ -448,10 +448,10 @@ impl TradingRepository for PostgresTradingRepository {
 /// - `trade_volumes(ts, user_id, quote_asset_id, volume)`: each fill's price times size, in its
 ///   market's quote asset, once for each of its users.
 ///
-/// A request reads its window only: the balances and prices in it, with each asset's last balance
-/// and price before it, and the deposits and withdrawals in it. Equity at a time is the sum of
-/// each asset's last balance at or before it at its last price at or before it: an asset that
-/// has no price yet is worth zero. A deposit or withdrawal counts from its minute, as the
+/// A request reads its window only: the balances in it, and the prices of the assets they hold,
+/// with each asset's last balance and price before it, and the deposits and withdrawals in it.
+/// Equity at a time is the sum of each asset's last balance at or before it at its last price at
+/// or before it: an asset that has no price yet is worth zero. A deposit or withdrawal counts from its minute, as the
 /// per-minute balance it changed does, at its asset's price then.
 ///
 /// Metrics computed:
@@ -529,36 +529,37 @@ impl ClickHousePortfolioRepository {
     /// always values portfolios in USD.
     const QUOTE_ASSET_ID: u16 = 1;
 
-    /// Each asset's `column` in the rows of `view` whose `key` is `value`, by minute: the rows in
-    /// (start, end], and the last one at or before `start`, which holds at `start`.
+    /// Each asset's `column` in the rows of `view` that match `filter`, whose `?` is `arg`, by
+    /// minute: the rows in (start, end], and the last one at or before `start`, which holds at
+    /// `start`.
     async fn series(
         &self,
         view: &str,
         column: &str,
-        key: &str,
-        value: u64,
+        filter: &str,
+        arg: impl Bind + Copy,
         start: i64,
         end: i64,
     ) -> Result<BTreeMap<u16, Series>> {
         let sql = format!(
             "SELECT asset_id, CAST(toUnixTimestamp(minute) AS Int64), toString({column})
              FROM {view}
-             WHERE {key} = ? AND minute > toDateTime(?) AND minute <= toDateTime(?)
+             WHERE {filter} AND minute > toDateTime(?) AND minute <= toDateTime(?)
              UNION ALL
              SELECT asset_id, CAST(toUnixTimestamp(max(minute)) AS Int64),
                     toString(argMax({column}, minute))
              FROM {view}
-             WHERE {key} = ? AND minute <= toDateTime(?)
+             WHERE {filter} AND minute <= toDateTime(?)
              GROUP BY asset_id",
             view = self.table(view)
         );
         let rows: Vec<(u16, i64, String)> = self
             .ch
             .query(&sql)
-            .bind(value)
+            .bind(arg)
             .bind(start)
             .bind(end)
-            .bind(value)
+            .bind(arg)
             .bind(start)
             .fetch_all()
             .await
@@ -572,32 +573,45 @@ impl ClickHousePortfolioRepository {
     }
 
     async fn holdings(&self, user_id: u64, start: i64, end: i64) -> Result<Holdings> {
-        Ok(Holdings {
-            balances: self
-                .series(
-                    "balances_per_minute",
-                    "total",
-                    "user_id",
-                    user_id,
-                    start,
-                    end,
-                )
-                .await?,
-            prices: self
-                .series(
-                    "asset_prices_per_minute",
-                    "price",
-                    "quote_asset_id",
-                    Self::QUOTE_ASSET_ID.into(),
-                    start,
-                    end,
-                )
-                .await?,
-        })
+        let balances = self
+            .series(
+                "balances_per_minute",
+                "total",
+                "user_id = ?",
+                user_id,
+                start,
+                end,
+            )
+            .await?;
+        // Only the prices of the assets the user holds, not every market's. vex-core writes a
+        // balance with each deposit and withdrawal, so the flows' assets are among them.
+        let assets: Vec<u16> = balances
+            .keys()
+            .copied()
+            .filter(|&asset| asset != Self::QUOTE_ASSET_ID)
+            .collect();
+        let prices = if assets.is_empty() {
+            BTreeMap::new()
+        } else {
+            self.series(
+                "asset_prices_per_minute",
+                "price",
+                &format!(
+                    "quote_asset_id = {} AND asset_id IN ?",
+                    Self::QUOTE_ASSET_ID
+                ),
+                assets.as_slice(),
+                start,
+                end,
+            )
+            .await?
+        };
+        Ok(Holdings { balances, prices })
     }
 
-    /// The value of the user's deposits less withdrawals in (start, end], cumulated by minute:
-    /// each counts from its minute, at its asset's price in that minute.
+    /// The value of the user's deposits less withdrawals after `start` and in or before `end`'s
+    /// minute, as balances are, cumulated by minute: each counts from its minute, at its asset's
+    /// price in that minute.
     async fn cashflows(
         &self,
         user_id: u64,
@@ -612,12 +626,14 @@ impl ClickHousePortfolioRepository {
                 SELECT CAST(toUnixTimestamp(toStartOfMinute(ts)) AS Int64) AS t, asset_id,
                        toString(amount) AS amt
                 FROM {}
-                WHERE user_id = ? AND ts > toDateTime(?) AND ts <= toDateTime(?)
+                WHERE user_id = ? AND ts > toDateTime(?)
+                  AND toStartOfMinute(ts) <= toDateTime(?)
                 UNION ALL
                 SELECT CAST(toUnixTimestamp(toStartOfMinute(ts)) AS Int64) AS t, asset_id,
                        toString(-amount) AS amt
                 FROM {}
-                WHERE user_id = ? AND ts > toDateTime(?) AND ts <= toDateTime(?)
+                WHERE user_id = ? AND ts > toDateTime(?)
+                  AND toStartOfMinute(ts) <= toDateTime(?)
              )
              ORDER BY t ASC",
             self.table("deposits"),
