@@ -615,7 +615,7 @@ mod tests {
                 // A route for the signed-in person only, as `/api/profile` is.
                 .route(
                     "/api/profile",
-                    web::get().to(|_: AuthenticatedUser| async { HttpResponse::Ok() }),
+                    web::get().to(|_: AuthenticatedUser| async { HttpResponse::Ok().finish() }),
                 ),
         )
         .await;
