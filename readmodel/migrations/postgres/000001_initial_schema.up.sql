@@ -80,23 +80,22 @@ CREATE TABLE api_keys (
 CREATE INDEX api_keys_user_id ON api_keys (user_id);
 
 -- Mirrors of vex-core's symbol configuration, written only by readmodel/seeds. ScalingCache
--- turns engine integers into decimals with them, so they must match the core exactly.
+-- turns engine integers into decimals with them, so they must match the core exactly. A row stays
+-- when its market or asset leaves the configuration: its orders and balances still need its scale.
 -- Their ids have the types ScalingCache reads (i16, i32), while trading.* stores ids, like every
 -- proto integer, as BIGINT: the same id has the same value on both sides only below 2^15
 -- (assets) and 2^31 (markets). Join on the unsigned value: asset_id & 65535,
 -- market_id & 4294967295.
 CREATE TABLE assets (
     asset_id     SMALLINT PRIMARY KEY,                           -- u16
-    native_scale BIGINT NOT NULL CHECK (native_scale <> 0),      -- u64
-    active       BOOLEAN NOT NULL
+    native_scale BIGINT NOT NULL CHECK (native_scale <> 0)       -- u64
 );
 
 CREATE TABLE markets (
     market_id     INTEGER PRIMARY KEY,                           -- u32: quote_asset << 16 | base_asset
     base_asset    SMALLINT NOT NULL REFERENCES assets (asset_id),
     quote_asset   SMALLINT NOT NULL REFERENCES assets (asset_id),
-    quote_scale_k BIGINT NOT NULL CHECK (quote_scale_k <> 0),    -- u64
-    active        BOOLEAN NOT NULL
+    quote_scale_k BIGINT NOT NULL CHECK (quote_scale_k <> 0)     -- u64
 );
 
 CREATE TABLE user_favorite_markets (

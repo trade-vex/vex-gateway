@@ -45,7 +45,6 @@ impl ScalingCache {
         let query = r#"
             SELECT market_id, quote_scale_k, base_asset, quote_asset
             FROM markets
-            WHERE active = true
         "#;
 
         let stmt = Statement::from_string(sea_orm::DatabaseBackend::Postgres, query.to_string());
@@ -90,7 +89,6 @@ impl ScalingCache {
         let query = r#"
             SELECT asset_id, native_scale
             FROM assets
-            WHERE active = true
         "#;
 
         let stmt = Statement::from_string(sea_orm::DatabaseBackend::Postgres, query.to_string());

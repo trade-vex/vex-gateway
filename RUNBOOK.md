@@ -492,8 +492,9 @@ In this order:
    ```
    No migration holds a password: every secret comes from the deploy's secret store.
 4. **Seeds,** on every deploy, from the configuration file vex-core runs with. The Postgres
-   output upserts every configured market and asset and deactivates the others, so applying it
-   again is harmless:
+   output upserts every configured market and asset and keeps the rows of those that left the
+   configuration, since their orders and balances still need their scales, so applying it again
+   is harmless:
    ```bash
    cargo run --release -p readmodel-seeds -- postgres <vex-core config file> \
      | psql "<owner URL>" -v ON_ERROR_STOP=1
@@ -593,6 +594,12 @@ In this order:
    that its last run may not have delivered: the connectors absorb the copies.
 7. **The gateway,** with the gateway login: in Postgres through `auth.database.url`, and in
    ClickHouse through `clickhouse.user` and `clickhouse.password` ([ClickHouse](#clickhouse)).
+
+**Listing a market** is a deploy, in this order: the market (and any new asset) in vex-core's
+configuration file, the seeds from that file (step 4, Postgres and ClickHouse), a restart of
+vex-core, which registers markets only at startup, then a rolling restart of the gateways, which
+load the `markets` and `assets` rows once at startup and show a market they do not know in raw
+engine integers.
 
 ### Read Model Roles
 
