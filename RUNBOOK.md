@@ -128,8 +128,8 @@ The service validates configuration on startup:
   another provider stops the gateway at startup, and the error names it. For `twitter` (X), the X
   developer app must have "Request email from users" enabled (it needs Terms of Service and
   Privacy Policy URLs in the app settings): without it X sends no confirmed email and every X
-  login is refused with 400 `USER_INFO_FAILED`. The code lifetimes in `[auth.otp]` must be
-  positive, `clickhouse.user` must not be empty, `clickhouse.database` must be a plain
+  login is refused with 400 `USER_INFO_FAILED`. The code lifetimes in `[auth.otp]` and
+  `auth.jwt.access_token_ttl_minutes` must be positive, `clickhouse.user` must not be empty, `clickhouse.database` must be a plain
   identifier, `metrics.bind` must be an IP address and a port, and every `rate_limit` setting
   must be greater than 0
 

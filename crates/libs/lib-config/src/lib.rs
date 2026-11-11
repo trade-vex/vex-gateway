@@ -350,6 +350,7 @@ impl Config {
     ///   must be set
     /// - `auth.otp.email_verification_expiry_minutes` and `password_reset_expiry_minutes` must be
     ///   positive
+    /// - `auth.jwt.access_token_ttl_minutes` must be positive
     /// - `clickhouse.user` cannot be empty, and `clickhouse.database` must be a plain identifier
     ///
     /// ## Production Environment
@@ -457,6 +458,15 @@ impl Config {
                     "auth.otp.{key} must be a positive number of minutes"
                 )));
             }
+        }
+
+        // An access token's lifetime is its `exp`: without a positive one every login, OAuth
+        // callback and session renewal would mint a token that is already expired.
+        if code_expiry_seconds(self.auth.jwt.access_token_ttl_minutes).is_none() {
+            return Err(ConfigError::ValidationError(
+                "auth.jwt.access_token_ttl_minutes must be a positive number of minutes"
+                    .to_string(),
+            ));
         }
 
         self.clickhouse.validate()?;
@@ -1226,6 +1236,21 @@ database = "vex_analytics"
                     "{name}={minutes}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_access_token_lifetime_must_be_positive() {
+        let name = variable("auth.jwt.access_token_ttl_minutes");
+        // Not a positive number of minutes, or one whose seconds overflow.
+        for minutes in ["0", "-5", &i64::MAX.to_string()] {
+            let error = load_development_example(&[(&name, minutes)]).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "Configuration validation failed: auth.jwt.access_token_ttl_minutes must be a \
+                 positive number of minutes",
+                "{name}={minutes}"
+            );
         }
     }
 
