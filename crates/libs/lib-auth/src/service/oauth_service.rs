@@ -235,7 +235,8 @@ impl OAuthService {
     }
 
     /// The account for an OAuth login: the one already linked to the provider identity, or a new
-    /// one when the email is not registered yet.
+    /// one when the email is not registered yet. Refused with `EmailNotVerified` when that account
+    /// cannot log in or the provider has not verified the email.
     ///
     /// A new account's username must be unique (`ux_users_username`), and different people can
     /// map to the same one. When the insert reports the username taken, it is retried with a
@@ -250,14 +251,21 @@ impl OAuthService {
             .find_by_provider_id(provider, &info.provider_id)
             .await?
         {
-            // Update last login timestamp for existing user
+            if !existing_user.can_login() {
+                return Err(AuthError::EmailNotVerified);
+            }
             user_repo.update_last_login(existing_user.user_id).await?;
             return Ok(existing_user);
         }
-
-        // Check if user exists with same email but different provider
-        if user_repo.find_by_email(&info.email).await?.is_some() {
-            return Err(AuthError::EmailAlreadyExists);
+        if !info.email_verified {
+            return Err(AuthError::EmailNotVerified);
+        }
+        match user_repo.find_by_email(&info.email).await? {
+            // No account linking: another verified account keeps the email.
+            Some(other) if other.email_verified => return Err(AuthError::EmailAlreadyExists),
+            // An unverified password sign-up never reserved the email; the provider has verified it.
+            Some(pending) => user_repo.delete_unverified(pending.user_id).await?,
+            None => {}
         }
 
         let now = chrono::Utc::now();
@@ -1528,6 +1536,20 @@ mod tests {
                 Ok(new_user.clone())
             }
 
+            async fn delete_unverified(&self, user_id: Uuid) -> Result<(), AuthError> {
+                let mut users = self.users.lock().unwrap();
+                let before = users.len();
+                users.retain(|user| {
+                    user.user_id != user_id
+                        || user.email_verified
+                        || user.status != UserStatus::Pending
+                });
+                if users.len() == before {
+                    return Err(AuthError::EmailAlreadyExists);
+                }
+                Ok(())
+            }
+
             async fn update_last_login(&self, _user_id: Uuid) -> Result<(), AuthError> {
                 Ok(())
             }
@@ -1632,6 +1654,96 @@ mod tests {
                 assert_eq!(again.user_id, user.user_id);
             }
             assert_eq!(repo.users.lock().unwrap().len(), 2);
+        }
+
+        /// A password sign-up for `email`, verified or not.
+        fn password_user(email: &str, verified: bool) -> Model {
+            let now = chrono::Utc::now();
+            Model {
+                user_id: Uuid::new_v4(),
+                email: email.to_string(),
+                username: "signup".to_string(),
+                password_hash: Some("hash".to_string()),
+                auth_provider: "email".to_string(),
+                provider_id: None,
+                avatar_url: None,
+                email_verified: verified,
+                status: if verified {
+                    UserStatus::Active
+                } else {
+                    UserStatus::Pending
+                },
+                created_at: now,
+                updated_at: now,
+                last_login: None,
+            }
+        }
+
+        #[tokio::test]
+        async fn unverified_provider_email_does_not_create_an_account() {
+            let repo = MemoryUserRepository::default();
+            let info = OAuthUserInfo {
+                email_verified: false,
+                ..oauth_user("1", "v@example.com", None)
+            };
+
+            let result = OAuthService::find_or_create_user(&repo, "github", &info).await;
+
+            assert!(matches!(result, Err(AuthError::EmailNotVerified)));
+            assert!(repo.users.lock().unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn suspended_user_cannot_log_in_with_oauth() {
+            let repo = MemoryUserRepository::default();
+            let info = oauth_user("1", "s@example.com", None);
+            OAuthService::find_or_create_user(&repo, "google", &info)
+                .await
+                .unwrap();
+            repo.users.lock().unwrap()[0].status = UserStatus::Suspended;
+
+            let result = OAuthService::find_or_create_user(&repo, "google", &info).await;
+
+            assert!(matches!(result, Err(AuthError::EmailNotVerified)));
+        }
+
+        #[tokio::test]
+        async fn a_verified_provider_email_replaces_an_unverified_password_signup() {
+            let repo = MemoryUserRepository::default();
+            let pending = password_user("v@example.com", false);
+            repo.users.lock().unwrap().push(pending.clone());
+
+            let user = OAuthService::find_or_create_user(
+                &repo,
+                "google",
+                &oauth_user("7", "v@example.com", None),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(user.auth_provider, "google");
+            assert_eq!(user.password_hash, None);
+            assert_eq!(*repo.users.lock().unwrap(), [user]);
+            assert_ne!(repo.users.lock().unwrap()[0].user_id, pending.user_id);
+        }
+
+        #[tokio::test]
+        async fn a_verified_account_with_the_same_email_still_refuses_oauth() {
+            let repo = MemoryUserRepository::default();
+            repo.users
+                .lock()
+                .unwrap()
+                .push(password_user("v@example.com", true));
+
+            let result = OAuthService::find_or_create_user(
+                &repo,
+                "google",
+                &oauth_user("7", "v@example.com", None),
+            )
+            .await;
+
+            assert!(matches!(result, Err(AuthError::EmailAlreadyExists)));
+            assert_eq!(repo.users.lock().unwrap().len(), 1);
         }
 
         #[tokio::test]

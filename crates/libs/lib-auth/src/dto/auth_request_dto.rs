@@ -44,14 +44,11 @@ pub struct OAuthCallbackQuery {
 pub struct VerifyEmailRequest {
     #[validate(email)]
     pub email: String,
+    /// The password chosen at sign-up: only the person who chose it can make it live.
+    #[validate(length(min = 8))]
+    pub password: String,
     #[validate(length(min = 6, max = 6))]
     pub otp: String,
-}
-
-#[derive(Deserialize, Validate)]
-pub struct CheckEmailRequest {
-    #[validate(email)]
-    pub email: String,
 }
 
 #[derive(Deserialize, Validate)]

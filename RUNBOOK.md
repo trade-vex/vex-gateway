@@ -211,8 +211,8 @@ Every series is reported from the first scrape, at 0 until its first count:
   refused IP or permission, a bad, stale or replayed signature, or a client IP over its refusal
   budget (429, see [Rate Limits](#rate-limits)). A 5xx, such as Postgres or Redis being
   unreachable, is the gateway's fault and is not counted.
-- `login`: a `POST /api/login` refused for its email and password (401). A rate-limited or
-  unverified login is not counted.
+- `login`: a `POST /api/login` or `POST /api/verify-email` refused for its email and password
+  (401). A rate-limited or unverified login is not counted.
 
 A request to a protected route without any credentials is not counted.
 
@@ -257,18 +257,16 @@ The routes:
   `/api/pnl-chart`, `/api/favorites`, `/api/api-key/*`, `/api/session-check`, `/api/profile`,
   `/api/logout`, `/api/change-password`, `/api/session/info`, `/api/session/refresh`.
 - `general`, per client IP: `GET /api/oauth/providers`, `POST /api/oauth/exchange`,
-  `POST /api/refresh`, `POST /api/session/refresh-tokens`, `POST /api/check-email`,
-  `POST /api/resend-verification`, `POST /api/forgot-password`, `POST /api/verify-reset-otp`,
-  `POST /api/reset-password`.
+  `POST /api/refresh`, `POST /api/session/refresh-tokens`, `POST /api/forgot-password`,
+  `POST /api/verify-reset-otp`, `POST /api/reset-password`.
 - Neither budget: the routes with fixed limits of their own per client IP (and some per email or
   username too): `POST /api/signup`, `POST /api/login`, `POST /api/verify-email`,
   `GET /api/oauth/{provider}`, `GET /api/oauth/{provider}/callback`. And `GET /api/health`, the
   load balancer's health check, which reads a flag and touches no store.
 
 The routes that send an email, or check a code sent by email, also have a fixed limit per email
-address, on top of their client IP's `general` budget: `POST /api/forgot-password` and
-`POST /api/resend-verification` 3 an hour, `POST /api/verify-reset-otp` 5 in 15 minutes. Over it
-they answer the same 429.
+address, on top of their client IP's `general` budget: `POST /api/forgot-password` 3 an hour,
+`POST /api/verify-reset-otp` 5 in 15 minutes. Over it they answer the same 429.
 
 API-key authentication has a budget of its own, a code constant: each client IP (an IPv6 client
 by its /64) may make 60 refused API-key authentications a minute (an unknown, disabled or expired
@@ -1117,12 +1115,18 @@ grep -i "memory\|oom" logs/app.log
 
 - `GET /api/health` - Liveness: 200 while the process serves
 - `GET /api/ready` - Readiness: 503 while the vex-core link is down
-- `POST /api/signup` - User registration
+- `POST /api/signup` - User registration. A second sign-up for an email whose account is not
+  verified yet replaces that sign-up and sends a new code; a verified email answers 409.
+- `POST /api/verify-email` - Takes the email, the password chosen at sign-up and the emailed code.
+  An unknown or already verified email and a wrong password all get the login's 401
 - `POST /api/login` - User login
 - `POST /api/refresh` - Refresh JWT token
 - `GET /api/oauth/providers` - List OAuth providers
 - `GET /api/oauth/{provider}` - Initiate OAuth flow
-- `GET /api/oauth/{provider}/callback` - OAuth callback
+- `GET /api/oauth/{provider}/callback` - OAuth callback. Refused with 403 `EMAIL_NOT_VERIFIED`
+  when the provider has not verified the email or the account cannot log in, and with 409
+  `EMAIL_EXISTS` when a verified account already holds the email; a provider-verified email
+  replaces a password sign-up that was never verified
 
 ### Protected Endpoints (Requires Authentication)
 

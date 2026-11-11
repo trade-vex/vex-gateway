@@ -19,9 +19,8 @@ pub use error::auth_error::AuthError;
 ///
 /// Signup, login, email verification, and the OAuth redirect and callback limit their own rate per
 /// client IP (`EmailService::enforce_rate_limit`). Every other route is wrapped with
-/// `rate_limited`: the gateway's rate limit for anonymous callers, per client IP. The routes that
-/// send an email or check a code also limit their own rate per email: the password-reset request
-/// and code check, and the resend of the verification code.
+/// `rate_limited`: the gateway's rate limit for anonymous callers, per client IP. The
+/// password-reset request and code check also limit their own rate per email.
 pub fn configure_public_auth_services(
     cfg: &mut web::ServiceConfig,
     rate_limited: fn(Route) -> Route,
@@ -60,14 +59,6 @@ pub fn configure_public_auth_services(
             rate_limited(web::post().to(handlers::session::refresh_session_tokens)),
         )
         .route(
-            "/check-email",
-            rate_limited(web::post().to(handlers::auth::check_email_exists)),
-        )
-        .route(
-            "/resend-verification",
-            rate_limited(web::post().to(handlers::auth::resend_verification_email)),
-        )
-        .route(
             "/verify-email",
             web::post().to(handlers::auth::verify_email_with_otp),
         )
@@ -92,10 +83,6 @@ pub fn configure_protected_auth_services(cfg: &mut web::ServiceConfig) {
         // Protected auth routes
         .route("/logout", web::post().to(handlers::auth::logout))
         .route("/profile", web::get().to(handlers::auth::get_profile))
-        .route(
-            "/verify-email",
-            web::post().to(handlers::auth::verify_email),
-        )
         .route(
             "/change-password",
             web::post().to(handlers::auth::change_password),
@@ -158,8 +145,6 @@ mod route_tests {
             (Method::POST, "/login", false),
             (Method::POST, "/refresh", true),
             (Method::POST, "/session/refresh-tokens", true),
-            (Method::POST, "/check-email", true),
-            (Method::POST, "/resend-verification", true),
             (Method::POST, "/verify-email", false),
             (Method::POST, "/forgot-password", true),
             (Method::POST, "/verify-reset-otp", true),

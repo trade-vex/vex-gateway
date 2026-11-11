@@ -6,9 +6,8 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::dto::auth_request_dto::{
-    ChangePasswordRequest, CheckEmailRequest, ForgotPasswordRequest, LoginRequest,
-    RefreshTokenRequest, ResetPasswordRequest, SignupRequest, VerifyEmailRequest,
-    VerifyResetOtpRequest,
+    ChangePasswordRequest, ForgotPasswordRequest, LoginRequest, RefreshTokenRequest,
+    ResetPasswordRequest, SignupRequest, VerifyEmailRequest, VerifyResetOtpRequest,
 };
 use crate::dto::auth_response_dto::{RefreshTokenResponse, SignupResponse, UserInfo, UserProfile};
 use crate::error::auth_error::AuthError;
@@ -101,9 +100,13 @@ pub async fn signup(
 
     tracing::debug!("Signup request");
 
-    // Check if user already exists
-    if let Some(_existing_user) = user_repo.find_by_email(&req.email).await? {
-        return Err(AuthError::EmailAlreadyExists);
+    if let Some(existing) = user_repo.find_by_email(&req.email).await? {
+        if existing.email_verified {
+            return Err(AuthError::EmailAlreadyExists);
+        }
+        // An unverified sign-up never reserved the email: whoever signs up last and then proves
+        // the inbox and this password owns the account, and nothing of the earlier attempt survives.
+        user_repo.delete_unverified(existing.user_id).await?;
     }
 
     // Hash the password
@@ -226,11 +229,6 @@ pub async fn login(
         None => return Err(refused_login()),
     };
 
-    // Check if user can login
-    if !user.can_login() {
-        return Err(AuthError::EmailNotVerified);
-    }
-
     // Verify password
     let password_hash = match user.password_hash.clone() {
         Some(password_hash) => password_hash,
@@ -283,6 +281,10 @@ pub async fn login(
 
     if !authenticated {
         return Err(refused_login());
+    }
+    // Only after the password matched, so an unverified or suspended account is not revealed.
+    if !user.can_login() {
+        return Err(AuthError::EmailNotVerified);
     }
 
     let user_id = user.user_id;
@@ -442,21 +444,29 @@ pub async fn verify_email_with_otp(
 
     tracing::debug!("Email verification request with OTP");
 
-    // Find user by email
+    // The code proves the inbox; the password proves this caller, not an earlier sign-up, chose
+    // the credentials. Every refusal is the login refusal, so the route reveals nothing about
+    // whether the email has an account or whether it is verified.
     let user = user_repo
         .find_by_email(&req.email)
         .await?
-        .ok_or(AuthError::UserNotFound)?;
-
-    // Check if already verified
-    if user.email_verified {
-        return Err(AuthError::Validation("Email already verified".to_string()));
+        .filter(|user| !user.email_verified)
+        .ok_or_else(refused_login)?;
+    let Some(password_hash) = user.password_hash.clone() else {
+        return Err(refused_login());
+    };
+    let known = tokio::task::spawn_blocking({
+        let p = req.password.clone();
+        move || verify(&p, &password_hash)
+    })
+    .await
+    .map_err(|e| AuthError::InternalError(format!("Join error: {}", e)))?
+    .map_err(|e| AuthError::InternalError(format!("Password verification failed: {}", e)))?;
+    if !known {
+        return Err(refused_login());
     }
 
-    // Verify OTP
     email_service.verify_otp(&req.email, &req.otp).await?;
-
-    // Update user status to verified
     user_repo.verify_email(user.user_id).await?;
 
     // Generate tokens now that email is verified
@@ -499,21 +509,6 @@ pub async fn verify_email_with_otp(
     // Return only success message (session created with cookie)
     Ok(HttpResponse::Ok().cookie(session_cookie).json(json!({
         "message": "Email verified successfully"
-    })))
-}
-
-// Verify email handler (internal handler)
-pub async fn verify_email(
-    user: AuthenticatedUser,
-    user_repo: web::Data<Arc<dyn UserRepository>>,
-) -> Result<HttpResponse, AuthError> {
-    tracing::debug!("Email verification request");
-
-    user_repo.verify_email(user.user_id).await?;
-
-    Ok(HttpResponse::Ok().json(json!({
-        "message": "Email verified successfully",
-        "timestamp": chrono::Utc::now().to_rfc3339()
     })))
 }
 
@@ -625,89 +620,6 @@ pub async fn change_password(
     })))
 }
 
-// Check if email exists handler
-pub async fn check_email_exists(
-    req: web::Json<CheckEmailRequest>,
-    user_repo: web::Data<Arc<dyn UserRepository>>,
-) -> Result<HttpResponse, AuthError> {
-    // Validate the request
-    req.validate()
-        .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
-
-    tracing::debug!("Check email exists request for: {}", req.email);
-
-    match user_repo.find_by_email(&req.email).await? {
-        Some(user) => Ok(HttpResponse::Ok().json(json!({
-            "exists": true,
-            "email_verified": user.email_verified
-        }))),
-        None => Ok(HttpResponse::Ok().json(json!({
-            "exists": false,
-            "email_verified": false
-        }))),
-    }
-}
-
-// resend verification email handler
-pub async fn resend_verification_email(
-    req: web::Json<CheckEmailRequest>,
-    user_repo: web::Data<Arc<dyn UserRepository>>,
-    email_service: web::Data<Arc<EmailService>>,
-) -> Result<HttpResponse, AuthError> {
-    // validate the request
-    req.validate()
-        .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
-
-    tracing::debug!("Resend verification email request for: {}", req.email);
-
-    email_service
-        .enforce_resend_verification_rate_limit(&req.email)
-        .await?;
-
-    // check if user exists by email
-    let user = user_repo.find_by_email(&req.email).await?;
-
-    match user {
-        Some(user_model) => {
-            // checking if email is already verified
-            if user_model.email_verified {
-                return Err(AuthError::Validation("Email already verified".to_string()));
-            }
-
-            // resend verification email
-            match email_service
-                .resend_verification_email(&req.email, &user_model.username)
-                .await
-            {
-                Ok(new_otp_sent) => {
-                    let message = if new_otp_sent {
-                        "New verification code sent successfully"
-                    } else {
-                        "Verification code resent successfully"
-                    };
-
-                    Ok(HttpResponse::Ok().json(json!({
-                        "message": message,
-                        "new_code_sent": new_otp_sent,
-                        "timestamp": chrono::Utc::now().to_rfc3339()
-                    })))
-                }
-                Err(e) => {
-                    tracing::error!("Failed to resend verification email: {}", e);
-                    Err(e)
-                }
-            }
-        }
-        None => {
-            tracing::warn!(
-                "Resend verification requested for non-existent email: {}",
-                req.email
-            );
-            Err(AuthError::UserNotFound)
-        }
-    }
-}
-
 // Forgot password handler
 pub async fn forgot_password(
     req: web::Json<ForgotPasswordRequest>,
@@ -770,23 +682,15 @@ pub async fn verify_reset_otp(
 
     tracing::debug!("Verify reset OTP request for email: {}", req.email);
 
-    // Find user by email
-    let user = user_repo
-        .find_by_email(&req.email)
-        .await?
-        .ok_or(AuthError::UserNotFound)?;
-
-    // Check if user has password_hash
-    if user.password_hash.is_none() {
-        return Err(AuthError::Validation(
-            "Password reset is not available for OAuth-only accounts".to_string(),
-        ));
-    }
-
-    // Verify OTP
+    // The code first: an unknown email and one without a code get the same answer.
     email_service
         .verify_password_reset_otp(&req.email, &req.otp)
         .await?;
+    let user = user_repo
+        .find_by_email(&req.email)
+        .await?
+        .filter(|user| user.password_hash.is_some())
+        .ok_or(AuthError::InvalidOtp)?;
 
     // Generate reset token
     let reset_token = email_service.generate_reset_token();
@@ -965,7 +869,7 @@ mod tests {
     };
     use secrecy::SecretString;
     use std::sync::{
-        OnceLock,
+        Mutex, OnceLock,
         atomic::{AtomicUsize, Ordering},
     };
 
@@ -999,6 +903,10 @@ mod tests {
         }
 
         async fn create_user(&self, _user: &Model) -> Result<Model, AuthError> {
+            unreachable!()
+        }
+
+        async fn delete_unverified(&self, _user_id: Uuid) -> Result<(), AuthError> {
             unreachable!()
         }
 
@@ -1049,6 +957,10 @@ mod tests {
             unreachable!()
         }
 
+        async fn delete_unverified(&self, _user_id: Uuid) -> Result<(), AuthError> {
+            unreachable!()
+        }
+
         async fn update_last_login(&self, _user_id: Uuid) -> Result<(), AuthError> {
             unreachable!()
         }
@@ -1088,6 +1000,10 @@ mod tests {
         }
 
         async fn create_user(&self, _user: &Model) -> Result<Model, AuthError> {
+            unreachable!()
+        }
+
+        async fn delete_unverified(&self, _user_id: Uuid) -> Result<(), AuthError> {
             unreachable!()
         }
 
@@ -1689,6 +1605,7 @@ mod tests {
                 .to_http_request(),
             web::Json(VerifyEmailRequest {
                 email: email.clone(),
+                password: "correct-horse-battery-staple".to_string(),
                 otp: "123456".to_string(),
             }),
             web::Data::new(user_repo),
@@ -1715,43 +1632,245 @@ mod tests {
         assert!(!email_key_exists);
     }
 
+    /// Holds at most one password user; records the delete and the create a second sign-up does,
+    /// and the verification.
+    struct SignupRepository {
+        user: Option<Model>,
+        deleted: AtomicUsize,
+        created: Mutex<Option<Model>>,
+        verified: AtomicUsize,
+    }
+
+    impl SignupRepository {
+        fn new(user: Option<Model>) -> Arc<Self> {
+            Arc::new(Self {
+                user,
+                deleted: AtomicUsize::new(0),
+                created: Mutex::new(None),
+                verified: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl UserRepository for SignupRepository {
+        async fn find_by_id(&self, _user_id: Uuid) -> Result<Option<Model>, AuthError> {
+            unreachable!()
+        }
+
+        async fn find_by_email(&self, _email: &str) -> Result<Option<Model>, AuthError> {
+            Ok(self.user.clone())
+        }
+
+        async fn find_by_provider_id(
+            &self,
+            _provider: &str,
+            _provider_id: &str,
+        ) -> Result<Option<Model>, AuthError> {
+            unreachable!()
+        }
+
+        async fn create_user(&self, user: &Model) -> Result<Model, AuthError> {
+            *self.created.lock().unwrap() = Some(user.clone());
+            Ok(user.clone())
+        }
+
+        async fn delete_unverified(&self, user_id: Uuid) -> Result<(), AuthError> {
+            assert_eq!(Some(user_id), self.user.as_ref().map(|user| user.user_id));
+            self.deleted.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn update_last_login(&self, _user_id: Uuid) -> Result<(), AuthError> {
+            Ok(())
+        }
+
+        async fn verify_email(&self, _user_id: Uuid) -> Result<(), AuthError> {
+            self.verified.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn update_password(
+            &self,
+            _user_id: Uuid,
+            _password_hash: &str,
+        ) -> Result<(), AuthError> {
+            unreachable!()
+        }
+    }
+
+    /// A password sign-up that has not verified its email yet.
+    fn pending_user(email: String, password: &str) -> Model {
+        Model {
+            email_verified: false,
+            status: UserStatus::Pending,
+            ..login_user(email, password)
+        }
+    }
+
     #[tokio::test]
-    async fn resend_verification_is_limited_per_email_before_the_lookup() {
+    async fn second_signup_for_an_unverified_email_replaces_it_and_answers_like_a_first_signup() {
         let (email_service, _, _) = test_services().await;
-        let repository = Arc::new(RejectIfCalledRepository {
-            find_by_email_calls: AtomicUsize::new(0),
-        });
-        let resend = |email: &str| {
-            let user_repo: Arc<dyn UserRepository> = repository.clone();
-            resend_verification_email(
-                web::Json(CheckEmailRequest {
-                    email: email.to_string(),
+        let email = format!("{}@example.com", Uuid::new_v4());
+        let username = format!("victim-{}", Uuid::new_v4().simple());
+        let pending = pending_user(email.clone(), "attacker-pw");
+        let signup_as_victim = |repository: Arc<SignupRepository>| {
+            let user_repo: Arc<dyn UserRepository> = repository;
+            signup(
+                actix_web::test::TestRequest::default()
+                    .peer_addr("203.0.113.203:12345".parse().unwrap())
+                    .to_http_request(),
+                web::Json(SignupRequest {
+                    email: email.clone(),
+                    username: username.clone(),
+                    password: "victim-pw".to_string(),
                 }),
                 web::Data::new(user_repo),
                 web::Data::new(email_service.clone()),
             )
         };
+
+        let repository = SignupRepository::new(Some(pending.clone()));
+        let response = signup_as_victim(repository.clone()).await.unwrap();
+
+        assert_eq!(response.status(), actix_web::http::StatusCode::CREATED);
+        assert_eq!(repository.deleted.load(Ordering::SeqCst), 1);
+        let created = repository.created.lock().unwrap().clone().unwrap();
+        assert_eq!(created.username, username);
+        assert!(verify("victim-pw", created.password_hash.as_ref().unwrap()).unwrap());
+        assert_ne!(created.user_id, pending.user_id);
+        // The new code was stored (its email then failed to send: no SMTP server here).
+        let mut conn = crate::test_redis().await;
+        let code_stored: bool = conn
+            .exists(format!("otp:verification:{email}"))
+            .await
+            .unwrap();
+        assert!(code_stored);
+
+        // A verified account keeps its email.
+        let verified = SignupRepository::new(Some(login_user(email.clone(), "owner-pw")));
+        assert!(matches!(
+            signup_as_victim(verified.clone()).await,
+            Err(AuthError::EmailAlreadyExists)
+        ));
+        assert_eq!(verified.deleted.load(Ordering::SeqCst), 0);
+    }
+
+    async fn verify_email_as(
+        email: &str,
+        password: &str,
+        user_repo: Arc<dyn UserRepository>,
+    ) -> Result<HttpResponse, AuthError> {
+        let (email_service, token_service, session_service) = test_services().await;
+        verify_email_with_otp(
+            actix_web::test::TestRequest::default()
+                .peer_addr("198.51.100.40:12345".parse().unwrap())
+                .to_http_request(),
+            web::Json(VerifyEmailRequest {
+                email: email.to_string(),
+                password: password.to_string(),
+                otp: "123456".to_string(),
+            }),
+            web::Data::new(user_repo),
+            web::Data::new(email_service),
+            web::Data::new(token_service),
+            web::Data::new(session_service),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn verify_email_refuses_a_caller_who_does_not_know_the_password() {
         let email = format!("{}@example.com", Uuid::new_v4());
+        let repository = SignupRepository::new(Some(pending_user(email.clone(), "attacker-pw")));
+        let code_key = format!("otp:verification:{email}");
+        let mut conn = crate::test_redis().await;
+        let _: () = conn.set_ex(&code_key, "123456", 60).await.unwrap();
 
-        // Three an hour per email reach the lookup, which this repository fails.
-        for _ in 0..3 {
-            assert!(matches!(
-                resend(&email).await,
-                Err(AuthError::InternalError(_))
-            ));
+        let result = verify_email_as(&email, "victim-pw", repository.clone()).await;
+
+        assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+        assert_eq!(repository.verified.load(Ordering::SeqCst), 0);
+        let code_kept: bool = conn.exists(&code_key).await.unwrap();
+        assert!(code_kept);
+
+        let response = verify_email_as(&email, "attacker-pw", repository.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), actix_web::http::StatusCode::OK);
+        assert!(
+            response
+                .cookies()
+                .any(|cookie| cookie.name() == "session_id")
+        );
+        assert_eq!(repository.verified.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn verify_email_answers_unknown_and_verified_emails_like_a_wrong_password() {
+        let email = format!("{}@example.com", Uuid::new_v4());
+        for user in [None, Some(login_user(email.clone(), "owner-pw"))] {
+            let result = verify_email_as(&email, "owner-pw", SignupRepository::new(user)).await;
+            assert!(
+                matches!(result, Err(AuthError::InvalidCredentials)),
+                "{:?}",
+                result.err()
+            );
         }
-        assert!(matches!(
-            resend(&email).await,
-            Err(AuthError::RateLimited { .. })
-        ));
-        assert_eq!(repository.find_by_email_calls.load(Ordering::SeqCst), 3);
+    }
 
-        // Another email has a limit of its own.
-        let other_email = format!("{}@example.com", Uuid::new_v4());
+    #[tokio::test]
+    async fn login_refuses_a_pending_account_only_after_the_password_matches() {
+        let (email_service, token_service, session_service) = test_services().await;
+        let email = format!("{}@example.com", Uuid::new_v4());
+        let user_repo: Arc<dyn UserRepository> = Arc::new(LoginRepository {
+            user: pending_user(email.clone(), "right-password"),
+            find_by_email_calls: AtomicUsize::new(0),
+        });
+        let login_with = |password: &'static str| {
+            attempt_login(
+                &email,
+                password,
+                "198.51.100.41:12345",
+                user_repo.clone(),
+                email_service.clone(),
+                token_service.clone(),
+                session_service.clone(),
+            )
+        };
+
         assert!(matches!(
-            resend(&other_email).await,
-            Err(AuthError::InternalError(_))
+            login_with("wrong-password").await,
+            Err(AuthError::InvalidCredentials)
         ));
+        assert!(matches!(
+            login_with("right-password").await,
+            Err(AuthError::EmailNotVerified)
+        ));
+    }
+
+    #[tokio::test]
+    async fn unknown_and_registered_emails_get_the_same_answer_from_verify_reset_otp() {
+        let (email_service, _, _) = test_services().await;
+        let email = format!("{}@example.com", Uuid::new_v4());
+        for user in [None, Some(login_user(email.clone(), "owner-pw"))] {
+            let user_repo: Arc<dyn UserRepository> = SignupRepository::new(user);
+            let result = verify_reset_otp(
+                web::Json(VerifyResetOtpRequest {
+                    email: email.clone(),
+                    otp: "123456".to_string(),
+                }),
+                web::Data::new(user_repo),
+                web::Data::new(email_service.clone()),
+            )
+            .await;
+            assert!(
+                matches!(result, Err(AuthError::OtpExpired)),
+                "{:?}",
+                result.err()
+            );
+        }
     }
 
     #[test]
@@ -1788,6 +1907,10 @@ mod tests {
         }
 
         async fn create_user(&self, _user: &Model) -> Result<Model, AuthError> {
+            unreachable!()
+        }
+
+        async fn delete_unverified(&self, _user_id: Uuid) -> Result<(), AuthError> {
             unreachable!()
         }
 
