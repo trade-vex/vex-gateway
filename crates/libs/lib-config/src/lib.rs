@@ -838,9 +838,12 @@ database = "vex_analytics"
         let config_dir = tempfile::tempdir().unwrap();
         fs::write(config_dir.path().join("production.toml"), PRODUCTION_TOML).unwrap();
 
-        let config =
-            Config::load_selected(Some("production"), Some(config_dir.path().to_path_buf()))
-                .unwrap();
+        let config = Config::load_with(
+            Environment::Production,
+            Some(config_dir.path().to_path_buf()),
+            Config::app_overrides([]).unwrap(),
+        )
+        .unwrap();
 
         assert_eq!(config.environment, Environment::Production);
         assert_eq!(config.server.host, "0.0.0.0");
@@ -997,20 +1000,7 @@ database = "vex_analytics"
 
     #[test]
     fn test_oauth_providers_require_both_frontend_urls() {
-        let load = |oauth: &str| {
-            let config_dir = tempfile::tempdir().unwrap();
-            let example = include_str!("../../../../config/development.toml.example");
-            assert_eq!(example.matches("providers = {}").count(), 1);
-            fs::write(
-                config_dir.path().join("development.toml"),
-                example.replace("providers = {}", oauth),
-            )
-            .unwrap();
-            Config::load(
-                Environment::Development,
-                Some(config_dir.path().to_path_buf()),
-            )
-        };
+        let load = |oauth: &str| load_edited_example("providers = {}", oauth).0;
         let provider = r#"providers = { github = { client_id = "id", client_secret = "secret", auth_url = "https://github.com/login/oauth/authorize", token_url = "https://github.com/login/oauth/access_token" } }"#;
         let web = r#"frontend_url_web = "https://app.example.com/oauth/done""#;
         let app = r#"frontend_url_app = "vex://oauth""#;
@@ -1524,21 +1514,8 @@ frontend_url_app = "vex://oauth""#
 
         // So is a file key that no setting reads, with its file, also when renaming it leaves a
         // required key missing.
-        let config_dir = tempfile::tempdir().unwrap();
-        let example = include_str!("../../../../config/development.toml.example");
-        assert_eq!(example.matches("[server]\nhost = ").count(), 1);
-        fs::write(
-            config_dir.path().join("development.toml"),
-            example.replace("[server]\nhost = ", "[server]\nhots = "),
-        )
-        .unwrap();
-        let error = Config::load_with(
-            Environment::Development,
-            Some(config_dir.path().to_path_buf()),
-            Config::app_overrides([]).unwrap(),
-        )
-        .unwrap_err();
-        let file = config_dir.path().join("development.toml");
+        let (result, file) = load_edited_example("[server]\nhost = ", "[server]\nhots = ");
+        let error = result.unwrap_err();
         assert_eq!(
             error.to_string(),
             format!(
@@ -1648,21 +1625,8 @@ frontend_url_app = "vex://oauth""#
         assert_eq!(config.server.port, 1);
 
         // A decimal is rounded in the file, and rejected in a variable.
-        let config_dir = tempfile::tempdir().unwrap();
-        let example = include_str!("../../../../config/development.toml.example");
-        assert_eq!(example.matches("port = 8081\n").count(), 1);
-        fs::write(
-            config_dir.path().join("development.toml"),
-            example.replace("port = 8081\n", "port = 8080.6\n"),
-        )
-        .unwrap();
-        let config = Config::load_with(
-            Environment::Development,
-            Some(config_dir.path().to_path_buf()),
-            Config::app_overrides([]).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(config.server.port, 8081);
+        let (config, _) = load_edited_example("port = 8081\n", "port = 8080.6\n");
+        assert_eq!(config.unwrap().server.port, 8081);
         assert!(matches!(
             load_development_example(&[("APP__SERVER__PORT", "8080.6")]),
             Err(ConfigError::LoadError(_))
