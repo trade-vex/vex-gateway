@@ -24,7 +24,8 @@
 2. **System Dependencies**
    - PostgreSQL client libraries
    - Redis client libraries
-   - Aeron media driver (for VEX Core communication)
+   - Aeron media driver (for VEX Core communication): `io.aeron.driver.MediaDriver` from
+     `aeron-all-1.49.0.jar`, the jar vex-core's archive image uses
    - [golang-migrate](https://github.com/golang-migrate/migrate) for the database schema
      (see [Read Model](#read-model))
 
@@ -66,7 +67,7 @@ vex-core link) lives in that file (see [Configuration](#configuration)), and the
 APP_ENV=production
 APP__SERVER__HOST=0.0.0.0                                  # server.host
 APP__AUTH__SERVER__TRUSTED_PROXIES=10.0.1.0/24,10.0.2.0/24 # auth.server.trusted_proxies
-APP__CORE__AUTH_KEY=<signed 32-bit integer>                # core.auth_key, kept out of the file
+APP__CORE__AUTH_KEY=<openssl rand -hex 32>                 # core.auth_key, kept out of the file
 APP__CLICKHOUSE__PASSWORD=<password>                       # clickhouse.password, kept out of the file
 APP__METRICS__BIND=0.0.0.0:9091                            # metrics.bind
 ```
@@ -216,6 +217,10 @@ Every series is reported from the first scrape, at 0 until its first count:
 - `unknown`: it was sent but no answer came back: the wait timed out (408), or the answer was
   lost (500).
 
+Alert on these, not on vex-core's log, which keeps per-order rejections and busy answers at debug:
+on `rate(vex_gateway_orders_total{outcome="busy"}[1m]) > 0` (the engine's queue is full), and on
+the share of `rejected` among all outcomes.
+
 `method` is one of:
 
 - `jwt`: a bearer token, or a session cookie whose session holds one, refused with 401 (invalid,
@@ -301,21 +306,27 @@ windows.
 The `[core]` section holds the Aeron link to vex-core (see `config/development.toml.example`).
 `APP__CORE__<KEY>` overrides a key, such as `APP__CORE__CONTROL_PORT` for `core.control_port`:
 
-- `gateway_id`: this gateway's id at the core, 0-15, unique among the gateways connected to it.
+- `gateway_id`: this gateway's id at the core, 0-15, unique among the gateways connected to it:
+  at most 16 gateways per core.
 - `auth_key`: the handshake credential (below).
 - `address`: vex-core's Aeron address.
 - `port`, `control_port`: vex-core's `core_networking.initial_port` and `initial_control_port`:
   3521 and 3522 for a production core, 40001 and 40002 for vex-core's development and test
   defaults. The two must differ.
-- `context_dir`: this gateway's Aeron media driver directory.
+- `context_dir`: the directory of this gateway's Aeron media driver, the Java `MediaDriver` of
+  `aeron-all-1.49.0.jar` ([Prerequisites](#prerequisites)).
 
-`auth_key` is a signed 32-bit integer equal to vex-core's
-`VEX__GATEWAY_NETWORKING__GATEWAY_AUTHENTICATION_KEY`, shared by every gateway. With
-`APP_ENV=production` the gateway refuses to start when it is empty, as vex-core does. Leave it
-empty only for a core running without authentication
+`auth_key` is an opaque key of at least 32 characters without whitespace (generate it with
+`openssl rand -hex 32`), equal to vex-core's `VEX__CORE_NETWORKING__GATEWAY_AUTHENTICATION_KEY`
+and shared by every gateway. With `APP_ENV=production` the gateway refuses to start when it is
+empty, as vex-core does. Leave it empty only for a core running without authentication
 (`VEX__CORE_NETWORKING__ENABLE_AUTHENTICATION=false`). To keep it out of the file, set
 `APP__CORE__AUTH_KEY`. The key travels in cleartext in the handshake, so keep gateway-to-core traffic
 on a trusted network segment.
+
+The core sends each gateway's replies unicast to the host its handshake came from, on a port of
+vex-core's `base_gateway_port` to `base_gateway_port + 63`. The gateway host must accept inbound
+UDP on those ports from the core, and must not sit behind NAT towards the core.
 
 The gateway exits at startup when one of these keys is missing, malformed or unknown, or when
 vex-core's own rules reject the combination (`Invalid vex-core link settings in [core]: ...`, for
@@ -938,6 +949,9 @@ grep "timeout" logs/app.log
 - Check VEX Core health and performance
 - Increase timeout (currently 5 seconds hardcoded)
 - Check network latency between gateway and core
+- A 408 `outcome_unknown` also follows vex-core closing this gateway's session because it stopped
+  reading replies for 1 s (`slow_gateway_closed` in the core log); resolve the order from the
+  read model, as the message says
 
 ### Stranded Order Idempotency Claims
 

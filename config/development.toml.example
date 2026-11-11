@@ -91,9 +91,9 @@ database = "trading"
 [core]
 # This gateway's id at the core: 0-15, unique among the gateways connected to it.
 gateway_id = 1
-# Handshake credential: a signed 32-bit integer equal to vex-core's
-# VEX__GATEWAY_NETWORKING__GATEWAY_AUTHENTICATION_KEY. Empty only for a core running without
-# authentication; required in production.
+# Handshake credential: at least 32 characters without whitespace (openssl rand -hex 32), equal
+# to vex-core's VEX__CORE_NETWORKING__GATEWAY_AUTHENTICATION_KEY. Empty only for a core running
+# without authentication; required in production.
 auth_key = ""
 address = "aeron-media-driver-core"
 # = vex-core core_networking.initial_port / initial_control_port (3521/3522 in production,

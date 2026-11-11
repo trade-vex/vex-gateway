@@ -10,5 +10,6 @@ vex-config = { workspace = true }
 vex-networking = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-# The version vex-networking pins, for its embedded media driver.
+# The version vex-networking pins, for its embedded media driver: Aeron's 1.48.6 C driver, test
+# only. Every deployed driver is aeron-all-1.49.0.jar's Java one (RUNBOOK.md).
 rusteron-media-driver = "=0.1.157"
