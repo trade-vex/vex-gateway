@@ -1,11 +1,14 @@
 //! Unit tests for API key handlers
 //!
 //! These tests use the actual Postgres implementation of ApiKeyRepository
-//! to test the real CRUD operations with the database.
+//! to test the real CRUD operations with the database, on the read model's schema.
+
+mod common;
 
 use actix_web::web;
 use chrono::Utc;
-use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
+use common::require_database;
+use sea_orm::{ConnectionTrait, DatabaseConnection};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -15,85 +18,6 @@ use lib_api::handlers::api_key::{
 };
 use lib_auth::middleware::jwt_auth::AuthenticatedUser;
 use lib_middleware::repository::api_key_repository::ApiKeyRepository;
-
-async fn setup_test_db() -> Result<DatabaseConnection, sea_orm::DbErr> {
-    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgresql://postgres:postgres123@localhost:5432/trading_db".to_string()
-    });
-
-    // Add timeout to prevent hanging
-    let connection_future = Database::connect(&database_url);
-    let timeout_duration = std::time::Duration::from_secs(5);
-
-    match tokio::time::timeout(timeout_duration, connection_future).await {
-        Ok(Ok(db)) => Ok(db),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err(sea_orm::DbErr::Custom(
-            "Database connection timeout".to_string(),
-        )),
-    }
-}
-
-// Helper function to get database connection, return None if unavailable (test will be skipped)
-async fn require_database() -> Option<DatabaseConnection> {
-    setup_test_db_with_schema().await.ok()
-}
-
-async fn setup_test_db_with_schema() -> Result<DatabaseConnection, sea_orm::DbErr> {
-    let db = setup_test_db().await?;
-
-    let create_table_sql = r#"
-        -- Create enum types for API key management (only if they don't exist)
-        DO $$ BEGIN
-            CREATE TYPE security_type AS ENUM ('none', 'trade', 'user_data', 'user_stream');
-        EXCEPTION
-            WHEN duplicate_object THEN null;
-        END $$;
-
-        DO $$ BEGIN
-            CREATE TYPE key_material_type AS ENUM ('hmac_secret');
-        EXCEPTION
-            WHEN duplicate_object THEN null;
-        END $$;
-
-        -- Create api_keys table if it doesn't exist (don't drop - allows parallel test execution)
-        CREATE TABLE IF NOT EXISTS api_keys (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            api_key VARCHAR(255) NOT NULL UNIQUE,
-            key_material_type key_material_type,
-            key_material_value TEXT,
-            permissions security_type[] NOT NULL DEFAULT ARRAY['none']::security_type[],
-            recv_window BIGINT NOT NULL DEFAULT 5000,
-            enabled BOOLEAN NOT NULL DEFAULT true,
-            description TEXT,
-            ip_blacklist TEXT[] DEFAULT ARRAY[]::TEXT[],
-            user_id UUID,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            expires_at TIMESTAMPTZ,
-            last_used_at TIMESTAMPTZ
-        );
-
-        -- Create indexes if they don't exist (idempotent)
-        CREATE INDEX IF NOT EXISTS idx_api_keys_api_key ON api_keys(api_key);
-        CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys(user_id);
-        CREATE INDEX IF NOT EXISTS idx_api_keys_enabled ON api_keys(enabled);
-        CREATE INDEX IF NOT EXISTS idx_api_keys_expires_at ON api_keys(expires_at);
-        CREATE INDEX IF NOT EXISTS idx_api_keys_created_at ON api_keys(created_at);
-        CREATE INDEX IF NOT EXISTS idx_api_keys_last_used_at ON api_keys(last_used_at);
-
-        -- Partial index for enabled keys only (drop and recreate if exists)
-        DROP INDEX IF EXISTS idx_api_keys_active;
-        CREATE INDEX idx_api_keys_active ON api_keys(api_key) 
-        WHERE enabled = true;
-    "#;
-
-    db.execute_unprepared(create_table_sql).await.map_err(|e| {
-        sea_orm::DbErr::Custom(format!("Failed to create test database schema: {}", e))
-    })?;
-
-    Ok(db)
-}
 
 async fn cleanup_test_data(db: &DatabaseConnection, user_id: Uuid) {
     let cleanup_sql = format!("DELETE FROM api_keys WHERE user_id = '{}'", user_id);
