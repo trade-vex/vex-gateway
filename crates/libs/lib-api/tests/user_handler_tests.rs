@@ -1682,9 +1682,7 @@ mod tests {
         cleanup_test_data(&db, user_id).await;
 
         // Insert favorite markets
-        // Note: PostgreSQL BIGINT is signed (i64), so we need to cast u64 to i64
-        // Mask to lower 63 bits to avoid producing negative values from high-bit u64s
-        let user_id_i64 = (user_id & 0x7FFF_FFFF_FFFF_FFFF) as i64;
+        let user_id_i64 = user_id as i64; // same bits, as the repository stores it
         let market_ids = vec![65538, 65539]; // BTC/USD and ETH/USD
         for market_id in &market_ids {
             let sql = format!(
@@ -1827,9 +1825,7 @@ mod tests {
         cleanup_test_data(&db, user_id).await;
 
         // First add a favorite
-        // Note: PostgreSQL BIGINT is signed (i64), so we need to cast u64 to i64
-        // Mask to lower 63 bits to avoid producing negative values from high-bit u64s
-        let user_id_i64 = (user_id & 0x7FFF_FFFF_FFFF_FFFF) as i64;
+        let user_id_i64 = user_id as i64; // same bits, as the repository stores it
         let sql = format!(
             "INSERT INTO user_favorite_markets (user_id, market_id) VALUES ({}, {})",
             user_id_i64, 65538
@@ -1872,6 +1868,46 @@ mod tests {
                 panic!("Handler returned error: {}", e);
             }
         }
+
+        cleanup_test_data(&db, user_id).await;
+    }
+
+    /// A user above `i64::MAX`, stored negative with the same bits, finds the favourite they
+    /// added.
+    #[tokio::test]
+    async fn favourites_of_a_user_above_i64_max_round_trip() {
+        let Some(db) = require_database().await else {
+            return;
+        };
+        let (user, user_id) = user_above_i64_max();
+        cleanup_test_data(&db, user_id).await;
+        let trading_repo: Arc<dyn TradingRepository> =
+            Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
+
+        let toggled = toggle_favorite_market(
+            create_authenticated_user_id(user),
+            web::Json(ToggleFavoriteMarketRequest { market_id: 65538 }),
+            web::Data::new(trading_repo.clone()),
+        )
+        .await
+        .unwrap();
+        let body = actix_web::body::to_bytes(toggled.into_body())
+            .await
+            .unwrap();
+        let toggled: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(toggled["action"], "added");
+
+        let favorites = get_favorite_markets(
+            create_authenticated_user_id(user),
+            web::Data::new(trading_repo),
+        )
+        .await
+        .unwrap();
+        let body = actix_web::body::to_bytes(favorites.into_body())
+            .await
+            .unwrap();
+        let favorites: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(favorites["market_ids"], serde_json::json!([65538]));
 
         cleanup_test_data(&db, user_id).await;
     }
