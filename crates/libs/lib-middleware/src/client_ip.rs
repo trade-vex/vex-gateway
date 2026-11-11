@@ -40,20 +40,23 @@ impl TrustedProxies {
     /// The client address of `req`, or `None` when the transport reports no peer.
     pub fn client_ip(&self, req: &HttpRequest) -> Option<IpAddr> {
         let mut client = req.peer_addr()?.ip().to_canonical();
-        let hops: Vec<&str> = req
+        // Split the raw bytes: one byte that is not visible ASCII (which `to_str` refuses) must
+        // spoil only its own hop, not the hops the proxies appended after it.
+        let hops: Vec<&[u8]> = req
             .headers()
             .get_all("x-forwarded-for")
-            .flat_map(|value| value.to_str().unwrap_or("").split(','))
+            .flat_map(|value| value.as_bytes().split(|&byte| byte == b','))
             .collect();
 
         for hop in hops.iter().rev() {
             if !self.is_trusted(client) {
                 break;
             }
-            match hop.trim().parse::<IpAddr>() {
-                Ok(ip) => client = ip.to_canonical(),
+            let hop = std::str::from_utf8(hop).ok();
+            match hop.and_then(|hop| hop.trim().parse::<IpAddr>().ok()) {
+                Some(ip) => client = ip.to_canonical(),
                 // A malformed hop names no one; keep the last address a trusted proxy vouched for.
-                Err(_) => break,
+                None => break,
             }
         }
         Some(client)
@@ -191,6 +194,20 @@ mod tests {
             resolve(&trusted, &request("10.0.0.2:1234", &["10.0.0.5"])),
             "10.0.0.5"
         );
+    }
+
+    #[test]
+    fn a_non_ascii_hop_does_not_hide_the_proxys_hop() {
+        // nginx appends the address it saw to whatever the client sent, bytes included.
+        let req = TestRequest::default()
+            .peer_addr("10.0.0.2:1234".parse().unwrap())
+            .append_header((
+                "X-Forwarded-For",
+                actix_web::http::header::HeaderValue::from_bytes(b"\xff, 198.51.100.7").unwrap(),
+            ))
+            .to_http_request();
+
+        assert_eq!(resolve(&proxies(&["10.0.0.0/8"]), &req), "198.51.100.7");
     }
 
     #[test]
