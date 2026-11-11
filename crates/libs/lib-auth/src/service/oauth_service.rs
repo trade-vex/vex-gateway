@@ -609,7 +609,6 @@ impl OAuthService {
     ///
     /// An `OAuthLoginResponse` containing:
     /// - `access_token`: JWT for API authentication
-    /// - `expires_in`: Token expiry time in seconds
     /// - `user`: User information
     ///
     /// # Errors
@@ -690,7 +689,6 @@ impl OAuthService {
         Ok((
             OAuthLoginResponse {
                 access_token: tokens.access_token,
-                expires_in: tokens.expires_in,
                 user: user.into(),
             },
             OAuthCallbackMeta {

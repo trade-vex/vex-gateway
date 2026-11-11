@@ -7,10 +7,8 @@ pub struct SignupResponse {
     pub message: String,
 }
 
-#[derive(Serialize)]
 pub struct OAuthLoginResponse {
     pub access_token: String,
-    pub expires_in: u64,
     pub user: UserInfo,
 }
 
