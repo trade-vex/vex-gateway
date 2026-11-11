@@ -1,5 +1,6 @@
 use redis::{aio::ConnectionManager, Script};
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
@@ -15,6 +16,33 @@ const RELEASED_MARKER_TTL_SECS: u64 = 60;
 // of ~200 on the Redis connection shared with sessions and caches.
 const COMPLETION_POLL_INITIAL: Duration = Duration::from_millis(25);
 const COMPLETION_POLL_MAX: Duration = Duration::from_millis(500);
+
+/// SET NX, except that a release marker, whatever its reason, counts as a free key.
+static CLAIM: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(
+        r#"
+        local current = redis.call('GET', KEYS[1])
+        if current == false or current == ARGV[2] or current == ARGV[4] then
+            redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[3])
+            return 1
+        end
+        return 0
+        "#,
+    )
+});
+
+/// Replaces the value at the key with ARGV[2], expiring in ARGV[3] seconds, only if it is ARGV[1].
+static REPLACE_IF_EQUAL: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(
+        r#"
+        if redis.call('GET', KEYS[1]) == ARGV[1] then
+            redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+            return 1
+        end
+        return 0
+        "#,
+    )
+});
 
 #[derive(Clone)]
 pub struct OrderIdempotencyStore {
@@ -117,21 +145,10 @@ impl OrderIdempotencyStore {
         let released_unavailable = serialize(&StoredOrderAttempt::Released(
             ReleaseReason::EngineUnavailable,
         ))?;
-        // SET NX, except that a release marker, whatever its reason, counts as a free key.
-        let script = Script::new(
-            r#"
-            local current = redis.call('GET', KEYS[1])
-            if current == false or current == ARGV[2] or current == ARGV[4] then
-                redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[3])
-                return 1
-            end
-            return 0
-            "#,
-        );
 
         for _ in 0..2 {
             let mut connection = self.connection.clone();
-            let outcome: Result<i32, _> = script
+            let outcome: Result<i32, _> = CLAIM
                 .key(&key)
                 .arg(&bytes)
                 .arg(&released_busy)
@@ -190,17 +207,8 @@ impl OrderIdempotencyStore {
             fingerprint: fingerprint.to_owned(),
             outcome,
         })?;
-        let script = Script::new(
-            r#"
-            if redis.call('GET', KEYS[1]) == ARGV[1] then
-                redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
-                return 1
-            end
-            return 0
-            "#,
-        );
         let mut connection = self.connection.clone();
-        let updated: i32 = script
+        let updated: i32 = REPLACE_IF_EQUAL
             .key(key)
             .arg(expected)
             .arg(completed)
@@ -230,17 +238,8 @@ impl OrderIdempotencyStore {
             nonce,
         })?;
         let released = serialize(&StoredOrderAttempt::Released(reason))?;
-        let script = Script::new(
-            r#"
-            if redis.call('GET', KEYS[1]) == ARGV[1] then
-                redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
-                return 1
-            end
-            return 0
-            "#,
-        );
         let mut connection = self.connection.clone();
-        let released: i32 = script
+        let released: i32 = REPLACE_IF_EQUAL
             .key(key)
             .arg(expected)
             .arg(released)
