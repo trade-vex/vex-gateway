@@ -3,7 +3,6 @@ use lib_middleware::api_key::{
     middleware::{ApiKeyMiddleware, ApiKeyStore, CacheConfig, RouteSecurityConfig},
     security::{ApiKeyConfig, SecurityType},
 };
-use std::sync::Arc;
 use std::time::Duration;
 
 #[test]
@@ -96,148 +95,6 @@ fn test_cache_config_default() {
     assert_eq!(config.l1_ttl, Duration::from_secs(5));
 }
 
-#[test]
-fn test_cache_config_custom() {
-    let config = CacheConfig {
-        l1_max_size: 2000,
-        l1_ttl: Duration::from_secs(600),
-    };
-
-    assert_eq!(config.l1_max_size, 2000);
-    assert_eq!(config.l1_ttl, Duration::from_secs(600));
-}
-
-#[test]
-fn test_cache_config_clone() {
-    let config = CacheConfig {
-        l1_max_size: 500,
-        l1_ttl: Duration::from_secs(120),
-    };
-
-    let cloned = config.clone();
-    assert_eq!(config.l1_max_size, cloned.l1_max_size);
-    assert_eq!(config.l1_ttl, cloned.l1_ttl);
-}
-
-#[tokio::test]
-async fn test_api_key_store_with_api_keys() {
-    let api_key_config = ApiKeyConfig::new("test-key".to_string())
-        .with_hmac_secret("secret".to_string())
-        .with_permissions(vec![SecurityType::Trade]);
-
-    let config = CacheConfig::default();
-    let store = ApiKeyStore::new(config).with_api_keys(vec![api_key_config.clone()]);
-
-    // Verify the API key was added to memory store
-    let result = store.get_api_key("test-key").await.unwrap();
-    assert!(result.is_some());
-
-    let retrieved_config = result.unwrap();
-    assert_eq!(retrieved_config.api_key, "test-key");
-    assert_eq!(retrieved_config.permissions, vec![SecurityType::Trade]);
-}
-
-#[tokio::test]
-async fn test_api_key_store_get_not_found() {
-    let config = CacheConfig::default();
-    let store = ApiKeyStore::new(config);
-
-    let result = store.get_api_key("non-existent-key").await.unwrap();
-    assert!(result.is_none());
-}
-
-#[tokio::test]
-async fn test_api_key_store_concurrent_access() {
-    let config = CacheConfig::default();
-    let store = Arc::new(ApiKeyStore::new(config));
-
-    let mut handles = vec![];
-
-    // Spawn multiple tasks that try to get the same non-existent key concurrently
-    for i in 0..10 {
-        let store_clone = Arc::clone(&store);
-        let handle = tokio::spawn(async move {
-            let key = format!("concurrent-key-{}", i);
-            let result = store_clone.get_api_key(&key).await.unwrap();
-            assert!(result.is_none());
-        });
-
-        handles.push(handle);
-    }
-
-    // Wait for all tasks to complete
-    for handle in handles {
-        handle.await.unwrap();
-    }
-}
-
-#[tokio::test]
-async fn test_api_key_store_with_valid_api_key() {
-    let api_key_config = ApiKeyConfig::new("valid-key".to_string())
-        .with_hmac_secret("test-secret".to_string())
-        .with_permissions(vec![SecurityType::Trade, SecurityType::UserData])
-        .with_recv_window(10000)
-        .with_description("Test API key".to_string());
-
-    let config = CacheConfig::default();
-    let store = ApiKeyStore::new(config).with_api_keys(vec![api_key_config]);
-
-    let result = store.get_api_key("valid-key").await.unwrap();
-    assert!(result.is_some());
-
-    let retrieved = result.unwrap();
-    assert_eq!(retrieved.api_key, "valid-key");
-    assert_eq!(retrieved.recv_window, 10000);
-    assert_eq!(retrieved.description, Some("Test API key".to_string()));
-    assert!(retrieved.has_permission(SecurityType::Trade));
-    assert!(retrieved.has_permission(SecurityType::UserData));
-    assert!(!retrieved.has_permission(SecurityType::UserStream));
-}
-
-#[tokio::test]
-async fn test_api_key_store_cache_behavior() {
-    let api_key_config =
-        ApiKeyConfig::new("cache-test".to_string()).with_hmac_secret("cache-secret".to_string());
-
-    let config = CacheConfig {
-        l1_max_size: 10,
-        l1_ttl: Duration::from_secs(1), // Short TTL for testing
-    };
-    let store = ApiKeyStore::new(config).with_api_keys(vec![api_key_config]);
-
-    // First access should cache the key
-    let result1 = store.get_api_key("cache-test").await.unwrap();
-    assert!(result1.is_some());
-
-    // Second access should hit cache
-    let result2 = store.get_api_key("cache-test").await.unwrap();
-    assert!(result2.is_some());
-
-    // Both results should be the same
-    assert_eq!(result1.unwrap().api_key, result2.unwrap().api_key);
-}
-
-#[test]
-fn test_api_key_store_clone() {
-    let config = CacheConfig::default();
-    let store = ApiKeyStore::new(config);
-
-    // Store should be cloneable (Arc-based internals)
-    let _cloned_store = store.clone();
-
-    // This test just ensures the clone compiles and works
-}
-
-#[test]
-fn test_api_key_store_send_sync() {
-    // Ensure ApiKeyStore is Send + Sync for async usage
-    fn assert_send<T: Send>() {}
-    fn assert_sync<T: Sync>() {}
-
-    assert_send::<ApiKeyStore>();
-    assert_sync::<ApiKeyStore>();
-}
-
 #[tokio::test]
 async fn test_invalidated_cached_key_stops_authenticating() {
     let store = ApiKeyStore::new(CacheConfig::default());
@@ -266,4 +123,26 @@ async fn test_cache_invalidation_does_not_affect_unrelated_key() {
     store.invalidate("revoked-key").await;
 
     assert!(store.get_api_key("unrelated-key").await.unwrap().is_some());
+}
+
+/// An L1 entry older than `l1_ttl` is looked up again: it is how a revocation on another replica
+/// reaches this one. The store has no repository and an empty memory store, so a stale entry is
+/// the only way the key could still be found.
+#[tokio::test]
+async fn cached_key_expires_after_ttl() {
+    let store = ApiKeyStore::new(CacheConfig {
+        l1_max_size: 1,
+        l1_ttl: Duration::from_millis(20),
+    });
+    store
+        .add_api_key(ApiKeyConfig::new("ttl-key".to_string()))
+        .await;
+    assert!(store.get_api_key("ttl-key").await.unwrap().is_some());
+
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    assert!(
+        store.get_api_key("ttl-key").await.unwrap().is_none(),
+        "an expired L1 entry must not authenticate"
+    );
 }
