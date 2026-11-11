@@ -4475,30 +4475,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tests"
-version = "0.1.0"
-dependencies = [
- "actix-web",
- "chrono",
- "common",
- "jsonwebtoken",
- "lib-auth",
- "lib-config",
- "lib-core",
- "lib-server",
- "reqwest",
- "rust_decimal",
- "sea-orm",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "uuid",
- "vex-config",
- "vex-networking",
-]
-
-[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
