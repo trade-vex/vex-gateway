@@ -1,3 +1,4 @@
+use actix_web::cookie::{Cookie, SameSite, time::Duration};
 use actix_web::{HttpRequest, HttpResponse, web};
 use bcrypt::{DEFAULT_COST, hash, verify};
 use chrono::Utc;
@@ -51,14 +52,17 @@ fn refused_login() -> AuthError {
     AuthError::InvalidCredentials
 }
 
-/// Session cookie attributes for `req`. Returns (is_secure, cookie_ttl) where:
-/// - is_secure: the request used HTTPS: a TLS connection, or `X-Forwarded-Proto: https` from a
-///   trusted proxy (`is_https`), the same rule the OAuth handlers apply to their cookies
-/// - cookie_ttl: cookie time-to-live in seconds (24 hours)
-fn get_cookie_config(req: &HttpRequest) -> (bool, i64) {
-    let is_secure = is_https(req);
-    let cookie_ttl = 24 * 3600;
-    (is_secure, cookie_ttl)
+/// The session cookie of every login: password, verified email and OAuth web. It lives 24 hours
+/// in the browser; the session's idle limit is enforced in Redis. `Secure` when the request used
+/// HTTPS: a TLS connection, or `X-Forwarded-Proto: https` from a trusted proxy (`is_https`).
+pub(crate) fn session_cookie(req: &HttpRequest, session_id: String) -> Cookie<'static> {
+    Cookie::build("session_id", session_id)
+        .path("/")
+        .http_only(true)
+        .secure(is_https(req))
+        .same_site(SameSite::Strict)
+        .max_age(Duration::hours(24))
+        .finish()
 }
 
 // Signup handler
@@ -302,20 +306,11 @@ pub async fn login(
         .create_session(user_id, tokens.access_token)
         .await?;
 
-    // Create session cookie
-    let (is_secure, cookie_ttl) = get_cookie_config(&http_req);
-
-    let session_cookie = actix_web::cookie::Cookie::build("session_id", session_id)
-        .path("/")
-        .http_only(true)
-        .secure(is_secure)
-        .same_site(actix_web::cookie::SameSite::Strict)
-        .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
-        .finish();
-
-    Ok(HttpResponse::Ok().cookie(session_cookie).json(json!({
-        "message": "Logged in successfully"
-    })))
+    Ok(HttpResponse::Ok()
+        .cookie(session_cookie(&http_req, session_id))
+        .json(json!({
+            "message": "Logged in successfully"
+        })))
 }
 
 // Logout handler
@@ -344,16 +339,8 @@ pub async fn logout(
         tracing::warn!("Failed to blacklist token during logout: {}", e);
     }
 
-    // Create cookie to delete the session cookie
-    let (is_secure, _cookie_ttl) = get_cookie_config(&req);
-
-    let delete_session_cookie = actix_web::cookie::Cookie::build("session_id", "")
-        .path("/")
-        .http_only(true)
-        .secure(is_secure)
-        .same_site(actix_web::cookie::SameSite::Strict)
-        .max_age(actix_web::cookie::time::Duration::seconds(0))
-        .finish();
+    let mut delete_session_cookie = session_cookie(&req, String::new());
+    delete_session_cookie.make_removal();
 
     Ok(HttpResponse::Ok()
         .cookie(delete_session_cookie)
@@ -467,23 +454,12 @@ pub async fn verify_email_with_otp(
     // Never log the session id: it is a bearer credential (see combined_auth.rs).
     tracing::debug!("Session created successfully");
 
-    // Create session cookie
-    let (is_secure, cookie_ttl) = get_cookie_config(&http_req);
-
-    let session_cookie = actix_web::cookie::Cookie::build("session_id", session_id)
-        .path("/")
-        .http_only(true)
-        .secure(is_secure)
-        .same_site(actix_web::cookie::SameSite::Strict)
-        .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
-        .finish();
-
-    tracing::debug!("Session cookie created, sending response with cookie");
-
     // Return only success message (session created with cookie)
-    Ok(HttpResponse::Ok().cookie(session_cookie).json(json!({
-        "message": "Email verified successfully"
-    })))
+    Ok(HttpResponse::Ok()
+        .cookie(session_cookie(&http_req, session_id))
+        .json(json!({
+            "message": "Email verified successfully"
+        })))
 }
 
 // Change password handler
@@ -776,20 +752,35 @@ mod tests {
         let behind_tls = forwarded_https()
             .app_data(load_balancer())
             .to_http_request();
-        assert!(get_cookie_config(&behind_tls).0);
+        let secure = |req| session_cookie(req, "id".to_string()).secure() == Some(true);
+        assert!(secure(&behind_tls));
 
         // Any other peer's header is ignored: this plain-HTTP request did not use HTTPS.
         let untrusted = forwarded_https().to_http_request();
-        assert!(!get_cookie_config(&untrusted).0);
+        assert!(!secure(&untrusted));
         let direct = actix_web::test::TestRequest::default()
             .peer_addr("192.0.2.10:12345".parse().unwrap())
             .insert_header(("X-Forwarded-Proto", "https"))
             .app_data(load_balancer())
             .to_http_request();
-        assert!(!get_cookie_config(&direct).0);
+        assert!(!secure(&direct));
 
         let plain = actix_web::test::TestRequest::default().to_http_request();
-        assert!(!get_cookie_config(&plain).0);
+        assert!(!secure(&plain));
+    }
+
+    /// Every login sets the same cookie, OAuth web included: one the browser keeps for 24 hours,
+    /// not one that ends with the server's 30-minute idle limit while the user is active.
+    #[test]
+    fn the_session_cookie_lives_24_hours() {
+        let req = actix_web::test::TestRequest::default().to_http_request();
+        let cookie = session_cookie(&req, "id".to_string());
+
+        assert_eq!(cookie.max_age(), Some(Duration::hours(24)));
+        assert_eq!(
+            (cookie.path(), cookie.http_only(), cookie.same_site()),
+            (Some("/"), Some(true), Some(SameSite::Strict))
+        );
     }
 
     /// The JWT middleware renews a session's expired token at the version it was issued at; after

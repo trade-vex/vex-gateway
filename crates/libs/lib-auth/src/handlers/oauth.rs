@@ -1,6 +1,7 @@
 use crate::dto::auth_request_dto::{OAuthCallbackQuery, OAuthExchangeRequest, OAuthInitQuery};
 use crate::dto::auth_response_dto::OAuthExchangeResponse;
 use crate::error::auth_error::AuthError;
+use crate::handlers::auth::session_cookie;
 use crate::service::{
     email_service::EmailService,
     oauth_service::{OAuthCallbackMeta, OAuthService},
@@ -169,8 +170,6 @@ pub async fn handle_oauth_callback(
                     AuthError::CodeExchangeFailed(format!("Failed to create session: {}", e))
                 })?;
 
-            let is_secure = is_https(&req);
-
             // Serialize user_info to JSON
             let user_info_json = serde_json::to_string(&user_info).map_err(|e| {
                 AuthError::Validation(format!("Failed to serialize user info: {}", e))
@@ -216,26 +215,17 @@ pub async fn handle_oauth_callback(
                 _ => {
                     // For web: session cookie only; frontend can call /profile to fetch user info
                     // Removed user_info cookie - it was XSS-sensitive (not HttpOnly)
-                    // Use SessionService TTL for cookie max_age to align client/server state
-                    let session_cookie = Cookie::build("session_id", session_id.clone())
-                        .path("/")
-                        .http_only(true)
-                        .secure(is_secure)
-                        .same_site(SameSite::Strict)
-                        .max_age(Duration::seconds(session_service.ttl_seconds() as i64))
-                        .finish();
-
                     // Clear the oauth_state cookie on success
                     let clear_state_cookie = Cookie::build(cookie_name, "")
                         .path(format!("/api/oauth/{}/callback", provider.as_str()))
                         .http_only(true)
-                        .secure(is_secure)
+                        .secure(is_https(&req))
                         .same_site(SameSite::Lax)
                         .max_age(Duration::seconds(0))
                         .finish();
 
                     Ok(HttpResponse::Found()
-                        .cookie(session_cookie)
+                        .cookie(session_cookie(&req, session_id))
                         .cookie(clear_state_cookie)
                         .insert_header(("Cache-Control", "no-store"))
                         .append_header(("Location", frontend_url))

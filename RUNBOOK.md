@@ -1172,9 +1172,10 @@ request, and within 5 seconds on the others: each replica caches a key for at mo
 #### Session
 - `GET /api/session-check` - Check session validity
 - `GET /api/session/info` - The session's user and access token. There are no refresh tokens: the
-  session (30 minutes idle) renews its access token when it expires. A Bearer client whose access
-  token expired calls `GET /api/session/info` with its session cookie; the middleware renews the
-  token on that call and the response carries the new one.
+  session (30 minutes idle; every login sets its `session_id` cookie for 24 hours) renews its
+  access token when it expires. A Bearer client whose access token expired calls
+  `GET /api/session/info` with its session cookie; the middleware renews the token on that call
+  and the response carries the new one.
 
 ### Authentication Methods
 
