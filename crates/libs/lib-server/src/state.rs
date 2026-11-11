@@ -30,16 +30,17 @@ use url::Url;
 use crate::rate_limit::RateLimiter;
 
 /// Placing and cancelling need a trading key; every other protected route is a signed read
-/// (`UserData`, the API-key middleware's default). A route for the signed-in person only (API-key
-/// management, logout, profile, change-password) takes lib_auth's `AuthenticatedUser`, which
-/// refuses API-key callers whatever their permissions.
-pub(crate) fn api_key_route_configs() -> Vec<RouteSecurityConfig> {
-    ["/api/order", "/api/cancel"]
-        .map(|path| RouteSecurityConfig {
-            path_pattern: path.into(),
-            security_type: SecurityType::Trade,
-        })
-        .into()
+/// (`UserData`). A route for the signed-in person only (API-key management, logout, profile,
+/// change-password) takes lib_auth's `AuthenticatedUser`, which refuses API-key callers whatever
+/// their permissions.
+pub(crate) fn with_api_key_policy(middleware: ApiKeyMiddleware) -> ApiKeyMiddleware {
+    let trade_routes = ["/api/order", "/api/cancel"].map(|path| RouteSecurityConfig {
+        path_pattern: path.into(),
+        security_type: SecurityType::Trade,
+    });
+    middleware
+        .with_route_configs(trade_routes.into())
+        .with_default_security(SecurityType::UserData)
 }
 
 /// Central application state containing all dependencies
@@ -312,11 +313,11 @@ impl AppState {
         redis_conn: ConnectionManager,
     ) -> ApiKeyMiddleware {
         // Create middleware with database repository for dynamic loading
-        ApiKeyMiddleware::new()
-            .with_repository(CacheConfig::default(), api_key_repo.clone())
-            .with_replay_store(redis_conn)
-            .with_route_configs(api_key_route_configs())
-            .with_default_security(SecurityType::UserData)
+        with_api_key_policy(
+            ApiKeyMiddleware::new()
+                .with_repository(CacheConfig::default(), api_key_repo.clone())
+                .with_replay_store(redis_conn),
+        )
     }
 
     /// Sanitize a URL string to remove credentials and sensitive information

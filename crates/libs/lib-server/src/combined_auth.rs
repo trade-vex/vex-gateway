@@ -587,15 +587,15 @@ mod tests {
     async fn read_only_key_reads_but_cannot_trade() {
         let redis_conn = crate::test_redis().await;
         let secret = "read-only-test-secret";
-        let api_key_middleware = ApiKeyMiddleware::new()
-            .with_api_key(
-                ApiKeyConfig::new("read-only-test-key".to_string())
-                    .with_hmac_secret(secret.to_string())
-                    .with_permissions(vec![SecurityType::UserData]),
-            )
-            .with_replay_store(redis_conn.clone())
-            .with_route_configs(crate::state::api_key_route_configs())
-            .with_default_security(SecurityType::UserData);
+        let api_key_middleware = crate::state::with_api_key_policy(
+            ApiKeyMiddleware::new()
+                .with_api_key(
+                    ApiKeyConfig::new("read-only-test-key".to_string())
+                        .with_hmac_secret(secret.to_string())
+                        .with_permissions(vec![SecurityType::UserData]),
+                )
+                .with_replay_store(redis_conn.clone()),
+        );
         let jwt_middleware = JwtAuthentication::new(
             DecodingKey::from_secret(b"unused-test-secret"),
             "vex-gateway".to_string(),
