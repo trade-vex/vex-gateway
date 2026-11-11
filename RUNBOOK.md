@@ -152,6 +152,11 @@ stops the gateway at startup. Keep the password-reset lifetime short: a reset co
 account. After 5 wrong attempts a code is void (the 5th answers 429), and a new one must be
 requested.
 
+`[auth.email]` sends them. On `smtp_port` 465 the connection is TLS from the first byte; on any
+other port (587, the submission port) it starts plain and must upgrade with STARTTLS. An
+`smtp_host` of `localhost`, `127.0.0.1` or `host.docker.internal` sends without TLS or credentials,
+for a local test server.
+
 ### ClickHouse
 
 The `[clickhouse]` section holds the connection to the ClickHouse the portfolio and balance-chart

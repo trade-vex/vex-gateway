@@ -1,6 +1,7 @@
 use lettre::{
-    AsyncSmtpTransport, AsyncTransport, Tokio1Executor, message::header::ContentType,
-    transport::smtp::authentication::Credentials,
+    AsyncSmtpTransport, AsyncTransport, Tokio1Executor,
+    message::header::ContentType,
+    transport::smtp::{SUBMISSIONS_PORT, authentication::Credentials},
 };
 use lib_middleware::rate_limit::{self, Limit};
 use rand::Rng;
@@ -72,9 +73,14 @@ impl EmailService {
                 .port(email_config.smtp_port)
                 .build()
         } else {
-            // for production SMTP servers, use relay with TLS
             tracing::info!("Configuring SMTP for production with TLS");
-            AsyncSmtpTransport::<Tokio1Executor>::relay(&email_config.smtp_host)
+            // 465 is TLS from the first byte; 587 and others start plain and upgrade with STARTTLS.
+            let builder = if email_config.smtp_port == SUBMISSIONS_PORT {
+                AsyncSmtpTransport::<Tokio1Executor>::relay(&email_config.smtp_host)
+            } else {
+                AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&email_config.smtp_host)
+            };
+            builder
                 .map_err(|e| {
                     tracing::error!(
                         "SMTP relay error for host {}: {}",
@@ -829,6 +835,42 @@ mod tests {
             };
             assert!(verify.validate().is_ok() && reset.validate().is_ok());
         }
+    }
+
+    #[tokio::test]
+    async fn smtp_on_a_port_other_than_465_starts_plain_and_upgrades_with_starttls() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // 127.0.0.2 is loopback but not a local-development host: the production transport.
+        let server = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
+        let config = EmailConfig {
+            smtp_host: "127.0.0.2".to_string(),
+            smtp_port: server.local_addr().unwrap().port(),
+            smtp_username: "test".to_string(),
+            smtp_password: SecretString::new("test".to_string()),
+            from_email: "test@example.com".to_string(),
+        };
+        let otp_config = OtpConfig {
+            email_verification_expiry_minutes: 15,
+            password_reset_expiry_minutes: 15,
+        };
+        let service = EmailService::new(&config, crate::test_redis().await, &otp_config).unwrap();
+        let first_words = tokio::spawn(async move {
+            let (mut socket, _) = server.accept().await.unwrap();
+            socket.write_all(b"220 test ESMTP\r\n").await.unwrap();
+            let mut first = [0; 4];
+            socket.read_exact(&mut first).await.unwrap();
+            first
+        });
+
+        // The send fails once the server hangs up; only what the client said first matters.
+        let _ = service
+            .send_email("user@example.com", "Subject", "<p>html</p>", "text")
+            .await;
+
+        // A STARTTLS client answers the greeting in plain SMTP; an implicit-TLS client would have
+        // opened with a TLS handshake record instead.
+        assert_eq!(&first_words.await.unwrap(), b"EHLO");
     }
 
     #[test]
