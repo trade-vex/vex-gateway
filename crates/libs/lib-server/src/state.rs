@@ -308,7 +308,7 @@ impl AppState {
 
     /// Create ApiKeyMiddleware using AppState dependencies; `redis_conn` (`auth.redis.url`) holds
     /// the signature replay guards
-    pub fn init_api_key_middleware(
+    fn init_api_key_middleware(
         api_key_repo: &Arc<dyn ApiKeyRepository>,
         redis_conn: ConnectionManager,
     ) -> ApiKeyMiddleware {

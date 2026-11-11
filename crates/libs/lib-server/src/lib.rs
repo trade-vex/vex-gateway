@@ -17,15 +17,11 @@ mod metrics;
 mod rate_limit;
 mod state;
 
-pub use app::create_app;
-pub use combined_auth::CombinedAuthMiddleware;
-pub use correlation_handler::CorrelationHandler;
+use app::create_app;
 pub use engine_connector::spawn_engine_link;
-pub use lib_core::{
-    CorrelationService, EngineLink, ResponseError, generate_client_order_id, wait_for_response,
-};
-pub use rate_limit::RateLimiter;
-pub use state::AppState;
+pub use lib_core::CorrelationService;
+use lib_core::EngineLink;
+use state::AppState;
 
 /// Initialize the HTTP server, and the internal metrics listener beside it. The returned future runs
 /// both until the HTTP server stops.
