@@ -2339,8 +2339,6 @@ dependencies = [
  "futures-util",
  "lib-auth",
  "lib-middleware",
- "serde",
- "serde_json",
  "uuid",
 ]
 
