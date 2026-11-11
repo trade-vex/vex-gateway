@@ -208,8 +208,9 @@ Every series is reported from the first scrape, at 0 until its first count:
 - `jwt`: a bearer token, or a session cookie whose session holds one, refused with 401 (invalid,
   expired or revoked, or an expired or unknown session).
 - `api_key`: an `X-MBX-APIKEY` request refused with a 4xx: an unknown, disabled or expired key, a
-  refused IP or permission, or a bad, stale or replayed signature. A 5xx, such as the replay store
-  being unreachable, is the gateway's fault and is not counted.
+  refused IP or permission, a bad, stale or replayed signature, or a client IP over its refusal
+  budget (429, see [Rate Limits](#rate-limits)). A 5xx, such as Postgres or Redis being
+  unreachable, is the gateway's fault and is not counted.
 - `login`: a `POST /api/login` refused for its email and password (401). A rate-limited or
   unverified login is not counted.
 
@@ -317,6 +318,12 @@ attempt against a core that is down itself waits up to 20 s for it. The log show
 - `GET /api/ready` is readiness of the vex-core link: 200 while the gateway is connected to the
   core and its orders get answers, otherwise 503 with the reason (see
   [VEX Core is Down](#vex-core-is-down)).
+
+API-key authentication has a budget of its own, a code constant: each client IP (an IPv6 client
+by its /64) may make 60 refused API-key authentications a minute (an unknown, disabled or expired
+key, or a wrong signature). Over that, every API-key request from that IP is refused with the same
+429 and `Retry-After` until the window ends, before the key is looked up. A request whose key and
+signature are valid is never counted, so a working client never reaches it.
 
 Point the AWS ALB target group's health check, and any orchestrator's liveness check, at
 `/api/health`. On `/api/ready`, a core outage would fail every gateway's check at once: every
@@ -1002,6 +1009,8 @@ grep -i "memory\|oom" logs/app.log
    - User registration/login may fail
    - Balance, open-order and order-history queries will fail: they read the read model
    - API key management will fail
+   - API-key requests get 503 (`API key store is unavailable`) once their key has been out of
+     the gateway's cache for 5 s
    - **Order placement may still work** (if VEX Core is up)
 
 3. **Mitigation**
@@ -1019,8 +1028,8 @@ grep -i "memory\|oom" logs/app.log
 2. **Service Impact**
    - Every JWT-authenticated request gets 503 (`service_unavailable`): the token revocation
      checks read Redis.
-   - Signed API-key requests get 503 (`Signature replay protection failed`): their signatures
-     are recorded in Redis against replay.
+   - Every API-key request gets 503 (`API key store is unavailable`): each client IP's budget
+     of refused API-key authentications, and every signature (against replay), are kept in Redis.
    - **Order placement fails**: every order's idempotency claim is kept in Redis, so nothing is
      sent to the engine. An order that gets past authentication is answered 503 (`Order was not
      sent because idempotency storage is unavailable`).

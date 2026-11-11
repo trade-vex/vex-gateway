@@ -456,33 +456,17 @@ return {2, attempts, ttl}
         max_failures: u64,
         window_seconds: u64,
     ) -> Result<(), AuthError> {
-        let mut conn = self.conn.clone();
         let key = format!(
             "{}login:{}",
             AUTH_RATE_LIMIT_PREFIX,
             identity.trim().to_ascii_lowercase()
         );
-        let result: redis::RedisResult<(u64, i64)> = redis::Script::new(
-            r#"
-local count = tonumber(redis.call('GET', KEYS[1]) or '0')
-local ttl = redis.call('TTL', KEYS[1])
-return {count, ttl}
-"#,
-        )
-        .key(key)
-        .invoke_async(&mut conn)
-        .await;
-        let (count, ttl) = result.map_err(|e| {
-            AuthError::Redis(format!("Failed to check login failure rate limit: {}", e))
-        })?;
+        let limit = Limit {
+            max_requests: max_failures,
+            window_seconds,
+        };
 
-        if count >= max_failures {
-            return Err(AuthError::RateLimited {
-                retry_after_seconds: if ttl > 0 { ttl as u64 } else { window_seconds },
-            });
-        }
-
-        Ok(())
+        Self::rate_limit_result(rate_limit::check(&self.conn, &key, limit).await)
     }
 
     /// Reserve password verification for one request per login principal.

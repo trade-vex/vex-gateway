@@ -1,7 +1,8 @@
 use actix_web::{
     dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform},
-    error::PayloadError,
-    web, Error, HttpMessage, HttpRequest,
+    error::{InternalError, PayloadError},
+    http::header::RETRY_AFTER,
+    web, Error, HttpMessage, HttpRequest, HttpResponse,
 };
 use base64::{engine::general_purpose, Engine as _};
 use futures_util::future::{ready, LocalBoxFuture, Ready};
@@ -23,9 +24,53 @@ use crate::api_key::{
     security::{ApiKeyConfig, KeyMaterial, SecurityType},
     signature::SignatureVerifier,
 };
+use crate::rate_limit::{self, Limit};
 use crate::repository::api_key_repository::ApiKeyRepository;
 
 const MAX_SIGNED_BODY_SIZE: usize = 16 * 1024;
+
+/// Refused API-key authentications (unknown, disabled or expired key; wrong signature) one client
+/// IP may make per minute before it is refused without a lookup. Valid requests are not counted.
+const API_KEY_REFUSALS: Limit = Limit {
+    max_requests: 60,
+    window_seconds: 60,
+};
+
+/// Why an API-key request was refused with 503: Postgres or Redis could not be reached.
+const STORE_UNAVAILABLE: &str = "API key store is unavailable";
+
+fn refusals_key(req: &HttpRequest) -> String {
+    format!(
+        "rate_limit:api:apikey_refused:{}",
+        crate::client_ip::client_ip_key(req)
+    )
+}
+
+/// Charges one refusal. The refusal itself is already decided, so a Redis error only loses a count.
+async fn count_refusal(redis: Option<&redis::aio::ConnectionManager>, key: &str) {
+    if let Some(redis) = redis {
+        if let Err(e) = rate_limit::hit(redis, key, API_KEY_REFUSALS).await {
+            warn!("API-key refusal not counted: {e}");
+        }
+    }
+}
+
+/// 429 with `Retry-After`, shaped like lib-auth's `AuthError::RateLimited` (which lib-middleware
+/// cannot use: lib-auth depends on it).
+fn too_many_refusals(retry_after: u64) -> Error {
+    InternalError::from_response(
+        "Too many refused API-key authentications",
+        HttpResponse::TooManyRequests()
+            .insert_header((RETRY_AFTER, retry_after.to_string()))
+            .json(serde_json::json!({
+                "error": {
+                    "code": "RATE_LIMITED",
+                    "message": "Too many requests. Please try again later."
+                }
+            })),
+    )
+    .into()
+}
 
 fn unix_timestamp_millis(now: SystemTime) -> Result<u64, ApiKeyError> {
     now.duration_since(UNIX_EPOCH)
@@ -386,8 +431,12 @@ impl ApiKeyStore {
         guard.finish(config);
     }
 
-    /// Fast API key lookup with caching
-    pub async fn get_api_key(&self, api_key: &str) -> Option<Arc<ApiKeyConfig>> {
+    /// Fast API key lookup with caching. An error is the store's (Postgres unreachable), never a
+    /// verdict on the key.
+    pub async fn get_api_key(
+        &self,
+        api_key: &str,
+    ) -> Result<Option<Arc<ApiKeyConfig>>, ApiKeyError> {
         // L1 Cache: Check in-memory LRU first
         {
             let mut cache = self.l1_cache.write(api_key);
@@ -400,7 +449,7 @@ impl ApiKeyStore {
                         "L1 cache hit for key: {}",
                         ApiKeyStore::mask_api_key(api_key)
                     );
-                    return Some(cached.config.clone());
+                    return Ok(Some(cached.config.clone()));
                 } else {
                     // Remove expired entry
                     cache.entries.pop(api_key);
@@ -431,14 +480,14 @@ impl ApiKeyStore {
                             "Database hit for key: {}",
                             ApiKeyStore::mask_api_key(api_key)
                         );
-                        return Some(config_arc);
+                        return Ok(Some(config_arc));
                     } else {
                         self.finish_cache_fill(fill_guard, None);
                         debug!(
                             "API key found but invalid (disabled/expired): {}",
                             ApiKeyStore::mask_api_key(api_key)
                         );
-                        return None;
+                        return Ok(None);
                     }
                 }
                 Ok(None) => {
@@ -450,11 +499,7 @@ impl ApiKeyStore {
                 }
                 Err(e) => {
                     self.finish_cache_fill(fill_guard, None);
-                    error!(
-                        "Database error while fetching API key {}: {}",
-                        ApiKeyStore::mask_api_key(api_key),
-                        e
-                    );
+                    return Err(e);
                 }
             }
         }
@@ -473,7 +518,7 @@ impl ApiKeyStore {
                 "Memory store hit for key: {}",
                 ApiKeyStore::mask_api_key(api_key)
             );
-            return Some(config_arc);
+            return Ok(Some(config_arc));
         }
         self.finish_cache_fill(fill_guard, None);
 
@@ -484,7 +529,7 @@ impl ApiKeyStore {
         // }
 
         warn!("API key not found: {}", ApiKeyStore::mask_api_key(api_key));
-        None
+        Ok(None)
     }
 
     /// Invalidate cache entry (when key is updated/disabled)
@@ -640,7 +685,10 @@ impl ApiKeyMiddleware {
     }
 
     /// Get API key configuration (for use in combined middleware)
-    pub async fn get_api_key_config(&self, api_key: &str) -> Option<Arc<ApiKeyConfig>> {
+    pub async fn get_api_key_config(
+        &self,
+        api_key: &str,
+    ) -> Result<Option<Arc<ApiKeyConfig>>, ApiKeyError> {
         self.api_key_store.get_api_key(api_key).await
     }
 
@@ -963,12 +1011,30 @@ where
                 }
             };
 
+            // A client IP over its refusal budget is refused before it costs a lookup. Without a
+            // replay store (tests) there is no Redis, so no budget.
+            let refusals_key = refusals_key(req.request());
+            if let Some(redis) = &replay_store {
+                match rate_limit::check(redis, &refusals_key, API_KEY_REFUSALS).await {
+                    Ok(None) => {}
+                    Ok(Some(retry_after)) => return Err(too_many_refusals(retry_after)),
+                    Err(e) => {
+                        error!("API-key refusal budget unavailable: {e}");
+                        return Err(actix_web::error::ErrorServiceUnavailable(STORE_UNAVAILABLE));
+                    }
+                }
+            }
+
             // Get API key configuration
             let api_config = match api_key_store.get_api_key(&api_key).await {
-                Some(config) => config,
-                None => {
-                    error!("API key not found: {}", ApiKeyStore::mask_api_key(&api_key));
+                Ok(Some(config)) => config,
+                Ok(None) => {
+                    count_refusal(replay_store.as_ref(), &refusals_key).await;
                     return Err(actix_web::error::ErrorUnauthorized("Invalid API key"));
+                }
+                Err(e) => {
+                    error!("API key store unavailable: {e}");
+                    return Err(actix_web::error::ErrorServiceUnavailable(STORE_UNAVAILABLE));
                 }
             };
 
@@ -978,6 +1044,7 @@ where
                     "API key is disabled or expired: {}",
                     ApiKeyStore::mask_api_key(&api_key)
                 );
+                count_refusal(replay_store.as_ref(), &refusals_key).await;
                 return Err(actix_web::error::ErrorUnauthorized(
                     "API key is disabled or expired",
                 ));
@@ -1071,6 +1138,7 @@ where
                     });
                 if let Err(e) = signature_result {
                     error!("Signature validation failed: {}", e);
+                    count_refusal(replay_store.as_ref(), &refusals_key).await;
                     return Err(actix_web::error::ErrorBadRequest(format!(
                         "Signature validation failed: {}",
                         e
@@ -1184,7 +1252,7 @@ mod tests {
                 .build()
                 .unwrap();
             let found = runtime.block_on(lookup_store.get_api_key(&other_key));
-            found_tx.send(found.is_some()).unwrap();
+            found_tx.send(found.unwrap().is_some()).unwrap();
         });
 
         assert_eq!(found_rx.recv_timeout(Duration::from_secs(5)), Ok(true));
@@ -1279,6 +1347,100 @@ mod tests {
         assert_eq!(middleware.api_key_store().config.l1_ttl, Duration::ZERO);
     }
 
+    /// A store outage is the gateway's fault: a client must not take it for a revoked key.
+    #[actix_web::test]
+    async fn database_error_is_503_not_401() {
+        let app = actix_test::init_service(
+            App::new()
+                .wrap(
+                    ApiKeyMiddleware::new()
+                        .with_repository(CacheConfig::default(), unreachable_repository().await)
+                        .with_default_security(SecurityType::UserData),
+                )
+                .default_service(web::to(HttpResponse::Ok)),
+        )
+        .await;
+        let request = TestRequest::get()
+            .uri("/api/balances")
+            .insert_header(("X-MBX-APIKEY", "any-key"))
+            .to_request();
+
+        let error = actix_test::try_call_service(&app, request)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.as_response_error().status_code(),
+            actix_web::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[actix_web::test]
+    async fn sixty_refused_keys_from_one_ip_then_429() {
+        let redis = crate::test_redis().await;
+        let (blocked, other) = ([203, 0, 113, 9], [203, 0, 113, 10]);
+        // Each IP's budget lives 60 s in Redis: start from none.
+        for ip in [blocked, other] {
+            let key = format!(
+                "rate_limit:api:apikey_refused:ip:{}",
+                std::net::Ipv4Addr::from(ip)
+            );
+            let _: () = redis::cmd("DEL")
+                .arg(key)
+                .query_async(&mut redis.clone())
+                .await
+                .unwrap();
+        }
+        let app = actix_test::init_service(
+            App::new()
+                .wrap(
+                    ApiKeyMiddleware::new()
+                        .with_replay_store(redis)
+                        .with_default_security(SecurityType::UserData),
+                )
+                .default_service(web::to(HttpResponse::Ok)),
+        )
+        .await;
+        let refuse = |ip: [u8; 4]| {
+            TestRequest::get()
+                .uri("/api/balances")
+                .peer_addr(SocketAddr::from((ip, 443)))
+                .insert_header(("X-MBX-APIKEY", Uuid::new_v4().to_string()))
+                .to_request()
+        };
+        let status = |error: Error| error.as_response_error().status_code();
+
+        for _ in 0..60 {
+            let error = actix_test::try_call_service(&app, refuse(blocked))
+                .await
+                .unwrap_err();
+            assert_eq!(status(error), actix_web::http::StatusCode::UNAUTHORIZED);
+        }
+        let error = actix_test::try_call_service(&app, refuse(blocked))
+            .await
+            .unwrap_err();
+        let response = error.error_response();
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::TOO_MANY_REQUESTS
+        );
+        let retry_after: u64 = response
+            .headers()
+            .get(actix_web::http::header::RETRY_AFTER)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((1..=60).contains(&retry_after), "retry after {retry_after}");
+
+        // Another client has its own budget.
+        let error = actix_test::try_call_service(&app, refuse(other))
+            .await
+            .unwrap_err();
+        assert_eq!(status(error), actix_web::http::StatusCode::UNAUTHORIZED);
+    }
+
     #[test]
     fn cache_config_default_bounds_revocation_to_five_seconds() {
         assert_eq!(CacheConfig::default().l1_ttl, Duration::from_secs(5));
@@ -1323,7 +1485,7 @@ mod tests {
         store.invalidate(API_KEY).await;
         repository.release_read.notify_one();
 
-        let returned = fill.await.unwrap().unwrap();
+        let returned = fill.await.unwrap().unwrap().unwrap();
         assert_eq!(returned.description.as_deref(), Some("stale config"));
 
         let cache = store.l1_cache.write(API_KEY);

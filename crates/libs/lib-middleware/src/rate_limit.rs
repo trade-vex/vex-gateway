@@ -1,6 +1,6 @@
 //! The gateway's one rate-limit primitive: a fixed window counted in Redis. The auth endpoints'
-//! own limits (`EmailService::enforce_rate_limit`) and the API's budgets (lib-server's rate-limit
-//! middleware) both count with it.
+//! own limits (`EmailService::enforce_rate_limit`), the API's budgets (lib-server's rate-limit
+//! middleware) and the API-key middleware's refusal budget all count with it.
 
 use redis::{aio::ConnectionManager, RedisResult, Script};
 use serde::Deserialize;
@@ -45,6 +45,34 @@ pub async fn hit(redis: &ConnectionManager, key: &str, limit: Limit) -> RedisRes
         limit.window_seconds
     };
     Ok((count > limit.max_requests).then_some(retry_after))
+}
+
+/// `GET`-or-0 and `TTL`, in one round trip, without counting.
+static WINDOW_STATE: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(
+        r#"
+local count = tonumber(redis.call('GET', KEYS[1]) or '0')
+local ttl = redis.call('TTL', KEYS[1])
+return {count, ttl}
+"#,
+    )
+});
+
+/// Reads the window at `key` without counting: `None` while under `limit`, else the seconds left.
+/// For budgets charged after the fact (`hit` on a refusal), so that a request over budget is
+/// refused before it costs anything. A Redis error is returned, as `hit` returns it.
+pub async fn check(redis: &ConnectionManager, key: &str, limit: Limit) -> RedisResult<Option<u64>> {
+    let (count, ttl): (u64, i64) = WINDOW_STATE
+        .key(key)
+        .invoke_async(&mut redis.clone())
+        .await?;
+
+    let retry_after = if ttl > 0 {
+        ttl as u64
+    } else {
+        limit.window_seconds
+    };
+    Ok((count >= limit.max_requests).then_some(retry_after))
 }
 
 #[cfg(test)]
@@ -97,6 +125,30 @@ mod tests {
         assert_eq!(hit(&redis, &first, limit).await.unwrap(), None);
         assert!(hit(&redis, &first, limit).await.unwrap().is_some());
         assert_eq!(hit(&redis, &second, limit).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn check_reads_without_counting() {
+        let redis = crate::test_redis().await;
+        let key = key();
+        let limit = Limit {
+            max_requests: 3,
+            window_seconds: 60,
+        };
+
+        assert_eq!(check(&redis, &key, limit).await.unwrap(), None);
+        for _ in 0..3 {
+            assert_eq!(check(&redis, &key, limit).await.unwrap(), None);
+            assert_eq!(hit(&redis, &key, limit).await.unwrap(), None);
+        }
+        let retry_after = check(&redis, &key, limit).await.unwrap();
+        assert!(
+            matches!(retry_after, Some(1..=60)),
+            "retry after {retry_after:?}"
+        );
+
+        let count: u64 = redis.clone().get(&key).await.unwrap();
+        assert_eq!(count, 3);
     }
 
     #[tokio::test]

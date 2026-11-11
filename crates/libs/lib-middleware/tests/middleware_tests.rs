@@ -243,7 +243,7 @@ async fn test_api_key_store_with_api_keys() {
     let store = ApiKeyStore::new(config).with_api_keys(vec![api_key_config.clone()]);
 
     // Verify the API key was added to memory store
-    let result = store.get_api_key("test-key").await;
+    let result = store.get_api_key("test-key").await.unwrap();
     assert!(result.is_some());
 
     let retrieved_config = result.unwrap();
@@ -256,7 +256,7 @@ async fn test_api_key_store_get_not_found() {
     let config = CacheConfig::default();
     let store = ApiKeyStore::new(config);
 
-    let result = store.get_api_key("non-existent-key").await;
+    let result = store.get_api_key("non-existent-key").await.unwrap();
     assert!(result.is_none());
 }
 
@@ -272,7 +272,7 @@ async fn test_api_key_store_concurrent_access() {
         let store_clone = Arc::clone(&store);
         let handle = tokio::spawn(async move {
             let key = format!("concurrent-key-{}", i);
-            let result = store_clone.get_api_key(&key).await;
+            let result = store_clone.get_api_key(&key).await.unwrap();
             assert!(result.is_none());
         });
 
@@ -296,7 +296,7 @@ async fn test_api_key_store_with_valid_api_key() {
     let config = CacheConfig::default();
     let store = ApiKeyStore::new(config).with_api_keys(vec![api_key_config]);
 
-    let result = store.get_api_key("valid-key").await;
+    let result = store.get_api_key("valid-key").await.unwrap();
     assert!(result.is_some());
 
     let retrieved = result.unwrap();
@@ -320,11 +320,11 @@ async fn test_api_key_store_cache_behavior() {
     let store = ApiKeyStore::new(config).with_api_keys(vec![api_key_config]);
 
     // First access should cache the key
-    let result1 = store.get_api_key("cache-test").await;
+    let result1 = store.get_api_key("cache-test").await.unwrap();
     assert!(result1.is_some());
 
     // Second access should hit cache
-    let result2 = store.get_api_key("cache-test").await;
+    let result2 = store.get_api_key("cache-test").await.unwrap();
     assert!(result2.is_some());
 
     // Both results should be the same
@@ -376,18 +376,18 @@ async fn test_cache_invalidation_l1() {
     let store = ApiKeyStore::new(config).with_api_keys(vec![api_key.clone()]);
 
     // First fetch populates L1 cache
-    let result1 = store.get_api_key(key).await;
+    let result1 = store.get_api_key(key).await.unwrap();
     assert!(result1.is_some());
 
     // Second fetch should hit L1
-    let result2 = store.get_api_key(key).await;
+    let result2 = store.get_api_key(key).await.unwrap();
     assert!(result2.is_some());
 
     // Invalidate the key
     store.invalidate(key).await;
 
     // Next fetch should miss L1 and fall back to memory store
-    let result3 = store.get_api_key(key).await;
+    let result3 = store.get_api_key(key).await.unwrap();
     assert!(result3.is_some());
 
     // Metrics should show misses
@@ -402,11 +402,11 @@ async fn test_invalidated_cached_key_stops_authenticating() {
         ApiKeyConfig::new("revoked-key".to_string()).with_hmac_secret("revoked-secret".to_string());
 
     store.add_api_key(api_key).await;
-    assert!(store.get_api_key("revoked-key").await.is_some());
+    assert!(store.get_api_key("revoked-key").await.unwrap().is_some());
 
     store.invalidate("revoked-key").await;
 
-    assert!(store.get_api_key("revoked-key").await.is_none());
+    assert!(store.get_api_key("revoked-key").await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -422,5 +422,5 @@ async fn test_cache_invalidation_does_not_affect_unrelated_key() {
 
     store.invalidate("revoked-key").await;
 
-    assert!(store.get_api_key("unrelated-key").await.is_some());
+    assert!(store.get_api_key("unrelated-key").await.unwrap().is_some());
 }
