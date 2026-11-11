@@ -3,14 +3,14 @@
 //! These tests use the actual Postgres implementation of ApiKeyRepository
 //! to test the real CRUD operations with the database, on the read model's schema.
 
-mod common;
+mod support;
 
 use actix_web::{HttpResponse, web};
 use chrono::Utc;
-use common::require_database;
 use sea_orm::DatabaseConnection;
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
+use support::require_database;
 use uuid::Uuid;
 
 use lib_api::handlers::api_key::{

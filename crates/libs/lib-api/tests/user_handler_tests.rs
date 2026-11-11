@@ -6,13 +6,13 @@
 //! - Balance and PnL charts
 //! - Favorite markets
 
-mod common;
+mod support;
 
 use actix_web::web;
 use chrono::Utc;
-use common::require_database;
 use sea_orm::{ConnectionTrait, DatabaseConnection};
 use std::sync::Arc;
+use support::require_database;
 use uuid::Uuid;
 
 use async_trait::async_trait;
