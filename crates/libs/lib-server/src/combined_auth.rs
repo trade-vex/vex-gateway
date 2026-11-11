@@ -8,7 +8,6 @@ use lib_auth::service::session_service::SessionService;
 use lib_middleware::api_key::middleware::{ApiKeyMiddleware, ApiKeyMiddlewareService};
 use lib_middleware::metrics::{self, AuthMethod};
 use std::{rc::Rc, sync::Arc};
-use tracing::error;
 
 #[derive(Clone)]
 pub struct CombinedAuthMiddleware {
@@ -210,7 +209,7 @@ where
                 )),
 
                 AuthType::None => {
-                    error!("No authentication provided");
+                    tracing::debug!("No authentication provided");
                     Err(actix_web::error::ErrorUnauthorized(
                         "Authentication required",
                     ))

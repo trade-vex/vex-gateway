@@ -979,7 +979,7 @@ where
             let api_key = match ApiKeyMiddleware::extract_api_key(req.request()) {
                 Ok(key) => key,
                 Err(e) => {
-                    error!("API key extraction failed: {}", e);
+                    warn!("API key extraction failed: {}", e);
                     return Err(actix_web::error::ErrorUnauthorized(format!(
                         "API key required: {}",
                         e
@@ -1041,7 +1041,7 @@ where
 
             // Check permissions
             if !api_config.has_permission(required_security) {
-                error!(
+                warn!(
                     "Insufficient permissions. Required: {}, Available: {:?}",
                     required_security, api_config.permissions
                 );
@@ -1053,7 +1053,7 @@ where
                 let query_params = match ApiKeyMiddleware::parse_query_params(req.request()) {
                     Ok(params) => params,
                     Err(e) => {
-                        error!("Failed to parse query: {}", e);
+                        warn!("Failed to parse query: {}", e);
                         return Err(actix_web::error::ErrorBadRequest(format!(
                             "Failed to parse signed request: {}",
                             e
@@ -1066,14 +1066,14 @@ where
                     match ApiKeyMiddleware::parse_body_params(&mut req).await {
                         Ok(result) => result,
                         Err(e @ ApiKeyError::PayloadTooLarge) => {
-                            error!("Failed to parse body: {}", e);
+                            warn!("Failed to parse body: {}", e);
                             return Err(actix_web::error::ErrorPayloadTooLarge(format!(
                                 "Failed to parse request body: {}",
                                 e
                             )));
                         }
                         Err(e) => {
-                            error!("Failed to parse body: {}", e);
+                            warn!("Failed to parse body: {}", e);
                             return Err(actix_web::error::ErrorBadRequest(format!(
                                 "Failed to parse request body: {}",
                                 e
@@ -1091,7 +1091,7 @@ where
                     ) {
                         Ok(recv_window) => recv_window,
                         Err(e) => {
-                            error!("Timestamp validation failed: {}", e);
+                            warn!("Timestamp validation failed: {}", e);
                             return Err(ApiKeyMiddleware::timestamp_validation_error(&e));
                         }
                     };
@@ -1113,7 +1113,7 @@ where
                         )
                     });
                 if let Err(e) = signature_result {
-                    error!("Signature validation failed: {}", e);
+                    warn!("Signature validation failed: {}", e);
                     count_refusal(replay_store.as_ref(), &refusals_key).await;
                     return Err(actix_web::error::ErrorBadRequest(format!(
                         "Signature validation failed: {}",
@@ -1124,7 +1124,7 @@ where
                 let signature = match ApiKeyMiddleware::signature(&query_params, &body_params) {
                     Ok(signature) => signature,
                     Err(e) => {
-                        error!("Signature extraction failed: {}", e);
+                        warn!("Signature extraction failed: {}", e);
                         return Err(actix_web::error::ErrorBadRequest(format!(
                             "Signature validation failed: {}",
                             e
@@ -1140,11 +1140,13 @@ where
                 )
                 .await
                 {
-                    error!("Signature replay protection failed: {}", e);
                     let message = format!("Signature replay protection failed: {}", e);
+                    // Only an unreachable replay store is the gateway's fault; a replay is the client's.
                     return Err(if matches!(e, ApiKeyError::Internal(_)) {
+                        error!("{message}");
                         actix_web::error::ErrorServiceUnavailable(message)
                     } else {
+                        warn!("{message}");
                         actix_web::error::ErrorBadRequest(message)
                     });
                 }
@@ -1153,7 +1155,7 @@ where
             // Add API key info to request extensions for downstream handlers
             req.extensions_mut().insert(api_config.clone());
 
-            info!(
+            debug!(
                 "API key validation successful for key: {} (security: {}, ip: {})",
                 ApiKeyStore::mask_api_key(&api_key),
                 required_security,
