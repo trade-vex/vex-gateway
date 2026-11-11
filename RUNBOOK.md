@@ -390,11 +390,12 @@ openssl rsa -in private_key.pem -pubout -out public_key.pem
 
 The gateway's Postgres database holds the gateway's own tables (`users`, `api_keys`,
 `user_favorite_markets`, and `markets` and `assets`, which mirror vex-core's symbol configuration)
-and the `trading` schema: vex-core's Kafka events, which Kafka Connect writes there. The gateway
-may only read `trading`: `GET /api/balances` reads `trading.balances`, and `GET /api/orders/open`
-and `/api/orders/history` read `trading.orders`, as fresh as the connectors' lag. ClickHouse holds
-the same events for the portfolio and balance-chart endpoints, which Kafka Connect writes there
-too; the gateway may only read its views. Redis holds only the gateway's own state (sessions,
+and the `trading` schema: the latest state of vex-core's balances, orders and order books, which
+Kafka Connect writes there from vex-core's Kafka events. The gateway may only read `trading`:
+`GET /api/balances` reads `trading.balances`, and `GET /api/orders/open` and `/api/orders/history`
+read `trading.orders`, as fresh as the connectors' lag. ClickHouse holds every event, the history
+of every topic, for the portfolio and balance-chart endpoints and for ad-hoc and compliance
+queries, which Kafka Connect writes there too; the gateway may only read its views. Redis holds only the gateway's own state (sessions,
 tokens, OTP and OAuth state, rate limits, API-key signatures, order idempotency claims).
 Everything for both lives in `readmodel/`:
 
@@ -408,18 +409,17 @@ Everything for both lives in `readmodel/`:
   (`connectors/*.json`), and `apply-connectors.sh`.
 - `tests/`: the read model's test stack and tests.
 
-In `trading`, each latest-state table (`balances`, `orders`, `orderbook`) holds one row per key and
-each history table (`balance_events`, `order_events`, `cancel_events`, `trade_events`,
-`deposit_events`, `withdrawal_events`) one row per key and event timestamp (`event_ts`, vex-core's
-`timestamp` in nanoseconds). Every table's `keep_newer` trigger turns the connectors' upserts into
-"newer `event_ts` wins; of two copies of one event, the first stays", so duplicates and events
-delivered out of order change nothing. vex-core's `u64` values are stored with the same bits in
+In `trading`, each table (`balances`, `orders`, `orderbook`) holds one row per key, with the
+timestamp of its latest event (`event_ts`, vex-core's `timestamp` in nanoseconds). Every table's
+`keep_newer` trigger turns the connectors' upserts into "newer `event_ts` wins; of two copies of
+one event, the first stays", so duplicates and events delivered out of order change nothing. vex-core's `u64` values are stored with the same bits in
 `BIGINT` columns: read them as `i64` and decode with `as u64`; in SQL, `trading.u64(column)` gives
 the unsigned value.
 
 In ClickHouse, each topic has a raw table (`balance_events`, `order_events`, `orderbook_events`,
-`cancel_events`, `trade_events`, `deposit_events`, `withdrawal_events`) whose columns are those of
-the Postgres tables, with every proto integer a `UInt64`, plus `ts`, the time `event_ts` names.
+`cancel_events`, `trade_events`, `deposit_events`, `withdrawal_events`) whose columns are the
+event's proto fields after Flatten, as in Postgres, with every proto integer a `UInt64`, plus `ts`,
+the time `event_ts` names.
 Each is a `ReplacingMergeTree` keyed by the event's key and `event_ts`, which keeps one copy of an
 event, the last one written, once its parts merge; until then the copies are stored too, so read
 the tables through `FINAL`. Materialized views keep each minute's last balance and last trade price
@@ -726,8 +726,9 @@ certificate or `server`; restart the connector if its tasks failed.
 ### Schema Changes
 
 - A migration is a new file, `<next number>_<name>.up.sql`. Never edit one that has been applied.
-- A new `trading.proto` field needs its column, in Postgres and in its ClickHouse raw table,
-  deployed before the vex-core that publishes it.
+- A new `trading.proto` field needs its column in its ClickHouse raw table, and for `balances`,
+  `orders` and `orderbook` in its Postgres table too, deployed before the vex-core that publishes
+  it.
 - A new `trading` table needs its `keep_newer` trigger, its grants to `readmodel_connect` and
   `readmodel_gateway`, and a connector file.
 - A new ClickHouse view states `DEFINER = readmodel_owner SQL SECURITY DEFINER`, reads its tables

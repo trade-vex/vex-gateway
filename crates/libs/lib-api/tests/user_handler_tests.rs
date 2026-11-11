@@ -101,9 +101,7 @@ async fn cleanup_test_data(db: &DatabaseConnection, user_id: u64) {
     let cleanup_queries = vec![
         format!("DELETE FROM user_favorite_markets WHERE user_id = {user_id}"),
         format!("DELETE FROM trading.orders WHERE order_user_id = {user_id}"),
-        format!("DELETE FROM trading.order_events WHERE order_user_id = {user_id}"),
         format!("DELETE FROM trading.balances WHERE user_id = {user_id}"),
-        format!("DELETE FROM trading.balance_events WHERE user_id = {user_id}"),
     ];
 
     for query in cleanup_queries {
@@ -140,25 +138,13 @@ async fn insert_test_balance(
 ) -> Result<(), sea_orm::DbErr> {
     let total = available + locked;
     let timestamp = Utc::now().timestamp();
-    insert_balance_row(
-        db,
-        "trading.balances",
-        user_id,
-        asset_id,
-        available,
-        locked,
-        total,
-        timestamp,
-    )
-    .await
+    insert_balance_row(db, user_id, asset_id, available, locked, total, timestamp).await
 }
 
-/// Insert a user's balance of an asset, as Kafka Connect would: `table` is `trading.balances` or
-/// its history, `trading.balance_events`. `u64` values are stored with the same bits.
-#[allow(clippy::too_many_arguments)]
+/// Insert a user's balance of an asset into `trading.balances`, as Kafka Connect would. `u64`
+/// values are stored with the same bits.
 async fn insert_balance_row(
     db: &DatabaseConnection,
-    table: &str,
     user_id: u64,
     asset_id: i32,
     available: u64,
@@ -167,7 +153,7 @@ async fn insert_balance_row(
     event_ts: i64,
 ) -> Result<(), sea_orm::DbErr> {
     let sql = format!(
-        "INSERT INTO {table} (user_id, asset_id, available, locked, total, event_ts) \
+        "INSERT INTO trading.balances (user_id, asset_id, available, locked, total, event_ts) \
          VALUES ({}, {asset_id}, {}, {}, {}, {event_ts})",
         user_id as i64, available as i64, locked as i64, total as i64,
     );
@@ -189,7 +175,6 @@ async fn insert_test_order(
 ) -> Result<(), sea_orm::DbErr> {
     insert_order_row(
         db,
-        "trading.orders",
         OrderRow {
             order_id,
             user_id,
@@ -206,7 +191,7 @@ async fn insert_test_order(
     .await
 }
 
-/// An order as Kafka Connect writes it to `trading.orders` or its history, `trading.order_events`.
+/// An order as Kafka Connect writes it to `trading.orders`.
 /// Side, time in force and status are vex-core's enum names (SIDE_*, TIF_*, STATUS_*).
 struct OrderRow<'a> {
     order_id: u64,
@@ -221,14 +206,13 @@ struct OrderRow<'a> {
     event_ts: i64,
 }
 
-/// Inserts `order` into `table`, with `u64` values stored with the same bits.
+/// Inserts `order` into `trading.orders`, with `u64` values stored with the same bits.
 async fn insert_order_row(
     db: &DatabaseConnection,
-    table: &str,
     order: OrderRow<'_>,
 ) -> Result<(), sea_orm::DbErr> {
     let sql = format!(
-        "INSERT INTO {table} (order_order_id, order_user_id, order_price, order_size, \
+        "INSERT INTO trading.orders (order_order_id, order_user_id, order_price, order_size, \
          order_filled_size, order_side, order_time_in_force, order_status, event_ts, market_id) \
          VALUES ({}, {}, {}, {}, {}, '{}', '{}', '{}', {}, {})",
         order.order_id as i64,
@@ -597,21 +581,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_postgres_orders_come_from_the_latest_state_table() {
+    async fn test_postgres_order_pages_filter_by_status_and_market() {
         let Some(db) = require_database().await else {
             return;
         };
         let (_, user_id) = user_above_i64_max();
         cleanup_test_data(&db, user_id).await;
 
-        // trading.orders holds each order's latest state; its history must not leak in.
         for (order_id, market_id, status, event_ts) in [
             (91001, 65538, "STATUS_FILLED", 3),
             (91002, 65538, "STATUS_PLACED", 2),
             (91003, 65539, "STATUS_PARTIALLY_FILLED", 1),
             (91004, 65539, "STATUS_CANCELLED", 4),
         ] {
-            let row = |status, event_ts| OrderRow {
+            let row = OrderRow {
                 order_id,
                 user_id,
                 market_id,
@@ -623,12 +606,7 @@ mod tests {
                 status,
                 event_ts,
             };
-            insert_order_row(&db, "trading.orders", row(status, event_ts))
-                .await
-                .unwrap();
-            insert_order_row(&db, "trading.order_events", row("STATUS_PLACED", 0))
-                .await
-                .unwrap();
+            insert_order_row(&db, row).await.unwrap();
         }
 
         let repo = PostgresTradingRepository::new(Arc::new(db.clone()));
@@ -807,9 +785,7 @@ mod tests {
                 status: "STATUS_PARTIALLY_FILLED",
                 event_ts: Utc::now().timestamp(),
             };
-            insert_order_row(&db, "trading.orders", order)
-                .await
-                .unwrap();
+            insert_order_row(&db, order).await.unwrap();
         }
 
         let repo = PostgresTradingRepository::new(Arc::new(db.clone()));
@@ -823,34 +799,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_postgres_balances_come_from_the_latest_state_table() {
+    async fn test_postgres_balances_are_by_asset() {
         let Some(db) = require_database().await else {
             return;
         };
         let (_, user_id) = user_above_i64_max();
         cleanup_test_data(&db, user_id).await;
 
-        // trading.balances holds each asset's latest balance; its history must not leak in.
-        insert_balance_row(&db, "trading.balances", user_id, 2, 2_000, 0, 2_000, 20)
+        insert_balance_row(&db, user_id, 2, 2_000, 0, 2_000, 20)
             .await
             .unwrap();
-        insert_balance_row(&db, "trading.balances", user_id, 1, 700, 400, 1_100, 10)
+        insert_balance_row(&db, user_id, 1, 700, 400, 1_100, 10)
             .await
             .unwrap();
-        for (asset_id, available, event_ts) in [(1, 1_000, 5), (1, 900, 30), (3, 50, 1)] {
-            insert_balance_row(
-                &db,
-                "trading.balance_events",
-                user_id,
-                asset_id,
-                available,
-                0,
-                available,
-                event_ts,
-            )
-            .await
-            .unwrap();
-        }
 
         let repo = PostgresTradingRepository::new(Arc::new(db.clone()));
         let balances = repo.get_user_balances(user_id).await.unwrap();
@@ -888,21 +849,12 @@ mod tests {
 
         // 10 ETH (asset 3, 10^18 units each: above i64::MAX) and 1 USD available, 0.5 locked.
         let ten_eth = 10_000_000_000_000_000_000_u64;
-        insert_balance_row(&db, "trading.balances", user_id, 3, ten_eth, 0, ten_eth, 7)
+        insert_balance_row(&db, user_id, 3, ten_eth, 0, ten_eth, 7)
             .await
             .unwrap();
-        insert_balance_row(
-            &db,
-            "trading.balances",
-            user_id,
-            1,
-            1_000_000,
-            500_000,
-            1_500_000,
-            8,
-        )
-        .await
-        .unwrap();
+        insert_balance_row(&db, user_id, 1, 1_000_000, 500_000, 1_500_000, 8)
+            .await
+            .unwrap();
         // A bid for 2 ETH at 2,500 USD on ETH/USD (65539, quote_scale_k 10), 0.5 ETH filled, and
         // a filled one; both order ids above i64::MAX.
         let (open_id, filled_id) = ((1_u64 << 63) + 5, (1_u64 << 63) + 6);
@@ -927,9 +879,7 @@ mod tests {
                 status,
                 event_ts,
             };
-            insert_order_row(&db, "trading.orders", order)
-                .await
-                .unwrap();
+            insert_order_row(&db, order).await.unwrap();
         }
 
         let db = Arc::new(db);

@@ -106,18 +106,17 @@ CREATE TABLE user_favorite_markets (
     CONSTRAINT user_favorite_markets_user_market UNIQUE (user_id, market_id)
 );
 
--- trading.*: vex-core's events, written only by Kafka Connect
+-- trading.*: the latest state of vex-core's balances, orders and order books, written only by
+-- Kafka Connect. ClickHouse holds the history of every topic.
 --
 -- Columns are the proto fields of trading.proto after Connect's Flatten (delimiter "_") with the
--- event's timestamp renamed to event_ts. Latest-state tables hold one row per key, history tables
--- one row per (key, event_ts).
+-- event's timestamp renamed to event_ts. Each table holds one row per key.
 
 CREATE SCHEMA trading;
 
 -- Every trading table's BEFORE UPDATE guard. The connectors upsert, so a conflicting row only
--- replaces the stored one when its event is newer: a latest-state row keeps the greatest
--- event_ts whatever the delivery order, and a history row, whose key includes event_ts, is never
--- rewritten. Of two copies of one event the first stays.
+-- replaces the stored one when its event is newer: a row keeps the greatest event_ts whatever the
+-- delivery order. Of two copies of one event the first stays.
 CREATE FUNCTION trading.keep_newer() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF NEW.event_ts <= OLD.event_ts THEN
@@ -142,10 +141,6 @@ CREATE TABLE trading.balances (
     event_ts  BIGINT NOT NULL,
     PRIMARY KEY (user_id, asset_id)
 );
-CREATE TABLE trading.balance_events (
-    LIKE trading.balances,
-    PRIMARY KEY (user_id, asset_id, event_ts)
-);
 
 -- topic orders
 CREATE TABLE trading.orders (
@@ -165,12 +160,8 @@ CREATE INDEX orders_user_event_ts ON trading.orders (order_user_id, event_ts);
 CREATE INDEX orders_user_open ON trading.orders (order_user_id, event_ts)
     WHERE order_status = 'STATUS_PLACED'
        OR (order_status = 'STATUS_PARTIALLY_FILLED' AND order_time_in_force <> 'TIF_IOC');
-CREATE TABLE trading.order_events (
-    LIKE trading.orders,
-    PRIMARY KEY (order_order_id, event_ts)
-);
 
--- topic orderbook: latest state only
+-- topic orderbook
 CREATE TABLE trading.orderbook (
     market_id BIGINT NOT NULL PRIMARY KEY,
     bids      TEXT   NOT NULL,
@@ -178,61 +169,11 @@ CREATE TABLE trading.orderbook (
     event_ts  BIGINT NOT NULL
 );
 
--- topic cancels: history only
-CREATE TABLE trading.cancel_events (
-    order_id  BIGINT NOT NULL,
-    market_id BIGINT NOT NULL,
-    user_id   BIGINT NOT NULL,
-    event_ts  BIGINT NOT NULL,
-    PRIMARY KEY (order_id, event_ts)
-);
-
--- topic trades: history only
-CREATE TABLE trading.trade_events (
-    maker_user_id  BIGINT NOT NULL,
-    taker_user_id  BIGINT NOT NULL,
-    market_id      BIGINT NOT NULL,
-    price          BIGINT NOT NULL,
-    size           BIGINT NOT NULL,
-    maker_order_id BIGINT NOT NULL,
-    taker_order_id BIGINT NOT NULL,
-    taker_side     TEXT   NOT NULL,
-    event_ts       BIGINT NOT NULL,
-    PRIMARY KEY (taker_order_id, maker_order_id, event_ts)
-);
-
--- topic deposits: history only
-CREATE TABLE trading.deposit_events (
-    user_id  BIGINT NOT NULL,
-    asset_id BIGINT NOT NULL,
-    amount   BIGINT NOT NULL,
-    event_ts BIGINT NOT NULL,
-    PRIMARY KEY (user_id, event_ts)
-);
-
--- topic withdrawals: history only
-CREATE TABLE trading.withdrawal_events (
-    LIKE trading.deposit_events,
-    PRIMARY KEY (user_id, event_ts)
-);
-
 CREATE TRIGGER keep_newer BEFORE UPDATE ON trading.balances
-    FOR EACH ROW EXECUTE FUNCTION trading.keep_newer();
-CREATE TRIGGER keep_newer BEFORE UPDATE ON trading.balance_events
     FOR EACH ROW EXECUTE FUNCTION trading.keep_newer();
 CREATE TRIGGER keep_newer BEFORE UPDATE ON trading.orders
     FOR EACH ROW EXECUTE FUNCTION trading.keep_newer();
-CREATE TRIGGER keep_newer BEFORE UPDATE ON trading.order_events
-    FOR EACH ROW EXECUTE FUNCTION trading.keep_newer();
 CREATE TRIGGER keep_newer BEFORE UPDATE ON trading.orderbook
-    FOR EACH ROW EXECUTE FUNCTION trading.keep_newer();
-CREATE TRIGGER keep_newer BEFORE UPDATE ON trading.cancel_events
-    FOR EACH ROW EXECUTE FUNCTION trading.keep_newer();
-CREATE TRIGGER keep_newer BEFORE UPDATE ON trading.trade_events
-    FOR EACH ROW EXECUTE FUNCTION trading.keep_newer();
-CREATE TRIGGER keep_newer BEFORE UPDATE ON trading.deposit_events
-    FOR EACH ROW EXECUTE FUNCTION trading.keep_newer();
-CREATE TRIGGER keep_newer BEFORE UPDATE ON trading.withdrawal_events
     FOR EACH ROW EXECUTE FUNCTION trading.keep_newer();
 
 -- Roles
