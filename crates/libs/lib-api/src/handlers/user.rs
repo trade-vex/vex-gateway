@@ -42,7 +42,7 @@ use std::sync::Arc;
 ///       "available": 1000000,
 ///       "locked": 50000,
 ///       "total": 1050000,
-///       "timestamp": 1697452800000000
+///       "timestamp": "1697452800000000000"
 ///     },
 ///     {
 ///       "user_id": 123456,
@@ -50,7 +50,7 @@ use std::sync::Arc;
 ///       "available": 5000000,
 ///       "locked": 100000,
 ///       "total": 5100000,
-///       "timestamp": 1697452800000000
+///       "timestamp": "1697452800000000000"
 ///     }
 ///   ],
 ///   "total_assets": 2
@@ -137,7 +137,7 @@ pub async fn get_balances(
 ///       "price": 5000000,
 ///       "size": 100,
 ///       "side": "Bid",
-///       "timestamp": 1697452800000000
+///       "timestamp": "1697452800000000000"
 ///     }
 ///   ],
 ///   "page": 1,
@@ -262,7 +262,7 @@ pub async fn get_open_orders(
 ///       "size": 100,
 ///       "filled": 100,
 ///       "side": "Bid",
-///       "timestamp": 1697452800000000,
+///       "timestamp": "1697452800000000000",
 ///       "time_in_force": "GTC",
 ///       "status": "Filled"
 ///     }

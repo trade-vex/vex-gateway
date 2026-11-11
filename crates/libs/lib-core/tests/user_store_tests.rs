@@ -33,4 +33,6 @@ fn u64_values_above_i64_max_are_decoded_from_their_bits() {
     // The id travels as a string, which keeps every u64 exact.
     let json = serde_json::to_value(&response).unwrap();
     assert_eq!(json["user_id"], ((1_u64 << 63) + 1).to_string());
+    // So does the nanosecond timestamp, which a JavaScript number rounds to 256 ns.
+    assert_eq!(json["timestamp"], "1700000000000000000");
 }

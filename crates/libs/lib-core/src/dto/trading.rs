@@ -58,12 +58,17 @@ pub struct OrderResponse {
     /// Remaining size (order_size - order_filled_size)
     pub size: Decimal,
     pub side: Side,
+    #[serde(
+        serialize_with = "serialize_u64_as_string",
+        deserialize_with = "deserialize_u64_from_string"
+    )]
     pub timestamp: u64,
     pub time_in_force: String,
     pub status: String,
 }
 
-/// Ids are `u64`, beyond what a JSON number holds exactly, so they travel as strings.
+/// Ids and nanosecond timestamps are `u64`, beyond what a JSON number holds exactly, so they
+/// travel as strings.
 fn serialize_u64_as_string<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -102,6 +107,10 @@ pub struct OrderHistoryResponse {
     /// Filled amount
     pub filled: Decimal,
     pub side: Side,
+    #[serde(
+        serialize_with = "serialize_u64_as_string",
+        deserialize_with = "deserialize_u64_from_string"
+    )]
     pub timestamp: u64,
     pub time_in_force: String,
     pub status: String,
@@ -118,6 +127,10 @@ pub struct UserBalanceResponse {
     pub available: Decimal,
     pub locked: Decimal,
     pub total: Decimal,
+    #[serde(
+        serialize_with = "serialize_u64_as_string",
+        deserialize_with = "deserialize_u64_from_string"
+    )]
     pub timestamp: u64,
 }
 

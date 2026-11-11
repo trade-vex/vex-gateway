@@ -974,7 +974,7 @@ mod tests {
         assert_eq!(usd["asset_id"], 1);
         assert_eq!(decimal(&usd["available"]), Decimal::ONE);
         assert_eq!(decimal(&usd["locked"]), Decimal::new(5, 1));
-        assert_eq!(usd["timestamp"], 8);
+        assert_eq!(usd["timestamp"], "8");
         assert_eq!(eth["asset_id"], 3);
         assert_eq!(decimal(&eth["available"]), Decimal::TEN);
         assert_eq!(decimal(&eth["total"]), Decimal::TEN);
@@ -990,7 +990,7 @@ mod tests {
         // What remains: 1.5 ETH.
         assert_eq!(decimal(&order["size"]), Decimal::new(15, 1));
         assert_eq!(order["status"], "PartiallyFilled");
-        assert_eq!(order["timestamp"], 9);
+        assert_eq!(order["timestamp"], "9");
 
         let history = get("/orders/history").await;
         let ids: Vec<_> = history["orders"]
