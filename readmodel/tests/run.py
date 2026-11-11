@@ -200,6 +200,10 @@ CLICKHOUSE_RULES = {
     # a certificate that does not verify, which the sink reports as a failed connection: the task
     # writes once it is back, like the JDBC connectors after a Postgres outage.
     "retryOnSocketException": "true",
+    # The sink inserts once per topic-partition per poll, tens of small inserts a second under
+    # load: ClickHouse buffers them into fewer parts, and answers each insert once it is flushed,
+    # so that offsets are committed only for written rows.
+    "clickhouseSettings": "async_insert=1,wait_for_async_insert=1",
     "transforms": "flatten,event_ts,order_event_ts",
     "transforms.flatten.type": "org.apache.kafka.connect.transforms.Flatten$Value",
     "transforms.flatten.delimiter": "_",
