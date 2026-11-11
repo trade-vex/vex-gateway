@@ -3,13 +3,14 @@
 //! database, which the repository reads as a login that holds only the gateway's role.
 //!
 //! Needs ClickHouse at `TEST_CLICKHOUSE_URL` (default `http://localhost:8123`) as a user that may
-//! create databases, users and roles (`TEST_CLICKHOUSE_USER` and `TEST_CLICKHOUSE_PASSWORD`,
-//! default `default` and empty); the scaling test also needs Postgres at `DATABASE_URL`. Without
-//! them the tests are skipped, except in CI, where they fail.
+//! create databases, users and roles, and flush and read the query log (`TEST_CLICKHOUSE_USER` and
+//! `TEST_CLICKHOUSE_PASSWORD`, default `default` and empty); the scaling test also needs Postgres
+//! at `DATABASE_URL`. Without them the tests are skipped, except in CI, where they fail.
 
 use std::fs;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,6 +32,7 @@ const DAY: i64 = 24 * HOUR;
 /// USD: the quote asset the repository values portfolios in, with native scale 10^6.
 const USD: u64 = 1;
 const USD_SCALE: u64 = 1_000_000;
+const BTC: u64 = 2;
 /// BTC/USD (quote asset 1 << 16 | base asset 2): BTC's native scale is 10^8, quote_scale_k 1.
 const BTC_USD: u64 = 65538;
 const BTC_SCALE: u64 = 100_000_000;
@@ -71,6 +73,63 @@ impl ClickHouse {
         if let Err(error) = self.admin.query(sql).execute().await {
             panic!("{sql}: {error}");
         }
+    }
+
+    /// `user`'s balance of `asset` from `seconds` on.
+    async fn balance(&self, user: u64, asset: u64, total: u64, seconds: i64) {
+        self.execute(&format!(
+            "INSERT INTO balance_events (user_id, asset_id, available, locked, total, event_ts) \
+             VALUES ({user}, {asset}, {total}, 0, {total}, {})",
+            at(seconds)
+        ))
+        .await;
+    }
+
+    /// A deposit, into `deposit_events`, or a withdrawal, into `withdrawal_events`.
+    async fn flow(&self, table: &str, user: u64, asset: u64, amount: u64, seconds: i64) {
+        self.execute(&format!(
+            "INSERT INTO {table} (user_id, asset_id, amount, event_ts) \
+             VALUES ({user}, {asset}, {amount}, {})",
+            at(seconds)
+        ))
+        .await;
+    }
+
+    /// A fill of `size` at `price` between `maker` and `taker`, by orders of its own.
+    async fn fill(&self, market: u64, price: u64, size: u64, maker: u64, taker: u64, seconds: i64) {
+        static ORDERS: AtomicU64 = AtomicU64::new(1_000);
+        let order = ORDERS.fetch_add(1, Ordering::Relaxed);
+        self.execute(&format!(
+            "INSERT INTO trade_events (maker_user_id, taker_user_id, market_id, price, size, \
+             maker_order_id, taker_order_id, taker_side, event_ts) VALUES \
+             ({maker}, {taker}, {market}, {price}, {size}, {order}, {order}, 'SIDE_BID', {})",
+            at(seconds)
+        ))
+        .await;
+    }
+
+    /// The gateway's login, logging its queries with a comment of their own, which `logged` reads.
+    fn logging_gateway(&self) -> (ClickHousePortfolioRepository, String) {
+        let comment = uuid::Uuid::new_v4().to_string();
+        let client = self.gateway.clone().with_option("log_comment", &comment);
+        (
+            ClickHousePortfolioRepository::new_with_schema(client, DATABASE),
+            comment,
+        )
+    }
+
+    /// Each query that ran with the log comment `comment`: its text and the rows it read.
+    async fn logged(&self, comment: &str) -> Vec<(String, u64)> {
+        self.execute("SYSTEM FLUSH LOGS").await;
+        self.admin
+            .query(
+                "SELECT query, read_rows FROM system.query_log \
+                 WHERE log_comment = ? AND type = 'QueryFinish' ORDER BY event_time_microseconds",
+            )
+            .bind(comment)
+            .fetch_all()
+            .await
+            .unwrap()
     }
 }
 
@@ -190,6 +249,16 @@ fn decimal(text: &str) -> Decimal {
     Decimal::from_str(text).unwrap()
 }
 
+/// Unix seconds as an `event_ts`, in nanoseconds.
+fn at(seconds: i64) -> u64 {
+    seconds as u64 * 1_000_000_000
+}
+
+/// The current minute, in Unix seconds.
+fn this_minute() -> i64 {
+    chrono::Utc::now().timestamp() / 60 * 60
+}
+
 /// vex-core's events of one user, written twice each, as a re-publication after a restart
 /// writes them: every metric counts each event once.
 #[tokio::test]
@@ -198,8 +267,7 @@ async fn portfolio_counts_each_event_once() {
         return;
     };
     let user = 42;
-    let now = chrono::Utc::now().timestamp() / 60 * 60;
-    let at = |seconds: i64| (seconds as u64) * 1_000_000_000;
+    let now = this_minute();
     // USD balances, deposits and withdrawals: the quote asset has price 1, so equity is the
     // balance. A deposit falls between the two withdrawals of the last day, so the cash flows
     // come in time order only if the whole UNION ALL of deposits and withdrawals is sorted, not
@@ -265,7 +333,9 @@ async fn portfolio_counts_each_event_once() {
     assert_eq!(week.volume_24h, decimal("250"));
     // (1600 - 1000) - (200 + 100 - 50 - 20)
     assert_eq!(week.pnl_7d, decimal("370"));
-    assert_eq!(week.max_drawdown_1m, Decimal::ZERO);
+    // Equity net of the cash flows: the deposit of 100 at now - 5.5 h leaves the balance at 1500,
+    // as the PnL series below shows, falling from 150 to 50.
+    assert_eq!(week.max_drawdown_1m, decimal("100"));
 
     // Hourly from now - 24 h: equity 1400, 1500 from now - 8 h and 1600 at now, against the
     // window's start, less the cash flow since then: -50 from now - 10.5 h, +100 from now - 5.5 h
@@ -428,4 +498,183 @@ async fn views_scale_as_scaling_cache_does() {
             "volume in market {market}"
         );
     }
+}
+
+/// BTC is worth its last price, nothing before its first trade, and a deposit of it is worth its
+/// price then, as equity values it: deposited before BTC had a price, it cost nothing, and all of
+/// its value since is profit.
+#[tokio::test]
+async fn non_usd_balances_are_valued_at_the_last_price_and_deposits_at_cost() {
+    let Some(ch) = clickhouse().await else {
+        return;
+    };
+    let user = 43;
+    // 2024-06-01T00:00:00Z, before any other test's trade: a price is every user's.
+    let now = 1_717_200_000;
+    ch.balance(user, BTC, 2 * BTC_SCALE, now - 6 * HOUR).await;
+    ch.flow("deposit_events", user, BTC, 2 * BTC_SCALE, now - 6 * HOUR)
+        .await;
+    ch.fill(BTC_USD, 100, BTC_SCALE, 990, 991, now - 4 * HOUR)
+        .await;
+    ch.balance(user, BTC, 3 * BTC_SCALE, now - 3 * HOUR).await;
+    ch.flow("deposit_events", user, BTC, BTC_SCALE, now - 3 * HOUR)
+        .await;
+    ch.fill(BTC_USD, 120, BTC_SCALE, 990, 991, now - 2 * HOUR)
+        .await;
+    let repository = ClickHousePortfolioRepository::new_with_schema(ch.gateway.clone(), DATABASE);
+    let hourly = |values: [i64; 4]| -> Vec<(i64, Decimal)> {
+        (0..=24)
+            .map(|hour| {
+                let value = match hour {
+                    0..=19 => values[0],
+                    20 => values[1],
+                    21 => values[2],
+                    _ => values[3],
+                };
+                (now - DAY + hour * HOUR, Decimal::from(value))
+            })
+            .collect()
+    };
+
+    // 2 BTC at 100 from now - 4 h, 3 at 100 from now - 3 h, 3 at 120 from now - 2 h.
+    let chart: Vec<_> = repository
+        .get_balance_chart(user, now, PnlResolution::Day)
+        .await
+        .unwrap()
+        .iter()
+        .map(|point| (point.timestamp, point.balance))
+        .collect();
+    assert_eq!(chart, hourly([0, 200, 300, 360]));
+
+    // Less the second deposit, 1 BTC at 100.
+    let portfolio = repository
+        .get_portfolio(user, now, PnlResolution::Day)
+        .await
+        .unwrap();
+    let pnl: Vec<_> = portfolio
+        .pnl_series
+        .iter()
+        .map(|point| (point.timestamp, point.pnl))
+        .collect();
+    assert_eq!(pnl, hourly([0, 200, 200, 260]));
+    assert_eq!(portfolio.balance, decimal("360"));
+    assert_eq!(portfolio.pnl_7d, decimal("260"));
+
+    // Two days on, the window holds no balance and no price: those before it hold.
+    let later = repository
+        .get_balance_chart(user, now + 2 * DAY, PnlResolution::Day)
+        .await
+        .unwrap();
+    assert!(
+        later.iter().all(|point| point.balance == decimal("360")),
+        "{later:?}"
+    );
+}
+
+/// A deposit counts from its minute, as the per-minute balance it raised does: a point in that
+/// minute but before the deposit's second shows no profit.
+#[tokio::test]
+async fn a_deposit_counts_from_its_minute() {
+    let Some(ch) = clickhouse().await else {
+        return;
+    };
+    let user = 44;
+    let minute = this_minute() - 10 * HOUR;
+    ch.balance(user, USD, 100 * USD_SCALE, minute + 30).await;
+    ch.flow("deposit_events", user, USD, 100 * USD_SCALE, minute + 30)
+        .await;
+    let repository = ClickHousePortfolioRepository::new_with_schema(ch.gateway.clone(), DATABASE);
+
+    // Each point 17 s into its minute.
+    let portfolio = repository
+        .get_portfolio(user, minute + 10 * HOUR + 17, PnlResolution::Day)
+        .await
+        .unwrap();
+    assert!(portfolio
+        .pnl_series
+        .iter()
+        .any(|point| point.timestamp == minute + 17));
+    assert!(
+        portfolio.pnl_series.iter().all(|point| point.pnl.is_zero()),
+        "{:?}",
+        portfolio.pnl_series
+    );
+}
+
+/// A withdrawal lowers equity, not performance: it is no drawdown.
+#[tokio::test]
+async fn a_withdrawal_is_not_a_drawdown() {
+    let Some(ch) = clickhouse().await else {
+        return;
+    };
+    let user = 45;
+    let now = this_minute();
+    ch.balance(user, USD, 1000 * USD_SCALE, now - 2 * DAY).await;
+    ch.flow("deposit_events", user, USD, 1000 * USD_SCALE, now - 2 * DAY)
+        .await;
+    ch.balance(user, USD, 100 * USD_SCALE, now - DAY).await;
+    ch.flow("withdrawal_events", user, USD, 900 * USD_SCALE, now - DAY)
+        .await;
+    let repository = ClickHousePortfolioRepository::new_with_schema(ch.gateway.clone(), DATABASE);
+
+    let portfolio = repository
+        .get_portfolio(user, now, PnlResolution::Day)
+        .await
+        .unwrap();
+    assert_eq!(portfolio.balance, decimal("100"));
+    assert_eq!(portfolio.max_drawdown_1m, Decimal::ZERO);
+}
+
+/// The year charts end now, although 365 days are not a whole number of weeks.
+#[tokio::test]
+async fn year_charts_end_now() {
+    let Some(ch) = clickhouse().await else {
+        return;
+    };
+    let now = this_minute();
+    let repository = ClickHousePortfolioRepository::new_with_schema(ch.gateway.clone(), DATABASE);
+    let mut expected: Vec<_> = (0..53)
+        .map(|week| now - 365 * DAY + week * 7 * DAY)
+        .collect();
+    expected.push(now);
+
+    let chart = repository
+        .get_balance_chart(46, now, PnlResolution::Year)
+        .await
+        .unwrap();
+    let timestamps: Vec<_> = chart.iter().map(|point| point.timestamp).collect();
+    assert_eq!(timestamps, expected);
+    let portfolio = repository
+        .get_portfolio(46, now, PnlResolution::Year)
+        .await
+        .unwrap();
+    let timestamps: Vec<_> = portfolio
+        .pnl_series
+        .iter()
+        .map(|point| point.timestamp)
+        .collect();
+    assert_eq!(timestamps, expected);
+}
+
+/// A portfolio reads each view it needs once, a balance chart only balances and prices.
+#[tokio::test]
+async fn each_request_reads_each_view_once() {
+    let Some(ch) = clickhouse().await else {
+        return;
+    };
+    let now = this_minute();
+
+    let (repository, comment) = ch.logging_gateway();
+    repository
+        .get_portfolio(1, now, PnlResolution::Year)
+        .await
+        .unwrap();
+    assert_eq!(ch.logged(&comment).await.len(), 4);
+
+    let (repository, comment) = ch.logging_gateway();
+    repository
+        .get_balance_chart(1, now, PnlResolution::Year)
+        .await
+        .unwrap();
+    assert_eq!(ch.logged(&comment).await.len(), 2);
 }

@@ -405,8 +405,9 @@ pub async fn get_order_history(
 /// - `balance` (now): last ASOF-valued equity at or before current time
 /// - `balance_24h_ago`: last ASOF-valued equity at or before now - 24h
 /// - `pnl_7d`: `equity(now) - equity(now - 7d) - cashflow(7d)`, each flow valued at its asset's
-///   ASOF price (the latest price when there is none at or before the flow)
-/// - `max_drawdown_1m`: max peak-to-trough drawdown of ASOF-valued equity over last 30d
+///   ASOF price in its minute (zero before the asset's first trade, as equity values it)
+/// - `max_drawdown_1m`: peak-to-trough decline over equity net of deposits and withdrawals in the
+///   last 30 days
 /// - `volume_24h`: sum of `trade_volumes.volume`, each fill's price times size in its quote asset,
 ///   for `ts in [now-24h, now]`
 ///
