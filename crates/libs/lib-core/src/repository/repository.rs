@@ -260,7 +260,7 @@ const ORDER_COLUMNS: &str = "order_order_id, order_user_id, order_price, order_s
 // Status and time-in-force values are vex-core's protobuf enum value names (trading.proto
 // `Status`, `TimeInForce`), which the Kafka Connect sink writes verbatim.
 const OPEN_ORDER_FILTER: &str = r#"
-    order_status IN ('STATUS_PLACED', 'STATUS_PROCESSING')
+    order_status = 'STATUS_PLACED'
     OR (
         order_status = 'STATUS_PARTIALLY_FILLED'
         AND order_time_in_force <> 'TIF_IOC'

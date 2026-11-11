@@ -1083,18 +1083,6 @@ mod tests {
         .unwrap();
         insert_test_order(
             &db,
-            1002,
-            user_id,
-            65538,
-            5100000,
-            200,
-            "SIDE_ASK",
-            "STATUS_PROCESSING",
-        )
-        .await
-        .unwrap();
-        insert_test_order(
-            &db,
             1003,
             user_id,
             65539,
@@ -1134,9 +1122,9 @@ mod tests {
 
                 assert!(orders_response["orders"].is_array());
                 let orders = orders_response["orders"].as_array().unwrap();
-                // Should have 2 open orders (Placed and Processing), not the Filled one
-                assert_eq!(orders.len(), 2);
-                assert_eq!(orders_response["total"], 2);
+                // The Placed order, not the Filled one
+                assert_eq!(orders.len(), 1);
+                assert_eq!(orders_response["total"], 1);
                 assert_eq!(orders_response["page"], 1);
             }
             Err(e) => {
@@ -1239,18 +1227,6 @@ mod tests {
         .unwrap();
         insert_test_order(
             &db,
-            4002,
-            user_id,
-            65538,
-            5100000,
-            200,
-            "SIDE_ASK",
-            "STATUS_PROCESSING",
-        )
-        .await
-        .unwrap();
-        insert_test_order(
-            &db,
             4003,
             user_id,
             65538,
@@ -1258,18 +1234,6 @@ mod tests {
             150,
             "SIDE_BID",
             "STATUS_PARTIALLY_FILLED",
-        )
-        .await
-        .unwrap();
-        insert_test_order(
-            &db,
-            4004,
-            user_id,
-            65539,
-            3000000,
-            200,
-            "SIDE_ASK",
-            "STATUS_PROCESSING",
         )
         .await
         .unwrap();
@@ -1295,18 +1259,6 @@ mod tests {
             300,
             "SIDE_ASK",
             "STATUS_CANCELLED",
-        )
-        .await
-        .unwrap();
-        insert_test_order(
-            &db,
-            4007,
-            user_id,
-            65539,
-            3500000,
-            100,
-            "SIDE_BID",
-            "STATUS_REJECTED",
         )
         .await
         .unwrap();
@@ -1339,10 +1291,9 @@ mod tests {
 
                 assert!(orders_response["orders"].is_array());
                 let orders = orders_response["orders"].as_array().unwrap();
-                // Should have 4 open orders: Placed, PartiallyFilled and two Processing
-                // Should NOT include: Filled, Cancelled, Rejected
-                assert_eq!(orders.len(), 4);
-                assert_eq!(orders_response["total"], 4);
+                // Placed and PartiallyFilled, not Filled or Cancelled
+                assert_eq!(orders.len(), 2);
+                assert_eq!(orders_response["total"], 2);
 
                 // Verify all returned orders have open statuses
                 let statuses: Vec<String> = orders
@@ -1357,16 +1308,10 @@ mod tests {
                         .iter()
                         .any(|s| s.eq_ignore_ascii_case("PartiallyFilled"))
                 );
-                assert!(
-                    statuses
-                        .iter()
-                        .any(|s| s.eq_ignore_ascii_case("Processing"))
-                );
 
                 // Verify terminal statuses are NOT present
                 assert!(!statuses.iter().any(|s| s.eq_ignore_ascii_case("Filled")));
                 assert!(!statuses.iter().any(|s| s.eq_ignore_ascii_case("Cancelled")));
-                assert!(!statuses.iter().any(|s| s.eq_ignore_ascii_case("Rejected")));
             }
             Err(e) => {
                 panic!("Handler returned error: {}", e);
@@ -1477,149 +1422,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_order_history_with_rejected() {
-        let Some(db) = require_database().await else {
-            return; // Skip test if database is unavailable
-        };
-        let user = database_test_user(101_007);
-        let user_id = uuid_to_u64(user);
-
-        cleanup_test_data(&db, user_id).await;
-
-        // Insert test orders - terminal statuses
-        // Note: Repository currently only includes Filled, Cancelled, and PartiallyFilled
-        // Rejected is a terminal state but is NOT currently included in history (may be a bug)
-        insert_test_order(
-            &db,
-            5001,
-            user_id,
-            65538,
-            5000000,
-            100,
-            "SIDE_BID",
-            "STATUS_FILLED",
-        )
-        .await
-        .unwrap();
-        insert_test_order(
-            &db,
-            5002,
-            user_id,
-            65538,
-            5100000,
-            200,
-            "SIDE_ASK",
-            "STATUS_CANCELLED",
-        )
-        .await
-        .unwrap();
-        insert_test_order(
-            &db,
-            5003,
-            user_id,
-            65539,
-            3000000,
-            150,
-            "SIDE_BID",
-            "STATUS_PARTIALLY_FILLED",
-        )
-        .await
-        .unwrap();
-        insert_test_order(
-            &db,
-            5004,
-            user_id,
-            65538,
-            5200000,
-            250,
-            "SIDE_ASK",
-            "STATUS_REJECTED",
-        )
-        .await
-        .unwrap();
-        // Open status - should not appear in history
-        insert_test_order(
-            &db,
-            5005,
-            user_id,
-            65538,
-            5300000,
-            300,
-            "SIDE_BID",
-            "STATUS_PLACED",
-        )
-        .await
-        .unwrap();
-
-        let trading_repo = Arc::new(PostgresTradingRepository::new(Arc::new(db.clone())));
-        let order_store = Arc::new(OrderStore::new(unscaled()));
-
-        let authenticated_user = create_authenticated_user_id(user);
-        let query = web::Query(OrdersQuery {
-            page: Some(1),
-            limit: Some(20),
-            market_id: None,
-        });
-
-        let result = get_order_history(
-            authenticated_user,
-            query,
-            web::Data::new(order_store.clone()),
-            web::Data::new(trading_repo.clone() as Arc<dyn TradingRepository>),
-        )
-        .await;
-
-        match result {
-            Ok(response) => {
-                assert_eq!(response.status(), 200);
-
-                let body = response.into_body();
-                let bytes = actix_web::body::to_bytes(body).await.unwrap();
-                let history_response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-
-                assert!(history_response["orders"].is_array());
-                let orders = history_response["orders"].as_array().unwrap();
-                // Should have 3 history orders: Filled, Cancelled, PartiallyFilled
-                // Note: Rejected is NOT currently included (repository filters it out)
-                // Should NOT include: Placed (open status), Rejected (not in repository filter)
-                assert_eq!(orders.len(), 3);
-                assert_eq!(history_response["total"], 3);
-
-                // Verify all returned orders have terminal statuses that are included
-                let statuses: Vec<String> = orders
-                    .iter()
-                    .map(|o| o["status"].as_str().unwrap().to_string())
-                    .collect();
-
-                // Check that included terminal statuses are present
-                assert!(statuses.iter().any(|s| s.eq_ignore_ascii_case("Filled")));
-                assert!(statuses.iter().any(|s| s.eq_ignore_ascii_case("Cancelled")));
-                assert!(
-                    statuses
-                        .iter()
-                        .any(|s| s.eq_ignore_ascii_case("PartiallyFilled"))
-                );
-
-                // Verify Rejected is NOT present (current repository implementation excludes it)
-                assert!(!statuses.iter().any(|s| s.eq_ignore_ascii_case("Rejected")));
-
-                // Verify open statuses are NOT present
-                assert!(!statuses.iter().any(|s| s.eq_ignore_ascii_case("Placed")));
-                assert!(
-                    !statuses
-                        .iter()
-                        .any(|s| s.eq_ignore_ascii_case("Processing"))
-                );
-            }
-            Err(e) => {
-                panic!("Handler returned error: {}", e);
-            }
-        }
-
-        cleanup_test_data(&db, user_id).await;
-    }
-
-    #[tokio::test]
     async fn test_get_open_orders_with_market_id_filter() {
         let Some(db) = require_database().await else {
             return; // Skip test if database is unavailable
@@ -1639,18 +1441,6 @@ mod tests {
             100,
             "SIDE_BID",
             "STATUS_PLACED",
-        )
-        .await
-        .unwrap(); // Market 65538
-        insert_test_order(
-            &db,
-            6002,
-            user_id,
-            65538,
-            5100000,
-            200,
-            "SIDE_ASK",
-            "STATUS_PROCESSING",
         )
         .await
         .unwrap(); // Market 65538
@@ -1707,10 +1497,10 @@ mod tests {
 
                 assert!(orders_response["orders"].is_array());
                 let orders = orders_response["orders"].as_array().unwrap();
-                // Should have 3 orders from market 65538 (Placed, Processing, PartiallyFilled)
+                // Should have 2 orders from market 65538 (Placed, PartiallyFilled)
                 // Should NOT include order from market 65539
-                assert_eq!(orders.len(), 3);
-                assert_eq!(orders_response["total"], 3);
+                assert_eq!(orders.len(), 2);
+                assert_eq!(orders_response["total"], 2);
 
                 // Verify all returned orders are from the correct market
                 for order in orders {

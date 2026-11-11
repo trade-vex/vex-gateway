@@ -163,15 +163,12 @@ pub async fn get_balances(
 ///
 /// # Order States
 /// Only returns orders in "open" states:
-/// - Placed - Order placed but not yet processed
-/// - Pending - Order submitted but not yet processed
-/// - PartiallyFilled - Order partially executed
-/// - Processing - Order being matched
+/// - Placed - Order resting on the book
+/// - PartiallyFilled - Order partially executed, unless immediate-or-cancel
 ///
 /// Excludes:
 /// - Filled - Completely executed orders
 /// - Cancelled - User-cancelled orders
-/// - Rejected - Orders rejected by matching engine
 #[derive(Debug, Deserialize)]
 pub struct OrdersQuery {
     pub page: Option<usize>,
