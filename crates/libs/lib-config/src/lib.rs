@@ -348,6 +348,7 @@ impl Config {
     /// - `auth.oauth.providers` may list only `google`, `github` and `twitter`
     /// - With an OAuth provider configured, `auth.oauth.frontend_url_web` and `frontend_url_app`
     ///   must be set
+    /// - A `google` provider needs its `issuer_url`
     /// - `auth.otp.email_verification_expiry_minutes` and `password_reset_expiry_minutes` must be
     ///   positive
     /// - `auth.jwt.access_token_ttl_minutes` must be positive
@@ -438,6 +439,20 @@ impl Config {
                     )));
                 }
             }
+        }
+
+        // Google is OIDC: its ID token is verified against the keys discovery finds at this
+        // issuer. Without it every Google login would fail.
+        if oauth.providers.get("google").is_some_and(|google| {
+            google
+                .issuer_url
+                .as_deref()
+                .is_none_or(|url| url.trim().is_empty())
+        }) {
+            return Err(ConfigError::ValidationError(
+                "auth.oauth.providers.google.issuer_url is required (https://accounts.google.com)"
+                    .into(),
+            ));
         }
 
         // A code's lifetime is the TTL of its Redis key: without a positive one, every signup or
@@ -1056,7 +1071,7 @@ database = "vex_analytics"
                 Some(config_dir.path().to_path_buf()),
             )
         };
-        let provider = r#"providers = { google = { client_id = "id", client_secret = "secret", auth_url = "https://accounts.example.com/auth", token_url = "https://accounts.example.com/token" } }"#;
+        let provider = r#"providers = { github = { client_id = "id", client_secret = "secret", auth_url = "https://github.com/login/oauth/authorize", token_url = "https://github.com/login/oauth/access_token" } }"#;
         let web = r#"frontend_url_web = "https://app.example.com/oauth/done""#;
         let app = r#"frontend_url_app = "vex://oauth""#;
         let with_provider = |urls: &[&str]| load(&format!("{provider}\n{}", urls.join("\n")));
@@ -1085,6 +1100,37 @@ database = "vex_analytics"
                 "unexpected error: {error}"
             );
         }
+    }
+
+    #[test]
+    fn google_requires_issuer_url() {
+        let load = |issuer: &str| {
+            load_edited_example(
+                "providers = {}",
+                &format!(
+                    r#"providers = {{ google = {{ client_id = "id", client_secret = "secret", auth_url = "https://accounts.google.com/o/oauth2/v2/auth", token_url = "https://oauth2.googleapis.com/token"{issuer} }} }}
+frontend_url_web = "https://app.example.com/oauth/done"
+frontend_url_app = "vex://oauth""#
+                ),
+            )
+            .0
+        };
+
+        for issuer in ["", r#", issuer_url = " ""#] {
+            let error = load(issuer).unwrap_err();
+            assert!(
+                matches!(error, ConfigError::ValidationError(_))
+                    && error
+                        .to_string()
+                        .contains("auth.oauth.providers.google.issuer_url"),
+                "unexpected error: {error}"
+            );
+        }
+        let config = load(r#", issuer_url = "https://accounts.google.com""#).unwrap();
+        assert_eq!(
+            config.auth.oauth.providers["google"].issuer_url.as_deref(),
+            Some("https://accounts.google.com")
+        );
     }
 
     #[test]
@@ -1469,6 +1515,10 @@ database = "vex_analytics"
             (
                 "APP__AUTH__OAUTH__PROVIDERS__GOOGLE__TOKEN_URL",
                 "https://accounts.example.com/token",
+            ),
+            (
+                "APP__AUTH__OAUTH__PROVIDERS__GOOGLE__ISSUER_URL",
+                "https://accounts.google.com",
             ),
             (
                 "APP__AUTH__OAUTH__FRONTEND_URL_WEB",

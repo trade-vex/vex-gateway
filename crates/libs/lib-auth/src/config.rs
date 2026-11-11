@@ -48,7 +48,7 @@ pub struct OAuthProviderConfig {
     pub client_secret: SecretString,
     pub auth_url: String,
     pub token_url: String,
-    /// Optional OpenID Connect discovery URL (e.g., for Google)
+    /// OpenID Connect discovery URL; required for `google` (lib-config validation).
     pub issuer_url: Option<String>,
 }
 

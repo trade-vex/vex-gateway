@@ -51,6 +51,14 @@ redirect_base = "http://localhost:8081"
 # Where a completed OAuth login lands: required once a provider is configured.
 # frontend_url_web = "http://localhost:3000"
 # frontend_url_app = "vex://oauth"
+# A provider takes the place of the empty `providers` above, as a table of its own:
+# [auth.oauth.providers.google]
+# client_id = "..."
+# client_secret = "..."
+# auth_url = "https://accounts.google.com/o/oauth2/v2/auth"
+# token_url = "https://oauth2.googleapis.com/token"
+# # OIDC discovery; required for google.
+# issuer_url = "https://accounts.google.com"
 
 [auth.server]
 # Optional; empty means clients connect directly. Required in production.
