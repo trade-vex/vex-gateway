@@ -13,12 +13,6 @@ fn test_api_key_error_variants() {
     let not_found = ApiKeyError::NotFound;
     assert_eq!(not_found.to_string(), "API key not found");
 
-    let disabled = ApiKeyError::Disabled;
-    assert_eq!(disabled.to_string(), "API key is disabled");
-
-    let expired = ApiKeyError::Expired;
-    assert_eq!(expired.to_string(), "API key has expired");
-
     let invalid_signature = ApiKeyError::InvalidSignature("Bad format".to_string());
     assert_eq!(
         invalid_signature.to_string(),
@@ -30,39 +24,6 @@ fn test_api_key_error_variants() {
         invalid_timestamp.to_string(),
         "Invalid timestamp: Not a number"
     );
-
-    let window_exceeded = ApiKeyError::WindowExceeded;
-    assert_eq!(window_exceeded.to_string(), "Request window exceeded");
-
-    // let ip_blacklisted = ApiKeyError::IpBlacklisted("192.168.1.1".to_string());
-    // assert_eq!(ip_blacklisted.to_string(), "IP address blacklisted: 192.168.1.1");
-
-    let permission_denied = ApiKeyError::PermissionDenied("TRADE".to_string());
-    assert_eq!(
-        permission_denied.to_string(),
-        "Permission denied for security type: TRADE"
-    );
-
-    let invalid_key_material = ApiKeyError::InvalidKeyMaterial("Invalid PEM".to_string());
-    assert_eq!(
-        invalid_key_material.to_string(),
-        "Invalid key material: Invalid PEM"
-    );
-
-    let missing_header = ApiKeyError::MissingHeader("X-API-Key".to_string());
-    assert_eq!(
-        missing_header.to_string(),
-        "Missing required header: X-API-Key"
-    );
-
-    let invalid_header = ApiKeyError::InvalidHeader("Malformed value".to_string());
-    assert_eq!(
-        invalid_header.to_string(),
-        "Invalid header format: Malformed value"
-    );
-
-    let cache_error = ApiKeyError::Cache("Redis timeout".to_string());
-    assert_eq!(cache_error.to_string(), "Cache error: Redis timeout");
 
     let serialization_error = ApiKeyError::Serialization("JSON parse error".to_string());
     assert_eq!(

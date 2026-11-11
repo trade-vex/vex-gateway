@@ -99,8 +99,6 @@ pub struct ApiKeyStore {
     memory_store: Arc<HashMap<String, ApiKeyConfig>>,
     /// Cache configuration
     config: CacheConfig,
-    /// Performance metrics
-    metrics: Arc<CacheMetrics>,
 }
 
 /// Cached API key with TTL
@@ -238,40 +236,6 @@ impl Default for CacheConfig {
     }
 }
 
-/// Cache performance metrics
-pub struct CacheMetrics {
-    pub l1_hits: std::sync::atomic::AtomicU64,
-    pub l1_misses: std::sync::atomic::AtomicU64,
-    pub db_queries: std::sync::atomic::AtomicU64,
-}
-
-impl Default for CacheMetrics {
-    fn default() -> Self {
-        Self {
-            l1_hits: std::sync::atomic::AtomicU64::new(0),
-            l1_misses: std::sync::atomic::AtomicU64::new(0),
-            db_queries: std::sync::atomic::AtomicU64::new(0),
-        }
-    }
-}
-
-impl CacheMetrics {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Get L1 cache hit rate for monitoring
-    pub fn get_l1_hit_rate(&self) -> f64 {
-        let hits = self.l1_hits.load(std::sync::atomic::Ordering::Relaxed);
-        let misses = self.l1_misses.load(std::sync::atomic::Ordering::Relaxed);
-        if hits + misses == 0 {
-            0.0
-        } else {
-            hits as f64 / (hits + misses) as f64
-        }
-    }
-}
-
 /// Ends an in-flight cache fill exactly once, on completion or on drop.
 ///
 /// `Drop` runs even when the owning future is cancelled (an actix client disconnect), which is the
@@ -370,7 +334,6 @@ impl ApiKeyStore {
             api_key_repo: None,
             memory_store: Arc::new(HashMap::new()),
             config,
-            metrics: Arc::new(CacheMetrics::new()),
         }
     }
 
@@ -383,7 +346,6 @@ impl ApiKeyStore {
             api_key_repo: Some(api_key_repo),
             memory_store: Arc::new(HashMap::new()),
             config,
-            metrics: Arc::new(CacheMetrics::new()),
         }
     }
 
@@ -428,9 +390,6 @@ impl ApiKeyStore {
             let mut cache = self.l1_cache.write(api_key);
             if let Some(cached) = cache.entries.get(api_key) {
                 if !cached.is_expired(self.config.l1_ttl) {
-                    self.metrics
-                        .l1_hits
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     debug!(
                         "L1 cache hit for key: {}",
                         ApiKeyStore::mask_api_key(api_key)
@@ -444,19 +403,12 @@ impl ApiKeyStore {
             }
         }
 
-        self.metrics
-            .l1_misses
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
         // L3: Check database first (if available)
         if let Some(repo) = &self.api_key_repo {
             let fill_guard = self.begin_cache_fill(api_key);
             match repo.find_by_api_key(api_key).await {
                 Ok(Some(model)) => {
                     if model.is_valid() {
-                        self.metrics
-                            .db_queries
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let config = model.to_api_key_config();
                         let config_arc = Arc::new(config.clone());
 
@@ -493,9 +445,6 @@ impl ApiKeyStore {
         // Fallback: Check memory store (for development/testing)
         let fill_guard = self.begin_cache_fill(api_key);
         if let Some(config) = self.memory_store.get(api_key) {
-            self.metrics
-                .db_queries
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let config_arc = Arc::new(config.clone());
 
             self.finish_cache_fill(fill_guard, Some(config.clone()));
@@ -531,11 +480,6 @@ impl ApiKeyStore {
         );
     }
 
-    /// Get cache metrics for monitoring
-    pub fn metrics(&self) -> &CacheMetrics {
-        &self.metrics
-    }
-
     /// Add a new API key to the cache
     pub async fn add_api_key(&self, config: ApiKeyConfig) {
         let mut cache = self.l1_cache.write(&config.api_key);
@@ -545,18 +489,6 @@ impl ApiKeyStore {
         info!(
             "Added API key to cache: {}",
             Self::mask_api_key(&config.api_key)
-        );
-    }
-
-    /// Remove an API key from the cache
-    pub async fn remove_api_key(&self, api_key: &str) {
-        let mut cache = self.l1_cache.write(api_key);
-        cache.entries.pop(api_key);
-        cache.prune_epoch_if_idle(api_key);
-
-        info!(
-            "Removed API key from cache: {}",
-            Self::mask_api_key(api_key)
         );
     }
 
@@ -581,7 +513,6 @@ pub struct ApiKeyMiddleware {
     api_key_store: ApiKeyStore,
     default_security: SecurityType,
     route_configs: Arc<Vec<RouteSecurityConfig>>,
-    strict_timestamp_validation: bool,
     /// Where signed requests record their signatures against replay; see [`guard_signature`].
     replay_store: Option<redis::aio::ConnectionManager>,
 }
@@ -592,7 +523,6 @@ impl Default for ApiKeyMiddleware {
             api_key_store: ApiKeyStore::new(CacheConfig::default()),
             default_security: SecurityType::None,
             route_configs: Arc::new(vec![]),
-            strict_timestamp_validation: true,
             replay_store: None,
         }
     }
@@ -621,12 +551,6 @@ impl ApiKeyMiddleware {
         self
     }
 
-    /// Add multiple API keys (for development/testing)
-    pub fn with_api_keys(mut self, configs: Vec<ApiKeyConfig>) -> Self {
-        self.api_key_store = self.api_key_store.with_api_keys(configs);
-        self
-    }
-
     pub fn with_default_security(mut self, security: SecurityType) -> Self {
         self.default_security = security;
         self
@@ -634,11 +558,6 @@ impl ApiKeyMiddleware {
 
     pub fn with_route_configs(mut self, route_configs: Vec<RouteSecurityConfig>) -> Self {
         self.route_configs = Arc::new(route_configs);
-        self
-    }
-
-    pub fn with_strict_timestamp_validation(mut self, strict: bool) -> Self {
-        self.strict_timestamp_validation = strict;
         self
     }
 
@@ -650,32 +569,9 @@ impl ApiKeyMiddleware {
         self
     }
 
-    /// Get cache metrics for monitoring
-    pub fn cache_metrics(&self) -> &CacheMetrics {
-        self.api_key_store.metrics()
-    }
-
     /// Get a handle to the shared API key store.
     pub fn api_key_store(&self) -> ApiKeyStore {
         self.api_key_store.clone()
-    }
-
-    /// Add a new API key to the cache
-    pub async fn add_api_key(&self, config: ApiKeyConfig) {
-        self.api_key_store.add_api_key(config).await;
-    }
-
-    /// Remove an API key from the cache
-    pub async fn remove_api_key(&self, api_key: &str) {
-        self.api_key_store.remove_api_key(api_key).await;
-    }
-
-    /// Get API key configuration (for use in combined middleware)
-    pub async fn get_api_key_config(
-        &self,
-        api_key: &str,
-    ) -> Result<Option<Arc<ApiKeyConfig>>, ApiKeyError> {
-        self.api_key_store.get_api_key(api_key).await
     }
 
     /// Determine security type for the current route
@@ -854,7 +750,6 @@ impl ApiKeyMiddleware {
         query_params: &HashMap<String, String>,
         body_params: &HashMap<String, String>,
         recv_window: u64,
-        strict: bool,
     ) -> Result<u64, ApiKeyError> {
         let timestamp_str = query_params
             .get("timestamp")
@@ -875,15 +770,10 @@ impl ApiKeyMiddleware {
             })
             .transpose()?;
 
-        // Additional strict validation if enabled
-        if strict {
-            if let Some(provided_recv_window) = provided_recv_window {
-                if provided_recv_window > 60000 {
-                    return Err(ApiKeyError::InvalidTimestamp(
-                        "recvWindow cannot exceed 60000ms".to_string(),
-                    ));
-                }
-            }
+        if provided_recv_window.is_some_and(|window| window > 60000) {
+            return Err(ApiKeyError::InvalidTimestamp(
+                "recvWindow cannot exceed 60000ms".to_string(),
+            ));
         }
 
         let effective_recv_window = provided_recv_window.unwrap_or(recv_window).min(recv_window);
@@ -923,7 +813,6 @@ where
             api_key_store: self.api_key_store.clone(),
             default_security: self.default_security,
             route_configs: self.route_configs.clone(),
-            strict_timestamp_validation: self.strict_timestamp_validation,
             replay_store: self.replay_store.clone(),
         }))
     }
@@ -934,7 +823,6 @@ pub struct ApiKeyMiddlewareService<S> {
     api_key_store: ApiKeyStore,
     default_security: SecurityType,
     route_configs: Arc<Vec<RouteSecurityConfig>>,
-    strict_timestamp_validation: bool,
     replay_store: Option<redis::aio::ConnectionManager>,
 }
 
@@ -954,7 +842,6 @@ where
         let api_key_store = self.api_key_store.clone();
         let default_security = self.default_security;
         let route_configs = self.route_configs.clone();
-        let strict_timestamp_validation = self.strict_timestamp_validation;
         let replay_store = self.replay_store.clone();
         let service = Rc::clone(&self.service);
 
@@ -965,7 +852,6 @@ where
                 api_key_store: api_key_store.clone(),
                 default_security,
                 route_configs: route_configs.clone(),
-                strict_timestamp_validation,
                 replay_store: replay_store.clone(),
             };
             let required_security = middleware.get_route_security_type(path, &route_configs);
@@ -1087,7 +973,6 @@ where
                         &query_params,
                         &body_params,
                         api_config.recv_window,
-                        strict_timestamp_validation,
                     ) {
                         Ok(recv_window) => recv_window,
                         Err(e) => {
@@ -1172,7 +1057,7 @@ where
 mod tests {
     use super::*;
     use crate::models::api_key::{ActiveModel, Model, NewApiKey};
-    use chrono::{DateTime, Utc};
+    use chrono::Utc;
     use tokio::sync::Notify;
     use uuid::Uuid;
 
@@ -1267,34 +1152,7 @@ mod tests {
             unreachable!()
         }
 
-        async fn update_last_used(
-            &self,
-            _id: Uuid,
-            _timestamp: DateTime<Utc>,
-        ) -> Result<(), ApiKeyError> {
-            unreachable!()
-        }
-
         async fn delete(&self, _id: Uuid) -> Result<(), ApiKeyError> {
-            unreachable!()
-        }
-
-        async fn find_active_keys(&self, _limit: Option<u64>) -> Result<Vec<Model>, ApiKeyError> {
-            unreachable!()
-        }
-
-        async fn find_expiring_keys(&self, _days: i64) -> Result<Vec<Model>, ApiKeyError> {
-            unreachable!()
-        }
-
-        async fn count_by_user(&self, _user_id: Uuid) -> Result<u64, ApiKeyError> {
-            unreachable!()
-        }
-
-        async fn find_by_permission(
-            &self,
-            _permission: SecurityType,
-        ) -> Result<Vec<Model>, ApiKeyError> {
             unreachable!()
         }
     }
@@ -1699,7 +1557,6 @@ mod tests {
                 &without_client_window,
                 &HashMap::new(),
                 5000,
-                true,
             )
             .unwrap(),
             5000
@@ -1713,7 +1570,6 @@ mod tests {
             &with_client_window,
             &HashMap::new(),
             5000,
-            true,
         )
         .is_err());
     }
@@ -1730,7 +1586,6 @@ mod tests {
             &query_params,
             &HashMap::new(),
             50,
-            true,
         )
         .is_err());
     }
@@ -1929,7 +1784,6 @@ mod tests {
         ApiKeyMiddleware::new()
             .with_api_key(api_key)
             .with_default_security(SecurityType::Trade)
-            .with_strict_timestamp_validation(false)
     }
 
     fn signed_body_at_limit() -> String {

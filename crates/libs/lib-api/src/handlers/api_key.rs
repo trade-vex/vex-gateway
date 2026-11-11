@@ -61,6 +61,11 @@ pub struct UpdateApiKeyRequest {
     pub ip_blacklist: Option<Vec<String>>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ToggleApiKeyRequest {
+    pub enabled: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ApiKeyResponse {
     pub id: Uuid,
@@ -368,16 +373,13 @@ pub async fn delete_api_key(
 /// Enable/disable an API key
 pub async fn toggle_api_key(
     path: web::Path<Uuid>,
-    req: web::Json<serde_json::Value>,
+    req: web::Json<ToggleApiKeyRequest>,
     repo: web::Data<Arc<dyn ApiKeyRepository>>,
     cache: Option<web::Data<ApiKeyStore>>,
     auth_user: AuthenticatedUser,
 ) -> Result<HttpResponse> {
     let api_key_id = path.into_inner();
-    let enabled = req
-        .get("enabled")
-        .and_then(|v| v.as_bool())
-        .ok_or_else(|| actix_web::error::ErrorBadRequest("Missing or invalid 'enabled' field"))?;
+    let enabled = req.enabled;
 
     let user_id = auth_user.user_id;
 

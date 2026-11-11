@@ -62,20 +62,6 @@ impl Model {
             None
         };
 
-        // Parse permissions from JSON
-        let _permissions_json = serde_json::to_value(
-            self.permissions
-                .iter()
-                .map(|p| match p {
-                    SecurityType::None => "none",
-                    SecurityType::Trade => "trade",
-                    SecurityType::UserData => "user_data",
-                    SecurityType::UserStream => "user_stream",
-                })
-                .collect::<Vec<_>>(),
-        )
-        .unwrap_or(serde_json::json!(["none"]));
-
         crate::api_key::security::ApiKeyConfig {
             api_key: self.api_key.clone(),
             key_material,
@@ -93,29 +79,6 @@ impl Model {
     /// Check if the API key is currently valid (enabled and not expired)
     pub fn is_valid(&self) -> bool {
         self.enabled && (self.expires_at.is_none() || self.expires_at.unwrap() > Utc::now())
-    }
-
-    /// Check if the API key has the required permission
-    pub fn has_permission(&self, required_permission: &SecurityType) -> bool {
-        // let permissions = self
-        //     .permissions
-        //     .as_array()
-        //     .and_then(|arr| {
-        //         arr.iter()
-        //             .filter_map(|v| v.as_str())
-        //             .map(|s| match s {
-        //                 "none" => Some(SecurityType::None),
-        //                 "trade" => Some(SecurityType::Trade),
-        //                 "user_data" => Some(SecurityType::UserData),
-        //                 "user_stream" => Some(SecurityType::UserStream),
-        //                 _ => None,
-        //             })
-        //             .collect::<Option<Vec<_>>>()
-        //     })
-        //     .unwrap_or_else(|| vec![SecurityType::None]);
-
-        self.permissions.contains(required_permission)
-            || self.permissions.contains(&SecurityType::None)
     }
 }
 
@@ -157,20 +120,6 @@ impl NewApiKey {
         } else {
             (None, None)
         };
-
-        // Convert permissions to JSON
-        // let permissions_json = serde_json::to_value(
-        //     self.permissions
-        //         .iter()
-        //         .map(|p| match p {
-        //             SecurityType::None => "none",
-        //             SecurityType::Trade => "trade",
-        //             SecurityType::UserData => "user_data",
-        //             SecurityType::UserStream => "user_stream",
-        //         })
-        //         .collect::<Vec<_>>(),
-        // )
-        // .unwrap_or(serde_json::json!(["none"]));
 
         let now = Utc::now();
 
