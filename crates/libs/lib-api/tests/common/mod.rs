@@ -63,10 +63,19 @@ async fn create_schema_database(server: &DatabaseConnection) -> String {
 }
 
 /// A connection to the tests' database, which the first caller creates; None, so that the test
-/// is skipped, when no Postgres server answers at DATABASE_URL.
+/// is skipped, when no Postgres server answers at DATABASE_URL. CI (`CI` set) must have one.
 pub async fn require_database() -> Option<DatabaseConnection> {
     static SCHEMA_DATABASE: OnceCell<String> = OnceCell::const_new();
-    let server = setup_test_db().await.ok()?;
+    let server = match setup_test_db().await {
+        Ok(server) => server,
+        Err(error) => {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI needs the Postgres at DATABASE_URL: {error}"
+            );
+            return None;
+        }
+    };
     let url = SCHEMA_DATABASE
         .get_or_init(|| create_schema_database(&server))
         .await;

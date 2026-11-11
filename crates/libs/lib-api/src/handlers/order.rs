@@ -1420,7 +1420,7 @@ mod tests {
     }
 
     /// The store on `REDIS_URL` (default local 6379), or `None` when Redis is unreachable so the
-    /// calling test skips, as lib-core's own idempotency tests do.
+    /// calling test skips, as lib-core's own idempotency tests do; CI (`CI` set) must reach it.
     async fn live_idempotency_store() -> Option<OrderIdempotencyStore> {
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -1428,6 +1428,10 @@ mod tests {
         match redis::aio::ConnectionManager::new(client).await {
             Ok(connection) => Some(OrderIdempotencyStore::new(connection)),
             Err(error) => {
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "CI needs the Redis at {redis_url}: {error}"
+                );
                 eprintln!("Skipping live-Redis test: unable to connect to {redis_url}: {error}");
                 None
             }
