@@ -22,10 +22,11 @@ use tracing_subscriber::{EnvFilter, filter::LevelFilter, fmt};
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     // Load configuration
-    let config = Config::load_auto().map_err(|e| {
-        eprintln!("Failed to load configuration: {e}");
-        std::io::Error::other(e.to_string())
-    })?;
+    // The error's own text says what failed; returning it from main would print it a second time.
+    let config = Config::load_auto().unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1)
+    });
 
     // Initialize logging.
     let app_level = config
