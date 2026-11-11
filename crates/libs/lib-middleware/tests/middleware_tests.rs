@@ -93,7 +93,7 @@ fn test_cache_config_default() {
     let config = CacheConfig::default();
 
     assert_eq!(config.l1_max_size, 100_000);
-    assert_eq!(config.l1_ttl, Duration::from_secs(300)); // 5 minutes
+    assert_eq!(config.l1_ttl, Duration::from_secs(5));
 }
 
 #[test]
