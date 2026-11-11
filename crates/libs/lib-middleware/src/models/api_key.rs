@@ -62,20 +62,6 @@ impl Model {
             None
         };
 
-        // Parse permissions from JSON
-        let _permissions_json = serde_json::to_value(
-            self.permissions
-                .iter()
-                .map(|p| match p {
-                    SecurityType::None => "none",
-                    SecurityType::Trade => "trade",
-                    SecurityType::UserData => "user_data",
-                    SecurityType::UserStream => "user_stream",
-                })
-                .collect::<Vec<_>>(),
-        )
-        .unwrap_or(serde_json::json!(["none"]));
-
         crate::api_key::security::ApiKeyConfig {
             api_key: self.api_key.clone(),
             key_material,
@@ -134,20 +120,6 @@ impl NewApiKey {
         } else {
             (None, None)
         };
-
-        // Convert permissions to JSON
-        // let permissions_json = serde_json::to_value(
-        //     self.permissions
-        //         .iter()
-        //         .map(|p| match p {
-        //             SecurityType::None => "none",
-        //             SecurityType::Trade => "trade",
-        //             SecurityType::UserData => "user_data",
-        //             SecurityType::UserStream => "user_stream",
-        //         })
-        //         .collect::<Vec<_>>(),
-        // )
-        // .unwrap_or(serde_json::json!(["none"]));
 
         let now = Utc::now();
 
