@@ -1238,6 +1238,64 @@ mod tests {
         }
     }
 
+    /// Records each command it is sent and answers it at once: placed, as order 9.
+    struct FakeEngine {
+        sent: Mutex<Vec<OrderCommand>>,
+        correlation: Arc<CorrelationService>,
+    }
+
+    impl lib_core::LinkPublisher for FakeEngine {
+        fn is_connected(&self) -> bool {
+            true
+        }
+
+        fn try_send_order_command(&self, command: &OrderCommand) -> Result<(), GatewayError> {
+            self.sent.lock().unwrap().push(command.clone());
+            self.correlation.route_response(OrderCommand {
+                order_id: 9,
+                status: Status::Placed,
+                ..command.clone()
+            });
+            Ok(())
+        }
+    }
+
+    /// The handler's wiring: claim, register, send, wait, record. A retry with the same key
+    /// replays the engine's answer without sending the order again.
+    #[actix_web::test]
+    async fn an_engine_answer_is_recorded_and_a_retry_with_the_same_key_sends_once() {
+        let Some(store) = live_idempotency_store().await else {
+            return;
+        };
+        let correlation = Arc::new(CorrelationService::new());
+        let engine = Arc::new(FakeEngine {
+            sent: Mutex::new(Vec::new()),
+            correlation: correlation.clone(),
+        });
+        let app = actix_web::test::init_service(order_app(
+            EngineLink::connected(engine.clone()),
+            correlation,
+            store,
+            uuid::Uuid::new_v4(),
+        ))
+        .await;
+        let key = format!("answered-{}", generate_client_order_id());
+
+        for _ in 0..2 {
+            let order = order_request(&key, "3000.1").to_request();
+            let response = actix_web::test::call_service(&app, order).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: serde_json::Value = actix_web::test::read_body_json(response).await;
+            assert_eq!(
+                (&body["order_id"], &body["status"]),
+                (&"9".into(), &"Placed".into())
+            );
+        }
+        let sent = engine.sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!((sent[0].price, sent[0].size), (30_001, 50_000_000));
+    }
+
     #[actix_web::test]
     async fn place_order_refuses_a_price_off_the_step() {
         let Some(store) = live_idempotency_store().await else {
