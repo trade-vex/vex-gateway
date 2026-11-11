@@ -298,17 +298,9 @@ impl AppState {
         api_key_repo: &Arc<dyn ApiKeyRepository>,
         redis_conn: ConnectionManager,
     ) -> ApiKeyMiddleware {
-        // Create cache configuration
-        // This should be loaded from config , hardcoded config should be removed
-        let cache_config = CacheConfig {
-            l1_max_size: 100000,
-            l1_ttl: std::time::Duration::from_secs(300),
-        };
-
         // Create middleware with database repository for dynamic loading
         ApiKeyMiddleware::new()
-            .with_cache_config(cache_config)
-            .with_repository(api_key_repo.clone())
+            .with_repository(CacheConfig::default(), api_key_repo.clone())
             .with_replay_store(redis_conn)
             .with_default_security(SecurityType::Trade)
     }

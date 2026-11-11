@@ -185,8 +185,11 @@ pub struct CacheConfig {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
-            l1_max_size: 100_000,             // 100K hot keys in memory
-            l1_ttl: Duration::from_secs(300), // 5 minute TTL
+            l1_max_size: 100_000, // 100K hot keys in memory
+            // The longest a revoked or changed key is still accepted on a replica that did not
+            // serve the change: each process caches on its own, and `invalidate` reaches only the
+            // process that calls it (owner decision: 5 s).
+            l1_ttl: Duration::from_secs(5),
         }
     }
 }
@@ -570,15 +573,14 @@ impl ApiKeyMiddleware {
         Self::default()
     }
 
-    /// Configure with custom cache settings
-    pub fn with_cache_config(mut self, config: CacheConfig) -> Self {
-        self.api_key_store = ApiKeyStore::new(config);
-        self
-    }
-
-    /// Configure with database repository for dynamic loading
-    pub fn with_repository(mut self, api_key_repo: Arc<dyn ApiKeyRepository>) -> Self {
-        self.api_key_store = ApiKeyStore::with_repository(CacheConfig::default(), api_key_repo);
+    /// Configure with database repository for dynamic loading; `config.l1_ttl` bounds revocation
+    /// delay across replicas (see [`CacheConfig`]).
+    pub fn with_repository(
+        mut self,
+        config: CacheConfig,
+        api_key_repo: Arc<dyn ApiKeyRepository>,
+    ) -> Self {
+        self.api_key_store = ApiKeyStore::with_repository(config, api_key_repo);
         self
     }
 
@@ -1252,6 +1254,34 @@ mod tests {
         ) -> Result<Vec<Model>, ApiKeyError> {
             unreachable!()
         }
+    }
+
+    /// A repository whose every query fails: its Postgres is unreachable.
+    async fn unreachable_repository() -> Arc<dyn ApiKeyRepository> {
+        let mut options = sea_orm::ConnectOptions::new("postgres://vex@127.0.0.1:1/vex");
+        options
+            .connect_lazy(true)
+            .acquire_timeout(Duration::from_millis(100));
+        let db = sea_orm::Database::connect(options).await.unwrap();
+        Arc::new(crate::repository::api_key_repository::PostgresApiKeyRepository::new(Arc::new(db)))
+    }
+
+    #[tokio::test]
+    async fn with_repository_uses_the_given_cache_config() {
+        let middleware = ApiKeyMiddleware::new().with_repository(
+            CacheConfig {
+                l1_max_size: 1,
+                l1_ttl: Duration::ZERO,
+            },
+            unreachable_repository().await,
+        );
+
+        assert_eq!(middleware.api_key_store().config.l1_ttl, Duration::ZERO);
+    }
+
+    #[test]
+    fn cache_config_default_bounds_revocation_to_five_seconds() {
+        assert_eq!(CacheConfig::default().l1_ttl, Duration::from_secs(5));
     }
 
     #[tokio::test]

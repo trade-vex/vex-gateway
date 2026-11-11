@@ -1138,6 +1138,9 @@ grep -i "memory\|oom" logs/app.log
 - `DELETE /api/api-key/{id}` - Delete API key
 - `PATCH /api/api-key/{id}/toggle` - Enable/disable API key
 
+Deleting, disabling or changing a key takes effect at once on the gateway replica that served the
+request, and within 5 seconds on the others: each replica caches a key for at most 5 s.
+
 #### Session
 - `GET /api/session/check` - Check session validity
 
