@@ -81,6 +81,8 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
+          # libssl-dev only for the rusteron (Aeron) build scripts, whose reqwest uses native-tls;
+          # the gateway itself links rustls, not OpenSSL.
           sudo apt-get install -y libbsd-dev libssl-dev pkg-config build-essential clang libclang-dev openjdk-21-jdk uuid-dev
           # Install CMake 3.30+ (required by rusteron-archive/aeron)
           wget -q https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0-linux-x86_64.sh
@@ -131,6 +133,8 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
+          # libssl-dev only for the rusteron (Aeron) build scripts, whose reqwest uses native-tls;
+          # the gateway itself links rustls, not OpenSSL.
           sudo apt-get install -y libbsd-dev libssl-dev pkg-config build-essential clang libclang-dev openjdk-21-jdk uuid-dev
           # Install CMake 3.30+ (required by rusteron-archive/aeron)
           wget -q https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0-linux-x86_64.sh
@@ -205,6 +209,8 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
+          # libssl-dev only for the rusteron (Aeron) build scripts, whose reqwest uses native-tls;
+          # the gateway itself links rustls, not OpenSSL.
           sudo apt-get install -y libbsd-dev libssl-dev pkg-config build-essential clang libclang-dev openjdk-21-jdk uuid-dev
           # Install CMake 3.30+ (required by rusteron-archive/aeron)
           wget -q https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0-linux-x86_64.sh

@@ -155,7 +155,9 @@ account. After 5 wrong attempts a code is void (the 5th answers 429), and a new 
 requested.
 
 `[auth.email]` sends them. On `smtp_port` 465 the connection is TLS from the first byte; on any
-other port (587, the submission port) it starts plain and must upgrade with STARTTLS. An
+other port (587, the submission port) it starts plain and must upgrade with STARTTLS. The relay's
+certificate is checked against the public CA roots built into the gateway (webpki-roots), not the
+host's trust store, so a relay with a certificate from a private CA is refused. An
 `smtp_host` of `localhost`, `127.0.0.1` or `host.docker.internal` sends without TLS or credentials,
 for a local test server.
 
