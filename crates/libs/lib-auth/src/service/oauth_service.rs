@@ -74,7 +74,10 @@ use openidconnect::{
     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointMaybeSet,
     EndpointNotSet, EndpointSet, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier,
     RedirectUrl, ResponseTypes, Scope, TokenUrl,
-    core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata, CoreResponseType},
+    core::{
+        CoreAuthenticationFlow, CoreClient, CoreIdTokenVerifier, CoreJsonWebKeySet,
+        CoreProviderMetadata, CoreResponseType,
+    },
 };
 use secrecy::ExposeSecret;
 use serde_json::Value;
@@ -129,12 +132,16 @@ pub struct OAuthService {
     /// HTTP client for API requests to providers
     http_client: reqwest::Client,
 
-    /// HTTP client for the OAuth/OIDC protocol requests (discovery, token exchange). It does not
-    /// follow redirects, which would open the token exchange to SSRF.
+    /// HTTP client for the OAuth/OIDC protocol requests (discovery, key sets, token exchange). It
+    /// does not follow redirects, which would open the token exchange to SSRF.
     oidc_http_client: reqwest::Client,
 
     /// Pre-configured OAuth clients per provider (initialized at startup)
     oauth_clients: HashMap<String, OAuthClient>,
+
+    /// Discovered metadata of the OIDC providers (Google). Its `jwks_uri` is fetched at each login
+    /// because the provider rotates its signing keys.
+    oidc_metadata: HashMap<String, CoreProviderMetadata>,
 
     /// JWT token service for minting application tokens
     token_service: Arc<TokenService>,
@@ -337,13 +344,16 @@ impl OAuthService {
     ) -> Result<Self, AuthError> {
         let oidc_http_client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            // Discovery runs before the gateway listens: a stalled provider must not hold it.
+            .timeout(std::time::Duration::from_secs(10))
             .build()
             .map_err(|e| AuthError::Config(format!("Failed to build OAuth HTTP client: {}", e)))?;
         let mut oauth_clients = HashMap::new();
+        let mut oidc_metadata = HashMap::new();
 
         // Initialize OAuth clients for each configured provider
         for (provider, config) in &oauth_config.providers {
-            let client = Self::create_oauth_client(
+            let (client, metadata) = Self::create_oauth_client(
                 provider,
                 config,
                 &oauth_config.redirect_base,
@@ -351,6 +361,9 @@ impl OAuthService {
             )
             .await?;
             oauth_clients.insert(provider.clone(), client);
+            if let Some(metadata) = metadata {
+                oidc_metadata.insert(provider.clone(), metadata);
+            }
         }
 
         Ok(Self {
@@ -358,6 +371,7 @@ impl OAuthService {
             http_client,
             oidc_http_client,
             oauth_clients,
+            oidc_metadata,
             token_service,
             user_repo,
             frontend_url_web: oauth_config.frontend_url_web.clone(),
@@ -365,7 +379,8 @@ impl OAuthService {
         })
     }
 
-    /// Creates an OAuth client for a specific provider
+    /// Creates an OAuth client for a specific provider, and the provider's discovered metadata
+    /// when it is an OIDC provider
     ///
     /// Uses OIDC discovery for providers that support it, otherwise creates
     /// a minimal client configuration.
@@ -384,7 +399,7 @@ impl OAuthService {
         config: &OAuthProviderConfig,
         redirect_base: &str,
         http_client: &reqwest::Client,
-    ) -> Result<OAuthClient, AuthError> {
+    ) -> Result<(OAuthClient, Option<CoreProviderMetadata>), AuthError> {
         let client_id = ClientId::new(config.client_id.clone());
         let client_secret = ClientSecret::new(config.client_secret.expose_secret().to_string());
         let redirect_uri = format!("{}/api/oauth/{}/callback", redirect_base, provider);
@@ -405,12 +420,13 @@ impl OAuthService {
                 .await
                 .map_err(|e| AuthError::Config(format!("OIDC discovery failed: {}", e)))?;
 
-            Ok(CoreClient::from_provider_metadata(
-                provider_metadata,
+            let client = CoreClient::from_provider_metadata(
+                provider_metadata.clone(),
                 client_id,
                 Some(client_secret),
             )
-            .set_redirect_uri(redirect_url))
+            .set_redirect_uri(redirect_url);
+            Ok((client, Some(provider_metadata)))
         } else {
             // For plain OAuth 2.0 providers, create minimal metadata
             let issuer = IssuerUrl::new(format!("https://{}.com", provider))
@@ -432,12 +448,13 @@ impl OAuthService {
             )
             .set_token_endpoint(Some(token_url));
 
-            Ok(CoreClient::from_provider_metadata(
+            let client = CoreClient::from_provider_metadata(
                 provider_metadata,
                 client_id,
                 Some(client_secret),
             )
-            .set_redirect_uri(redirect_url))
+            .set_redirect_uri(redirect_url);
+            Ok((client, None))
         }
     }
 
@@ -751,7 +768,7 @@ impl OAuthService {
             let nonce = txn.nonce.as_deref().ok_or_else(|| {
                 AuthError::CodeExchangeFailed("OIDC nonce missing from transaction".to_string())
             })?;
-            self.validate_id_token(client, &token_response, nonce)
+            self.validate_id_token(provider, client, &token_response, nonce)
                 .await?;
         }
 
@@ -789,7 +806,7 @@ impl OAuthService {
     /// Validates the OIDC ID token for Google authentication
     ///
     /// This method performs comprehensive ID token validation:
-    /// - Verifies signature using Google's JWKS endpoint
+    /// - Verifies signature using the keys at Google's JWKS endpoint, fetched for each login
     /// - Checks issuer matches "https://accounts.google.com"
     /// - Checks audience matches the configured client ID
     /// - Verifies expiration and issued-at timestamps
@@ -797,6 +814,7 @@ impl OAuthService {
     ///
     /// # Arguments
     ///
+    /// * `provider` - The OIDC provider's name
     /// * `client` - The OAuth client configured for the provider
     /// * `token_response` - The token response from the provider
     /// * `stored_nonce_secret` - The nonce stored during OAuth initiation
@@ -804,10 +822,13 @@ impl OAuthService {
     /// # Errors
     ///
     /// Returns an error if:
+    /// - The provider has no discovered metadata (no `issuer_url`)
     /// - ID token is missing from the response
+    /// - The key set cannot be fetched
     /// - Any validation step fails (signature, issuer, audience, expiration, nonce)
     async fn validate_id_token(
         &self,
+        provider: &str,
         client: &OAuthClient,
         token_response: &openidconnect::core::CoreTokenResponse,
         stored_nonce_secret: &str,
@@ -819,14 +840,27 @@ impl OAuthService {
 
         let stored_nonce = Nonce::new(stored_nonce_secret.to_string());
 
-        // Verify ID token using the client's verifier
+        let metadata = self.oidc_metadata.get(provider).ok_or_else(|| {
+            AuthError::Config(format!(
+                "{provider} has no OIDC metadata: set its issuer_url"
+            ))
+        })?;
+        // The key set the client got at discovery goes stale when the provider rotates its keys.
+        let jwks = CoreJsonWebKeySet::fetch_async(metadata.jwks_uri(), &self.oidc_http_client)
+            .await
+            .map_err(|e| AuthError::CodeExchangeFailed(format!("JWKS fetch failed: {e}")))?;
+
         // This validates:
-        // - Signature using JWKS endpoint
+        // - Signature (RS256) against the fetched keys
         // - Issuer (iss) claim
         // - Audience (aud) claim
         // - Expiration (exp) and issued-at (iat) claims
         // - Nonce claim must match the stored nonce
-        let verifier = client.id_token_verifier();
+        let verifier = CoreIdTokenVerifier::new_public_client(
+            client.client_id().clone(),
+            metadata.issuer().clone(),
+            jwks,
+        );
         id_token.claims(&verifier, &stored_nonce).map_err(|e| {
             AuthError::CodeExchangeFailed(format!("ID token validation failed: {}", e))
         })?;
@@ -1199,8 +1233,168 @@ fn landing_url<'a>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::config::JwtConfig;
+    use crate::repository::user_repository::PostgresUserRepository;
+    use jsonwebtoken::{DecodingKey, EncodingKey};
+
+    /// An `OAuthService` for `oauth_config` on the test Redis, with no database behind its users.
+    pub(crate) async fn test_service(oauth_config: &OAuthConfig) -> OAuthService {
+        let conn = crate::test_redis().await;
+        let jwt_config = Arc::new(JwtConfig {
+            private_key_path: String::new(),
+            public_key_path: String::new(),
+            access_token_ttl_minutes: 15,
+            issuer: "test".to_string(),
+            audience: "test".to_string(),
+        });
+        let token_service = Arc::new(TokenService::new(
+            jwt_config,
+            conn.clone(),
+            Arc::new(EncodingKey::from_secret(b"unused")),
+            Arc::new(DecodingKey::from_secret(b"unused")),
+        ));
+        let user_repo = Arc::new(PostgresUserRepository::new(Arc::new(
+            sea_orm::DatabaseConnection::default(),
+        )));
+        OAuthService::new(
+            conn,
+            reqwest::Client::new(),
+            oauth_config,
+            token_service,
+            user_repo,
+        )
+        .await
+        .unwrap()
+    }
+
+    mod id_token {
+        use super::*;
+        use openidconnect::core::{
+            CoreIdToken, CoreIdTokenClaims, CoreIdTokenFields, CoreJwsSigningAlgorithm,
+            CoreRsaPrivateSigningKey, CoreTokenResponse, CoreTokenType,
+        };
+        use openidconnect::{
+            AccessToken, Audience, EmptyAdditionalClaims, EmptyExtraTokenFields, JsonWebKeyId,
+            PrivateSigningKey, StandardClaims, SubjectIdentifier,
+        };
+        use rsa::{
+            Generate, PrivateKey,
+            pkcs1::{EncodeRsaPrivateKey, LineEnding},
+        };
+        use secrecy::SecretString;
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        /// Answers each request to `listener` with the next of `bodies`, as JSON.
+        fn serve_in_order(listener: TcpListener, bodies: Vec<String>) {
+            std::thread::spawn(move || {
+                for body in bodies {
+                    let (stream, _) = listener.accept().unwrap();
+                    // A GET request ends with its empty line.
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(&stream);
+                    while reader.read_line(&mut line).unwrap() > 2 {
+                        line.clear();
+                    }
+                    write!(
+                        &stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                }
+            });
+        }
+
+        /// Google rotates its keys after the gateway started: the login's ID token is signed with
+        /// a key the startup key set does not hold.
+        #[tokio::test]
+        async fn google_id_token_is_verified_against_freshly_fetched_keys() {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let issuer = format!("http://{}", listener.local_addr().unwrap());
+            let pem = PrivateKey::generate().to_pkcs1_pem(LineEnding::LF).unwrap();
+            let key = |kid: &str| {
+                CoreRsaPrivateSigningKey::from_pem(&pem, Some(JsonWebKeyId::new(kid.to_string())))
+                    .unwrap()
+            };
+            let key_set = |kid| {
+                serde_json::to_string(&CoreJsonWebKeySet::new(vec![
+                    key(kid).as_verification_key(),
+                ]))
+                .unwrap()
+            };
+            // Discovery and its key set at startup, then the key set of the login.
+            serve_in_order(
+                listener,
+                vec![
+                    serde_json::json!({
+                        "issuer": issuer,
+                        "authorization_endpoint": format!("{issuer}/auth"),
+                        "jwks_uri": format!("{issuer}/jwks"),
+                        "response_types_supported": ["code"],
+                        "subject_types_supported": ["public"],
+                        "id_token_signing_alg_values_supported": ["RS256"],
+                    })
+                    .to_string(),
+                    key_set("old"),
+                    key_set("new"),
+                ],
+            );
+            let service = test_service(&OAuthConfig {
+                providers: HashMap::from([(
+                    "google".to_string(),
+                    OAuthProviderConfig {
+                        client_id: "client".to_string(),
+                        client_secret: SecretString::new("secret".to_string()),
+                        auth_url: format!("{issuer}/auth"),
+                        token_url: format!("{issuer}/token"),
+                        issuer_url: Some(issuer.clone()),
+                    },
+                )]),
+                redirect_base: "http://localhost".to_string(),
+                frontend_url_web: None,
+                frontend_url_app: None,
+            })
+            .await;
+
+            let now = chrono::Utc::now();
+            let claims = CoreIdTokenClaims::new(
+                IssuerUrl::new(issuer).unwrap(),
+                vec![Audience::new("client".to_string())],
+                now + chrono::Duration::minutes(5),
+                now,
+                StandardClaims::new(SubjectIdentifier::new("user".to_string())),
+                EmptyAdditionalClaims {},
+            )
+            .set_nonce(Some(Nonce::new("nonce".to_string())));
+            let id_token = CoreIdToken::new(
+                claims,
+                &key("new"),
+                CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256,
+                None,
+                None,
+            )
+            .unwrap();
+            let token_response = CoreTokenResponse::new(
+                AccessToken::new("access".to_string()),
+                CoreTokenType::Bearer,
+                CoreIdTokenFields::new(Some(id_token), EmptyExtraTokenFields {}),
+            );
+
+            service
+                .validate_id_token(
+                    "google",
+                    &service.oauth_clients["google"],
+                    &token_response,
+                    "nonce",
+                )
+                .await
+                .unwrap();
+        }
+    }
 
     #[test]
     fn app_logins_land_on_the_app_url_and_every_other_platform_on_the_web_url() {

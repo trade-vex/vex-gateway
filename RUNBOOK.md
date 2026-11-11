@@ -126,8 +126,8 @@ The service validates configuration on startup:
 - **Testing**: Allows ephemeral ports (port 0)
 - **Every environment**: `auth.oauth.providers` may list only `google`, `github` and `twitter`;
   another provider stops the gateway at startup, and the error names it. A `google` provider needs
-  `issuer_url = "https://accounts.google.com"`, where Google's endpoints and signing keys are
-  discovered. For `twitter` (X), the X
+  `issuer_url = "https://accounts.google.com"`, where the gateway discovers Google's endpoints at
+  startup (10 s timeout) and fetches its signing keys at each login. For `twitter` (X), the X
   developer app must have "Request email from users" enabled (it needs Terms of Service and
   Privacy Policy URLs in the app settings): without it X sends no confirmed email and every X
   login is refused with 400 `USER_INFO_FAILED`. The code lifetimes in `[auth.otp]` and
