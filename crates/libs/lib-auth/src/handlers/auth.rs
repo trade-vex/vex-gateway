@@ -1076,7 +1076,6 @@ mod tests {
             from_email: "test@example.com".to_string(),
         };
         let otp_config = OtpConfig {
-            otp_length: 6,
             email_verification_expiry_minutes: 15,
             password_reset_expiry_minutes: 15,
         };

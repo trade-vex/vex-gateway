@@ -132,7 +132,6 @@ pub struct EmailConfig {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct OtpConfig {
-    pub otp_length: usize,
     /// How long an email-verification code is valid, in minutes.
     pub email_verification_expiry_minutes: i64,
     /// How long a password-reset code is valid, in minutes. A setting of its own: a reset code

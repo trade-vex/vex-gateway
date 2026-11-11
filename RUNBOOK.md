@@ -145,7 +145,7 @@ login is redirected to, and refuses to start without them:
 
 ### Email Codes
 
-`[auth.otp]` sets the codes the gateway emails: `otp_length` digits (6 to 10, checked at load), valid for
+`[auth.otp]` sets how long the six-digit codes the gateway emails are valid:
 `email_verification_expiry_minutes` (signup email verification) or `password_reset_expiry_minutes`
 (password reset). Every key is required, and a lifetime that is not a positive number of minutes
 stops the gateway at startup. Keep the password-reset lifetime short: a reset code takes over the

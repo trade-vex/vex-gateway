@@ -30,7 +30,6 @@ pub struct EmailService {
     smtp_transport: AsyncSmtpTransport<Tokio1Executor>,
     conn: ConnectionManager,
     from_email: String,
-    otp_length: usize,
     otp_expiry_minutes: i64,
     password_reset_expiry_minutes: i64,
 }
@@ -46,7 +45,6 @@ impl EmailService {
         tracing::info!("SMTP Port: {}", email_config.smtp_port);
         tracing::info!("SMTP Username: {}", email_config.smtp_username);
         tracing::info!("From Email: {}", email_config.from_email);
-        tracing::info!("OTP Length: {}", otp_config.otp_length);
         tracing::info!(
             "OTP Expiry Minutes: {} (email verification), {} (password reset)",
             otp_config.email_verification_expiry_minutes,
@@ -95,7 +93,6 @@ impl EmailService {
             smtp_transport,
             conn,
             from_email: email_config.from_email.clone(),
-            otp_length: otp_config.otp_length,
             otp_expiry_minutes: otp_config.email_verification_expiry_minutes,
             password_reset_expiry_minutes: otp_config.password_reset_expiry_minutes,
         })
@@ -110,17 +107,9 @@ impl EmailService {
         })
     }
 
-    /// Generate a numeric OTP
+    /// A six-digit code: the length the request DTOs accept (`length(min = 6, max = 6)`).
     fn generate_otp(&self) -> String {
-        let mut rng = rand::thread_rng();
-        let mut otp = String::with_capacity(self.otp_length);
-
-        for _ in 0..self.otp_length {
-            let digit = rng.gen_range(0..10);
-            otp.push_str(&digit.to_string());
-        }
-
-        otp
+        format!("{:06}", rand::thread_rng().gen_range(0..1_000_000))
     }
 
     /// Store a verification code for `email`.
@@ -641,7 +630,6 @@ mod tests {
 
     async fn email_service() -> EmailService {
         email_service_with(&OtpConfig {
-            otp_length: 6,
             email_verification_expiry_minutes: 15,
             password_reset_expiry_minutes: 15,
         })
@@ -651,7 +639,6 @@ mod tests {
     #[tokio::test]
     async fn each_code_expires_after_its_own_lifetime_setting() {
         let service = email_service_with(&OtpConfig {
-            otp_length: 6,
             email_verification_expiry_minutes: 20,
             password_reset_expiry_minutes: 7,
         })
@@ -820,6 +807,28 @@ mod tests {
         }
 
         assert_eq!((codes, tokens), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn generated_codes_fit_the_requests_that_carry_them() {
+        use crate::dto::auth_request_dto::{VerifyEmailRequest, VerifyResetOtpRequest};
+        use validator::Validate;
+
+        let service = email_service().await;
+        for _ in 0..100 {
+            let otp = service.generate_otp();
+            assert!(otp.bytes().all(|b| b.is_ascii_digit()), "{otp}");
+            let verify = VerifyEmailRequest {
+                email: "user@example.com".to_string(),
+                password: "correct-horse-battery-staple".to_string(),
+                otp: otp.clone(),
+            };
+            let reset = VerifyResetOtpRequest {
+                email: "user@example.com".to_string(),
+                otp,
+            };
+            assert!(verify.validate().is_ok() && reset.validate().is_ok());
+        }
     }
 
     #[test]

@@ -350,7 +350,6 @@ impl Config {
     ///   must be set
     /// - `auth.otp.email_verification_expiry_minutes` and `password_reset_expiry_minutes` must be
     ///   positive
-    /// - `auth.otp.otp_length` must be 6 to 10 digits
     /// - `clickhouse.user` cannot be empty, and `clickhouse.database` must be a plain identifier
     ///
     /// ## Production Environment
@@ -458,14 +457,6 @@ impl Config {
                     "auth.otp.{key} must be a positive number of minutes"
                 )));
             }
-        }
-
-        // A length of 0 makes every code empty, which an empty submission would match; fewer than
-        // 6 digits is too easy to guess.
-        if !(6..=10).contains(&otp.otp_length) {
-            return Err(ConfigError::ValidationError(
-                "auth.otp.otp_length must be between 6 and 10 digits".to_string(),
-            ));
         }
 
         self.clickhouse.validate()?;
@@ -844,7 +835,6 @@ smtp_password = "configured-test-value"
 from_email = "gateway@example.com"
 
 [auth.otp]
-otp_length = 6
 email_verification_expiry_minutes = 15
 password_reset_expiry_minutes = 10
 
@@ -1241,23 +1231,6 @@ database = "vex_analytics"
     }
 
     #[test]
-    fn test_code_length_is_bounded() {
-        let config = load_development_example(&[("APP__AUTH__OTP__OTP_LENGTH", "8")]).unwrap();
-        assert_eq!(config.auth.otp.otp_length, 8);
-
-        for length in ["0", "5", "11"] {
-            let error =
-                load_development_example(&[("APP__AUTH__OTP__OTP_LENGTH", length)]).unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                "Configuration validation failed: auth.otp.otp_length must be between 6 and 10 \
-                 digits",
-                "otp_length={length}"
-            );
-        }
-    }
-
-    #[test]
     fn test_app_overrides_reach_every_core_link_key() {
         let config = load_development_example(&[
             ("APP__CORE__GATEWAY_ID", "7"),
@@ -1596,12 +1569,15 @@ database = "vex_analytics"
             load_development_example(&[("APP__SERVER__PORT", "65536")]).unwrap_err(),
             "Failed to load configuration: APP__SERVER__PORT must be an unsigned 16 bit integer",
         );
-        let (result, file) =
-            load_edited_example("otp_length = 6", &format!("otp_length = \"{secret}\""));
+        let (result, file) = load_edited_example(
+            "email_verification_expiry_minutes = 15",
+            &format!("email_verification_expiry_minutes = \"{secret}\""),
+        );
         expect(
             result.unwrap_err(),
             &format!(
-                "Failed to load configuration: auth.otp.otp_length (in {}) must be an integer",
+                "Failed to load configuration: auth.otp.email_verification_expiry_minutes (in {}) \
+                 must be an integer",
                 file.display()
             ),
         );
