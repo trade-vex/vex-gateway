@@ -569,7 +569,6 @@ mod tests {
                 iss: ISSUER.to_string(),
                 aud: AUDIENCE.to_string(),
                 jti: Uuid::new_v4().to_string(),
-                pwd: now - 3600,
                 token_version: token_service.get_token_version(user_id).await.unwrap(),
             },
             &test_keys().0,

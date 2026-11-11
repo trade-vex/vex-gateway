@@ -1,4 +1,6 @@
+use crate::dto::jwt_response_dto::AppClaims;
 use crate::error::auth_error::AuthError;
+use crate::service::token_service::{blacklist_key, token_version_key};
 use actix_web::http::header::{AUTHORIZATION, HeaderValue};
 use actix_web::{
     Error, HttpMessage, HttpResponse,
@@ -17,19 +19,20 @@ use std::rc::Rc;
 use std::sync::Arc;
 use uuid::Uuid;
 
-async fn refreshed_token_is_revoked(
+/// The revocation rule, the one every token passes before its request is served: its id was
+/// blacklisted (logout), or the user's token version moved past the token's (logout, password
+/// change or reset).
+async fn token_is_revoked(
     conn: &mut ConnectionManager,
     user_id: Uuid,
     jti: &str,
     token_version: u64,
 ) -> redis::RedisResult<bool> {
-    if conn.exists::<_, bool>(format!("blacklist:{}", jti)).await? {
+    if conn.exists::<_, bool>(blacklist_key(jti)).await? {
         return Ok(true);
     }
 
-    let stored_version: Option<u64> = conn
-        .get(crate::service::token_service::token_version_key(user_id))
-        .await?;
+    let stored_version: Option<u64> = conn.get(token_version_key(user_id)).await?;
     Ok(token_version < stored_version.unwrap_or_default())
 }
 
@@ -76,18 +79,6 @@ fn unavailable(req: ServiceRequest) -> Result<ServiceResponse<BoxBody>, Error> {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AuthenticatedUser {
     pub user_id: Uuid,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct JwtClaims {
-    pub sub: String, // user_id
-    exp: usize,
-    iat: usize,
-    iss: String,
-    aud: String,
-    jti: String,
-    pwd: i64, // password changed timestamp
-    token_version: u64,
 }
 
 #[derive(Clone)]
@@ -240,12 +231,12 @@ where
             validation.set_issuer(&[issuer]);
             validation.set_audience(&[audience]);
 
-            match decode::<JwtClaims>(token, &decoding_key, &validation) {
+            match decode::<AppClaims>(token, &decoding_key, &validation) {
                 Ok(token_data) => {
                     tracing::debug!("JWT middleware: JWT validation successful");
                     if let Ok(user_id) = Uuid::parse_str(&token_data.claims.sub) {
                         let jti = token_data.claims.jti.clone();
-                        let token_exp = token_data.claims.exp as i64;
+                        let token_exp = token_data.claims.exp;
                         let token_version = token_data.claims.token_version;
                         let authenticated_user: AuthenticatedUser = AuthenticatedUser { user_id };
 
@@ -254,50 +245,13 @@ where
 
                         // Clone handles to move into the async block
                         let svc = self.service.clone();
-                        let token_service_opt = self.token_service.clone();
                         let session_service_opt = self.session_service.clone();
 
                         return Box::pin(async move {
                             tracing::debug!("JWT middleware: Checking blacklist for JTI: {}", jti);
                             // Check revocation state BEFORE calling the inner service.
-                            let revocation_result = {
-                                let mut conn = redis_conn.clone();
-                                let blacklist_key = format!("blacklist:{}", jti);
-                                match conn.exists::<_, bool>(&blacklist_key).await {
-                                    Ok(true) => {
-                                        tracing::warn!(
-                                            "Attempted use of blacklisted token with JTI: {}",
-                                            jti
-                                        );
-                                        Ok(true)
-                                    }
-                                    Ok(false) => {
-                                        let version_key =
-                                            crate::service::token_service::token_version_key(
-                                                user_id,
-                                            );
-                                        match conn.get::<_, Option<u64>>(version_key).await {
-                                            Ok(stored_version) => {
-                                                Ok(token_version
-                                                    < stored_version.unwrap_or_default())
-                                            }
-                                            Err(e) => {
-                                                tracing::error!(
-                                                    "Failed to check token version: {}",
-                                                    e
-                                                );
-                                                Err("Redis token version check failed")
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::error!("Failed to check token blacklist: {}", e);
-                                        Err("Redis blacklist check failed")
-                                    }
-                                }
-                            };
-
-                            match revocation_result {
+                            let mut conn = redis_conn.clone();
+                            match token_is_revoked(&mut conn, user_id, &jti, token_version).await {
                                 Ok(true) => {
                                     tracing::warn!(
                                         "JWT middleware: Token is revoked with JTI: {}",
@@ -326,26 +280,18 @@ where
                                                 let now = chrono::Utc::now().timestamp();
                                                 if token_exp > now {
                                                     let ttl_secs = (token_exp - now) as u64;
-                                                    if let Some(token_service) = &token_service_opt
+                                                    if let Err(e) = conn
+                                                        .set_ex::<_, _, ()>(
+                                                            blacklist_key(&jti),
+                                                            "1",
+                                                            ttl_secs,
+                                                        )
+                                                        .await
                                                     {
-                                                        if let Err(e) = token_service
-                                                            .blacklist_jti(&jti, ttl_secs)
-                                                            .await
-                                                        {
-                                                            tracing::warn!(
-                                                                "Failed to blacklist JTI on idle-expiry: {}",
-                                                                e
-                                                            );
-                                                        }
-                                                    } else {
-                                                        let mut conn = redis_conn.clone();
-                                                        let _: Result<(), _> = conn
-                                                            .set_ex(
-                                                                format!("blacklist:{}", jti),
-                                                                "1",
-                                                                ttl_secs,
-                                                            )
-                                                            .await;
+                                                        tracing::warn!(
+                                                            "Failed to blacklist JTI on idle-expiry: {}",
+                                                            e
+                                                        );
                                                     }
                                                 }
 
@@ -370,7 +316,10 @@ where
                                     Ok(res.map_into_boxed_body())
                                 }
                                 // Redis failure - fail closed with service unavailable
-                                Err(_) => unavailable(req),
+                                Err(e) => {
+                                    tracing::error!("Failed to check token revocation: {}", e);
+                                    unavailable(req)
+                                }
                             }
                         });
                     }
@@ -388,7 +337,7 @@ where
                         // trustworthy: the version they carry is the one the session was issued at.
                         let mut expired = validation.clone();
                         expired.validate_exp = false;
-                        let old = decode::<JwtClaims>(token, &decoding_key, &expired);
+                        let old = decode::<AppClaims>(token, &decoding_key, &expired);
                         let svc = self.service.clone();
 
                         return Box::pin(async move {
@@ -466,7 +415,7 @@ where
 
                             // Validate the new access token, and recheck revocation before
                             // forwarding.
-                            let Ok(token_data) = decode::<JwtClaims>(
+                            let Ok(token_data) = decode::<AppClaims>(
                                 &new_tokens.access_token,
                                 &decoding_key,
                                 &validation,
@@ -479,7 +428,7 @@ where
                                 );
                             };
                             let mut conn = redis_conn.clone();
-                            match refreshed_token_is_revoked(
+                            match token_is_revoked(
                                 &mut conn,
                                 session.user_id,
                                 &token_data.claims.jti,
@@ -619,14 +568,13 @@ mod tests {
             .as_secs();
         let exp = if expired { now - 3600 } else { now + 3600 };
 
-        let claims = JwtClaims {
+        let claims = AppClaims {
             sub: user_id.to_string(),
-            exp: exp as usize,
-            iat: now as usize,
+            exp: exp as i64,
+            iat: now as i64,
             iss: "vex-gateway".to_string(),
             aud: "vex-api".to_string(),
             jti: jti.to_string(),
-            pwd: now as i64, // Use current time as password timestamp for tests
             token_version,
         };
 
@@ -647,7 +595,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            refreshed_token_is_revoked(&mut conn, user_id, "auto-refresh-stale-version", 1)
+            token_is_revoked(&mut conn, user_id, "auto-refresh-stale-version", 1)
                 .await
                 .unwrap()
         );
@@ -813,7 +761,6 @@ mod tests {
                 "iss": "vex-gateway",
                 "aud": "vex-api",
                 "jti": "test-jti-no-version",
-                "pwd": now,
             }),
             &EncodingKey::from_secret("test_secret".as_ref()),
         )
