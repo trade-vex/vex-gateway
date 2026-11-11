@@ -134,7 +134,7 @@ impl EmailService {
         tracing::debug!("Getting Redis connection from pool");
         let mut conn = self.conn.clone();
 
-        let key = format!("{}{}", OTP_KEY_PREFIX, email);
+        let key = code_key(OTP_KEY_PREFIX, email);
 
         tracing::debug!("Redis key: {}", key);
         tracing::debug!(
@@ -148,7 +148,7 @@ impl EmailService {
             key,
             expiry_seconds_u64
         );
-        let attempt_key = format!("{}{}", OTP_VERIFY_ATTEMPT_PREFIX, email);
+        let attempt_key = code_key(OTP_VERIFY_ATTEMPT_PREFIX, email);
         let _: () = redis::pipe()
             .atomic()
             .set_ex(&key, otp, expiry_seconds_u64)
@@ -290,8 +290,8 @@ impl EmailService {
     pub async fn verify_otp(&self, email: &str, submitted_otp: &str) -> Result<(), AuthError> {
         let mut conn = self.conn.clone();
 
-        let key = format!("{}{}", OTP_KEY_PREFIX, email);
-        let attempt_key = format!("{}{}", OTP_VERIFY_ATTEMPT_PREFIX, email);
+        let key = code_key(OTP_KEY_PREFIX, email);
+        let attempt_key = code_key(OTP_VERIFY_ATTEMPT_PREFIX, email);
         let result: (u8, u64, i64) = redis::Script::new(
             r#"
 local otp = redis.call('GET', KEYS[1])
@@ -515,7 +515,7 @@ return count
         let expiry_seconds_u64 = Self::expiry_seconds(self.password_reset_expiry_minutes)?;
         let mut conn = self.conn.clone();
 
-        let key = format!("{}{}", PASSWORD_RESET_OTP_PREFIX, email);
+        let key = code_key(PASSWORD_RESET_OTP_PREFIX, email);
 
         let _: () = conn
             .set_ex(&key, otp, expiry_seconds_u64)
@@ -551,7 +551,7 @@ return count
 
         let mut conn = self.conn.clone();
 
-        let key = format!("{}{}", PASSWORD_RESET_OTP_PREFIX, email);
+        let key = code_key(PASSWORD_RESET_OTP_PREFIX, email);
 
         let stored_otp: Option<String> = conn
             .get(&key)
@@ -646,6 +646,12 @@ return count
     }
 }
 
+/// The Redis key of a code (or its attempt count) for `email`, whatever case it was typed in: the
+/// users table matches emails case-insensitively (CITEXT).
+fn code_key(prefix: &str, email: &str) -> String {
+    format!("{prefix}{}", email.trim().to_lowercase())
+}
+
 /// The text and HTML bodies of a code email, the same for every code the gateway sends.
 fn code_email(heading: &str, intro: &str, otp: &str, minutes: i64) -> (String, String) {
     let text = format!(
@@ -725,6 +731,26 @@ mod tests {
             "{verification_ttl}"
         );
         assert!((7 * 60 - 5..=7 * 60).contains(&reset_ttl), "{reset_ttl}");
+    }
+
+    #[tokio::test]
+    async fn a_code_stored_for_one_spelling_of_the_email_verifies_for_another() {
+        let service = email_service().await;
+        let local = Uuid::new_v4().simple().to_string();
+        let typed_at_signup = format!("{}@Example.COM", local.to_uppercase());
+        let typed_later = format!(" {local}@example.com ");
+
+        service.store_otp(&typed_at_signup, "123456").await.unwrap();
+        service
+            .store_password_reset_otp(&typed_at_signup, "654321")
+            .await
+            .unwrap();
+
+        service.verify_otp(&typed_later, "123456").await.unwrap();
+        service
+            .verify_password_reset_otp(&typed_later, "654321")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
