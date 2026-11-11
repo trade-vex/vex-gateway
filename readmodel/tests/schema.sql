@@ -114,6 +114,7 @@ UPDATE users SET email_verified = true WHERE username = 'role';
 INSERT INTO api_keys (id, api_key, permissions, recv_window, enabled)
 VALUES ('00000000-0000-0000-0000-000000000002', 'role-key', '{trade}', 5000, true);
 UPDATE api_keys SET enabled = false WHERE api_key = 'role-key';
+DELETE FROM api_keys WHERE api_key = 'role-key';
 INSERT INTO user_favorite_markets (user_id, market_id) VALUES (-1, 65538);
 DELETE FROM user_favorite_markets WHERE user_id = -1;
 DO $$

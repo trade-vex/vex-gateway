@@ -33,7 +33,7 @@ pub trait ApiKeyRepository: Send + Sync {
     async fn update_last_used(&self, id: Uuid, timestamp: DateTime<Utc>)
         -> Result<(), ApiKeyError>;
 
-    /// Delete API key (soft delete by disabling)
+    /// Delete API key
     async fn delete(&self, id: Uuid) -> Result<(), ApiKeyError>;
 
     /// Find active API keys (enabled and not expired)
@@ -146,8 +146,11 @@ impl ApiKeyRepository for PostgresApiKeyRepository {
     }
 
     async fn delete(&self, id: Uuid) -> Result<(), ApiKeyError> {
-        // Soft delete by disabling the key
-        self.set_enabled(id, false).await
+        let result = Entity::delete_by_id(id).exec(&*self.db).await?;
+        if result.rows_affected == 0 {
+            return Err(ApiKeyError::NotFound);
+        }
+        Ok(())
     }
 
     async fn find_active_keys(&self, limit: Option<u64>) -> Result<Vec<Model>, ApiKeyError> {

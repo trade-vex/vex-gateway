@@ -254,7 +254,8 @@ GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA trading TO readmodel_connec
 
 -- The gateway only reads trading.*, so Postgres, not convention, keeps it from writing balances.
 GRANT SELECT ON ALL TABLES IN SCHEMA trading TO readmodel_gateway;
-GRANT SELECT, INSERT, UPDATE ON users, api_keys TO readmodel_gateway;
+GRANT SELECT, INSERT, UPDATE ON users TO readmodel_gateway;
+GRANT SELECT, INSERT, UPDATE, DELETE ON api_keys TO readmodel_gateway;
 GRANT SELECT, INSERT, DELETE ON user_favorite_markets TO readmodel_gateway;
 GRANT SELECT ON assets, markets TO readmodel_gateway;
 

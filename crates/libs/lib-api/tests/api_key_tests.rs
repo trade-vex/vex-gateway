@@ -694,9 +694,18 @@ mod tests {
 
                 assert_eq!(delete_response["message"], "API key deleted successfully");
 
-                let deleted_key = repo.find_by_id(api_key_id).await.unwrap();
-                assert!(deleted_key.is_some());
-                assert!(!deleted_key.unwrap().enabled);
+                // Gone, secret included: it cannot be switched back on.
+                assert!(repo.find_by_id(api_key_id).await.unwrap().is_none());
+                let toggle = toggle_api_key(
+                    web::Path::from(api_key_id),
+                    web::Json(serde_json::json!({"enabled": true})),
+                    web::Data::new(repo.clone() as Arc<dyn ApiKeyRepository>),
+                    None,
+                    user.clone(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(toggle.status(), 404);
             }
             Err(e) => {
                 panic!("Delete API key failed: {}", e);

@@ -384,7 +384,7 @@ pub async fn update_api_key(
     }
 }
 
-/// delete an API key (soft delete by disabling)
+/// delete an API key
 pub async fn delete_api_key(
     path: web::Path<Uuid>,
     repo: web::Data<Arc<dyn ApiKeyRepository>>,
