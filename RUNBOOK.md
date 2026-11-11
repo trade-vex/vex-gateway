@@ -692,7 +692,11 @@ upserts in at most 46 ms per write), so `tasks.max` 3 holds about three times th
 `kafka_consumergroup_lag{group=~"connect-pg-.*"}` grows for more than a few minutes at or below
 the target, repeat that measurement, then set that connector's `tasks.max` to its topic's
 partition count (`balances` and `orders` 12, `orderbook` 6) and size Postgres' connections for
-the extra writers.
+the extra writers. The ClickHouse connector inserts one topic-partition after another, and each
+insert waits for ClickHouse to flush its asynchronous buffer (`clickhouseSettings`; about 60 ms
+measured, at most 200 ms), so a task writes at most `max.poll.records` (500) rows per wait: about
+8,000 rows/s, 2,500 at worst. When `kafka_consumergroup_lag{group="connect-clickhouse"}` grows while
+the `connect-pg-*` groups keep up, raise its `tasks.max`, up to 54 (its seven topics' partitions).
 
 **Recovery:** a task that is still retrying carries on once the cause is fixed. For a failed one,
 read its `trace` in `GET /connectors/<name>/status`, fix the cause, then restart the connector
