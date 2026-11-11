@@ -20,6 +20,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+# The jobs only read the repository; whatever the repository's default, the token cannot write.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Build and Test
@@ -72,11 +76,11 @@ jobs:
       TEST_CLICKHOUSE_USER: myuser
       TEST_CLICKHOUSE_PASSWORD: mypassword
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66 # 1.89.0
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Install system dependencies
         run: |
@@ -86,6 +90,8 @@ jobs:
           sudo apt-get install -y libbsd-dev libssl-dev pkg-config build-essential clang libclang-dev openjdk-21-jdk uuid-dev
           # Install CMake 3.30+ (required by rusteron-archive/aeron)
           wget -q https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0-linux-x86_64.sh
+          # From cmake-3.30.0-SHA-256.txt, published with the release
+          echo "1a5969fe81fea6e5220d053d9d3e3754cbc85be07d2d428bebdcfe87137971a9  cmake-3.30.0-linux-x86_64.sh" | sha256sum -c -
           sudo sh cmake-3.30.0-linux-x86_64.sh --prefix=/usr/local --skip-license
           echo "/usr/local/bin" >> $GITHUB_PATH
           export PATH="/usr/local/bin:$PATH"
@@ -108,9 +114,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66 # 1.89.0
         with:
           components: rustfmt
 
@@ -122,13 +128,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66 # 1.89.0
         with:
           components: clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Install system dependencies
         run: |
@@ -138,6 +144,8 @@ jobs:
           sudo apt-get install -y libbsd-dev libssl-dev pkg-config build-essential clang libclang-dev openjdk-21-jdk uuid-dev
           # Install CMake 3.30+ (required by rusteron-archive/aeron)
           wget -q https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0-linux-x86_64.sh
+          # From cmake-3.30.0-SHA-256.txt, published with the release
+          echo "1a5969fe81fea6e5220d053d9d3e3754cbc85be07d2d428bebdcfe87137971a9  cmake-3.30.0-linux-x86_64.sh" | sha256sum -c -
           sudo sh cmake-3.30.0-linux-x86_64.sh --prefix=/usr/local --skip-license
           echo "/usr/local/bin" >> $GITHUB_PATH
           export PATH="/usr/local/bin:$PATH"
@@ -198,13 +206,13 @@ jobs:
       TEST_CLICKHOUSE_PASSWORD: mypassword
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66 # 1.89.0
         with:
           components: llvm-tools-preview
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Install system dependencies
         run: |
@@ -214,6 +222,8 @@ jobs:
           sudo apt-get install -y libbsd-dev libssl-dev pkg-config build-essential clang libclang-dev openjdk-21-jdk uuid-dev
           # Install CMake 3.30+ (required by rusteron-archive/aeron)
           wget -q https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0-linux-x86_64.sh
+          # From cmake-3.30.0-SHA-256.txt, published with the release
+          echo "1a5969fe81fea6e5220d053d9d3e3754cbc85be07d2d428bebdcfe87137971a9  cmake-3.30.0-linux-x86_64.sh" | sha256sum -c -
           sudo sh cmake-3.30.0-linux-x86_64.sh --prefix=/usr/local --skip-license
           echo "/usr/local/bin" >> $GITHUB_PATH
           export PATH="/usr/local/bin:$PATH"
@@ -238,7 +248,7 @@ jobs:
         run: cargo llvm-cov --workspace --html --output-dir coverage
 
       - name: Upload coverage reports
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: coverage-report
@@ -256,7 +266,7 @@ jobs:
     steps:
       # A pull request's checkout is its merge commit: the base it merges into and its head are
       # the commit's two parents.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 2
 
@@ -289,7 +299,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       # The stack's images keep their layers in the Actions cache: a BuildKit builder that can
       # export them, and the runtime variables that reach the cache, on seeing which run.py adds
@@ -340,11 +350,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66 # 1.89.0
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Install cargo-audit
         uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
