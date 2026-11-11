@@ -129,16 +129,6 @@ impl Model {
         self.permissions.contains(required_permission)
             || self.permissions.contains(&SecurityType::None)
     }
-
-    /// Check if the IP address is blacklisted (blocked)
-    pub fn is_ip_blacklisted(&self, ip: &str) -> bool {
-        self.ip_blacklist.contains(&ip.to_string())
-    }
-
-    /// Check if the IP address is allowed (not blacklisted)
-    pub fn is_ip_allowed(&self, ip: &str) -> bool {
-        !self.is_ip_blacklisted(ip)
-    }
 }
 
 /// Helper struct for creating new API keys

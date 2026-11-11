@@ -198,10 +198,17 @@ impl ApiKeyConfig {
         true
     }
 
-    /// Check if the request IP is allowed (not blacklisted)
+    /// Whether `ip`, the client IP, is outside every blocked address and CIDR range. A client
+    /// with no address ("unknown", no peer) is allowed: there is nothing to match.
     pub fn is_ip_allowed(&self, ip: &str) -> bool {
-        // If IP is in blacklist, it's not allowed
-        !self.ip_blacklist.contains(&ip.to_string())
+        let Ok(ip) = ip.parse::<std::net::IpAddr>() else {
+            return true;
+        };
+        !self
+            .ip_blacklist
+            .iter()
+            .filter_map(|entry| crate::client_ip::parse_ip_or_net(entry))
+            .any(|net| net.contains(&ip))
     }
 
     /// Get the signature algorithm for this API key
@@ -240,5 +247,20 @@ mod tests {
         let multibyte_debug_output = format!("{:?}", multibyte_config);
 
         assert!(!multibyte_debug_output.contains(multibyte_api_key));
+    }
+
+    #[test]
+    fn cidr_and_noncanonical_ipv6_entries_block() {
+        let config = ApiKeyConfig::new("k".to_string()).with_ip_blacklist(vec![
+            "198.51.100.0/24".to_string(),
+            "2001:0DB8::1".to_string(),
+        ]);
+
+        assert!(!config.is_ip_allowed("198.51.100.7"));
+        // The client IP is the canonical form, lowercase and compressed.
+        assert!(!config.is_ip_allowed("2001:db8::1"));
+        assert!(config.is_ip_allowed("198.51.101.1"));
+        // No peer address: nothing to match.
+        assert!(config.is_ip_allowed("unknown"));
     }
 }

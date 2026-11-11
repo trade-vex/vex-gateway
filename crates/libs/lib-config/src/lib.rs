@@ -342,7 +342,7 @@ impl Config {
     /// - The `core` link settings must pass vex-core's own rules (distinct non-zero ports,
     ///   gateway id below 16, an empty or signed 32-bit `auth_key`, non-empty `context_dir`), and
     ///   `core.address` cannot be empty
-    /// - Every `auth.server.trusted_proxies` entry must be an IP address or CIDR range
+    /// - Every `auth.server.trusted_proxies` entry must be an IP address or CIDR range, not /0
     /// - `metrics.bind` must be an IP address and a port
     /// - Every `rate_limit` setting must be greater than 0
     /// - `auth.oauth.providers` may list only `google`, `github` and `twitter`

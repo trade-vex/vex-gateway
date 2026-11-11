@@ -337,7 +337,8 @@ Set `auth.server.trusted_proxies` in the TOML file, or `APP__AUTH__SERVER__TRUST
 a request whose TCP peer is in that list is `X-Forwarded-For` read, from the right; the first hop
 that is not itself a trusted proxy is the client. List only proxies that append to
 `X-Forwarded-For`: a listed address that forwards a client's header unchanged lets that client
-choose its own IP. An invalid entry stops the gateway at startup, before it connects to vex-core.
+choose its own IP. An invalid entry, or a /0 range (it would trust every client), stops the
+gateway at startup, before it connects to vex-core.
 The error gives the entry's position in the list, never its value; empty items of a
 comma-separated value are skipped and not counted.
 

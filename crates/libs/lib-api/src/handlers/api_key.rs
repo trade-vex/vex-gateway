@@ -11,6 +11,7 @@ use lib_middleware::{
     api_key::SecurityType,
     api_key::middleware::ApiKeyStore,
     api_key::security::KeyMaterial,
+    client_ip::parse_ip_or_net,
     models::api_key::{ActiveModel, Model as ApiKeyModel, NewApiKey},
     repository::api_key_repository::ApiKeyRepository,
 };
@@ -140,46 +141,15 @@ fn parse_key_material(key_type: &str, value: &str) -> Result<KeyMaterial, String
     }
 }
 
-/// validate IP address format (supports IPv4, IPv6, and CIDR notation)
-fn validate_ip_address(ip: &str) -> Result<(), String> {
-    use std::net::IpAddr;
-
-    // Check for CIDR notation (e.g., 192.168.1.0/24)
-    if let Some((ip_part, cidr_part)) = ip.split_once('/') {
-        let ip_addr: IpAddr = ip_part
-            .parse()
-            .map_err(|_| format!("Invalid IP address: {}", ip_part))?;
-        let prefix_len: u8 = cidr_part
-            .parse()
-            .map_err(|_| format!("Invalid CIDR prefix: {}", cidr_part))?;
-
-        match ip_addr {
-            IpAddr::V4(_) => {
-                if prefix_len > 32 {
-                    return Err(format!("Invalid IPv4 CIDR prefix: {}", prefix_len));
-                }
-            }
-            IpAddr::V6(_) => {
-                if prefix_len > 128 {
-                    return Err(format!("Invalid IPv6 CIDR prefix: {}", prefix_len));
-                }
-            }
-        }
-        return Ok(());
-    }
-
-    // Check for single IP address
-    ip.parse::<IpAddr>()
-        .map_err(|_| format!("Invalid IP address: {}", ip))?;
-    Ok(())
-}
-
-/// validate IP blacklist entries
+/// Every entry must be an IP address or a CIDR range: the form the API-key middleware matches.
 fn validate_ip_blacklist(ip_list: &[String]) -> Result<(), String> {
-    for ip in ip_list {
-        validate_ip_address(ip)?;
+    match ip_list
+        .iter()
+        .find(|entry| parse_ip_or_net(entry).is_none())
+    {
+        Some(entry) => Err(format!("Invalid IP address or CIDR range: {entry}")),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// create a new API key
