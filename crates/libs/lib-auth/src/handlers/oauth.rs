@@ -30,6 +30,14 @@ pub(crate) fn validate_callback_state_cookie(
     Ok(())
 }
 
+/// `base` with `key=value` appended to its query, whatever its scheme.
+fn login_redirect(base: &str, key: &str, value: &str) -> Result<String, AuthError> {
+    let mut url = Url::parse(base)
+        .map_err(|e| AuthError::Config(format!("frontend URL {base:?} is not a URL: {e}")))?;
+    url.query_pairs_mut().append_pair(key, value);
+    Ok(url.to_string())
+}
+
 const OAUTH_INIT_RATE_LIMIT_SCOPE: &str = "oauth_initiate";
 const OAUTH_CALLBACK_RATE_LIMIT_SCOPE: &str = "oauth_callback";
 // `client_ip_key` honours X-Forwarded-For only from configured trusted proxies
@@ -185,27 +193,7 @@ pub async fn handle_oauth_callback(
                         .create_login_code(session_id, user_info_json, app_challenge)
                         .await?;
 
-                    // Build redirect URL with only login_code
-                    let redirect_url = if frontend_url.contains("://")
-                        && !frontend_url.starts_with("http://")
-                        && !frontend_url.starts_with("https://")
-                    {
-                        // Custom scheme (e.g., vex://) - UUIDs are URL-safe, no encoding needed
-                        format!("{}?login_code={}", frontend_url, login_code)
-                    } else {
-                        // Standard URL - use URL parsing for proper encoding
-                        match Url::parse(&frontend_url) {
-                            Ok(mut url) => {
-                                // query_pairs_mut() automatically handles encoding if needed
-                                url.query_pairs_mut().append_pair("login_code", &login_code);
-                                url.to_string()
-                            }
-                            Err(_) => {
-                                // Fallback - UUIDs are URL-safe
-                                format!("{}?login_code={}", frontend_url, login_code)
-                            }
-                        }
-                    };
+                    let redirect_url = login_redirect(&frontend_url, "login_code", &login_code)?;
 
                     Ok(HttpResponse::Found()
                         .insert_header(("Cache-Control", "no-store"))
@@ -296,4 +284,26 @@ pub async fn exchange_oauth_login_code(
             session_id: data.session_id,
             user_info: user_info_val,
         }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_mobile_redirect_keeps_an_existing_query_on_the_app_url() {
+        for (base, redirect) in [
+            ("vex://oauth", "vex://oauth?login_code=abc"),
+            (
+                "vex://oauth?src=login",
+                "vex://oauth?src=login&login_code=abc",
+            ),
+            (
+                "https://app.example.com/done",
+                "https://app.example.com/done?login_code=abc",
+            ),
+        ] {
+            assert_eq!(login_redirect(base, "login_code", "abc").unwrap(), redirect);
+        }
+    }
 }
