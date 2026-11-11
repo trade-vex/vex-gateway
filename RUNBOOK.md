@@ -775,7 +775,7 @@ certificate or `server`; restart the connector if its tasks failed.
   stack with the vex-core rev `Cargo.lock` pins, its topics from that rev's
   `deploy/kafka/topics.toml`; CI runs it (the "Read model" job, which keeps the images' layers in
   the GitHub Actions cache) on pushes to `main` and `develop` and on pull requests that change
-  `readmodel/`, `Cargo.lock`, the gateway's repository or model code, or `ci.yml`.
+  `readmodel/`, `Cargo.lock` or `ci.yml` (it builds no gateway crate).
 - After re-pinning vex-core, `cargo test -p readmodel-seeds` fails if its `config.dev.yaml` changed;
   regenerate the development seeds with
   `cargo run -p readmodel-seeds -- postgres <vex-core checkout>/config.dev.yaml > readmodel/seeds/development.sql`
