@@ -33,7 +33,10 @@ impl CombinedAuthMiddleware {
     fn detect_auth_type(req: &HttpRequest) -> AuthType {
         let has_bearer_token = if let Some(auth_header) = req.headers().get("authorization")
             && let Ok(auth_str) = auth_header.to_str()
-            && auth_str.starts_with("Bearer ")
+            // The scheme is case-insensitive (RFC 7235), as the JWT middleware reads it.
+            && auth_str
+                .get(..7)
+                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("bearer "))
         {
             true
         } else {
@@ -638,5 +641,63 @@ mod tests {
         assert_eq!(status(trade), StatusCode::FORBIDDEN);
         let profile = test::try_call_service(&app, signed("GET", "/api/profile")).await;
         assert_eq!(status(profile), StatusCode::UNAUTHORIZED);
+    }
+
+    /// RFC 7235: the scheme is case-insensitive, as the JWT middleware already reads it.
+    #[actix_web::test]
+    async fn lowercase_bearer_scheme_is_routed_to_jwt() {
+        let redis_conn = crate::test_redis().await;
+        let (encoding_key, decoding_key) = test_keys();
+        let (issuer, audience) = ("combined-auth-test", "combined-auth-audience");
+        let token_service = TokenService::new(
+            Arc::new(JwtConfig {
+                private_key_path: String::new(),
+                public_key_path: String::new(),
+                access_token_ttl_minutes: 60,
+                refresh_token_ttl_days: 1,
+                issuer: issuer.to_string(),
+                audience: audience.to_string(),
+            }),
+            redis_conn.clone(),
+            Arc::new(encoding_key),
+            Arc::new(decoding_key.clone()),
+        );
+        let tokens = token_service
+            .mint_tokens(Uuid::new_v4())
+            .await
+            .expect("token mint must succeed");
+        let jwt_middleware = JwtAuthentication::new(
+            decoding_key,
+            issuer.to_string(),
+            audience.to_string(),
+            redis_conn.clone(),
+        );
+        let session_service = Arc::new(SessionService::new(redis_conn.clone(), 300));
+        let app = test::init_service(
+            App::new()
+                .wrap(CombinedAuthMiddleware::new(
+                    jwt_middleware,
+                    ApiKeyMiddleware::new(),
+                    session_service,
+                ))
+                .route("/protected", web::get().to(HttpResponse::Ok)),
+        )
+        .await;
+
+        let request = test::TestRequest::get()
+            .uri("/protected")
+            .insert_header(("Authorization", format!("bearer {}", tokens.access_token)))
+            .to_request();
+        let status = match test::try_call_service(&app, request).await {
+            Ok(response) => response.status(),
+            Err(error) => error.as_response_error().status_code(),
+        };
+
+        assert_eq!(status, StatusCode::OK);
+        let _: () = redis_conn
+            .clone()
+            .del(format!("refresh:{}", tokens.refresh_token))
+            .await
+            .expect("test refresh token cleanup must succeed");
     }
 }
