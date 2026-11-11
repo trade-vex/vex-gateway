@@ -1,7 +1,7 @@
 # Local development configuration for the docker-compose services used by scripts/.
 # scripts/setup_dev.sh copies this file to config/development.toml (gitignored); edit the copy.
 # Every setting below is required unless marked optional. Run from the repository root.
-environment = "development"
+# APP_ENV names the environment, which selects this file; an `environment` key here is ignored.
 
 [server]
 host = "127.0.0.1"

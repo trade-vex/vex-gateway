@@ -45,6 +45,14 @@ impl FromStr for Environment {
 }
 
 impl Environment {
+    /// The lowercase name APP_ENV uses.
+    pub fn name(self) -> &'static str {
+        match self {
+            Environment::Development => "development",
+            Environment::Production => "production",
+        }
+    }
+
     /// Get the configuration file name for this environment.
     ///
     /// Returns the filename (without path) that should contain

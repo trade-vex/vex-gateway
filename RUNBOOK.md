@@ -51,8 +51,8 @@ APP_ENV=production ./target/release/gateway
 
 The gateway reads two environment variables by name, and does not read a `.env` file:
 
-- `APP_ENV` (required): `development` or `production`. Selects `<APP_ENV>.toml`, whose
-  `environment` key must name the same environment.
+- `APP_ENV` (required): `development` or `production`. Selects `<APP_ENV>.toml` and the
+  environment's rules; an `environment` key in the file, or `APP__ENVIRONMENT`, is ignored.
 - `APP_CONFIG_DIR` (optional): the directory holding that file. The gateway refuses to start
   when it does not name a directory. When it is unset, the gateway uses the nearest `config/`
   directory at or above its working directory.

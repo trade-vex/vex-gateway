@@ -229,6 +229,9 @@ impl Config {
             .add_source(config::File::from(file.clone()))
             // 2. Override it with the `APP__` environment variables
             .add_source(overrides)
+            // APP_ENV chose the file; the value is not a setting of the file
+            .set_override("environment", environment.name())
+            .map_err(|error| load_error(error, &overridden, &file))?
             .build()
             .map_err(|error| load_error(error, &overridden, &file))?;
 
@@ -257,14 +260,6 @@ impl Config {
             )));
         }
         let config = result.map_err(|error| load_error(error, &overridden, &file))?;
-
-        // The selected environment chose the file, so the file (or `APP__ENVIRONMENT`) must agree.
-        if config.environment != environment {
-            return Err(ConfigError::ValidationError(format!(
-                "the configuration's environment ({:?}) is not the selected one ({:?}, from APP_ENV)",
-                config.environment, environment
-            )));
-        }
 
         // Log what we loaded before validation
         debug!("Loaded configuration before validation:");
@@ -657,16 +652,6 @@ fn load_error(
         }
         // A message names no key. serde's for a missing setting names its field.
         config::ConfigError::Message(message) if message.starts_with("missing field ") => message,
-        // config-rs's for `environment`, the only enum, quotes the value after a fixed prefix.
-        config::ConfigError::Message(message)
-            if message.starts_with("enum Environment ")
-                || message.starts_with("value of enum Environment ") =>
-        {
-            format!(
-                "{} must be one of: development, production",
-                setting("environment", overridden, file)
-            )
-        }
         // serde's for a section or list given a single value quotes it before what was expected
         // (`invalid type: string "…", expected struct DatabaseConfig`).
         config::ConfigError::Message(message) => match message.rsplit_once(", expected ") {
@@ -794,8 +779,6 @@ mod tests {
 
     /// A complete production configuration.
     const PRODUCTION_TOML: &str = r#"
-environment = "production"
-
 [server]
 host = "0.0.0.0"
 port = 8081
@@ -1011,7 +994,7 @@ database = "vex_analytics"
         let error = Config::load_with(
             Environment::Production,
             Some(config_dir.path().to_path_buf()),
-            Config::app_overrides([("APP__ENVIRONMENT".into(), "production".into())]).unwrap(),
+            Config::app_overrides([("APP__SERVER__PORT".into(), "8081".into())]).unwrap(),
         )
         .unwrap_err();
 
@@ -1603,13 +1586,11 @@ frontend_url_app = "vex://oauth""#
     }
 
     #[test]
-    fn test_environment_must_match_the_selected_one() {
-        let error = load_development_example(&[("APP__ENVIRONMENT", "production")]).unwrap_err();
-        assert!(
-            matches!(error, ConfigError::ValidationError(_))
-                && error.to_string().contains("APP_ENV"),
-            "unexpected error: {error}"
-        );
+    fn test_environment_is_the_one_app_env_selected() {
+        // A leftover `environment` line in the file does not change it.
+        let (config, _) =
+            load_edited_example("[server]\n", "environment = \"production\"\n\n[server]\n");
+        assert_eq!(config.unwrap().environment, Environment::Development);
     }
 
     #[test]
@@ -1622,7 +1603,7 @@ frontend_url_app = "vex://oauth""#
         };
 
         // A value of the wrong type names its variable, or its key and the file, and what the
-        // setting expects; so does an unknown environment.
+        // setting expects.
         expect(
             load_development_example(&[("APP__SERVER__PORT", secret)]).unwrap_err(),
             "Failed to load configuration: APP__SERVER__PORT must be an integer",
@@ -1640,22 +1621,6 @@ frontend_url_app = "vex://oauth""#
             &format!(
                 "Failed to load configuration: auth.otp.email_verification_expiry_minutes (in {}) \
                  must be an integer",
-                file.display()
-            ),
-        );
-        expect(
-            load_development_example(&[("APP__ENVIRONMENT", secret)]).unwrap_err(),
-            "Failed to load configuration: APP__ENVIRONMENT must be one of: development, production",
-        );
-        let (result, file) = load_edited_example(
-            "environment = \"development\"",
-            &format!("environment = \"{secret}\""),
-        );
-        expect(
-            result.unwrap_err(),
-            &format!(
-                "Failed to load configuration: environment (in {}) must be one of: development, \
-                 production",
                 file.display()
             ),
         );
