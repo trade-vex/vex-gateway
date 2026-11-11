@@ -1158,7 +1158,7 @@ Deleting, disabling or changing a key takes effect at once on the gateway replic
 request, and within 5 seconds on the others: each replica caches a key for at most 5 s.
 
 #### Session
-- `GET /api/session/check` - Check session validity
+- `GET /api/session-check` - Check session validity
 
 ### Authentication Methods
 
