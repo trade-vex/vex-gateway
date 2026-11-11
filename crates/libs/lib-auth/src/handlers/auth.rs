@@ -568,13 +568,12 @@ pub async fn change_password(
     .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
     .map_err(|e| AuthError::Validation(format!("Password hashing failed: {}", e)))?;
 
-    // Update password in database
+    // Invalidate all previously issued access and refresh tokens first: if the update then fails,
+    // the user is logged out everywhere, never the reverse.
+    token_service.bump_token_version(user.user_id).await?;
     user_repo
         .update_password(user.user_id, &new_password_hash)
         .await?;
-
-    // Invalidate all previously issued access and refresh tokens.
-    token_service.bump_token_version(user.user_id).await?;
 
     // Generate new tokens at the current version.
     let new_tokens = token_service.mint_tokens(user.user_id).await?;
@@ -757,13 +756,12 @@ pub async fn reset_password(
     .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
     .map_err(|e| AuthError::Validation(format!("Password hashing failed: {}", e)))?;
 
-    // Update password in database
+    // Invalidate all previously issued access and refresh tokens first: if the update then fails,
+    // the user is logged out everywhere, never the reverse.
+    token_service.bump_token_version(user_id).await?;
     user_repo
         .update_password(user_id, &new_password_hash)
         .await?;
-
-    // Invalidate all previously issued access and refresh tokens.
-    token_service.bump_token_version(user_id).await?;
 
     // Revoke all user sessions
     if let Err(e) = session_service.revoke_all_user_sessions(user_id).await {
@@ -1894,9 +1892,10 @@ mod tests {
         assert_eq!(client_ip_key(&request), "ip:192.0.2.10");
     }
 
-    /// Serves one password user and accepts its password update.
+    /// Serves one password user and accepts its password update, or fails it.
     struct PasswordRepository {
         user: Model,
+        update_fails: bool,
     }
 
     #[async_trait]
@@ -1938,6 +1937,9 @@ mod tests {
             _user_id: Uuid,
             _password_hash: &str,
         ) -> Result<(), AuthError> {
+            if self.update_fails {
+                return Err(AuthError::Database("update failed".to_string()));
+            }
             Ok(())
         }
     }
@@ -1992,7 +1994,10 @@ mod tests {
             .store_reset_token(&reset_token, user_id)
             .await
             .unwrap();
-        let user_repo: Arc<dyn UserRepository> = Arc::new(PasswordRepository { user });
+        let user_repo: Arc<dyn UserRepository> = Arc::new(PasswordRepository {
+            user,
+            update_fails: false,
+        });
 
         let response = reset_password(
             web::Json(ResetPasswordRequest {
@@ -2026,7 +2031,10 @@ mod tests {
             sign_in(&token_service, &session_service, user_id).await,
             sign_in(&token_service, &session_service, user_id).await,
         ];
-        let user_repo: Arc<dyn UserRepository> = Arc::new(PasswordRepository { user });
+        let user_repo: Arc<dyn UserRepository> = Arc::new(PasswordRepository {
+            user,
+            update_fails: false,
+        });
 
         let response = change_password(
             actix_web::test::TestRequest::default().to_http_request(),
@@ -2062,7 +2070,10 @@ mod tests {
             sign_in(&token_service, &session_service, user_id).await;
         let (other_session, other_tokens) =
             sign_in(&token_service, &session_service, user_id).await;
-        let user_repo: Arc<dyn UserRepository> = Arc::new(PasswordRepository { user });
+        let user_repo: Arc<dyn UserRepository> = Arc::new(PasswordRepository {
+            user,
+            update_fails: false,
+        });
 
         let response = change_password(
             actix_web::test::TestRequest::default()
@@ -2100,6 +2111,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_password_update_still_revokes_every_token() {
+        let (email_service, token_service, session_service) = test_services().await;
+        let user = login_user(
+            format!("fail-{}@example.com", Uuid::new_v4()),
+            "old-password",
+        );
+        let user_id = user.user_id;
+        let user_repo: Arc<dyn UserRepository> = Arc::new(PasswordRepository {
+            user,
+            update_fails: true,
+        });
+        let version_before = token_service.get_token_version(user_id).await.unwrap();
+
+        let reset_token = email_service.generate_reset_token();
+        email_service
+            .store_reset_token(&reset_token, user_id)
+            .await
+            .unwrap();
+        let reset = reset_password(
+            web::Json(ResetPasswordRequest {
+                reset_token,
+                new_password: "new-password".to_string(),
+            }),
+            web::Data::new(user_repo.clone()),
+            web::Data::new(token_service.clone()),
+            web::Data::new(session_service.clone()),
+            web::Data::new(email_service.clone()),
+        )
+        .await;
+        let change = change_password(
+            actix_web::test::TestRequest::default().to_http_request(),
+            AuthenticatedUser { user_id },
+            web::Json(ChangePasswordRequest {
+                old_password: "old-password".to_string(),
+                new_password: "new-password".to_string(),
+            }),
+            web::Data::new(user_repo),
+            web::Data::new(token_service.clone()),
+            web::Data::new(session_service),
+            web::Data::new(email_service),
+        )
+        .await;
+
+        assert!(matches!(reset, Err(AuthError::Database(_))));
+        assert!(matches!(change, Err(AuthError::Database(_))));
+        assert_eq!(
+            token_service.get_token_version(user_id).await.unwrap(),
+            version_before + 2
+        );
+    }
+
+    #[tokio::test]
     async fn change_password_refuses_the_sixth_wrong_old_password_for_the_window() {
         let (email_service, token_service, session_service) = test_services().await;
         let user = login_user(
@@ -2107,7 +2170,10 @@ mod tests {
             "old-password",
         );
         let user_id = user.user_id;
-        let user_repo: Arc<dyn UserRepository> = Arc::new(PasswordRepository { user });
+        let user_repo: Arc<dyn UserRepository> = Arc::new(PasswordRepository {
+            user,
+            update_fails: false,
+        });
         let guess = || {
             change_password(
                 actix_web::test::TestRequest::default().to_http_request(),
