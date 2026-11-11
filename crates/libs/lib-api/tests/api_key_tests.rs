@@ -10,10 +10,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use lib_api::handlers::api_key::{
-    ApiKeyListResponse, ApiKeyResponse, AuthenticatedUser, CreateApiKeyRequest,
-    UpdateApiKeyRequest, create_api_key, delete_api_key, get_api_key, list_api_keys,
-    toggle_api_key, update_api_key,
+    ApiKeyListResponse, ApiKeyResponse, CreateApiKeyRequest, UpdateApiKeyRequest, create_api_key,
+    delete_api_key, get_api_key, list_api_keys, toggle_api_key, update_api_key,
 };
+use lib_auth::middleware::jwt_auth::AuthenticatedUser;
 use lib_middleware::repository::api_key_repository::ApiKeyRepository;
 
 async fn setup_test_db() -> Result<DatabaseConnection, sea_orm::DbErr> {
@@ -103,10 +103,9 @@ async fn cleanup_test_data(db: &DatabaseConnection, user_id: Uuid) {
 }
 
 fn create_test_user() -> AuthenticatedUser {
-    use lib_auth::middleware::jwt_auth::AuthenticatedUser as JwtUser;
-    AuthenticatedUser::Jwt(JwtUser {
+    AuthenticatedUser {
         user_id: Uuid::new_v4(),
-    })
+    }
 }
 
 fn create_test_request() -> CreateApiKeyRequest {
@@ -131,7 +130,7 @@ mod tests {
             return; // Skip test if database is unavailable
         };
         let user = create_test_user();
-        let user_id = user.user_id().unwrap();
+        let user_id = user.user_id;
         // Clean up before test to ensure isolation
         cleanup_test_data(&db, user_id).await;
 
@@ -176,7 +175,7 @@ mod tests {
             return; // Skip test if database is unavailable
         };
         let user = create_test_user();
-        let user_id = user.user_id().unwrap();
+        let user_id = user.user_id;
         cleanup_test_data(&db, user_id).await;
         let repo = Arc::new(
             lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(
@@ -212,7 +211,7 @@ mod tests {
             return; // Skip test if database is unavailable
         };
         let user = create_test_user();
-        let user_id = user.user_id().unwrap();
+        let user_id = user.user_id;
         cleanup_test_data(&db, user_id).await;
         let repo = Arc::new(
             lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(
@@ -248,7 +247,7 @@ mod tests {
             return; // Skip test if database is unavailable
         };
         let user = create_test_user();
-        let user_id = user.user_id().unwrap();
+        let user_id = user.user_id;
         cleanup_test_data(&db, user_id).await;
 
         let repo = Arc::new(
@@ -333,7 +332,7 @@ mod tests {
             return; // Skip test if database is unavailable
         };
         let user = create_test_user();
-        let user_id = user.user_id().unwrap();
+        let user_id = user.user_id;
         cleanup_test_data(&db, user_id).await;
 
         let repo = Arc::new(
@@ -400,7 +399,7 @@ mod tests {
             return; // Skip test if database is unavailable
         };
         let user = create_test_user();
-        let user_id = user.user_id().unwrap();
+        let user_id = user.user_id;
         cleanup_test_data(&db, user_id).await;
         let repo = Arc::new(
             lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(
@@ -438,8 +437,8 @@ mod tests {
         };
         let user1 = create_test_user();
         let user2 = create_test_user();
-        let user1_id = user1.user_id().unwrap();
-        let user2_id = user2.user_id().unwrap();
+        let user1_id = user1.user_id;
+        let user2_id = user2.user_id;
         cleanup_test_data(&db, user1_id).await;
         cleanup_test_data(&db, user2_id).await;
         let repo = Arc::new(
@@ -499,7 +498,7 @@ mod tests {
             return; // Skip test if database is unavailable
         };
         let user = create_test_user();
-        let user_id = user.user_id().unwrap();
+        let user_id = user.user_id;
         cleanup_test_data(&db, user_id).await;
 
         let repo = Arc::new(
@@ -589,7 +588,7 @@ mod tests {
             return; // Skip test if database is unavailable
         };
         let user = create_test_user();
-        let user_id = user.user_id().unwrap();
+        let user_id = user.user_id;
         cleanup_test_data(&db, user_id).await;
         let repo = Arc::new(
             lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(
@@ -648,7 +647,7 @@ mod tests {
             return; // Skip test if database is unavailable
         };
         let user = create_test_user();
-        let user_id = user.user_id().unwrap();
+        let user_id = user.user_id;
         cleanup_test_data(&db, user_id).await;
 
         let repo = Arc::new(
@@ -713,7 +712,7 @@ mod tests {
             return; // Skip test if database is unavailable
         };
         let user = create_test_user();
-        let user_id = user.user_id().unwrap();
+        let user_id = user.user_id;
         cleanup_test_data(&db, user_id).await;
 
         let repo = Arc::new(
@@ -791,7 +790,7 @@ mod tests {
             return; // Skip test if database is unavailable
         };
         let user = create_test_user();
-        let user_id = user.user_id().unwrap();
+        let user_id = user.user_id;
         cleanup_test_data(&db, user_id).await;
 
         let repo = Arc::new(
@@ -850,5 +849,50 @@ mod tests {
         }
 
         cleanup_test_data(&db, user_id).await;
+    }
+
+    /// A key the API-key middleware let through is not a signed-in person: it must not create
+    /// a key only its thief knows, or change its own block list.
+    #[actix_web::test]
+    async fn signed_api_key_cannot_manage_api_keys() {
+        use actix_web::{HttpMessage, dev::Service};
+        use lib_middleware::api_key::{ApiKeyConfig, SecurityType};
+
+        let Some(db) = require_database().await else {
+            return; // Skip test if database is unavailable
+        };
+        let user_id = Uuid::new_v4();
+        let repo: Arc<dyn ApiKeyRepository> = Arc::new(
+            lib_middleware::repository::api_key_repository::PostgresApiKeyRepository::new(
+                Arc::new(db.clone()),
+            ),
+        );
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                // What the API-key middleware leaves for the handlers: the key, not a user.
+                .wrap_fn(move |request, service| {
+                    request.extensions_mut().insert(Arc::new(ApiKeyConfig {
+                        user_id: Some(user_id),
+                        ..ApiKeyConfig::new("stolen-key".to_string())
+                            .with_permissions(vec![SecurityType::Trade])
+                    }));
+                    service.call(request)
+                })
+                .service(
+                    web::scope("/api-key")
+                        .app_data(web::Data::new(repo.clone()))
+                        .configure(lib_api::routes::api_key_routes::configure),
+                ),
+        )
+        .await;
+
+        let request = actix_web::test::TestRequest::post()
+            .uri("/api-key")
+            .set_json(serde_json::json!({"permissions": ["trade"]}))
+            .to_request();
+        let response = actix_web::test::call_service(&app, request).await;
+
+        assert_eq!(response.status(), 401);
+        assert!(repo.find_by_user_id(user_id).await.unwrap().is_empty());
     }
 }

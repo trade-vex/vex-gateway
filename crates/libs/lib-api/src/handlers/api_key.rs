@@ -1,15 +1,16 @@
 //! lib-api/src/handlers/api_keys.rs
 
-use actix_web::{FromRequest, HttpMessage, HttpResponse, Result, web};
+use actix_web::{HttpResponse, Result, web};
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, Serializer};
 use uuid::Uuid;
 
+use lib_auth::middleware::jwt_auth::AuthenticatedUser;
 use lib_middleware::{
     api_key::SecurityType,
     api_key::middleware::ApiKeyStore,
-    api_key::security::{ApiKeyConfig, KeyMaterial},
+    api_key::security::KeyMaterial,
     models::api_key::{ActiveModel, Model as ApiKeyModel, NewApiKey},
     repository::api_key_repository::ApiKeyRepository,
 };
@@ -25,74 +26,6 @@ async fn invalidate_api_key_cache(cache: Option<&web::Data<ApiKeyStore>>, api_ke
     };
 
     cache.invalidate(api_key).await;
-}
-
-/// Combined authentication result that can be either JWT or API key
-#[derive(Debug, Clone)]
-pub enum AuthenticatedUser {
-    Jwt(lib_auth::middleware::jwt_auth::AuthenticatedUser),
-    ApiKey(ApiKeyConfig),
-}
-
-impl AuthenticatedUser {
-    /// Get the user ID from either authentication method
-    pub fn user_id(&self) -> Option<Uuid> {
-        match self {
-            AuthenticatedUser::Jwt(user) => Some(user.user_id),
-            AuthenticatedUser::ApiKey(config) => config.user_id,
-        }
-    }
-
-    /// Check if the user has a specific permission
-    pub fn has_permission(&self, permission: &SecurityType) -> bool {
-        match self {
-            AuthenticatedUser::Jwt(_) => true, // JWT users have all permissions
-            AuthenticatedUser::ApiKey(config) => config.has_permission(*permission),
-        }
-    }
-
-    /// Get the API key if authenticated via API key
-    pub fn api_key(&self) -> Option<&str> {
-        match self {
-            AuthenticatedUser::ApiKey(config) => Some(&config.api_key),
-            _ => None,
-        }
-    }
-}
-
-/// Combined authentication extractor that works with both JWT and API key authentication
-impl FromRequest for AuthenticatedUser {
-    type Error = actix_web::Error;
-    type Future = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self, Self::Error>>>>;
-
-    fn from_request(
-        req: &actix_web::HttpRequest,
-        _payload: &mut actix_web::dev::Payload,
-    ) -> Self::Future {
-        let req = req.clone();
-
-        Box::pin(async move {
-            // First, try to extract JWT authentication
-            if let Ok(jwt_user) = lib_auth::middleware::jwt_auth::AuthenticatedUser::from_request(
-                &req,
-                &mut actix_web::dev::Payload::None,
-            )
-            .await
-            {
-                return Ok(AuthenticatedUser::Jwt(jwt_user));
-            }
-
-            // If JWT fails, extract API key authentication from extensions
-            if let Some(api_config_arc) = req.extensions().get::<Arc<ApiKeyConfig>>() {
-                return Ok(AuthenticatedUser::ApiKey(api_config_arc.as_ref().clone()));
-            }
-
-            // If neither works, return unauthorized
-            Err(actix_web::error::ErrorUnauthorized(
-                "Authentication required",
-            ))
-        })
-    }
 }
 
 /// masks an API key for safe serialization
@@ -255,10 +188,7 @@ pub async fn create_api_key(
     repo: web::Data<Arc<dyn ApiKeyRepository>>,
     auth_user: AuthenticatedUser,
 ) -> Result<HttpResponse> {
-    // Get user ID from either JWT or API key authentication
-    let user_id = auth_user.user_id().ok_or_else(|| {
-        actix_web::error::ErrorUnauthorized("User ID not found in authentication")
-    })?;
+    let user_id = auth_user.user_id;
     // parse permissions
     let permissions: Result<Vec<SecurityType>, String> = req
         .permissions
@@ -346,10 +276,7 @@ pub async fn list_api_keys(
     repo: web::Data<Arc<dyn ApiKeyRepository>>,
     auth_user: AuthenticatedUser,
 ) -> Result<HttpResponse> {
-    // Get user ID from either JWT or API key authentication
-    let user_id = auth_user.user_id().ok_or_else(|| {
-        actix_web::error::ErrorUnauthorized("User ID not found in authentication")
-    })?;
+    let user_id = auth_user.user_id;
 
     match repo.as_ref().as_ref().find_by_user_id(user_id).await {
         Ok(api_keys) => {
@@ -378,10 +305,7 @@ pub async fn get_api_key(
 ) -> Result<HttpResponse> {
     let api_key_id = path.into_inner();
 
-    // Get user ID from either JWT or API key authentication
-    let user_id = auth_user.user_id().ok_or_else(|| {
-        actix_web::error::ErrorUnauthorized("User ID not found in authentication")
-    })?;
+    let user_id = auth_user.user_id;
 
     match repo.as_ref().as_ref().find_by_id(api_key_id).await {
         Ok(Some(api_key)) => {
@@ -419,10 +343,7 @@ pub async fn update_api_key(
 ) -> Result<HttpResponse> {
     let api_key_id = path.into_inner();
 
-    // Get user ID from either JWT or API key authentication
-    let user_id = auth_user.user_id().ok_or_else(|| {
-        actix_web::error::ErrorUnauthorized("User ID not found in authentication")
-    })?;
+    let user_id = auth_user.user_id;
 
     // checking if the API key exists and belongs to the user
     let api_key = match repo.as_ref().find_by_id(api_key_id).await {
@@ -502,10 +423,7 @@ pub async fn delete_api_key(
 ) -> Result<HttpResponse> {
     let api_key_id = path.into_inner();
 
-    // Get user ID from either JWT or API key authentication
-    let user_id = auth_user.user_id().ok_or_else(|| {
-        actix_web::error::ErrorUnauthorized("User ID not found in authentication")
-    })?;
+    let user_id = auth_user.user_id;
 
     // first, check if the API key exists and belongs to the user
     let api_key = match repo.as_ref().find_by_id(api_key_id).await {
@@ -563,10 +481,7 @@ pub async fn toggle_api_key(
         .and_then(|v| v.as_bool())
         .ok_or_else(|| actix_web::error::ErrorBadRequest("Missing or invalid 'enabled' field"))?;
 
-    // Get user ID from either JWT or API key authentication
-    let user_id = auth_user.user_id().ok_or_else(|| {
-        actix_web::error::ErrorUnauthorized("User ID not found in authentication")
-    })?;
+    let user_id = auth_user.user_id;
 
     // First, check if the API key exists and belongs to the user
     let api_key = match repo.as_ref().find_by_id(api_key_id).await {
