@@ -17,7 +17,8 @@ use lib_api::handlers::api_key::{
     delete_api_key, get_api_key, list_api_keys, toggle_api_key, update_api_key,
 };
 use lib_auth::middleware::jwt_auth::AuthenticatedUser;
-use lib_middleware::repository::api_key_repository::ApiKeyRepository;
+use lib_middleware::models::api_key::NewApiKey;
+use lib_middleware::repository::api_key_repository::{ApiKeyRepository, PostgresApiKeyRepository};
 
 async fn cleanup_test_data(db: &DatabaseConnection, user_id: Uuid) {
     let cleanup_sql = format!("DELETE FROM api_keys WHERE user_id = '{}'", user_id);
@@ -45,6 +46,44 @@ fn create_test_request() -> CreateApiKeyRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The lookup every API-key request makes answers only for enabled keys that have not
+    /// expired: it is what makes a disabled or expired key stop authenticating.
+    #[tokio::test]
+    async fn find_by_api_key_returns_only_enabled_unexpired_keys() {
+        let Some(db) = require_database().await else {
+            return;
+        };
+        let repo = PostgresApiKeyRepository::new(Arc::new(db));
+        let day = chrono::Duration::days(1);
+        for (key, expires_at) in [
+            ("live", None),
+            ("off", None),
+            ("stale", Some(Utc::now() - day)),
+            ("soon", Some(Utc::now() + day)),
+        ] {
+            let row = repo
+                .create(NewApiKey {
+                    expires_at,
+                    ..NewApiKey::new(key.to_string())
+                })
+                .await
+                .unwrap();
+            if key == "off" {
+                repo.set_enabled(row.id, false).await.unwrap();
+            }
+        }
+
+        for (key, found) in [
+            ("live", true),
+            ("off", false),
+            ("stale", false),
+            ("soon", true),
+        ] {
+            let row = repo.find_by_api_key(key).await.unwrap();
+            assert_eq!(row.is_some(), found, "{key}");
+        }
+    }
 
     #[tokio::test]
     async fn test_create_api_key_success() {
