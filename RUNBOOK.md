@@ -598,8 +598,8 @@ In this order:
 **Listing a market** is a deploy, in this order: the market (and any new asset) in vex-core's
 configuration file, the seeds from that file (step 4, Postgres and ClickHouse), a restart of
 vex-core, which registers markets only at startup, then a rolling restart of the gateways, which
-load the `markets` and `assets` rows once at startup and show a market they do not know in raw
-engine integers.
+load the `markets` and `assets` rows once at startup: they show a market they do not know in raw
+engine integers and refuse its orders with 400 `unknown market`.
 
 ### Read Model Roles
 
@@ -1198,21 +1198,27 @@ curl -X POST http://localhost:8081/api/order \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: <unique-logical-order-key>" \
-  -d '{"price": 5000000, "volume": 100, "market_id": 1, "side": "Bid", "time_in_force": "Gtc", "order_type": "Limit"}'
+  -d '{"price": "50000.5", "volume": "0.25", "market_id": 65538, "side": "Bid", "time_in_force": "Gtc", "order_type": "Limit"}'
 ```
 
 The body:
 
 ```json
 {
-  "price": 5000000,
-  "volume": 100,
-  "market_id": 1,
+  "price": "50000.5",
+  "volume": "0.25",
+  "market_id": 65538,
   "side": "Bid",
   "time_in_force": "Gtc",
   "order_type": "Limit"
 }
 ```
+
+`price` (quote asset per base asset) and `volume` (base asset) are decimal strings in the units the
+balance and order reads return; JSON numbers are refused. The gateway converts them to the
+engine's integers with the market's scales from the read model (`markets.quote_scale_k`, the base
+asset's `assets.native_scale`). An unknown market, or a value that is not a multiple of the
+market's price step or the asset's smallest unit, gets 400 with a message naming the step.
 
 ### Order Response Format
 

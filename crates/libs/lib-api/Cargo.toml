@@ -22,7 +22,7 @@ lib-core = { path = "../lib-core" }
 vex-networking ={ workspace = true }
 vex-config = { workspace = true}
 common = { workspace = true}
-rust_decimal = "1.40"
+rust_decimal = { version = "1.40", features = ["serde-with-str"] }
 
 [dev-dependencies]
 tokio-test = "0.4"

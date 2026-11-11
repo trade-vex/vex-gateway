@@ -60,6 +60,7 @@ pub fn create_app(
         .app_data(web::Data::new(app_state.engine_link.clone()))
         .app_data(web::Data::new(app_state.correlation_service.clone()))
         .app_data(web::Data::new(app_state.order_idempotency_store.clone()))
+        .app_data(web::Data::new(app_state.scaling_cache.clone()))
         .app_data(web::Data::new(app_state.rate_limiter.clone()))
         // Configure all routes under a single /api scope
         .service(

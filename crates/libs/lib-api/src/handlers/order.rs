@@ -2,6 +2,7 @@
 
 use actix_web::{HttpRequest, HttpResponse, http::StatusCode, web};
 use common::{OrderCommand, OrderCommandType, Side, Status, TimeInForce, UserBalance};
+use lib_core::cache::scaling_cache::ScalingCache;
 use lib_core::{
     CompletionWait, CorrelationService, EngineLink, IdempotentOrderOutcome, OrderClaim,
     OrderIdempotencyError, OrderIdempotencyStore, ReleaseReason, ResponseError,
@@ -9,6 +10,7 @@ use lib_core::{
 };
 use lib_middleware::metrics::{self, EngineOutcome};
 use lib_utils::{AuthenticatedUserId, uuid_to_u64};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -29,8 +31,8 @@ fn unix_timestamp_nanos(now: SystemTime) -> u64 {
 /// Request payload for placing a new order
 ///
 /// # Fields
-/// * `price` - Order price in smallest currency unit (e.g., cents, satoshis)
-/// * `volume` - Order size/quantity in base asset units
+/// * `price` - Order price in the quote asset, as a decimal string
+/// * `volume` - Order size in the base asset, as a decimal string
 /// * `market_id` - Unique identifier for the trading market/pair
 /// * `side` - Order side (Bid for buy, Ask for sell)
 /// * `time_in_force` - Order duration policy (GTC, IOC, FOK, etc.)
@@ -40,9 +42,9 @@ fn unix_timestamp_nanos(now: SystemTime) -> u64 {
 /// # Example
 /// ```json
 /// {
-///   "price": 5000000,
-///   "volume": 100,
-///   "market_id": 1,
+///   "price": "50000.5",
+///   "volume": "0.25",
+///   "market_id": 65538,
 ///   "side": "Bid",
 ///   "time_in_force": "Gtc",
 ///   "order_type": "Limit"
@@ -56,11 +58,13 @@ pub enum OrderType {
 
 #[derive(Debug, Deserialize)]
 pub struct OrderRequest {
-    /// Order price in smallest currency unit
-    pub price: u64,
+    /// In the quote asset, as a decimal string ("50000.5"): a multiple of the market's price step.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub price: Decimal,
 
-    /// Order volume/size in base asset units
-    pub volume: u64,
+    /// In the base asset, as a decimal string ("0.25"): a multiple of its smallest unit.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub volume: Decimal,
 
     /// Market identifier (trading pair)
     pub market_id: u32,
@@ -584,7 +588,8 @@ fn parse_order_id(order_id: &str) -> Result<u64, std::num::ParseIntError> {
 /// Requires valid JWT token in Authorization header: `Bearer <token>`
 ///
 /// # Request Body
-/// See [`OrderRequest`] for request payload structure.
+/// See [`OrderRequest`] for request payload structure. A price or size off the market's step is
+/// a 400 that names the step.
 ///
 /// # Response
 /// Returns [`OrderResponse`] with order details and status.
@@ -601,9 +606,9 @@ fn parse_order_id(order_id: &str) -> Result<u64, std::num::ParseIntError> {
 ///   -H "Content-Type: application/json" \
 ///   -H "Idempotency-Key: <unique-logical-order-key>" \
 ///   -d '{
-///     "price": 5000000,
-///     "volume": 100,
-///     "market_id": 1,
+///     "price": "50000.5",
+///     "volume": "0.25",
+///     "market_id": 65538,
 ///     "side": "Bid",
 ///     "time_in_force": "Gtc",
 ///     "order_type": "Limit"
@@ -649,6 +654,7 @@ pub async fn place_order(
     engine_link: web::Data<EngineLink>,
     correlation_service: web::Data<Arc<CorrelationService>>,
     idempotency_store: web::Data<Arc<OrderIdempotencyStore>>,
+    scaling: web::Data<Arc<ScalingCache>>,
 ) -> HttpResponse {
     let start = Instant::now();
 
@@ -681,13 +687,27 @@ pub async fn place_order(
     let order_data = order_data.into_inner();
 
     let OrderRequest {
-        price,
-        volume,
         market_id,
         side,
         time_in_force,
         order_type,
+        ..
     } = order_data;
+
+    let (price, volume) = match (
+        scaling.price_to_engine(market_id, order_data.price),
+        scaling.volume_to_engine(market_id, order_data.volume),
+    ) {
+        (Ok(price), Ok(volume)) => (price, volume),
+        (Err(message), _) | (_, Err(message)) => {
+            return HttpResponse::BadRequest().json(OrderResponse {
+                order_id: 0,
+                client_order_id: 0,
+                status: "rejected".to_string(),
+                message,
+            });
+        }
+    };
 
     if let Err(message) = validate_order_inputs(price, volume, time_in_force, &order_type) {
         return HttpResponse::BadRequest().json(OrderResponse {
@@ -1119,48 +1139,71 @@ mod tests {
         );
     }
 
-    #[actix_web::test]
-    async fn order_endpoints_answer_unavailable_while_the_engine_link_is_down() {
+    /// The order routes for the authenticated `user`, on `engine_link`, with market 65538: price
+    /// step 0.1, size step 0.00000001. No rate limits: the routes' own handlers answer.
+    fn order_app(
+        engine_link: EngineLink,
+        correlation: Arc<CorrelationService>,
+        store: OrderIdempotencyStore,
+        user: uuid::Uuid,
+    ) -> actix_web::App<
+        impl actix_web::dev::ServiceFactory<
+            actix_web::dev::ServiceRequest,
+            Config = (),
+            Response = actix_web::dev::ServiceResponse,
+            Error = actix_web::Error,
+            InitError = (),
+        >,
+    > {
         use actix_web::HttpMessage as _;
         use actix_web::dev::Service as _;
 
-        let Some(store) = live_idempotency_store().await else {
-            return;
-        };
-        // No engine link has been established, and the caller is authenticated.
-        let app = actix_web::test::init_service(
-            actix_web::App::new()
-                .app_data(web::Data::new(EngineLink::new()))
-                .app_data(web::Data::new(Arc::new(CorrelationService::new())))
-                .app_data(web::Data::new(Arc::new(store)))
-                .wrap_fn(|request, service| {
-                    request.extensions_mut().insert(
-                        lib_auth::middleware::jwt_auth::AuthenticatedUser {
-                            user_id: uuid::Uuid::new_v4(),
-                        },
-                    );
-                    service.call(request)
-                })
-                // No rate limits: the routes' own handlers answer.
-                .configure(|cfg| crate::routes::order_route::configure(cfg, |route, _| route)),
-        )
-        .await;
+        let scaling = ScalingCache::with_scales(&[(65538, 2, 10)], &[(2, 100_000_000)]);
+        actix_web::App::new()
+            .app_data(web::Data::new(engine_link))
+            .app_data(web::Data::new(correlation))
+            .app_data(web::Data::new(Arc::new(store)))
+            .app_data(web::Data::new(Arc::new(scaling)))
+            .wrap_fn(move |request, service| {
+                request
+                    .extensions_mut()
+                    .insert(lib_auth::middleware::jwt_auth::AuthenticatedUser { user_id: user });
+                service.call(request)
+            })
+            .configure(|cfg| crate::routes::order_route::configure(cfg, |route, _| route))
+    }
 
-        let order = actix_web::test::TestRequest::post()
+    /// A limit bid for 0.5 on market 65538 at `price`, under `idempotency_key`.
+    fn order_request(idempotency_key: &str, price: &str) -> actix_web::test::TestRequest {
+        actix_web::test::TestRequest::post()
             .uri("/order")
-            .insert_header((
-                IDEMPOTENCY_KEY_HEADER,
-                format!("no-link-{}", generate_client_order_id()),
-            ))
+            .insert_header((IDEMPOTENCY_KEY_HEADER, idempotency_key))
             .set_json(serde_json::json!({
-                "price": 100,
-                "volume": 1,
-                "market_id": 1,
+                "price": price,
+                "volume": "0.5",
+                "market_id": 65538,
                 "side": "Bid",
                 "time_in_force": "Gtc",
                 "order_type": "Limit",
             }))
-            .to_request();
+    }
+
+    #[actix_web::test]
+    async fn order_endpoints_answer_unavailable_while_the_engine_link_is_down() {
+        let Some(store) = live_idempotency_store().await else {
+            return;
+        };
+        // No engine link has been established, and the caller is authenticated.
+        let app = actix_web::test::init_service(order_app(
+            EngineLink::new(),
+            Arc::new(CorrelationService::new()),
+            store,
+            uuid::Uuid::new_v4(),
+        ))
+        .await;
+
+        let order =
+            order_request(&format!("no-link-{}", generate_client_order_id()), "100").to_request();
         let cancel = actix_web::test::TestRequest::post()
             .uri("/cancel")
             .set_json(serde_json::json!({ "order_id": "9", "market_id": 1 }))
@@ -1179,6 +1222,33 @@ mod tests {
             let body: serde_json::Value = actix_web::test::read_body_json(response).await;
             assert_eq!(body["message"], ENGINE_UNAVAILABLE_MESSAGE);
         }
+    }
+
+    #[actix_web::test]
+    async fn place_order_refuses_a_price_off_the_step() {
+        let Some(store) = live_idempotency_store().await else {
+            return;
+        };
+        let app = actix_web::test::init_service(order_app(
+            EngineLink::new(),
+            Arc::new(CorrelationService::new()),
+            store,
+            uuid::Uuid::new_v4(),
+        ))
+        .await;
+
+        let order = order_request(
+            &format!("off-step-{}", generate_client_order_id()),
+            "3000.15",
+        );
+        let response = actix_web::test::call_service(&app, order.to_request()).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = actix_web::test::read_body_json(response).await;
+        assert_eq!(
+            body["message"],
+            "price must be a non-negative multiple of 0.1"
+        );
     }
 
     #[actix_web::test]
