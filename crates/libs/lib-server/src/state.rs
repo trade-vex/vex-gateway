@@ -50,7 +50,6 @@ pub(crate) fn with_api_key_policy(middleware: ApiKeyMiddleware) -> ApiKeyMiddlew
 #[derive(Clone)]
 pub struct AppState {
     // Database and infrastructure
-    pub db: Arc<DatabaseConnection>,
     pub redis_conn: ConnectionManager,
 
     // DB Repository
@@ -174,7 +173,6 @@ impl AppState {
         tracing::info!("AppState initialization completed successfully");
 
         Ok(Arc::new(Self {
-            db,
             redis_conn,
             user_repo,
             jwt_config: config.jwt.clone(),
