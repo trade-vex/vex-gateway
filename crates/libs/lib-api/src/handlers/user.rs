@@ -140,10 +140,8 @@ pub async fn get_balances(
 ///       "timestamp": 1697452800000000
 ///     }
 ///   ],
-///   "total": 2,
 ///   "page": 1,
 ///   "limit": 20,
-///   "total_pages": 1,
 ///   "has_next": false,
 ///   "has_prev": false
 /// }
@@ -191,46 +189,27 @@ pub async fn get_open_orders(
     let page = query.page.unwrap_or(1).clamp(1, MAX_PAGE);
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
     let offset = (page as u64).saturating_sub(1).saturating_mul(limit as u64);
-    let limit_u64 = limit as u64;
 
-    // Get total count for pagination metadata
-    let total_count = match trading_repo
-        .count_open_orders(user_id, query.market_id)
-        .await
-    {
-        Ok(count) => count as usize,
-        Err(e) => {
-            tracing::error!("failed to count open orders for user_id {}: {}", user_id, e);
-            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "failed to retrieve open orders",
-                "message": "An internal error occurred. Please try again later."
-            })));
-        }
-    };
-
+    // One row more than the page says whether a next page exists, without counting the rest.
     match trading_repo
-        .get_open_orders_paginated(user_id, offset, limit_u64, query.market_id)
+        .get_open_orders_paginated(user_id, offset, limit as u64 + 1, query.market_id)
         .await
     {
-        Ok(orders) => {
+        Ok(mut orders) => {
+            let has_next = orders.len() > limit && page < MAX_PAGE;
+            orders.truncate(limit);
             // order_store descales them
             let order_responses: Vec<OrderResponse> = orders
                 .into_iter()
                 .filter_map(|order| order_store.to_response(order))
                 .collect();
 
-            let total_pages = total_count.div_ceil(limit);
-            let has_next = page < total_pages && page < MAX_PAGE;
-            let has_prev = page > 1;
-
             let response = OrdersListResponse {
                 orders: order_responses,
-                total: total_count,
                 page,
                 limit,
-                total_pages,
                 has_next,
-                has_prev,
+                has_prev: page > 1,
             };
 
             Ok(HttpResponse::Ok().json(response))
@@ -288,10 +267,8 @@ pub async fn get_open_orders(
 ///       "status": "Filled"
 ///     }
 ///   ],
-///   "total": 3,
 ///   "page": 1,
 ///   "limit": 20,
-///   "total_pages": 1,
 ///   "has_next": false,
 ///   "has_prev": false
 /// }
@@ -326,50 +303,27 @@ pub async fn get_order_history(
     let page = query.page.unwrap_or(1).clamp(1, MAX_PAGE);
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
     let offset = (page as u64).saturating_sub(1).saturating_mul(limit as u64);
-    let limit_u64 = limit as u64;
 
-    // Get total count for pagination metadata
-    let total_count = match trading_repo
-        .count_order_history(user_id, query.market_id)
-        .await
-    {
-        Ok(count) => count as usize,
-        Err(e) => {
-            tracing::error!(
-                "failed to count order history for user_id {}: {}",
-                user_id,
-                e
-            );
-            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "failed to retrieve order history",
-                "message": "An internal error occurred. Please try again later."
-            })));
-        }
-    };
-
+    // One row more than the page says whether a next page exists, without counting the rest.
     match trading_repo
-        .get_order_history_paginated(user_id, offset, limit_u64, query.market_id)
+        .get_order_history_paginated(user_id, offset, limit as u64 + 1, query.market_id)
         .await
     {
-        Ok(orders) => {
+        Ok(mut orders) => {
+            let has_next = orders.len() > limit && page < MAX_PAGE;
+            orders.truncate(limit);
             // order_store descales them
             let order_responses: Vec<OrderHistoryResponse> = orders
                 .into_iter()
                 .filter_map(|order| order_store.to_history_response(order))
                 .collect();
 
-            let total_pages = total_count.div_ceil(limit);
-            let has_next = page < total_pages && page < MAX_PAGE;
-            let has_prev = page > 1;
-
             let response = OrdersHistoryListResponse {
                 orders: order_responses,
-                total: total_count,
                 page,
                 limit,
-                total_pages,
                 has_next,
-                has_prev,
+                has_prev: page > 1,
             };
 
             Ok(HttpResponse::Ok().json(response))

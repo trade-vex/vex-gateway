@@ -18,8 +18,9 @@
 
 use actix_web::{App, HttpResponse, HttpServer, Result, web};
 use common::{OrderCommand, OrderCommandType, Side, Status, TimeInForce, UserBalance};
+use lib_core::cache::scaling_cache::ScalingCache;
 use lib_core::{
-    CorrelationService, OrdersListResponse, PostgresTradingRepository, Publisher,
+    CorrelationService, OrderStore, OrdersListResponse, PostgresTradingRepository, Publisher,
     TradingRepository, generate_client_order_id, wait_for_response,
 };
 use sea_orm::{Database, DatabaseConnection};
@@ -315,13 +316,17 @@ async fn test_get_open_orders(
         .await
     {
         Ok(orders) => {
-            let total = orders.len();
+            // Unscaled: the cancels below need only the ids.
+            let store = OrderStore::new(Arc::new(ScalingCache::new(Arc::new(
+                DatabaseConnection::default(),
+            ))));
             Ok(HttpResponse::Ok().json(OrdersListResponse {
-                orders: vec![],
-                total,
+                orders: orders
+                    .into_iter()
+                    .filter_map(|order| store.to_response(order))
+                    .collect(),
                 page: 1,
                 limit: 100,
-                total_pages: 1,
                 has_next: false,
                 has_prev: false,
             }))
@@ -545,16 +550,17 @@ async fn test_high_frequency_stress_test() {
             .expect("Failed");
         let orders_data: OrdersListResponse = orders_resp.json().await.expect("Failed");
 
-        total_before_cancel += orders_data.total;
+        total_before_cancel += orders_data.orders.len();
 
-        if orders_data.total > 0 {
+        if !orders_data.orders.is_empty() {
             println!(
                 "User {}: {} open orders (cancelling half)",
-                user_id, orders_data.total
+                user_id,
+                orders_data.orders.len()
             );
 
             // Cancel half of this user's UNFILLED orders
-            let cancel_count = (orders_data.total / 2).max(1); // Cancel at least 1
+            let cancel_count = (orders_data.orders.len() / 2).max(1); // Cancel at least 1
             for i in 0..cancel_count.min(orders_data.orders.len()) {
                 let order = &orders_data.orders[i];
                 let order_id = order.order_id;
@@ -624,7 +630,9 @@ async fn test_high_frequency_stress_test() {
 
         println!(
             "User {}: {} assets, {} open orders",
-            user_id, balance_data.total_assets, orders_data.total
+            user_id,
+            balance_data.total_assets,
+            orders_data.orders.len()
         );
 
         // Each user must have both assets
@@ -644,7 +652,7 @@ async fn test_high_frequency_stress_test() {
             }
         }
 
-        total_open_orders += orders_data.total;
+        total_open_orders += orders_data.orders.len();
     }
 
     // CRITICAL: System-wide fund conservation (total across all users = initial deposits)

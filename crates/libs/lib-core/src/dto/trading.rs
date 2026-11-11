@@ -130,10 +130,8 @@ pub struct BalancesListResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OrdersListResponse {
     pub orders: Vec<OrderResponse>,
-    pub total: usize,
     pub page: usize,
     pub limit: usize,
-    pub total_pages: usize,
     pub has_next: bool,
     pub has_prev: bool,
 }
@@ -141,10 +139,8 @@ pub struct OrdersListResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OrdersHistoryListResponse {
     pub orders: Vec<OrderHistoryResponse>,
-    pub total: usize,
     pub page: usize,
     pub limit: usize,
-    pub total_pages: usize,
     pub has_next: bool,
     pub has_prev: bool,
 }

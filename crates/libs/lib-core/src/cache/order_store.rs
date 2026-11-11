@@ -33,8 +33,7 @@ impl OrderStore {
 
     /// The stored side, or `None` (logged) when it is not one of core's `Side` names. Such a
     /// row is skipped: guessing a side would show the user an order on the wrong side of the
-    /// book. The handlers' `total` comes from the repository's count, so a page holding a
-    /// skipped row is short.
+    /// book. A page holding a skipped row is short.
     fn parse_side(model: &OrderModel) -> Option<Side> {
         match model.order_side.parse() {
             Ok(side) => Some(side),

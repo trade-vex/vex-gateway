@@ -307,8 +307,6 @@ async fn test_get_open_orders(
     {
         Ok(orders) => {
             println!("   OrderStore returned {} orders", orders.len());
-
-            let total = orders.len();
             let order_responses: Vec<_> = orders
                 .into_iter()
                 .filter_map(|order| order_store.to_response(order))
@@ -316,10 +314,8 @@ async fn test_get_open_orders(
 
             let response = OrdersListResponse {
                 orders: order_responses,
-                total,
                 page: 1,
                 limit: 100,
-                total_pages: 1,
                 has_next: false,
                 has_prev: false,
             };
@@ -506,19 +502,11 @@ async fn check_orders(
 
     let orders: OrdersListResponse = resp.json().await.expect("Failed to parse orders");
 
-    // Assert total matches actual count
-    assert_eq!(
-        orders.total,
-        orders.orders.len(),
-        "{} order count mismatch: total={} but got {} orders",
-        user_name,
-        orders.total,
-        orders.orders.len()
-    );
-
     println!(
         "\n📋 {} (user {}) open orders: {}",
-        user_name, user_id, orders.total
+        user_name,
+        user_id,
+        orders.orders.len()
     );
     for order in &orders.orders {
         println!(
@@ -1029,10 +1017,10 @@ async fn test_multi_user_trading_scenario() {
     println!("\n--- Open Orders After Building Book ---");
     let alice_orders_list = check_orders(&client, &server_address, alice_id, "Alice").await;
 
-    if alice_orders_list.total != 3 {
+    if alice_orders_list.orders.len() != 3 {
         println!(
             "\n❌ ASSERTION FAILURE: Alice should have 3 orders but has {}",
-            alice_orders_list.total
+            alice_orders_list.orders.len()
         );
         println!("   Expected order IDs: {:?}", alice_orders);
         println!("   Check the read model:");
@@ -1041,31 +1029,51 @@ async fn test_multi_user_trading_scenario() {
         );
     }
     assert_eq!(
-        alice_orders_list.total, 3,
+        alice_orders_list.orders.len(),
+        3,
         "Alice should have 3 SELL orders, but has {}. Orders may not have reached the read model yet.",
-        alice_orders_list.total
+        alice_orders_list.orders.len()
     );
 
     let bob_orders_list = check_orders(&client, &server_address, bob_id, "Bob").await;
-    assert_eq!(bob_orders_list.total, 3, "Bob should have 3 BUY orders");
+    assert_eq!(
+        bob_orders_list.orders.len(),
+        3,
+        "Bob should have 3 BUY orders"
+    );
 
     let carol_orders_list = check_orders(&client, &server_address, carol_id, "Carol").await;
-    assert_eq!(carol_orders_list.total, 1, "Carol should have 1 SELL order");
+    assert_eq!(
+        carol_orders_list.orders.len(),
+        1,
+        "Carol should have 1 SELL order"
+    );
 
     let frank_orders_list = check_orders(&client, &server_address, frank_id, "Frank").await;
-    assert_eq!(frank_orders_list.total, 3, "Frank should have 3 BUY orders");
+    assert_eq!(
+        frank_orders_list.orders.len(),
+        3,
+        "Frank should have 3 BUY orders"
+    );
 
     let henry_orders_list = check_orders(&client, &server_address, henry_id, "Henry").await;
-    assert_eq!(henry_orders_list.total, 1, "Henry should have 1 BUY order");
+    assert_eq!(
+        henry_orders_list.orders.len(),
+        1,
+        "Henry should have 1 BUY order"
+    );
 
     println!("\n📊 Order Book Status:");
     println!(
         "   Total SELL orders: {}",
-        alice_orders_list.total + carol_orders_list.total + 1
+        alice_orders_list.orders.len() + carol_orders_list.orders.len() + 1
     ); // Alice + Carol + Eve
     println!(
         "   Total BUY orders: {}",
-        bob_orders_list.total + frank_orders_list.total + henry_orders_list.total + 1
+        bob_orders_list.orders.len()
+            + frank_orders_list.orders.len()
+            + henry_orders_list.orders.len()
+            + 1
     ); // Bob + Dave + Frank + Henry
 
     println!("\n✅ All orders placed and verified!");
@@ -1206,9 +1214,10 @@ async fn test_multi_user_trading_scenario() {
     println!("\n--- Open Orders After Trades ---");
     let grace_orders_after = check_orders(&client, &server_address, grace_id, "Grace").await;
     assert_eq!(
-        grace_orders_after.total, 0,
+        grace_orders_after.orders.len(),
+        0,
         "Grace's IOC order should not rest in book, found {} orders",
-        grace_orders_after.total
+        grace_orders_after.orders.len()
     );
     println!("   ✅ Grace has no open orders (IOC filled and removed)");
 
@@ -1297,17 +1306,19 @@ async fn test_multi_user_trading_scenario() {
     println!("\n--- Open Orders After Cancellations ---");
     let dave_orders_after = check_orders(&client, &server_address, dave_id, "Dave").await;
     assert_eq!(
-        dave_orders_after.total, 0,
+        dave_orders_after.orders.len(),
+        0,
         "Dave should have 0 orders after cancellation, found {}",
-        dave_orders_after.total
+        dave_orders_after.orders.len()
     );
     println!("   ✅ Dave's order removed from open orders");
 
     let frank_orders_after = check_orders(&client, &server_address, frank_id, "Frank").await;
     assert_eq!(
-        frank_orders_after.total, 2,
+        frank_orders_after.orders.len(),
+        2,
         "Frank should have 2 orders remaining (cancelled 1 of 3), found {}",
-        frank_orders_after.total
+        frank_orders_after.orders.len()
     );
     println!("   ✅ Frank has 2 remaining orders (cancelled 1)");
 
@@ -1381,7 +1392,8 @@ async fn test_multi_user_trading_scenario() {
 
     let final_bob_orders = check_orders(&client, &server_address, bob_id, "Bob").await;
     assert_eq!(
-        final_bob_orders.total, 3,
+        final_bob_orders.orders.len(),
+        3,
         "Bob should still have 3 resting BUY orders"
     );
     println!("   ✅ Bob still has 3 BUY orders");
@@ -1390,7 +1402,8 @@ async fn test_multi_user_trading_scenario() {
 
     let final_dave_orders = check_orders(&client, &server_address, dave_id, "Dave").await;
     assert_eq!(
-        final_dave_orders.total, 0,
+        final_dave_orders.orders.len(),
+        0,
         "Dave should have 0 orders after cancel"
     );
     println!("   ✅ Dave has 0 orders (cancelled)");
@@ -1399,14 +1412,16 @@ async fn test_multi_user_trading_scenario() {
 
     let final_frank_orders = check_orders(&client, &server_address, frank_id, "Frank").await;
     assert_eq!(
-        final_frank_orders.total, 2,
+        final_frank_orders.orders.len(),
+        2,
         "Frank should have 2 orders (cancelled 1 of 3)"
     );
     println!("   ✅ Frank has 2 remaining orders");
 
     let final_henry_orders = check_orders(&client, &server_address, henry_id, "Henry").await;
     assert_eq!(
-        final_henry_orders.total, 2,
+        final_henry_orders.orders.len(),
+        2,
         "Henry should have 2 orders (1 BUY + 1 SELL)"
     );
     println!("   ✅ Henry has 2 orders");

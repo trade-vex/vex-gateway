@@ -308,8 +308,6 @@ async fn test_get_open_orders(
     {
         Ok(orders) => {
             println!("   ✓ Retrieved {} orders from store", orders.len());
-
-            let total = orders.len();
             let order_responses: Vec<_> = orders
                 .into_iter()
                 .filter_map(|order| order_store.to_response(order))
@@ -317,10 +315,8 @@ async fn test_get_open_orders(
 
             let response = OrdersListResponse {
                 orders: order_responses,
-                total,
                 page: 1,
                 limit: 100,
-                total_pages: 1,
                 has_next: false,
                 has_prev: false,
             };
@@ -749,7 +745,7 @@ async fn test_user_balance_and_order_retrieval() {
 
     if orders_response.status().is_success() {
         let orders: OrdersListResponse = orders_response.json().await.expect("Failed to parse");
-        println!("   Total orders: {}", orders.total);
+        println!("   Total orders: {}", orders.orders.len());
 
         let mut found_our_order = false;
         for (idx, order) in orders.orders.iter().enumerate() {

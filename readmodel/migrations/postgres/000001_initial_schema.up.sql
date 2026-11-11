@@ -162,6 +162,10 @@ CREATE TABLE trading.orders (
     market_id           BIGINT NOT NULL
 );
 CREATE INDEX orders_user_event_ts ON trading.orders (order_user_id, event_ts);
+-- The open-order page (lib-core OPEN_ORDER_FILTER): the predicate must stay identical to it.
+CREATE INDEX orders_user_open ON trading.orders (order_user_id, event_ts)
+    WHERE order_status = 'STATUS_PLACED'
+       OR (order_status = 'STATUS_PARTIALLY_FILLED' AND order_time_in_force <> 'TIF_IOC');
 CREATE TABLE trading.order_events (
     LIKE trading.orders,
     PRIMARY KEY (order_order_id, event_ts)

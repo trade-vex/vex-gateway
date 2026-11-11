@@ -53,7 +53,6 @@ pub trait TradingRepository: Send + Sync {
         limit: u64,
         market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>>;
-    async fn count_open_orders(&self, user_id: u64, market_id: Option<u32>) -> Result<u64>;
     async fn get_order_history_paginated(
         &self,
         user_id: u64,
@@ -61,7 +60,6 @@ pub trait TradingRepository: Send + Sync {
         limit: u64,
         market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>>;
-    async fn count_order_history(&self, user_id: u64, market_id: Option<u32>) -> Result<u64>;
 
     // Favorite markets operations
     async fn get_user_favorite_markets(&self, user_id: u64)
@@ -180,37 +178,10 @@ impl PostgresTradingRepository {
         Self { db }
     }
 
-    /// `SELECT <select>` over the user's rows of `trading.orders` (one per order) that match
-    /// `status_filter` and, if given, `market_id`; with `page`, `(offset, limit)`, that page of
-    /// them, the most recently changed first. The index on `(order_user_id, event_ts)` serves it.
-    fn orders_statement(
-        select: &str,
-        user_id: u64,
-        status_filter: &str,
-        market_id: Option<u32>,
-        page: Option<(u64, u64)>,
-    ) -> Statement {
-        let mut values: Vec<Value> = vec![(user_id as i64).into()];
-        let mut sql = format!(
-            "SELECT {select} FROM trading.orders WHERE order_user_id = $1 AND ({status_filter})"
-        );
-        if let Some(market_id) = market_id {
-            values.push(i64::from(market_id).into());
-            sql.push_str(&format!(" AND market_id = ${}", values.len()));
-        }
-        if let Some((offset, limit)) = page {
-            values.push((offset as i64).into());
-            values.push((limit as i64).into());
-            // order_order_id breaks ties: one command can change several of a user's orders.
-            sql.push_str(&format!(
-                " ORDER BY event_ts DESC, order_order_id DESC OFFSET ${} LIMIT ${}",
-                values.len() - 1,
-                values.len()
-            ));
-        }
-        Statement::from_sql_and_values(DbBackend::Postgres, sql, values)
-    }
-
+    /// The user's rows of `trading.orders` (one per order) that match `status_filter` and, if
+    /// given, `market_id`: `limit` of them from `offset`, the most recently changed first. The
+    /// index on `(order_user_id, event_ts)` serves it, and for open orders the partial index
+    /// `orders_user_open`, which holds only open orders.
     async fn orders_page(
         &self,
         user_id: u64,
@@ -219,37 +190,30 @@ impl PostgresTradingRepository {
         offset: u64,
         limit: u64,
     ) -> Result<Vec<OrderModel>> {
-        OrderModel::find_by_statement(Self::orders_statement(
-            ORDER_COLUMNS,
-            user_id,
-            status_filter,
-            market_id,
-            Some((offset, limit)),
+        let mut values: Vec<Value> = vec![(user_id as i64).into()];
+        let mut sql = format!(
+            "SELECT {ORDER_COLUMNS} FROM trading.orders WHERE order_user_id = $1 AND ({status_filter})"
+        );
+        if let Some(market_id) = market_id {
+            values.push(i64::from(market_id).into());
+            sql.push_str(&format!(" AND market_id = ${}", values.len()));
+        }
+        values.push((offset as i64).into());
+        values.push((limit as i64).into());
+        // order_order_id breaks ties: one command can change several of a user's orders.
+        sql.push_str(&format!(
+            " ORDER BY event_ts DESC, order_order_id DESC OFFSET ${} LIMIT ${}",
+            values.len() - 1,
+            values.len()
+        ));
+        OrderModel::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            sql,
+            values,
         ))
         .all(&*self.db)
         .await
         .map_err(Into::into)
-    }
-
-    async fn count_orders(
-        &self,
-        user_id: u64,
-        status_filter: &str,
-        market_id: Option<u32>,
-    ) -> Result<u64> {
-        let row = self
-            .db
-            .query_one(Self::orders_statement(
-                "COUNT(*) AS count",
-                user_id,
-                status_filter,
-                market_id,
-                None,
-            ))
-            .await?
-            .ok_or_else(|| TradingError::Database("Order count returned no row".to_string()))?;
-        let count: i64 = row.try_get("", "count")?;
-        Ok(count as u64)
     }
 }
 
@@ -259,6 +223,7 @@ const ORDER_COLUMNS: &str = "order_order_id, order_user_id, order_price, order_s
 
 // Status and time-in-force values are vex-core's protobuf enum value names (trading.proto
 // `Status`, `TimeInForce`), which the Kafka Connect sink writes verbatim.
+// Also the predicate of the partial index orders_user_open: change both together.
 const OPEN_ORDER_FILTER: &str = r#"
     order_status = 'STATUS_PLACED'
     OR (
@@ -295,11 +260,6 @@ impl TradingRepository for PostgresTradingRepository {
             .await
     }
 
-    async fn count_open_orders(&self, user_id: u64, market_id: Option<u32>) -> Result<u64> {
-        self.count_orders(user_id, OPEN_ORDER_FILTER, market_id)
-            .await
-    }
-
     async fn get_order_history_paginated(
         &self,
         user_id: u64,
@@ -308,11 +268,6 @@ impl TradingRepository for PostgresTradingRepository {
         market_id: Option<u32>,
     ) -> Result<Vec<OrderModel>> {
         self.orders_page(user_id, HISTORY_ORDER_FILTER, market_id, offset, limit)
-            .await
-    }
-
-    async fn count_order_history(&self, user_id: u64, market_id: Option<u32>) -> Result<u64> {
-        self.count_orders(user_id, HISTORY_ORDER_FILTER, market_id)
             .await
     }
 
