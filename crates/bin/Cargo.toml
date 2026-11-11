@@ -4,18 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-tokio = {workspace = true}
 actix-web = {workspace = true}
 tracing = {workspace = true}
 tracing-subscriber = {workspace = true}
-serde_json = { workspace = true }
 
 # Internal crate dependencies
 lib-server = {path = "../libs/lib-server"}
 lib-config = {path = "../libs/lib-config"}
-
-# Vex dependencies
-lib-auth = {path = "../libs/lib-auth"}
-chrono = { workspace = true }
-jsonwebtoken = { workspace = true }
-redis = { workspace = true }
