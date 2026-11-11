@@ -8,12 +8,6 @@ pub enum AuthError {
     #[error("Token is revoked")]
     TokenRevoked,
 
-    #[error("Token has expired")]
-    TokenExpired,
-
-    #[error("Missing authorization header")]
-    MissingAuthHeader,
-
     #[error("Invalid credentials")]
     InvalidCredentials,
 
@@ -39,12 +33,6 @@ pub enum AuthError {
     #[error("Failed to fetch user info: {0}")]
     UserInfoFetchFailed(String),
 
-    #[error("Invalid OAuth callback")]
-    InvalidCallback,
-
-    #[error("OAuth provider error: {0}")]
-    ProviderError(String),
-
     // Traditional auth errors
     #[error("Email already exists")]
     EmailAlreadyExists,
@@ -52,17 +40,8 @@ pub enum AuthError {
     #[error("Username already taken")]
     UsernameAlreadyExists,
 
-    #[error("Invalid password")]
-    InvalidPassword,
-
     #[error("Email not verified")]
     EmailNotVerified,
-
-    #[error("Invalid verification code")]
-    InvalidVerificationCode,
-
-    #[error("Verification code expired")]
-    VerificationCodeExpired,
 
     #[error("Password reset token invalid")]
     InvalidResetToken,
@@ -97,15 +76,18 @@ pub enum AuthError {
 
 impl ResponseError for AuthError {
     fn error_response(&self) -> HttpResponse {
+        // A 500's detail is for the log; the client gets a fixed body.
+        if matches!(
+            self,
+            AuthError::Database(_)
+                | AuthError::Redis(_)
+                | AuthError::Config(_)
+                | AuthError::InternalError(_)
+        ) {
+            tracing::error!("{self}");
+        }
         let (status_code, error_code, message) = match self {
-            AuthError::TokenRevoked | AuthError::TokenExpired => {
-                (401, "TOKEN_INVALID", self.to_string())
-            }
-            AuthError::MissingAuthHeader => (
-                401,
-                "MISSING_AUTH_HEADER",
-                "Authorization header is required".to_string(),
-            ),
+            AuthError::TokenRevoked => (401, "TOKEN_INVALID", self.to_string()),
             AuthError::InvalidCredentials => (
                 401,
                 "INVALID_CREDENTIALS",
@@ -128,14 +110,6 @@ impl ResponseError for AuthError {
                 "USER_INFO_FAILED",
                 "Failed to fetch user information from provider".to_string(),
             ),
-            AuthError::InvalidCallback => (
-                400,
-                "INVALID_CALLBACK",
-                "Invalid OAuth callback parameters".to_string(),
-            ),
-            AuthError::ProviderError(_) => {
-                (400, "PROVIDER_ERROR", "Upstream provider error".to_string())
-            }
             AuthError::EmailAlreadyExists => (
                 409,
                 "EMAIL_EXISTS",
@@ -144,25 +118,10 @@ impl ResponseError for AuthError {
             AuthError::UsernameAlreadyExists => {
                 (409, "USERNAME_TAKEN", "Username already taken".to_string())
             }
-            AuthError::InvalidPassword => (
-                400,
-                "INVALID_PASSWORD",
-                "Password does not meet requirements".to_string(),
-            ),
             AuthError::EmailNotVerified => (
                 403,
                 "EMAIL_NOT_VERIFIED",
                 "Email address not verified".to_string(),
-            ),
-            AuthError::InvalidVerificationCode => (
-                400,
-                "INVALID_VERIFICATION_CODE",
-                "Invalid verification code".to_string(),
-            ),
-            AuthError::VerificationCodeExpired => (
-                400,
-                "VERIFICATION_CODE_EXPIRED",
-                "Verification code has expired".to_string(),
             ),
             AuthError::InvalidResetToken => (
                 400,

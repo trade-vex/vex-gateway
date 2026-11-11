@@ -20,9 +20,18 @@ pub struct ClickHouseConfig {
 }
 
 impl ClickHouseConfig {
-    /// `user` cannot be empty, and `database` must be a plain identifier (ASCII letters, digits and
-    /// underscores, not starting with a digit): the queries name it unquoted.
+    /// `url` must be an http:// URL, `user` cannot be empty, and `database` must be a plain
+    /// identifier (ASCII letters, digits and underscores, not starting with a digit): the queries
+    /// name it unquoted.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        // The client builds its request URIs lazily, and has no TLS: any other URL would fail at
+        // the first portfolio read instead of at startup.
+        if !self.url.starts_with("http://") {
+            return Err(ConfigError::ValidationError(
+                "clickhouse.url must start with http:// (the ClickHouse client has no TLS)"
+                    .to_string(),
+            ));
+        }
         if self.user.trim().is_empty() {
             return Err(ConfigError::ValidationError(
                 "clickhouse.user cannot be empty".to_string(),

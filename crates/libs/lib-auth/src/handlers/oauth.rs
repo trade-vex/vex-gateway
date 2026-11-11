@@ -1,6 +1,7 @@
 use crate::dto::auth_request_dto::{OAuthCallbackQuery, OAuthExchangeRequest, OAuthInitQuery};
 use crate::dto::auth_response_dto::OAuthExchangeResponse;
 use crate::error::auth_error::AuthError;
+use crate::handlers::auth::session_cookie;
 use crate::service::{
     email_service::EmailService,
     oauth_service::{OAuthCallbackMeta, OAuthService},
@@ -18,7 +19,7 @@ use std::sync::Arc;
 use tracing::error;
 use url::Url;
 
-pub(crate) fn validate_callback_state_cookie(
+fn validate_callback_state_cookie(
     meta: &OAuthCallbackMeta,
     has_state_cookie: bool,
 ) -> Result<(), AuthError> {
@@ -27,6 +28,14 @@ pub(crate) fn validate_callback_state_cookie(
     }
 
     Ok(())
+}
+
+/// `base` with `key=value` appended to its query, whatever its scheme.
+fn login_redirect(base: &str, key: &str, value: &str) -> Result<String, AuthError> {
+    let mut url = Url::parse(base)
+        .map_err(|e| AuthError::Config(format!("frontend URL {base:?} is not a URL: {e}")))?;
+    url.query_pairs_mut().append_pair(key, value);
+    Ok(url.to_string())
 }
 
 const OAUTH_INIT_RATE_LIMIT_SCOPE: &str = "oauth_initiate";
@@ -104,6 +113,8 @@ pub async fn initiate_oauth(
 /// Handle OAuth callback
 /// GET /oauth/{provider}/callback?code=...&state=...
 ///
+/// Without a code (the user cancelled, or the provider answered `error`), redirects to the
+/// front end with `?error=oauth_cancelled`.
 /// For web: validates state cookie binding before processing.
 /// For mobile: creates a one-time login_code instead of returning session_id directly.
 pub async fn handle_oauth_callback(
@@ -123,17 +134,36 @@ pub async fn handle_oauth_callback(
         )
         .await?;
 
-    // Validate that the OAuth code is present and non-empty
-    let code = query
-        .code
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or(AuthError::InvalidRequest)?;
-
     // Check for state cookie (present for web, absent for mobile)
     let cookie_name = format!("oauth_state_{}", provider.as_str());
     let cookie_state = req.cookie(&cookie_name).map(|c| c.value().to_string());
     let has_state_cookie = cookie_state.is_some();
+    let clear_state_cookie = Cookie::build(cookie_name, "")
+        .path(format!("/api/oauth/{}/callback", provider.as_str()))
+        .http_only(true)
+        .secure(is_https(&req))
+        .same_site(SameSite::Lax)
+        .max_age(Duration::seconds(0))
+        .finish();
+
+    // The user cancelled or the provider refused: land on the front end, not on this API. Only a
+    // browser login has the state cookie.
+    let code = match query.code.as_deref().filter(|code| !code.is_empty()) {
+        Some(code) if query.error.is_none() => code,
+        _ => {
+            let platform = if has_state_cookie { None } else { Some("app") };
+            let landing = login_redirect(
+                oauth_service.frontend_url(platform)?,
+                "error",
+                "oauth_cancelled",
+            )?;
+            return Ok(HttpResponse::Found()
+                .cookie(clear_state_cookie)
+                .insert_header(("Cache-Control", "no-store"))
+                .append_header(("Location", landing))
+                .finish());
+        }
+    };
 
     // For web flow: enforce state cookie binding (prevents login CSRF / session swapping)
     // If cookie exists, it must match the query state
@@ -161,19 +191,13 @@ pub async fn handle_oauth_callback(
             let user_id = response.user.user_id;
             let user_info = response.user.clone();
 
-            // Create session with user_id and tokens
+            // Create session with user_id and its access token
             let session_id = session_service
-                .create_session(
-                    user_id,
-                    response.access_token.clone(),
-                    response.refresh_token.clone(),
-                )
+                .create_session(user_id, response.access_token.clone())
                 .await
                 .map_err(|e| {
                     AuthError::CodeExchangeFailed(format!("Failed to create session: {}", e))
                 })?;
-
-            let is_secure = is_https(&req);
 
             // Serialize user_info to JSON
             let user_info_json = serde_json::to_string(&user_info).map_err(|e| {
@@ -190,27 +214,7 @@ pub async fn handle_oauth_callback(
                         .create_login_code(session_id, user_info_json, app_challenge)
                         .await?;
 
-                    // Build redirect URL with only login_code
-                    let redirect_url = if frontend_url.contains("://")
-                        && !frontend_url.starts_with("http://")
-                        && !frontend_url.starts_with("https://")
-                    {
-                        // Custom scheme (e.g., vex://) - UUIDs are URL-safe, no encoding needed
-                        format!("{}?login_code={}", frontend_url, login_code)
-                    } else {
-                        // Standard URL - use URL parsing for proper encoding
-                        match Url::parse(&frontend_url) {
-                            Ok(mut url) => {
-                                // query_pairs_mut() automatically handles encoding if needed
-                                url.query_pairs_mut().append_pair("login_code", &login_code);
-                                url.to_string()
-                            }
-                            Err(_) => {
-                                // Fallback - UUIDs are URL-safe
-                                format!("{}?login_code={}", frontend_url, login_code)
-                            }
-                        }
-                    };
+                    let redirect_url = login_redirect(&frontend_url, "login_code", &login_code)?;
 
                     Ok(HttpResponse::Found()
                         .insert_header(("Cache-Control", "no-store"))
@@ -220,26 +224,9 @@ pub async fn handle_oauth_callback(
                 _ => {
                     // For web: session cookie only; frontend can call /profile to fetch user info
                     // Removed user_info cookie - it was XSS-sensitive (not HttpOnly)
-                    // Use SessionService TTL for cookie max_age to align client/server state
-                    let session_cookie = Cookie::build("session_id", session_id.clone())
-                        .path("/")
-                        .http_only(true)
-                        .secure(is_secure)
-                        .same_site(SameSite::Strict)
-                        .max_age(Duration::seconds(session_service.ttl_seconds() as i64))
-                        .finish();
-
                     // Clear the oauth_state cookie on success
-                    let clear_state_cookie = Cookie::build(cookie_name, "")
-                        .path(format!("/api/oauth/{}/callback", provider.as_str()))
-                        .http_only(true)
-                        .secure(is_secure)
-                        .same_site(SameSite::Lax)
-                        .max_age(Duration::seconds(0))
-                        .finish();
-
                     Ok(HttpResponse::Found()
-                        .cookie(session_cookie)
+                        .cookie(session_cookie(&req, session_id))
                         .cookie(clear_state_cookie)
                         .insert_header(("Cache-Control", "no-store"))
                         .append_header(("Location", frontend_url))
@@ -310,4 +297,182 @@ pub async fn exchange_oauth_login_code(
             session_id: data.session_id,
             user_info: user_info_val,
         }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{OAuthConfig, OAuthProviderConfig};
+    use crate::handlers::auth::tests::test_services;
+    use crate::service::oauth_service::tests::test_service;
+    use actix_web::{
+        App,
+        dev::ServiceResponse,
+        http::{StatusCode, header::LOCATION},
+        test::{self, TestRequest},
+    };
+    use secrecy::SecretString;
+    use std::collections::HashMap;
+
+    /// GitHub as the one provider; its token endpoint refuses connections.
+    fn oauth_config() -> OAuthConfig {
+        OAuthConfig {
+            providers: HashMap::from([(
+                "github".to_string(),
+                OAuthProviderConfig {
+                    client_id: "id".to_string(),
+                    client_secret: SecretString::new("secret".to_string()),
+                    auth_url: "https://github.com/login/oauth/authorize".to_string(),
+                    token_url: "http://127.0.0.1:9/token".to_string(),
+                    issuer_url: None,
+                },
+            )]),
+            redirect_base: "http://localhost".to_string(),
+            frontend_url_web: Some("https://app.example.com/oauth/done".to_string()),
+            frontend_url_app: Some("vex://oauth".to_string()),
+        }
+    }
+
+    /// Sends `req` to the callback route, whose services use the test Redis.
+    async fn callback(req: TestRequest) -> ServiceResponse {
+        let (email_service, _, session_service) = test_services().await;
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(Arc::new(
+                    test_service(&oauth_config()).await,
+                )))
+                .app_data(web::Data::new(session_service))
+                .app_data(web::Data::new(email_service))
+                .route(
+                    "/oauth/{provider}/callback",
+                    web::get().to(handle_oauth_callback),
+                ),
+        )
+        .await;
+        let req = req
+            .peer_addr("198.51.100.7:1".parse().unwrap())
+            .to_request();
+        test::call_service(&app, req).await
+    }
+
+    #[actix_web::test]
+    async fn cancelled_oauth_login_redirects_to_the_front_end_with_an_error() {
+        // A browser login has the state cookie; the app's has none.
+        for (state_cookie, landing) in [
+            (
+                true,
+                "https://app.example.com/oauth/done?error=oauth_cancelled",
+            ),
+            (false, "vex://oauth?error=oauth_cancelled"),
+        ] {
+            let mut req =
+                TestRequest::get().uri("/oauth/github/callback?error=access_denied&state=s");
+            if state_cookie {
+                req = req.cookie(Cookie::new("oauth_state_github", "s"));
+            }
+
+            let response = callback(req).await;
+
+            assert_eq!(response.status(), StatusCode::FOUND);
+            assert_eq!(response.headers().get(LOCATION).unwrap(), landing);
+            let cleared = response
+                .response()
+                .cookies()
+                .find(|cookie| cookie.name() == "oauth_state_github")
+                .unwrap();
+            assert_eq!(cleared.max_age(), Some(Duration::ZERO));
+        }
+    }
+
+    /// The provider still knows the state, but this browser holds another one: a login CSRF.
+    #[actix_web::test]
+    async fn callback_with_a_state_cookie_that_differs_from_the_query_state_is_refused() {
+        let (_, state) = test_service(&oauth_config())
+            .await
+            .get_auth_url_with_platform("github", None, None)
+            .await
+            .unwrap();
+
+        let response = callback(
+            TestRequest::get()
+                .uri(&format!("/oauth/github/callback?code=c&state={state}"))
+                .cookie(Cookie::new("oauth_state_github", "another")),
+        )
+        .await;
+
+        let error = response.response().error().unwrap();
+        assert!(matches!(
+            error.as_error::<AuthError>(),
+            Some(AuthError::StateMismatch)
+        ));
+    }
+
+    #[actix_web::test]
+    async fn exchange_with_the_wrong_verifier_is_refused_and_consumes_the_code() {
+        let verifier = "v".repeat(43);
+        let (_, _, session_service) = test_services().await;
+        let login_code = session_service
+            .create_login_code(
+                "session".to_string(),
+                "{}".to_string(),
+                crate::utils::pkce::s256_challenge(&verifier).unwrap(),
+            )
+            .await
+            .unwrap();
+        let exchange = |verifier: String| {
+            exchange_oauth_login_code(
+                web::Json(OAuthExchangeRequest {
+                    login_code: login_code.clone(),
+                    verifier,
+                }),
+                web::Data::new(session_service.clone()),
+            )
+        };
+
+        let wrong = exchange("w".repeat(43)).await;
+        assert!(matches!(wrong, Err(AuthError::InvalidRequest)));
+        // The code was used up: the right verifier no longer redeems it.
+        let right = exchange(verifier).await;
+        assert!(matches!(right, Err(AuthError::InvalidRequest)));
+    }
+
+    fn meta(platform: Option<&str>) -> OAuthCallbackMeta {
+        OAuthCallbackMeta {
+            platform: platform.map(String::from),
+            app_challenge: None,
+        }
+    }
+
+    #[test]
+    fn web_callback_without_state_cookie_is_rejected() {
+        for platform in [None, Some("web")] {
+            assert!(matches!(
+                validate_callback_state_cookie(&meta(platform), false),
+                Err(AuthError::StateMismatch)
+            ));
+            assert!(validate_callback_state_cookie(&meta(platform), true).is_ok());
+        }
+    }
+
+    #[test]
+    fn app_callback_needs_no_state_cookie() {
+        assert!(validate_callback_state_cookie(&meta(Some("app")), false).is_ok());
+    }
+
+    #[test]
+    fn the_mobile_redirect_keeps_an_existing_query_on_the_app_url() {
+        for (base, redirect) in [
+            ("vex://oauth", "vex://oauth?login_code=abc"),
+            (
+                "vex://oauth?src=login",
+                "vex://oauth?src=login&login_code=abc",
+            ),
+            (
+                "https://app.example.com/done",
+                "https://app.example.com/done?login_code=abc",
+            ),
+        ] {
+            assert_eq!(login_redirect(base, "login_code", "abc").unwrap(), redirect);
+        }
+    }
 }

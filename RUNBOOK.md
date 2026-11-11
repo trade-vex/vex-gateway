@@ -51,8 +51,8 @@ APP_ENV=production ./target/release/gateway
 
 The gateway reads two environment variables by name, and does not read a `.env` file:
 
-- `APP_ENV` (required): `development`, `testing` or `production`. Selects `<APP_ENV>.toml`, whose
-  `environment` key must name the same environment.
+- `APP_ENV` (required): `development` or `production`. Selects `<APP_ENV>.toml` and the
+  environment's rules; an `environment` key in the file, or `APP__ENVIRONMENT`, is ignored.
 - `APP_CONFIG_DIR` (optional): the directory holding that file. The gateway refuses to start
   when it does not name a directory. When it is unset, the gateway uses the nearest `config/`
   directory at or above its working directory.
@@ -81,10 +81,9 @@ Configuration is loaded from TOML files in the `config/` directory:
 
 - `config/development.toml` - Development settings; `scripts/setup_dev.sh` creates it from the
   committed `config/development.toml.example`
-- `config/testing.toml` - Testing settings
 - `config/production.toml` - Production settings
 
-The three environment files are gitignored. The selected environment's file must exist: without
+The two environment files are gitignored. The selected environment's file must exist: without
 it the gateway does not start.
 
 ### Configuration Precedence
@@ -119,21 +118,27 @@ optional setting.
 ### Configuration Validation
 
 The service validates configuration on startup:
-- **Production**: Cannot bind to localhost, cannot use debug logging, port must be > 0,
-  `auth.server.trusted_proxies`, `core.auth_key` and `clickhouse.password` must not be empty, and
-  `metrics.bind` needs a port of its own (not 0, and not `server.port`)
+- **Production**: Cannot bind to a loopback address (127.0.0.0/8, ::1, or a name resolving to
+  one), cannot use debug logging, port must be > 0, `auth.server.trusted_proxies`,
+  `core.auth_key` and `clickhouse.password` must not be empty, and `metrics.bind` needs a port of
+  its own (not 0, and not `server.port`)
 - **Development**: More lenient validation
-- **Testing**: Allows ephemeral ports (port 0)
 - **Every environment**: `auth.oauth.providers` may list only `google`, `github` and `twitter`;
-  another provider stops the gateway at startup, and the error names it. The code lifetimes in
-  `[auth.otp]` must be positive, `clickhouse.user` must not be empty, `clickhouse.database` must
-  be a plain identifier, `metrics.bind` must be an IP address and a port, and every `rate_limit`
-  setting must be greater than 0
+  another provider stops the gateway at startup, and the error names it. A `google` provider needs
+  `issuer_url = "https://accounts.google.com"`, where the gateway discovers Google's endpoints at
+  startup (10 s timeout) and fetches its signing keys at each login. For `twitter` (X), the X
+  developer app must have "Request email from users" enabled (it needs Terms of Service and
+  Privacy Policy URLs in the app settings): without it X sends no confirmed email and every X
+  login is refused with 400 `USER_INFO_FAILED`. The code lifetimes in `[auth.otp]` and
+  `auth.jwt.access_token_ttl_minutes` must be positive, `clickhouse.url` must start with
+  `http://`, `clickhouse.user` must not be empty, `clickhouse.database` must be a
+  plain identifier, `metrics.bind` must be an IP address and a port, and every `rate_limit` setting
+  must be greater than 0
 
 ### OAuth Redirects
 
 Once `auth.oauth.providers` lists a provider, the gateway needs the two URLs a completed OAuth
-login is redirected to, and refuses to start without them:
+login is redirected to, and refuses to start unless both are absolute URLs:
 
 - `auth.oauth.frontend_url_web`: the web frontend page that finishes a browser login (the session
   cookie is already set).
@@ -142,12 +147,19 @@ login is redirected to, and refuses to start without them:
 
 ### Email Codes
 
-`[auth.otp]` sets the codes the gateway emails: `otp_length` digits (6 to 10, checked at load), valid for
+`[auth.otp]` sets how long the six-digit codes the gateway emails are valid:
 `email_verification_expiry_minutes` (signup email verification) or `password_reset_expiry_minutes`
 (password reset). Every key is required, and a lifetime that is not a positive number of minutes
 stops the gateway at startup. Keep the password-reset lifetime short: a reset code takes over the
-account, and its check allows 5 attempts per email per 15 minutes, so a longer-lived code can be
-guessed more often.
+account. After 5 wrong attempts a code is void (the 5th answers 429), and a new one must be
+requested.
+
+`[auth.email]` sends them. On `smtp_port` 465 the connection is TLS from the first byte; on any
+other port (587, the submission port) it starts plain and must upgrade with STARTTLS. The relay's
+certificate is checked against the public CA roots built into the gateway (webpki-roots), not the
+host's trust store, so a relay with a certificate from a private CA is refused. An
+`smtp_host` of `localhost`, `127.0.0.1` or `host.docker.internal` sends without TLS or credentials,
+for a local test server.
 
 ### ClickHouse
 
@@ -156,8 +168,9 @@ endpoints read from. Every key is required, with no default, and `APP__CLICKHOUS
 overrides one:
 
 - `url` (`APP__CLICKHOUSE__URL`): the HTTP endpoint, such as `http://clickhouse.internal:8123`.
-  The gateway's ClickHouse client speaks plain HTTP only, not HTTPS, so this endpoint must be
-  reachable only from the gateway's private network.
+  The gateway's ClickHouse client speaks plain HTTP only, not HTTPS (a URL that does not start
+  with `http://` stops the gateway at startup), so this endpoint must be reachable only from the
+  gateway's private network.
 - `user` (`APP__CLICKHOUSE__USER`): the user the gateway reads as, ClickHouse's gateway login
   ([Read Model](#read-model)). It must not be empty.
 - `password` (`APP__CLICKHOUSE__PASSWORD`): that user's password, never logged. Empty only for a
@@ -208,10 +221,11 @@ Every series is reported from the first scrape, at 0 until its first count:
 - `jwt`: a bearer token, or a session cookie whose session holds one, refused with 401 (invalid,
   expired or revoked, or an expired or unknown session).
 - `api_key`: an `X-MBX-APIKEY` request refused with a 4xx: an unknown, disabled or expired key, a
-  refused IP or permission, or a bad, stale or replayed signature. A 5xx, such as the replay store
-  being unreachable, is the gateway's fault and is not counted.
-- `login`: a `POST /api/login` refused for its email and password (401). A rate-limited or
-  unverified login is not counted.
+  refused IP or permission, a bad, stale or replayed signature, or a client IP over its refusal
+  budget (429, see [Rate Limits](#rate-limits)). A 5xx, such as Postgres or Redis being
+  unreachable, is the gateway's fault and is not counted.
+- `login`: a `POST /api/login` or `POST /api/verify-email` refused for its email and password
+  (401). A rate-limited or unverified login is not counted.
 
 A request to a protected route without any credentials is not counted.
 
@@ -254,20 +268,27 @@ The routes:
 - `general`, per user: every other authenticated route: `POST /api/cancel`, `/api/balances`,
   `/api/orders/open`, `/api/orders/history`, `/api/portfolio`, `/api/balance-chart`,
   `/api/pnl-chart`, `/api/favorites`, `/api/api-key/*`, `/api/session-check`, `/api/profile`,
-  `/api/logout`, `/api/change-password`, `/api/session/info`, `/api/session/refresh`.
+  `/api/logout`, `/api/change-password`, `/api/session/info`.
 - `general`, per client IP: `GET /api/oauth/providers`, `POST /api/oauth/exchange`,
-  `POST /api/refresh`, `POST /api/session/refresh-tokens`, `POST /api/check-email`,
-  `POST /api/resend-verification`, `POST /api/forgot-password`, `POST /api/verify-reset-otp`,
-  `POST /api/reset-password`.
+  `POST /api/forgot-password`, `POST /api/verify-reset-otp`, `POST /api/reset-password`.
 - Neither budget: the routes with fixed limits of their own per client IP (and some per email or
   username too): `POST /api/signup`, `POST /api/login`, `POST /api/verify-email`,
   `GET /api/oauth/{provider}`, `GET /api/oauth/{provider}/callback`. And `GET /api/health`, the
   load balancer's health check, which reads a flag and touches no store.
 
-The routes that send an email, or check a code sent by email, also have a fixed limit per email
-address, on top of their client IP's `general` budget: `POST /api/forgot-password` and
-`POST /api/resend-verification` 3 an hour, `POST /api/verify-reset-otp` 5 in 15 minutes. Over it
-they answer the same 429.
+`POST /api/forgot-password`, which sends an email, also has a fixed limit per email address on top
+of its client IP's `general` budget: 3 an hour. Over it, it answers the same 429. A code sent by
+email has an attempt cap instead (see [Email Codes](#email-codes)).
+
+`POST /api/change-password` has the login's failure budget, per user: after 5 wrong old passwords
+in 5 minutes it answers 429 until the window ends.
+
+API-key authentication has a budget of its own, a code constant: each client IP (an IPv6 client
+by its /64) may make 60 refused API-key authentications a minute (an unknown, disabled or expired
+key, or a wrong signature). Over that, every API-key request from that IP is refused with the same
+429 and `Retry-After` until the window ends, before the key is looked up. A request whose key and
+signature are valid is never counted, so a working client never reaches it. When Redis cannot
+read the budget, the request gets 503 `API key store is unavailable`.
 
 When Redis cannot count a request (it is unreachable, or full under `noeviction`), the gateway
 refuses it with 503
@@ -337,12 +358,13 @@ Set `auth.server.trusted_proxies` in the TOML file, or `APP__AUTH__SERVER__TRUST
 a request whose TCP peer is in that list is `X-Forwarded-For` read, from the right; the first hop
 that is not itself a trusted proxy is the client. List only proxies that append to
 `X-Forwarded-For`: a listed address that forwards a client's header unchanged lets that client
-choose its own IP. An invalid entry stops the gateway at startup, before it connects to vex-core.
+choose its own IP. An invalid entry, or a /0 range (it would trust every client), stops the
+gateway at startup, before it connects to vex-core.
 The error gives the entry's position in the list, never its value; empty items of a
 comma-separated value are skipped and not counted.
 
 With `APP_ENV=production` the list is required: the gateway refuses to start when it is empty.
-Development and testing default to an empty list, so the TCP peer is the client.
+Development defaults to an empty list, so the TCP peer is the client.
 
 Production runs behind an AWS Application Load Balancer (ALB):
 
@@ -364,8 +386,8 @@ Production runs behind an AWS Application Load Balancer (ALB):
 
 Run Redis with `maxmemory-policy noeviction`. Two kinds of gateway state must never be evicted:
 
-- `token_version:<user_id>` has no TTL and is what revokes a user's outstanding access and refresh
-  tokens after logout, password change or password reset. An `allkeys-*` policy can evict it, which
+- `token_version:<user_id>` has no TTL and is what revokes a user's outstanding access tokens
+  after logout, password change or password reset. An `allkeys-*` policy can evict it, which
   silently makes those tokens valid again.
 - Order idempotency claims (`vex:order-idempotency:*`, 24-hour TTL) stop a retried order from being
   published twice. A `volatile-*` or `allkeys-*` policy can evict a claim early, and the retry is
@@ -598,7 +620,7 @@ In this order:
 | Role | May |
 |---|---|
 | `readmodel_connect` | `SELECT`, `INSERT` and `UPDATE` on every `trading` table (an upsert needs all three). Nothing else. |
-| `readmodel_gateway` | `SELECT` on every `trading` table, so Postgres denies the gateway any write to it. `SELECT`, `INSERT`, `UPDATE` on `users` and `api_keys`; `SELECT`, `INSERT`, `DELETE` on `user_favorite_markets`; `SELECT` on `markets` and `assets`. |
+| `readmodel_gateway` | `SELECT` on every `trading` table, so Postgres denies the gateway any write to it. `SELECT`, `INSERT`, `UPDATE` on `users`; `SELECT`, `INSERT`, `UPDATE`, `DELETE` on `api_keys`; `SELECT`, `INSERT`, `DELETE` on `user_favorite_markets`; `SELECT` on `markets` and `assets`. |
 
 Only the owner runs migrations and seeds, and only the owner creates objects, in schema `public`
 too.
@@ -1001,6 +1023,8 @@ grep -i "memory\|oom" logs/app.log
    - User registration/login may fail
    - Balance, open-order and order-history queries will fail: they read the read model
    - API key management will fail
+   - API-key requests get 503 (`API key store is unavailable`) once their key has been out of
+     the gateway's cache for 5 s
    - **Order placement may still work** (if VEX Core is up)
 
 3. **Mitigation**
@@ -1016,15 +1040,14 @@ grep -i "memory\|oom" logs/app.log
    ```
 
 2. **Service Impact**
-   - Every JWT-authenticated request gets 503 (`service_unavailable`): the token revocation
-     checks read Redis.
-   - Signed API-key requests get 503 (`Signature replay protection failed`): their signatures
-     are recorded in Redis against replay.
+   - Every JWT-authenticated request, session cookies included, gets 503 (`service_unavailable`):
+     the token revocation checks and the sessions read Redis. No one is logged out by it.
+   - Every API-key request gets 503 (`API key store is unavailable`): each client IP's budget
+     of refused API-key authentications, and every signature (against replay), are kept in Redis.
    - **Order placement fails**: every order's idempotency claim is kept in Redis, so nothing is
      sent to the engine. An order that gets past authentication is answered 503 (`Order was not
      sent because idempotency storage is unavailable`).
    - OAuth flows will fail (state storage)
-   - Session refresh may fail
 
 3. **Mitigation**
    - Restart Redis
@@ -1106,12 +1129,19 @@ grep -i "memory\|oom" logs/app.log
 
 - `GET /api/health` - Liveness: 200 while the process serves
 - `GET /api/ready` - Readiness: 503 while the vex-core link is down
-- `POST /api/signup` - User registration
+- `POST /api/signup` - User registration. A second sign-up for an email whose account is not
+  verified yet replaces that sign-up and sends a new code; a verified email answers 409.
+- `POST /api/verify-email` - Takes the email, the password chosen at sign-up and the emailed code.
+  An unknown or already verified email and a wrong password all get the login's 401
 - `POST /api/login` - User login
-- `POST /api/refresh` - Refresh JWT token
 - `GET /api/oauth/providers` - List OAuth providers
 - `GET /api/oauth/{provider}` - Initiate OAuth flow
-- `GET /api/oauth/{provider}/callback` - OAuth callback
+- `GET /api/oauth/{provider}/callback` - OAuth callback. Refused with 403 `EMAIL_NOT_VERIFIED`
+  when the provider has not verified the email or the account cannot log in, and with 409
+  `EMAIL_EXISTS` when a verified account already holds the email; a provider-verified email
+  replaces a password sign-up that was never verified. A login cancelled at the provider (an
+  `error`, or no `code`) is redirected to `frontend_url_web` (`frontend_url_app` without the
+  browser's state cookie) with `?error=oauth_cancelled`
 
 ### Protected Endpoints (Requires Authentication)
 
@@ -1137,8 +1167,22 @@ grep -i "memory\|oom" logs/app.log
 - `DELETE /api/api-key/{id}` - Delete API key
 - `PATCH /api/api-key/{id}/toggle` - Enable/disable API key
 
+A key holds the permissions `trade`, `user_data` or both, and every API-key request is signed.
+`trade` is needed to place and cancel orders (`POST /api/order`, `POST /api/cancel`); `user_data`
+for every other route an API key may reach (balances, orders, portfolio, charts, favorites,
+`/api/session-check`). `/api/api-key/*`, `/api/logout`, `/api/profile` and `/api/change-password`
+are for the signed-in person only: they answer an API key with 401 whatever its permissions.
+
+Deleting, disabling or changing a key takes effect at once on the gateway replica that served the
+request, and within 5 seconds on the others: each replica caches a key for at most 5 s.
+
 #### Session
-- `GET /api/session/check` - Check session validity
+- `GET /api/session-check` - Check session validity
+- `GET /api/session/info` - The session's user and access token. There are no refresh tokens: the
+  session (30 minutes idle; every login sets its `session_id` cookie for 24 hours) renews its
+  access token when it expires. A Bearer client whose access token expired calls
+  `GET /api/session/info` with its session cookie; the middleware renews the token on that call
+  and the response carries the new one.
 
 ### Authentication Methods
 

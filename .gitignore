@@ -12,7 +12,6 @@
 # Config
 config/production.toml
 config/development.toml
-config/testing.toml
 
 **/target
 .DS_Store

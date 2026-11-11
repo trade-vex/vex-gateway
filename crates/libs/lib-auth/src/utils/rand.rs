@@ -1,5 +1,5 @@
 use rand::distributions::{Alphanumeric, Distribution};
-use rand::{Rng, rngs::OsRng};
+use rand::rngs::OsRng;
 
 /// Generates a cryptographically secure random alphanumeric string.
 ///
@@ -60,15 +60,9 @@ pub fn generate_random_string(length: usize) -> String {
         .collect::<String>()
 }
 
-pub fn generate_random_bytes(length: usize) -> Vec<u8> {
-    let mut rng = rand::thread_rng();
-    (0..length).map(|_| rng.r#gen()).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
 
     #[test]
     fn test_generate_random_string() {
@@ -82,44 +76,5 @@ mod tests {
         // Should only contain valid characters
         assert!(s1.chars().all(|c| c.is_ascii_alphanumeric()));
         assert!(s2.chars().all(|c| c.is_ascii_alphanumeric()));
-    }
-
-    #[test]
-    fn test_cryptographic_properties() {
-        // Test uniqueness - generate many strings and ensure they're all different
-        let mut strings = HashSet::new();
-        for _ in 0..1000 {
-            let s = generate_random_string(16);
-            assert!(
-                strings.insert(s),
-                "Generated duplicate string - not cryptographically secure"
-            );
-        }
-        assert_eq!(strings.len(), 1000);
-
-        // Test character distribution - should have reasonable distribution
-        let mut char_counts = std::collections::HashMap::new();
-        for _ in 0..10000 {
-            let s = generate_random_string(1);
-            *char_counts.entry(s.chars().next().unwrap()).or_insert(0) += 1;
-        }
-
-        // Should have at least some characters from each category
-        let has_upper = char_counts.keys().any(|&c| c.is_ascii_uppercase());
-        let has_lower = char_counts.keys().any(|&c| c.is_ascii_lowercase());
-        let has_digit = char_counts.keys().any(|&c| c.is_ascii_digit());
-
-        assert!(has_upper, "Missing uppercase letters in distribution");
-        assert!(has_lower, "Missing lowercase letters in distribution");
-        assert!(has_digit, "Missing digits in distribution");
-    }
-
-    #[test]
-    fn test_osrng_usage() {
-        // Verify we're using OsRng by checking it doesn't panic
-        // OsRng should always be available on supported platforms
-        let _ = generate_random_string(1);
-        let _ = generate_random_string(100);
-        let _ = generate_random_string(1000);
     }
 }

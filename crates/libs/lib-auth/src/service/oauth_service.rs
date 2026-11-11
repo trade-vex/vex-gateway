@@ -68,13 +68,15 @@ pub struct OAuthCallbackMeta {
     /// App challenge for mobile verification (app only)
     pub app_challenge: Option<String>,
 }
-#[allow(unused_imports)]
 use openidconnect::TokenResponse;
 use openidconnect::{
     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointMaybeSet,
     EndpointNotSet, EndpointSet, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier,
     RedirectUrl, ResponseTypes, Scope, TokenUrl,
-    core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata, CoreResponseType},
+    core::{
+        CoreAuthenticationFlow, CoreClient, CoreIdTokenVerifier, CoreJsonWebKeySet,
+        CoreProviderMetadata, CoreResponseType,
+    },
 };
 use secrecy::ExposeSecret;
 use serde_json::Value;
@@ -118,9 +120,8 @@ type OAuthClient = CoreClient<
 ///
 /// # Redis Keys
 ///
-/// - `oauth_state:{provider}:{state}` - CSRF state validation (600s TTL)
-/// - `oauth_verifier:{provider}:{state}` - PKCE verifier storage (600s TTL)
-/// - `oauth_nonce:{provider}:{state}` - OIDC nonce for ID token validation (600s TTL)
+/// - `oauth_txn:{provider}:{state}` - the login's PKCE verifier, OIDC nonce, platform and app
+///   challenge (600s TTL), consumed by the callback
 #[derive(Clone)]
 pub struct OAuthService {
     /// Redis connection for state management
@@ -129,12 +130,16 @@ pub struct OAuthService {
     /// HTTP client for API requests to providers
     http_client: reqwest::Client,
 
-    /// HTTP client for the OAuth/OIDC protocol requests (discovery, token exchange). It does not
-    /// follow redirects, which would open the token exchange to SSRF.
+    /// HTTP client for the OAuth/OIDC protocol requests (discovery, key sets, token exchange). It
+    /// does not follow redirects, which would open the token exchange to SSRF.
     oidc_http_client: reqwest::Client,
 
     /// Pre-configured OAuth clients per provider (initialized at startup)
     oauth_clients: HashMap<String, OAuthClient>,
+
+    /// Discovered metadata of the OIDC providers (Google). Its `jwks_uri` is fetched at each login
+    /// because the provider rotates its signing keys.
+    oidc_metadata: HashMap<String, CoreProviderMetadata>,
 
     /// JWT token service for minting application tokens
     token_service: Arc<TokenService>,
@@ -235,7 +240,8 @@ impl OAuthService {
     }
 
     /// The account for an OAuth login: the one already linked to the provider identity, or a new
-    /// one when the email is not registered yet.
+    /// one when the email is not registered yet. Refused with `EmailNotVerified` when that account
+    /// cannot log in or the provider has not verified the email.
     ///
     /// A new account's username must be unique (`ux_users_username`), and different people can
     /// map to the same one. When the insert reports the username taken, it is retried with a
@@ -250,14 +256,21 @@ impl OAuthService {
             .find_by_provider_id(provider, &info.provider_id)
             .await?
         {
-            // Update last login timestamp for existing user
+            if !existing_user.can_login() {
+                return Err(AuthError::EmailNotVerified);
+            }
             user_repo.update_last_login(existing_user.user_id).await?;
             return Ok(existing_user);
         }
-
-        // Check if user exists with same email but different provider
-        if user_repo.find_by_email(&info.email).await?.is_some() {
-            return Err(AuthError::EmailAlreadyExists);
+        if !info.email_verified {
+            return Err(AuthError::EmailNotVerified);
+        }
+        match user_repo.find_by_email(&info.email).await? {
+            // No account linking: another verified account keeps the email.
+            Some(other) if other.email_verified => return Err(AuthError::EmailAlreadyExists),
+            // An unverified password sign-up never reserved the email; the provider has verified it.
+            Some(pending) => user_repo.delete_unverified(pending.user_id).await?,
+            None => {}
         }
 
         let now = chrono::Utc::now();
@@ -329,13 +342,16 @@ impl OAuthService {
     ) -> Result<Self, AuthError> {
         let oidc_http_client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            // Discovery runs before the gateway listens: a stalled provider must not hold it.
+            .timeout(std::time::Duration::from_secs(10))
             .build()
             .map_err(|e| AuthError::Config(format!("Failed to build OAuth HTTP client: {}", e)))?;
         let mut oauth_clients = HashMap::new();
+        let mut oidc_metadata = HashMap::new();
 
         // Initialize OAuth clients for each configured provider
         for (provider, config) in &oauth_config.providers {
-            let client = Self::create_oauth_client(
+            let (client, metadata) = Self::create_oauth_client(
                 provider,
                 config,
                 &oauth_config.redirect_base,
@@ -343,6 +359,9 @@ impl OAuthService {
             )
             .await?;
             oauth_clients.insert(provider.clone(), client);
+            if let Some(metadata) = metadata {
+                oidc_metadata.insert(provider.clone(), metadata);
+            }
         }
 
         Ok(Self {
@@ -350,6 +369,7 @@ impl OAuthService {
             http_client,
             oidc_http_client,
             oauth_clients,
+            oidc_metadata,
             token_service,
             user_repo,
             frontend_url_web: oauth_config.frontend_url_web.clone(),
@@ -357,7 +377,8 @@ impl OAuthService {
         })
     }
 
-    /// Creates an OAuth client for a specific provider
+    /// Creates an OAuth client for a specific provider, and the provider's discovered metadata
+    /// when it is an OIDC provider
     ///
     /// Uses OIDC discovery for providers that support it, otherwise creates
     /// a minimal client configuration.
@@ -376,7 +397,7 @@ impl OAuthService {
         config: &OAuthProviderConfig,
         redirect_base: &str,
         http_client: &reqwest::Client,
-    ) -> Result<OAuthClient, AuthError> {
+    ) -> Result<(OAuthClient, Option<CoreProviderMetadata>), AuthError> {
         let client_id = ClientId::new(config.client_id.clone());
         let client_secret = ClientSecret::new(config.client_secret.expose_secret().to_string());
         let redirect_uri = format!("{}/api/oauth/{}/callback", redirect_base, provider);
@@ -397,12 +418,13 @@ impl OAuthService {
                 .await
                 .map_err(|e| AuthError::Config(format!("OIDC discovery failed: {}", e)))?;
 
-            Ok(CoreClient::from_provider_metadata(
-                provider_metadata,
+            let client = CoreClient::from_provider_metadata(
+                provider_metadata.clone(),
                 client_id,
                 Some(client_secret),
             )
-            .set_redirect_uri(redirect_url))
+            .set_redirect_uri(redirect_url);
+            Ok((client, Some(provider_metadata)))
         } else {
             // For plain OAuth 2.0 providers, create minimal metadata
             let issuer = IssuerUrl::new(format!("https://{}.com", provider))
@@ -424,12 +446,13 @@ impl OAuthService {
             )
             .set_token_endpoint(Some(token_url));
 
-            Ok(CoreClient::from_provider_metadata(
+            let client = CoreClient::from_provider_metadata(
                 provider_metadata,
                 client_id,
                 Some(client_secret),
             )
-            .set_redirect_uri(redirect_url))
+            .set_redirect_uri(redirect_url);
+            Ok((client, None))
         }
     }
 
@@ -449,105 +472,6 @@ impl OAuthService {
     /// whenever a provider is configured; there is no fallback URL.
     pub fn frontend_url(&self, platform: Option<&str>) -> Result<&str, AuthError> {
         landing_url(platform, &self.frontend_url_web, &self.frontend_url_app)
-    }
-
-    /// Generates an authorization URL for initiating OAuth flow
-    ///
-    /// This method:
-    /// 1. Generates a random PKCE challenge and verifier
-    /// 2. Generates a random CSRF state token
-    /// 3. Builds the authorization URL with appropriate scopes
-    /// 4. Stores state and verifier in Redis with 10-minute expiry
-    ///
-    /// # Arguments
-    ///
-    /// * `provider` - The OAuth provider name ("google", "github", "twitter")
-    ///
-    /// # Returns
-    ///
-    /// The authorization URL to redirect the user to, or an error if:
-    /// - Provider is not configured
-    /// - Redis connection fails
-    ///
-    /// # Security
-    ///
-    /// - **PKCE**: SHA-256 code challenge protects against authorization code interception
-    /// - **State**: Random 128-bit token prevents CSRF attacks
-    /// - **TTL**: 10-minute expiry prevents replay attacks
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let auth_url = oauth_service.get_auth_url("google").await?;
-    /// // Returns: "https://accounts.google.com/o/oauth2/v2/auth?client_id=...&state=..."
-    /// ```
-    pub async fn get_auth_url(&self, provider: &str) -> Result<String, AuthError> {
-        if provider.is_empty() {
-            return Err(AuthError::InvalidProvider(
-                "Provider name is empty".to_string(),
-            ));
-        }
-
-        let client = self.oauth_clients.get(provider).ok_or_else(|| {
-            AuthError::InvalidProvider(format!("Provider '{}' not configured", provider))
-        })?;
-
-        // Generate PKCE challenge for security (prevents authorization code interception)
-        let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-
-        // Build authorization URL using OpenID Connect flow
-        // Note: Nonce is required by API but only used for OIDC ID token validation
-        let mut auth_request = client
-            .authorize_url(
-                CoreAuthenticationFlow::AuthorizationCode,
-                CsrfToken::new_random,
-                Nonce::new_random,
-            )
-            .set_pkce_challenge(pkce_challenge);
-
-        // Add provider-specific scopes
-        if provider == "google" {
-            auth_request = auth_request
-                .add_scope(Scope::new("openid".to_string()))
-                .add_scope(Scope::new("email".to_string()))
-                .add_scope(Scope::new("profile".to_string()));
-        } else if provider == "github" {
-            auth_request = auth_request.add_scope(Scope::new("user:email".to_string()));
-        } else if provider == "twitter" {
-            auth_request = auth_request
-                .add_scope(Scope::new("tweet.read".to_string()))
-                .add_scope(Scope::new("users.read".to_string()));
-        }
-
-        let (final_auth_url, csrf_state, nonce) = auth_request.url();
-
-        // Store state and PKCE verifier in Redis with 10-minute expiry
-        let mut redis_conn = self.conn.clone();
-
-        let state_key = format!("oauth_state:{}:{}", provider, csrf_state.secret());
-        let verifier_key = format!("oauth_verifier:{}:{}", provider, csrf_state.secret());
-
-        let _: () = redis_conn
-            .set_ex(&state_key, "valid", 600)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to store state: {}", e)))?;
-
-        let _: () = redis_conn
-            .set_ex(&verifier_key, pkce_verifier.secret(), 600)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to store verifier: {}", e)))?;
-
-        // Store nonce for OIDC providers (used for ID token validation)
-        // nonce is validated in handle_callback to prevent replay attacks
-        if provider == "google" {
-            let nonce_key = format!("oauth_nonce:{}:{}", provider, csrf_state.secret());
-            let _: () = redis_conn
-                .set_ex(&nonce_key, nonce.secret(), 600)
-                .await
-                .map_err(|e| AuthError::Redis(format!("Failed to store nonce: {}", e)))?;
-        }
-
-        Ok(final_auth_url.to_string())
     }
 
     /// Generates an authorization URL for initiating OAuth flow with platform support
@@ -611,7 +535,9 @@ impl OAuthService {
         } else if provider == "twitter" {
             auth_request = auth_request
                 .add_scope(Scope::new("tweet.read".to_string()))
-                .add_scope(Scope::new("users.read".to_string()));
+                .add_scope(Scope::new("users.read".to_string()))
+                // `confirmed_email` is returned only under this scope.
+                .add_scope(Scope::new("users.email".to_string()));
         }
 
         let (final_auth_url, csrf_state, nonce) = auth_request.url();
@@ -683,8 +609,6 @@ impl OAuthService {
     ///
     /// An `OAuthLoginResponse` containing:
     /// - `access_token`: JWT for API authentication
-    /// - `refresh_token`: JWT for token refresh
-    /// - `expires_in`: Token expiry time in seconds
     /// - `user`: User information
     ///
     /// # Errors
@@ -740,7 +664,7 @@ impl OAuthService {
             let nonce = txn.nonce.as_deref().ok_or_else(|| {
                 AuthError::CodeExchangeFailed("OIDC nonce missing from transaction".to_string())
             })?;
-            self.validate_id_token(client, &token_response, nonce)
+            self.validate_id_token(provider, client, &token_response, nonce)
                 .await?;
         }
 
@@ -765,8 +689,6 @@ impl OAuthService {
         Ok((
             OAuthLoginResponse {
                 access_token: tokens.access_token,
-                refresh_token: tokens.refresh_token,
-                expires_in: tokens.expires_in,
                 user: user.into(),
             },
             OAuthCallbackMeta {
@@ -779,7 +701,7 @@ impl OAuthService {
     /// Validates the OIDC ID token for Google authentication
     ///
     /// This method performs comprehensive ID token validation:
-    /// - Verifies signature using Google's JWKS endpoint
+    /// - Verifies signature using the keys at Google's JWKS endpoint, fetched for each login
     /// - Checks issuer matches "https://accounts.google.com"
     /// - Checks audience matches the configured client ID
     /// - Verifies expiration and issued-at timestamps
@@ -787,6 +709,7 @@ impl OAuthService {
     ///
     /// # Arguments
     ///
+    /// * `provider` - The OIDC provider's name
     /// * `client` - The OAuth client configured for the provider
     /// * `token_response` - The token response from the provider
     /// * `stored_nonce_secret` - The nonce stored during OAuth initiation
@@ -794,10 +717,13 @@ impl OAuthService {
     /// # Errors
     ///
     /// Returns an error if:
+    /// - The provider has no discovered metadata (no `issuer_url`)
     /// - ID token is missing from the response
+    /// - The key set cannot be fetched
     /// - Any validation step fails (signature, issuer, audience, expiration, nonce)
     async fn validate_id_token(
         &self,
+        provider: &str,
         client: &OAuthClient,
         token_response: &openidconnect::core::CoreTokenResponse,
         stored_nonce_secret: &str,
@@ -809,14 +735,27 @@ impl OAuthService {
 
         let stored_nonce = Nonce::new(stored_nonce_secret.to_string());
 
-        // Verify ID token using the client's verifier
+        let metadata = self.oidc_metadata.get(provider).ok_or_else(|| {
+            AuthError::Config(format!(
+                "{provider} has no OIDC metadata: set its issuer_url"
+            ))
+        })?;
+        // The key set the client got at discovery goes stale when the provider rotates its keys.
+        let jwks = CoreJsonWebKeySet::fetch_async(metadata.jwks_uri(), &self.oidc_http_client)
+            .await
+            .map_err(|e| AuthError::CodeExchangeFailed(format!("JWKS fetch failed: {e}")))?;
+
         // This validates:
-        // - Signature using JWKS endpoint
+        // - Signature (RS256) against the fetched keys
         // - Issuer (iss) claim
         // - Audience (aud) claim
         // - Expiration (exp) and issued-at (iat) claims
         // - Nonce claim must match the stored nonce
-        let verifier = client.id_token_verifier();
+        let verifier = CoreIdTokenVerifier::new_public_client(
+            client.client_id().clone(),
+            metadata.issuer().clone(),
+            jwks,
+        );
         id_token.claims(&verifier, &stored_nonce).map_err(|e| {
             AuthError::CodeExchangeFailed(format!("ID token validation failed: {}", e))
         })?;
@@ -859,7 +798,9 @@ impl OAuthService {
         let user_info_url = match provider {
             "google" => "https://openidconnect.googleapis.com/v1/userinfo",
             "github" => "https://api.github.com/user",
-            "twitter" => "https://api.twitter.com/2/users/me?user.fields=profile_image_url",
+            "twitter" => {
+                "https://api.x.com/2/users/me?user.fields=profile_image_url,confirmed_email"
+            }
             _ => {
                 return Err(AuthError::InvalidProvider(format!(
                     "Unknown provider: {}",
@@ -889,15 +830,6 @@ impl OAuthService {
         let mut user_info: serde_json::Value = response.json().await.map_err(|e| {
             AuthError::UserInfoFetchFailed(format!("Failed to parse user info: {}", e))
         })?;
-
-        // Debug logging for Google OAuth issues
-        if provider == "google" {
-            tracing::debug!(
-                "Google user info response: {}",
-                serde_json::to_string_pretty(&user_info)
-                    .unwrap_or_else(|_| "Failed to serialize".to_string())
-            );
-        }
 
         // Special handling for GitHub - fetch emails separately
         if provider == "github" {
@@ -949,7 +881,7 @@ impl OAuthService {
         let oauth_user_info = match provider {
             "google" => self.parse_google_user_info(user_info)?,
             "github" => self.parse_github_user_info(user_info).await?,
-            "twitter" => self.parse_twitter_user_info(user_info)?,
+            "twitter" => Self::parse_twitter_user_info(user_info)?,
             _ => {
                 return Err(AuthError::UserInfoFetchFailed(format!(
                     "Unsupported provider: {}",
@@ -1009,12 +941,6 @@ impl OAuthService {
     /// }
     /// ```
     fn parse_google_user_info(&self, data: Value) -> Result<OAuthUserInfo, AuthError> {
-        tracing::debug!(
-            "Parsing Google user info: {}",
-            serde_json::to_string_pretty(&data)
-                .unwrap_or_else(|_| "Failed to serialize".to_string())
-        );
-
         let provider_id = data["sub"]
             .as_str()
             .ok_or_else(|| {
@@ -1023,10 +949,8 @@ impl OAuthService {
                     .map(|obj| obj.keys().cloned().collect())
                     .unwrap_or_default();
                 AuthError::UserInfoFetchFailed(format!(
-                    "Missing Google 'sub' field. Available fields: {:?}. Response: {}",
-                    available_fields,
-                    serde_json::to_string(&data)
-                        .unwrap_or_else(|_| "Failed to serialize".to_string())
+                    "Missing Google 'sub' field. Available fields: {:?}",
+                    available_fields
                 ))
             })?
             .to_string();
@@ -1100,30 +1024,28 @@ impl OAuthService {
     ///     "username": "johndoe",
     ///     "name": "John Doe",
     ///     "profile_image_url": "https://...",
-    ///     "email": "user@example.com"  // May be missing if email scope not granted
+    ///     "confirmed_email": "user@example.com"
     ///   }
     /// }
     /// ```
     ///
     /// # Email Requirement
     ///
-    /// This method requires a non-empty email address. If the email is missing or empty,
-    /// it returns an error indicating that the email scope must be requested.
-    fn parse_twitter_user_info(&self, data: Value) -> Result<OAuthUserInfo, AuthError> {
+    /// X returns `confirmed_email` only for an address the account has confirmed, and only when
+    /// the app has "Request email from users" enabled and asked for `users.email`. Without it the
+    /// login is refused.
+    fn parse_twitter_user_info(data: Value) -> Result<OAuthUserInfo, AuthError> {
         let user_data = &data["data"];
 
-        // Extract and validate email
-        let email = user_data["email"].as_str().ok_or_else(|| {
-            AuthError::UserInfoFetchFailed(
-                "Twitter email not provided; request email scope".to_string(),
-            )
-        })?;
-
-        if email.is_empty() {
-            return Err(AuthError::UserInfoFetchFailed(
-                "Twitter email not provided; request email scope".to_string(),
-            ));
-        }
+        let email = user_data["confirmed_email"]
+            .as_str()
+            .filter(|email| !email.is_empty())
+            .ok_or_else(|| {
+                AuthError::UserInfoFetchFailed(
+                    "X returned no confirmed email: enable 'Request email from users' for the app"
+                        .to_string(),
+                )
+            })?;
 
         Ok(OAuthUserInfo {
             provider_id: user_data["id"]
@@ -1141,53 +1063,8 @@ impl OAuthService {
             avatar_url: user_data["profile_image_url"]
                 .as_str()
                 .map(|s| s.to_string()),
-            email_verified: user_data["email_verified"].as_bool().unwrap_or(false),
+            email_verified: true,
         })
-    }
-
-    /// Logs out a user by blacklisting their JWT token
-    ///
-    /// This method invalidates the JWT by adding its JTI (JWT ID) to a Redis
-    /// blacklist. The blacklist entry expires when the token would naturally expire.
-    ///
-    /// # Arguments
-    ///
-    /// * `token` - The JWT access token to revoke
-    ///
-    /// # Behavior
-    ///
-    /// - If token has no JTI, does nothing (token can't be blacklisted)
-    /// - If token is already expired, does nothing
-    /// - Otherwise, adds JTI to Redis blacklist with TTL = remaining token lifetime
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// oauth_service.logout("eyJhbGciOiJSUzI1NiIs...").await?;
-    /// // Token is now invalid for all future requests
-    /// ```
-    pub async fn logout(&self, token: &str) -> Result<(), AuthError> {
-        // Validate JWT to extract claims
-        let claims = self.token_service.validate_jwt(token)?;
-
-        // Check if token has JTI (required for blacklisting)
-        if claims.jti.is_empty() {
-            return Ok(());
-        }
-
-        // Calculate remaining TTL
-        let current_time = chrono::Utc::now().timestamp();
-        if claims.exp <= current_time {
-            // Token already expired, no need to blacklist
-            return Ok(());
-        }
-
-        let ttl_secs = (claims.exp - current_time) as u64;
-
-        // Add JTI to blacklist in Redis
-        self.token_service
-            .blacklist_jti(&claims.jti, ttl_secs)
-            .await
     }
 }
 
@@ -1206,8 +1083,168 @@ fn landing_url<'a>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::config::JwtConfig;
+    use crate::repository::user_repository::PostgresUserRepository;
+    use jsonwebtoken::{DecodingKey, EncodingKey};
+
+    /// An `OAuthService` for `oauth_config` on the test Redis, with no database behind its users.
+    pub(crate) async fn test_service(oauth_config: &OAuthConfig) -> OAuthService {
+        let conn = crate::test_redis().await;
+        let jwt_config = Arc::new(JwtConfig {
+            private_key_path: String::new(),
+            public_key_path: String::new(),
+            access_token_ttl_minutes: 15,
+            issuer: "test".to_string(),
+            audience: "test".to_string(),
+        });
+        let token_service = Arc::new(TokenService::new(
+            jwt_config,
+            conn.clone(),
+            Arc::new(EncodingKey::from_secret(b"unused")),
+            Arc::new(DecodingKey::from_secret(b"unused")),
+        ));
+        let user_repo = Arc::new(PostgresUserRepository::new(Arc::new(
+            sea_orm::DatabaseConnection::default(),
+        )));
+        OAuthService::new(
+            conn,
+            reqwest::Client::new(),
+            oauth_config,
+            token_service,
+            user_repo,
+        )
+        .await
+        .unwrap()
+    }
+
+    mod id_token {
+        use super::*;
+        use openidconnect::core::{
+            CoreIdToken, CoreIdTokenClaims, CoreIdTokenFields, CoreJwsSigningAlgorithm,
+            CoreRsaPrivateSigningKey, CoreTokenResponse, CoreTokenType,
+        };
+        use openidconnect::{
+            AccessToken, Audience, EmptyAdditionalClaims, EmptyExtraTokenFields, JsonWebKeyId,
+            PrivateSigningKey, StandardClaims, SubjectIdentifier,
+        };
+        use rsa::{
+            Generate, PrivateKey,
+            pkcs1::{EncodeRsaPrivateKey, LineEnding},
+        };
+        use secrecy::SecretString;
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        /// Answers each request to `listener` with the next of `bodies`, as JSON.
+        fn serve_in_order(listener: TcpListener, bodies: Vec<String>) {
+            std::thread::spawn(move || {
+                for body in bodies {
+                    let (stream, _) = listener.accept().unwrap();
+                    // A GET request ends with its empty line.
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(&stream);
+                    while reader.read_line(&mut line).unwrap() > 2 {
+                        line.clear();
+                    }
+                    write!(
+                        &stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                }
+            });
+        }
+
+        /// Google rotates its keys after the gateway started: the login's ID token is signed with
+        /// a key the startup key set does not hold.
+        #[tokio::test]
+        async fn google_id_token_is_verified_against_freshly_fetched_keys() {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let issuer = format!("http://{}", listener.local_addr().unwrap());
+            let pem = PrivateKey::generate().to_pkcs1_pem(LineEnding::LF).unwrap();
+            let key = |kid: &str| {
+                CoreRsaPrivateSigningKey::from_pem(&pem, Some(JsonWebKeyId::new(kid.to_string())))
+                    .unwrap()
+            };
+            let key_set = |kid| {
+                serde_json::to_string(&CoreJsonWebKeySet::new(vec![
+                    key(kid).as_verification_key(),
+                ]))
+                .unwrap()
+            };
+            // Discovery and its key set at startup, then the key set of the login.
+            serve_in_order(
+                listener,
+                vec![
+                    serde_json::json!({
+                        "issuer": issuer,
+                        "authorization_endpoint": format!("{issuer}/auth"),
+                        "jwks_uri": format!("{issuer}/jwks"),
+                        "response_types_supported": ["code"],
+                        "subject_types_supported": ["public"],
+                        "id_token_signing_alg_values_supported": ["RS256"],
+                    })
+                    .to_string(),
+                    key_set("old"),
+                    key_set("new"),
+                ],
+            );
+            let service = test_service(&OAuthConfig {
+                providers: HashMap::from([(
+                    "google".to_string(),
+                    OAuthProviderConfig {
+                        client_id: "client".to_string(),
+                        client_secret: SecretString::new("secret".to_string()),
+                        auth_url: format!("{issuer}/auth"),
+                        token_url: format!("{issuer}/token"),
+                        issuer_url: Some(issuer.clone()),
+                    },
+                )]),
+                redirect_base: "http://localhost".to_string(),
+                frontend_url_web: None,
+                frontend_url_app: None,
+            })
+            .await;
+
+            let now = chrono::Utc::now();
+            let claims = CoreIdTokenClaims::new(
+                IssuerUrl::new(issuer).unwrap(),
+                vec![Audience::new("client".to_string())],
+                now + chrono::Duration::minutes(5),
+                now,
+                StandardClaims::new(SubjectIdentifier::new("user".to_string())),
+                EmptyAdditionalClaims {},
+            )
+            .set_nonce(Some(Nonce::new("nonce".to_string())));
+            let id_token = CoreIdToken::new(
+                claims,
+                &key("new"),
+                CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256,
+                None,
+                None,
+            )
+            .unwrap();
+            let token_response = CoreTokenResponse::new(
+                AccessToken::new("access".to_string()),
+                CoreTokenType::Bearer,
+                CoreIdTokenFields::new(Some(id_token), EmptyExtraTokenFields {}),
+            );
+
+            service
+                .validate_id_token(
+                    "google",
+                    &service.oauth_clients["google"],
+                    &token_response,
+                    "nonce",
+                )
+                .await
+                .unwrap();
+        }
+    }
 
     #[test]
     fn app_logins_land_on_the_app_url_and_every_other_platform_on_the_web_url() {
@@ -1230,6 +1267,26 @@ mod tests {
             landing_url(None, &None, &app),
             Err(AuthError::Config(_))
         ));
+    }
+
+    #[test]
+    fn x_profile_uses_confirmed_email() {
+        let info = OAuthService::parse_twitter_user_info(serde_json::json!({
+            "data": {"id": "1", "username": "u", "name": "U", "confirmed_email": "u@x.com"}
+        }))
+        .unwrap();
+
+        assert_eq!(info.email, "u@x.com");
+        assert!(info.email_verified);
+    }
+
+    #[test]
+    fn x_profile_without_confirmed_email_is_refused() {
+        let result = OAuthService::parse_twitter_user_info(serde_json::json!({
+            "data": {"id": "1", "username": "u", "email": "u@x.com"}
+        }));
+
+        assert!(matches!(result, Err(AuthError::UserInfoFetchFailed(_))));
     }
 
     mod normalize_username {
@@ -1528,6 +1585,20 @@ mod tests {
                 Ok(new_user.clone())
             }
 
+            async fn delete_unverified(&self, user_id: Uuid) -> Result<(), AuthError> {
+                let mut users = self.users.lock().unwrap();
+                let before = users.len();
+                users.retain(|user| {
+                    user.user_id != user_id
+                        || user.email_verified
+                        || user.status != UserStatus::Pending
+                });
+                if users.len() == before {
+                    return Err(AuthError::EmailAlreadyExists);
+                }
+                Ok(())
+            }
+
             async fn update_last_login(&self, _user_id: Uuid) -> Result<(), AuthError> {
                 Ok(())
             }
@@ -1632,6 +1703,96 @@ mod tests {
                 assert_eq!(again.user_id, user.user_id);
             }
             assert_eq!(repo.users.lock().unwrap().len(), 2);
+        }
+
+        /// A password sign-up for `email`, verified or not.
+        fn password_user(email: &str, verified: bool) -> Model {
+            let now = chrono::Utc::now();
+            Model {
+                user_id: Uuid::new_v4(),
+                email: email.to_string(),
+                username: "signup".to_string(),
+                password_hash: Some("hash".to_string()),
+                auth_provider: "email".to_string(),
+                provider_id: None,
+                avatar_url: None,
+                email_verified: verified,
+                status: if verified {
+                    UserStatus::Active
+                } else {
+                    UserStatus::Pending
+                },
+                created_at: now,
+                updated_at: now,
+                last_login: None,
+            }
+        }
+
+        #[tokio::test]
+        async fn unverified_provider_email_does_not_create_an_account() {
+            let repo = MemoryUserRepository::default();
+            let info = OAuthUserInfo {
+                email_verified: false,
+                ..oauth_user("1", "v@example.com", None)
+            };
+
+            let result = OAuthService::find_or_create_user(&repo, "github", &info).await;
+
+            assert!(matches!(result, Err(AuthError::EmailNotVerified)));
+            assert!(repo.users.lock().unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn suspended_user_cannot_log_in_with_oauth() {
+            let repo = MemoryUserRepository::default();
+            let info = oauth_user("1", "s@example.com", None);
+            OAuthService::find_or_create_user(&repo, "google", &info)
+                .await
+                .unwrap();
+            repo.users.lock().unwrap()[0].status = UserStatus::Suspended;
+
+            let result = OAuthService::find_or_create_user(&repo, "google", &info).await;
+
+            assert!(matches!(result, Err(AuthError::EmailNotVerified)));
+        }
+
+        #[tokio::test]
+        async fn a_verified_provider_email_replaces_an_unverified_password_signup() {
+            let repo = MemoryUserRepository::default();
+            let pending = password_user("v@example.com", false);
+            repo.users.lock().unwrap().push(pending.clone());
+
+            let user = OAuthService::find_or_create_user(
+                &repo,
+                "google",
+                &oauth_user("7", "v@example.com", None),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(user.auth_provider, "google");
+            assert_eq!(user.password_hash, None);
+            assert_eq!(*repo.users.lock().unwrap(), [user]);
+            assert_ne!(repo.users.lock().unwrap()[0].user_id, pending.user_id);
+        }
+
+        #[tokio::test]
+        async fn a_verified_account_with_the_same_email_still_refuses_oauth() {
+            let repo = MemoryUserRepository::default();
+            repo.users
+                .lock()
+                .unwrap()
+                .push(password_user("v@example.com", true));
+
+            let result = OAuthService::find_or_create_user(
+                &repo,
+                "google",
+                &oauth_user("7", "v@example.com", None),
+            )
+            .await;
+
+            assert!(matches!(result, Err(AuthError::EmailAlreadyExists)));
+            assert_eq!(repo.users.lock().unwrap().len(), 1);
         }
 
         #[tokio::test]

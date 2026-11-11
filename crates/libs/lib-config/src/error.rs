@@ -10,7 +10,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum ConfigError {
     /// The runtime environment was not explicitly selected
-    #[error("APP_ENV must be set explicitly to one of: development, testing, production")]
+    #[error("APP_ENV must be set explicitly to one of: development, production")]
     MissingEnvironment,
 
     /// `APP_CONFIG_DIR` is set but does not name a directory
@@ -27,7 +27,7 @@ pub enum ConfigError {
     InvalidServerAddress,
 
     /// `APP_ENV` names no environment
-    #[error("Invalid environment in APP_ENV. Must be one of: development, testing, production")]
+    #[error("Invalid environment in APP_ENV. Must be one of: development, production")]
     InvalidEnvironment,
 
     /// Configuration validation failed (environment-specific rules violated)

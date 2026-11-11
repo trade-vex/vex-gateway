@@ -3,7 +3,6 @@
 use crate::ConfigError;
 use std::ffi::OsString;
 use std::path::PathBuf;
-use tracing::{info, warn};
 
 /// Find the configuration directory by searching upwards from the current directory.
 ///
@@ -31,7 +30,6 @@ fn config_dir_from(app_config_dir: Option<OsString>) -> Result<PathBuf, ConfigEr
         if !path.is_dir() {
             return Err(ConfigError::ConfigDirNotFound(path));
         }
-        info!("Using config directory from APP_CONFIG_DIR: {:?}", path);
         return Ok(path);
     }
 
@@ -40,7 +38,6 @@ fn config_dir_from(app_config_dir: Option<OsString>) -> Result<PathBuf, ConfigEr
     loop {
         let candidate = dir.join("config");
         if candidate.exists() && candidate.is_dir() {
-            info!("Found config directory: {:?}", candidate);
             return Ok(candidate);
         }
         if !dir.pop() {
@@ -49,7 +46,6 @@ fn config_dir_from(app_config_dir: Option<OsString>) -> Result<PathBuf, ConfigEr
     }
 
     // 3. Fallback: current directory
-    warn!("No config directory found, using current directory");
     Ok(PathBuf::from("."))
 }
 

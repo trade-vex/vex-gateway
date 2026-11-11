@@ -16,10 +16,6 @@ reqwest = {workspace = true}
 url = {workspace = true}
 futures-util = {workspace = true}
 uuid = {workspace = true}
-dashmap = "6.1"
-thiserror = {workspace = true}
-num_cpus = "1.16"
-async-trait = "0.1"
 clickhouse = "0.12"
 secrecy = "0.8"
 
@@ -35,7 +31,6 @@ lib-utils = {path = "../lib-utils"}
 vex-networking = {workspace = true}
 vex-config = {workspace = true}
 common = {workspace = true}
-rusteron-client = "=0.1.157"
 rusteron-archive = "=0.1.157"
 
 [dev-dependencies]

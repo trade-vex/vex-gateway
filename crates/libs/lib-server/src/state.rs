@@ -14,7 +14,7 @@ use lib_core::{
     OrderStore, PostgresTradingRepository, TradingRepository, UserBalanceStore,
     cache::scaling_cache::ScalingCache,
 };
-use lib_middleware::api_key::middleware::CacheConfig;
+use lib_middleware::api_key::middleware::{CacheConfig, RouteSecurityConfig};
 use lib_middleware::{
     ApiKeyMiddleware, SecurityType, TrustedProxies,
     repository::api_key_repository::{ApiKeyRepository, PostgresApiKeyRepository},
@@ -29,6 +29,20 @@ use url::Url;
 
 use crate::rate_limit::RateLimiter;
 
+/// Placing and cancelling need a trading key; every other protected route is a signed read
+/// (`UserData`). A route for the signed-in person only (API-key management, logout, profile,
+/// change-password) takes lib_auth's `AuthenticatedUser`, which refuses API-key callers whatever
+/// their permissions.
+pub(crate) fn with_api_key_policy(middleware: ApiKeyMiddleware) -> ApiKeyMiddleware {
+    let trade_routes = ["/api/order", "/api/cancel"].map(|path| RouteSecurityConfig {
+        path_pattern: path.into(),
+        security_type: SecurityType::Trade,
+    });
+    middleware
+        .with_route_configs(trade_routes.into())
+        .with_default_security(SecurityType::UserData)
+}
+
 /// Central application state containing all dependencies
 ///
 /// This struct follows the Dependency Injection pattern by centralizing
@@ -36,7 +50,6 @@ use crate::rate_limit::RateLimiter;
 #[derive(Clone)]
 pub struct AppState {
     // Database and infrastructure
-    pub db: Arc<DatabaseConnection>,
     pub redis_conn: ConnectionManager,
 
     // DB Repository
@@ -160,7 +173,6 @@ impl AppState {
         tracing::info!("AppState initialization completed successfully");
 
         Ok(Arc::new(Self {
-            db,
             redis_conn,
             user_repo,
             jwt_config: config.jwt.clone(),
@@ -294,23 +306,16 @@ impl AppState {
 
     /// Create ApiKeyMiddleware using AppState dependencies; `redis_conn` (`auth.redis.url`) holds
     /// the signature replay guards
-    pub fn init_api_key_middleware(
+    fn init_api_key_middleware(
         api_key_repo: &Arc<dyn ApiKeyRepository>,
         redis_conn: ConnectionManager,
     ) -> ApiKeyMiddleware {
-        // Create cache configuration
-        // This should be loaded from config , hardcoded config should be removed
-        let cache_config = CacheConfig {
-            l1_max_size: 100000,
-            l1_ttl: std::time::Duration::from_secs(300),
-        };
-
         // Create middleware with database repository for dynamic loading
-        ApiKeyMiddleware::new()
-            .with_cache_config(cache_config)
-            .with_repository(api_key_repo.clone())
-            .with_replay_store(redis_conn)
-            .with_default_security(SecurityType::Trade)
+        with_api_key_policy(
+            ApiKeyMiddleware::new()
+                .with_repository(CacheConfig::default(), api_key_repo.clone())
+                .with_replay_store(redis_conn),
+        )
     }
 
     /// Sanitize a URL string to remove credentials and sensitive information

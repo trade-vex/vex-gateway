@@ -20,9 +20,59 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+# The jobs only read the repository; whatever the repository's default, the token cannot write.
+permissions:
+  contents: read
+
 jobs:
-  test:
-    name: Build and Test
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66 # 1.89.0
+        with:
+          components: rustfmt
+
+      - name: Enforce formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66 # 1.89.0
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          # libssl-dev only for the rusteron (Aeron) build scripts, whose reqwest uses native-tls;
+          # the gateway itself links rustls, not OpenSSL.
+          sudo apt-get install -y libbsd-dev libssl-dev pkg-config build-essential clang libclang-dev openjdk-21-jdk uuid-dev
+          # Install CMake 3.30+ (required by rusteron-archive/aeron)
+          wget -q https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0-linux-x86_64.sh
+          # From cmake-3.30.0-SHA-256.txt, published with the release
+          echo "1a5969fe81fea6e5220d053d9d3e3754cbc85be07d2d428bebdcfe87137971a9  cmake-3.30.0-linux-x86_64.sh" | sha256sum -c -
+          sudo sh cmake-3.30.0-linux-x86_64.sh --prefix=/usr/local --skip-license
+          echo "/usr/local/bin" >> $GITHUB_PATH
+          export PATH="/usr/local/bin:$PATH"
+          cmake --version
+
+      - name: Linting
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings -A clippy::missing_errors_doc -A clippy::missing_panics_doc -A clippy::must_use_candidate -A clippy::default_trait_access -A clippy::ignored_unit_patterns -A clippy::module_name_repetitions -A clippy::cast_possible_truncation
+
+  # The workspace's test run: llvm-cov runs every test once, instrumented.
+  coverage:
+    name: Test and coverage
     runs-on: ubuntu-latest
     timeout-minutes: 55
     services:
@@ -72,142 +122,25 @@ jobs:
       TEST_CLICKHOUSE_USER: myuser
       TEST_CLICKHOUSE_PASSWORD: mypassword
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@1.89.0
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libbsd-dev libssl-dev pkg-config build-essential clang libclang-dev openjdk-21-jdk uuid-dev
-          # Install CMake 3.30+ (required by rusteron-archive/aeron)
-          wget -q https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0-linux-x86_64.sh
-          sudo sh cmake-3.30.0-linux-x86_64.sh --prefix=/usr/local --skip-license
-          echo "/usr/local/bin" >> $GITHUB_PATH
-          export PATH="/usr/local/bin:$PATH"
-          cmake --version
-
-      - name: Generate test keys
-        run: |
-          mkdir -p crates/libs/lib-auth/src/keys
-          openssl genrsa -out crates/libs/lib-auth/src/keys/private_key.pem 2048
-          openssl rsa -in crates/libs/lib-auth/src/keys/private_key.pem -pubout -out crates/libs/lib-auth/src/keys/public_key.pem
-
-      - name: Build workspace
-        run: cargo build --workspace
-        
-      - name: Run tests
-        run: cargo test --workspace
-
-  fmt:
-    name: Rustfmt
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@1.89.0
-        with:
-          components: rustfmt
-
-      - name: Enforce formatting
-        run: cargo fmt --all -- --check
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@1.89.0
-        with:
-          components: clippy
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libbsd-dev libssl-dev pkg-config build-essential clang libclang-dev openjdk-21-jdk uuid-dev
-          # Install CMake 3.30+ (required by rusteron-archive/aeron)
-          wget -q https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0-linux-x86_64.sh
-          sudo sh cmake-3.30.0-linux-x86_64.sh --prefix=/usr/local --skip-license
-          echo "/usr/local/bin" >> $GITHUB_PATH
-          export PATH="/usr/local/bin:$PATH"
-          cmake --version
-
-      - name: Linting
-        run: cargo clippy --workspace --all-features --all-targets -- -D warnings -A clippy::missing_errors_doc -A clippy::missing_panics_doc -A clippy::must_use_candidate -A clippy::default_trait_access -A clippy::ignored_unit_patterns -A clippy::module_name_repetitions -A clippy::cast_possible_truncation
-
-  coverage:
-    name: Code coverage
-    runs-on: ubuntu-latest
-    timeout-minutes: 50
-    services:
-      postgres:
-        image: postgres:15
-        env:
-          POSTGRES_USER: myuser
-          POSTGRES_PASSWORD: mypassword
-          POSTGRES_DB: mydb
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-      redis:
-        image: redis:7
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 6379:6379
-      # The read model's ClickHouse, pinned as in readmodel/tests/compose.yml, for
-      # lib-core/tests/portfolio_repository_clickhouse.rs: its user may create databases, users
-      # and roles, as the migrations need.
-      clickhouse:
-        image: clickhouse/clickhouse-server:26.8.36.3@sha256:d426d2f612e1e189c90f9a3f8dcd85a03c6851273833817a296bb327e63aa7a7
-        env:
-          CLICKHOUSE_USER: myuser
-          CLICKHOUSE_PASSWORD: mypassword
-          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
-        options: >-
-          --health-cmd "clickhouse-client --user=myuser --password=mypassword --query='SELECT 1'"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
-        ports:
-          - 8123:8123
-    env:
-      CI: true
-      DATABASE_URL: postgres://myuser:mypassword@localhost:5432/mydb
-      REDIS_URL: redis://localhost:6379
-      TEST_CLICKHOUSE_URL: http://localhost:8123
-      TEST_CLICKHOUSE_USER: myuser
-      TEST_CLICKHOUSE_PASSWORD: mypassword
-    steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66 # 1.89.0
         with:
           components: llvm-tools-preview
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Install system dependencies
         run: |
           sudo apt-get update
+          # libssl-dev only for the rusteron (Aeron) build scripts, whose reqwest uses native-tls;
+          # the gateway itself links rustls, not OpenSSL.
           sudo apt-get install -y libbsd-dev libssl-dev pkg-config build-essential clang libclang-dev openjdk-21-jdk uuid-dev
           # Install CMake 3.30+ (required by rusteron-archive/aeron)
           wget -q https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0-linux-x86_64.sh
+          # From cmake-3.30.0-SHA-256.txt, published with the release
+          echo "1a5969fe81fea6e5220d053d9d3e3754cbc85be07d2d428bebdcfe87137971a9  cmake-3.30.0-linux-x86_64.sh" | sha256sum -c -
           sudo sh cmake-3.30.0-linux-x86_64.sh --prefix=/usr/local --skip-license
           echo "/usr/local/bin" >> $GITHUB_PATH
           export PATH="/usr/local/bin:$PATH"
@@ -231,8 +164,11 @@ jobs:
       - name: Generate code coverage
         run: cargo llvm-cov --workspace --html --output-dir coverage
 
+      - name: Doc tests (llvm-cov skips them)
+        run: cargo test --workspace --doc
+
       - name: Upload coverage reports
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: coverage-report
@@ -250,7 +186,7 @@ jobs:
     steps:
       # A pull request's checkout is its merge commit: the base it merges into and its head are
       # the commit's two parents.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 2
 
@@ -261,7 +197,7 @@ jobs:
           EVENT: ${{ github.event_name }}
         run: |
           # Every push to main or develop runs it. A pull request runs it when it changes the read
-          # model, the pinned vex-core (Cargo.lock), the gateway's database code or this workflow.
+          # model, the pinned vex-core (Cargo.lock) or this workflow: run.py runs no gateway crate.
           if [ "$EVENT" != pull_request ]; then
             echo "readmodel=true" >> "$GITHUB_OUTPUT"
             exit 0
@@ -270,7 +206,7 @@ jobs:
           # with it, instead of reading as "nothing changed".
           git rev-parse --verify --quiet 'HEAD^2' > /dev/null
           files=$(git diff --name-only 'HEAD^1' HEAD)
-          if grep -qE '^(readmodel/|Cargo\.lock$|crates/libs/[^/]+/src/(repository|models?)/|\.github/workflows/ci\.yml$)' <<< "$files"; then
+          if grep -qE '^(readmodel/|Cargo\.lock$|\.github/workflows/ci\.yml$)' <<< "$files"; then
             echo "readmodel=true" >> "$GITHUB_OUTPUT"
           else
             echo "readmodel=false" >> "$GITHUB_OUTPUT"
@@ -283,7 +219,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       # The stack's images keep their layers in the Actions cache: a BuildKit builder that can
       # export them, and the runtime variables that reach the cache, on seeing which run.py adds
@@ -302,7 +238,7 @@ jobs:
   ci-required:
     name: CI required
     if: ${{ always() }}
-    needs: [test, fmt, clippy, coverage, audit, changes, readmodel]
+    needs: [fmt, clippy, coverage, audit, changes, readmodel]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -334,11 +270,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66 # 1.89.0
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Install cargo-audit
         uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20

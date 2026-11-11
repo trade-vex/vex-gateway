@@ -2,50 +2,14 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Serialize)]
-pub struct LoginResponse {
-    pub access_token: String,
-    pub refresh_token: String,
-    pub token_type: String,
-    pub expires_in: u64,
-    pub user: UserInfo,
-}
-
-/// The response sent to the client after a successful login or token refresh.
-#[derive(Serialize, Deserialize)]
-pub struct TokenResponse {
-    pub access_token: String,
-    pub refresh_token: String,
-    pub expires_in: u64, // TTL in seconds for the access token
-}
-
-#[derive(Serialize)]
-pub struct RefreshTokenResponse {
-    pub access_token: String,
-    pub token_type: String,
-    pub expires_in: u64,
-}
-
-#[derive(Serialize)]
 pub struct SignupResponse {
     pub user: UserInfo,
     pub message: String,
 }
 
-#[derive(Serialize)]
 pub struct OAuthLoginResponse {
     pub access_token: String,
-    pub refresh_token: String,
-    pub expires_in: u64,
     pub user: UserInfo,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct OAuthTokenResponse {
-    pub access_token: String,
-    pub token_type: String,
-    pub expires_in: Option<u64>,
-    pub refresh_token: Option<String>,
-    pub scope: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

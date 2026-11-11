@@ -5,12 +5,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use uuid::Uuid;
 
-/// Session data stored in Redis - only tokens and user_id
+/// Session data stored in Redis: the user and its current access token. The session is the only
+/// credential that outlives the access token: at expiry the JWT middleware mints a new one for it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionData {
     pub user_id: Uuid,
     pub access_token: String,
-    pub refresh_token: String,
 }
 
 /// One-time login code data for mobile OAuth exchange (short TTL)
@@ -50,17 +50,11 @@ impl SessionService {
         }
     }
 
-    /// Get the session TTL in seconds (for cookie max_age alignment)
-    pub fn ttl_seconds(&self) -> u64 {
-        self.session_ttl_seconds
-    }
-
     /// Create a new session for a user
     pub async fn create_session(
         &self,
         user_id: Uuid,
         access_token: String,
-        refresh_token: String,
     ) -> Result<String, AuthError> {
         let session_id = Uuid::new_v4().to_string();
         let session_key = format!("session:{}", session_id);
@@ -69,7 +63,6 @@ impl SessionService {
         let session_data = SessionData {
             user_id,
             access_token,
-            refresh_token,
         };
 
         let session_json = serde_json::to_string(&session_data)
@@ -149,20 +142,18 @@ impl SessionService {
         Ok(())
     }
 
-    /// Refresh/extend a session's TTL
-    pub async fn refresh_session(&self, session_id: &str) -> Result<(), AuthError> {
+    /// Extends the idle TTL of the session of `user_id`, the user of the token the request
+    /// carries. `InvalidRequest` when the session is gone: it idled out or was revoked.
+    pub async fn refresh_session(&self, session_id: &str, user_id: Uuid) -> Result<(), AuthError> {
         let session_key = format!("session:{}", session_id);
-        let session_data = self.get_session(session_id).await?;
-        let session_index_key = Self::session_index_key(session_data.user_id);
+        let session_index_key = Self::session_index_key(user_id);
         let mut conn = self.conn.clone();
 
-        // Extend the TTL
-        let _: () = redis::pipe()
+        let (alive,): (bool,) = redis::pipe()
             .atomic()
             .cmd("EXPIRE")
             .arg(&session_key)
             .arg(self.session_ttl_seconds)
-            .ignore()
             .cmd("SADD")
             .arg(&session_index_key)
             .arg(session_id)
@@ -175,27 +166,27 @@ impl SessionService {
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to refresh session: {}", e)))?;
 
+        if !alive {
+            return Err(AuthError::InvalidRequest);
+        }
         Ok(())
     }
 
-    /// Update tokens in an existing session
-    /// Uses a single Redis connection for read-modify-write to minimize race conditions
-    pub async fn update_session_tokens(
+    /// Replaces the session's access token: the JWT middleware renewed it at expiry, or a password
+    /// change minted a new one.
+    pub async fn update_session_access_token(
         &self,
         session_id: &str,
         access_token: String,
-        refresh_token: String,
     ) -> Result<(), AuthError> {
         let session_key = format!("session:{}", session_id);
 
         // Get existing session to preserve user_id
         let session_data = self.get_session(session_id).await?;
 
-        // Create updated session data with new tokens
         let updated_session = SessionData {
             user_id: session_data.user_id,
             access_token,
-            refresh_token,
         };
 
         let updated_json = serde_json::to_string(&updated_session)
@@ -204,7 +195,6 @@ impl SessionService {
         let mut conn = self.conn.clone();
         let session_index_key = Self::session_index_key(session_data.user_id);
 
-        // Update the session with new tokens
         let _: () = redis::pipe()
             .atomic()
             .cmd("SET")
@@ -234,73 +224,41 @@ impl SessionService {
         user_id: Uuid,
         keep_session_id: &str,
     ) -> Result<usize, AuthError> {
-        let mut conn = self.conn.clone();
-        let session_ids = self.user_session_ids(user_id).await?;
-        let session_index_key = Self::session_index_key(user_id);
-        let keep_session_exists = session_ids.contains(keep_session_id);
-
-        let mut revoked_count = 0;
-
-        for session_id in session_ids {
-            if session_id != keep_session_id {
-                let (deleted,): (usize,) = redis::pipe()
-                    .atomic()
-                    .cmd("DEL")
-                    .arg(format!("session:{}", session_id))
-                    .cmd("SREM")
-                    .arg(&session_index_key)
-                    .arg(&session_id)
-                    .ignore()
-                    .query_async(&mut conn)
-                    .await
-                    .map_err(|e| AuthError::Redis(format!("Failed to delete session: {}", e)))?;
-                revoked_count += deleted;
-            }
-        }
-
-        if keep_session_exists {
-            let _: () = redis::pipe()
-                .atomic()
-                .cmd("SADD")
-                .arg(&session_index_key)
-                .arg(keep_session_id)
-                .ignore()
-                .cmd("EXPIRE")
-                .arg(&session_index_key)
-                .arg(self.session_ttl_seconds)
-                .ignore()
-                .query_async(&mut conn)
-                .await
-                .map_err(|e| AuthError::Redis(format!("Failed to keep session indexed: {}", e)))?;
-        }
-
-        Ok(revoked_count)
+        let mut session_ids = self.user_session_ids(user_id).await?;
+        session_ids.remove(keep_session_id);
+        self.delete_user_sessions(user_id, session_ids).await
     }
 
     /// Revoke all sessions for a user
     pub async fn revoke_all_user_sessions(&self, user_id: Uuid) -> Result<usize, AuthError> {
-        let mut conn = self.conn.clone();
         let session_ids = self.user_session_ids(user_id).await?;
-        let session_index_key = Self::session_index_key(user_id);
+        self.delete_user_sessions(user_id, session_ids).await
+    }
 
-        let mut revoked_count = 0;
-
-        for session_id in session_ids {
-            let (deleted,): (usize,) = redis::pipe()
-                .atomic()
-                .cmd("DEL")
-                .arg(format!("session:{}", session_id))
-                .cmd("SREM")
-                .arg(&session_index_key)
-                .arg(&session_id)
-                .ignore()
-                .query_async(&mut conn)
-                .await
-                .map_err(|e| AuthError::Redis(format!("Failed to delete session: {}", e)))?;
-            revoked_count += deleted;
+    /// Deletes these sessions of `user_id` and drops them from its index, in one atomic round
+    /// trip. Returns how many still existed.
+    async fn delete_user_sessions(
+        &self,
+        user_id: Uuid,
+        session_ids: HashSet<String>,
+    ) -> Result<usize, AuthError> {
+        if session_ids.is_empty() {
+            return Ok(0);
         }
-
-        Ok(revoked_count)
+        let session_keys: Vec<String> = session_ids
+            .iter()
+            .map(|session_id| format!("session:{}", session_id))
+            .collect();
+        let mut conn = self.conn.clone();
+        let (deleted,): (usize,) = redis::pipe()
+            .atomic()
+            .del(session_keys)
+            .srem(Self::session_index_key(user_id), session_ids)
+            .ignore()
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| AuthError::Redis(format!("Failed to delete sessions: {}", e)))?;
+        Ok(deleted)
     }
 
     async fn user_session_ids(&self, user_id: Uuid) -> Result<HashSet<String>, AuthError> {
@@ -409,15 +367,15 @@ mod tests {
         let user_id = Uuid::new_v4();
         let other_user_id = Uuid::new_v4();
         let keep_session = service
-            .create_session(user_id, "access-keep".into(), "refresh-keep".into())
+            .create_session(user_id, "access-keep".into())
             .await
             .unwrap();
         let revoke_session = service
-            .create_session(user_id, "access-revoke".into(), "refresh-revoke".into())
+            .create_session(user_id, "access-revoke".into())
             .await
             .unwrap();
         let other_session = service
-            .create_session(other_user_id, "access-other".into(), "refresh-other".into())
+            .create_session(other_user_id, "access-other".into())
             .await
             .unwrap();
 
@@ -440,5 +398,25 @@ mod tests {
         assert!(service.get_session(&other_session).await.is_ok());
 
         service.delete_session(&other_session).await.unwrap();
+    }
+
+    /// The JWT middleware takes `InvalidRequest` from `refresh_session` as the session's idle
+    /// expiry: it must answer so without reading the session first.
+    #[tokio::test]
+    async fn refreshing_a_missing_session_is_invalid_request() {
+        let service = SessionService::new(crate::test_redis().await, 60);
+        let user_id = Uuid::new_v4();
+        let live = service
+            .create_session(user_id, "access".into())
+            .await
+            .unwrap();
+
+        assert!(service.refresh_session(&live, user_id).await.is_ok());
+        let missing = Uuid::new_v4().to_string();
+        assert!(matches!(
+            service.refresh_session(&missing, user_id).await,
+            Err(AuthError::InvalidRequest)
+        ));
+        service.delete_session(&live).await.unwrap();
     }
 }

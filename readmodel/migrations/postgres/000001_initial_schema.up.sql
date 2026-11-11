@@ -58,7 +58,7 @@ CREATE UNIQUE INDEX ux_users_provider_identity ON users (auth_provider, provider
     WHERE provider_id IS NOT NULL;
 
 CREATE TYPE security_type AS ENUM ('none', 'trade', 'user_data', 'user_stream');
-CREATE TYPE key_material_type AS ENUM ('hmac_secret', 'rsa_public_key', 'ed25519_public_key');
+CREATE TYPE key_material_type AS ENUM ('hmac_secret');
 
 CREATE TABLE api_keys (
     id                 UUID PRIMARY KEY,
@@ -254,7 +254,8 @@ GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA trading TO readmodel_connec
 
 -- The gateway only reads trading.*, so Postgres, not convention, keeps it from writing balances.
 GRANT SELECT ON ALL TABLES IN SCHEMA trading TO readmodel_gateway;
-GRANT SELECT, INSERT, UPDATE ON users, api_keys TO readmodel_gateway;
+GRANT SELECT, INSERT, UPDATE ON users TO readmodel_gateway;
+GRANT SELECT, INSERT, UPDATE, DELETE ON api_keys TO readmodel_gateway;
 GRANT SELECT, INSERT, DELETE ON user_favorite_markets TO readmodel_gateway;
 GRANT SELECT ON assets, markets TO readmodel_gateway;
 

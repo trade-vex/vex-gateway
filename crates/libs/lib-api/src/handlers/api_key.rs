@@ -1,15 +1,17 @@
 //! lib-api/src/handlers/api_keys.rs
 
-use actix_web::{FromRequest, HttpMessage, HttpResponse, Result, web};
+use actix_web::{HttpResponse, Result, web};
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, Serializer};
 use uuid::Uuid;
 
+use lib_auth::middleware::jwt_auth::AuthenticatedUser;
 use lib_middleware::{
     api_key::SecurityType,
     api_key::middleware::ApiKeyStore,
-    api_key::security::{ApiKeyConfig, KeyMaterial},
+    api_key::security::KeyMaterial,
+    client_ip::parse_ip_or_net,
     models::api_key::{ActiveModel, Model as ApiKeyModel, NewApiKey},
     repository::api_key_repository::ApiKeyRepository,
 };
@@ -25,74 +27,6 @@ async fn invalidate_api_key_cache(cache: Option<&web::Data<ApiKeyStore>>, api_ke
     };
 
     cache.invalidate(api_key).await;
-}
-
-/// Combined authentication result that can be either JWT or API key
-#[derive(Debug, Clone)]
-pub enum AuthenticatedUser {
-    Jwt(lib_auth::middleware::jwt_auth::AuthenticatedUser),
-    ApiKey(ApiKeyConfig),
-}
-
-impl AuthenticatedUser {
-    /// Get the user ID from either authentication method
-    pub fn user_id(&self) -> Option<Uuid> {
-        match self {
-            AuthenticatedUser::Jwt(user) => Some(user.user_id),
-            AuthenticatedUser::ApiKey(config) => config.user_id,
-        }
-    }
-
-    /// Check if the user has a specific permission
-    pub fn has_permission(&self, permission: &SecurityType) -> bool {
-        match self {
-            AuthenticatedUser::Jwt(_) => true, // JWT users have all permissions
-            AuthenticatedUser::ApiKey(config) => config.has_permission(*permission),
-        }
-    }
-
-    /// Get the API key if authenticated via API key
-    pub fn api_key(&self) -> Option<&str> {
-        match self {
-            AuthenticatedUser::ApiKey(config) => Some(&config.api_key),
-            _ => None,
-        }
-    }
-}
-
-/// Combined authentication extractor that works with both JWT and API key authentication
-impl FromRequest for AuthenticatedUser {
-    type Error = actix_web::Error;
-    type Future = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self, Self::Error>>>>;
-
-    fn from_request(
-        req: &actix_web::HttpRequest,
-        _payload: &mut actix_web::dev::Payload,
-    ) -> Self::Future {
-        let req = req.clone();
-
-        Box::pin(async move {
-            // First, try to extract JWT authentication
-            if let Ok(jwt_user) = lib_auth::middleware::jwt_auth::AuthenticatedUser::from_request(
-                &req,
-                &mut actix_web::dev::Payload::None,
-            )
-            .await
-            {
-                return Ok(AuthenticatedUser::Jwt(jwt_user));
-            }
-
-            // If JWT fails, extract API key authentication from extensions
-            if let Some(api_config_arc) = req.extensions().get::<Arc<ApiKeyConfig>>() {
-                return Ok(AuthenticatedUser::ApiKey(api_config_arc.as_ref().clone()));
-            }
-
-            // If neither works, return unauthorized
-            Err(actix_web::error::ErrorUnauthorized(
-                "Authentication required",
-            ))
-        })
-    }
 }
 
 /// masks an API key for safe serialization
@@ -119,14 +53,17 @@ pub struct CreateApiKeyRequest {
     pub recv_window: Option<u64>,
     pub expires_at: Option<DateTime<Utc>>,
     pub ip_blacklist: Option<Vec<String>>,
-    pub key_material_type: Option<String>,
-    pub key_material_value: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct UpdateApiKeyRequest {
     pub permissions: Vec<String>,
     pub ip_blacklist: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ToggleApiKeyRequest {
+    pub enabled: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -186,67 +123,26 @@ impl From<ApiKeyModel> for ApiKeyResponse {
     }
 }
 
-/// parse security type from string
+/// A key's permission: `trade` (place and cancel orders) or `user_data` (every other route an API
+/// key may reach). No route needs `none` or `user_stream`, so a key holding only those reaches
+/// nothing.
 fn parse_security_type(s: &str) -> Result<SecurityType, String> {
     match s.to_lowercase().as_str() {
-        "none" => Ok(SecurityType::None),
         "trade" => Ok(SecurityType::Trade),
         "user_data" => Ok(SecurityType::UserData),
-        "user_stream" => Ok(SecurityType::UserStream),
         _ => Err(format!("Invalid security type: {}", s)),
     }
 }
 
-/// parse key material from type and value
-fn parse_key_material(key_type: &str, value: &str) -> Result<KeyMaterial, String> {
-    match key_type.to_lowercase().as_str() {
-        "hmac_secret" => Ok(KeyMaterial::HmacSecret(value.to_string())),
-        "rsa_public_key" => Ok(KeyMaterial::RsaPublicKey(value.to_string())),
-        "ed25519_public_key" => Ok(KeyMaterial::Ed25519PublicKey(value.to_string())),
-        _ => Err(format!("Invalid key material type: {}", key_type)),
-    }
-}
-
-/// validate IP address format (supports IPv4, IPv6, and CIDR notation)
-fn validate_ip_address(ip: &str) -> Result<(), String> {
-    use std::net::IpAddr;
-
-    // Check for CIDR notation (e.g., 192.168.1.0/24)
-    if let Some((ip_part, cidr_part)) = ip.split_once('/') {
-        let ip_addr: IpAddr = ip_part
-            .parse()
-            .map_err(|_| format!("Invalid IP address: {}", ip_part))?;
-        let prefix_len: u8 = cidr_part
-            .parse()
-            .map_err(|_| format!("Invalid CIDR prefix: {}", cidr_part))?;
-
-        match ip_addr {
-            IpAddr::V4(_) => {
-                if prefix_len > 32 {
-                    return Err(format!("Invalid IPv4 CIDR prefix: {}", prefix_len));
-                }
-            }
-            IpAddr::V6(_) => {
-                if prefix_len > 128 {
-                    return Err(format!("Invalid IPv6 CIDR prefix: {}", prefix_len));
-                }
-            }
-        }
-        return Ok(());
-    }
-
-    // Check for single IP address
-    ip.parse::<IpAddr>()
-        .map_err(|_| format!("Invalid IP address: {}", ip))?;
-    Ok(())
-}
-
-/// validate IP blacklist entries
+/// Every entry must be an IP address or a CIDR range: the form the API-key middleware matches.
 fn validate_ip_blacklist(ip_list: &[String]) -> Result<(), String> {
-    for ip in ip_list {
-        validate_ip_address(ip)?;
+    match ip_list
+        .iter()
+        .find(|entry| parse_ip_or_net(entry).is_none())
+    {
+        Some(entry) => Err(format!("Invalid IP address or CIDR range: {entry}")),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// create a new API key
@@ -255,10 +151,7 @@ pub async fn create_api_key(
     repo: web::Data<Arc<dyn ApiKeyRepository>>,
     auth_user: AuthenticatedUser,
 ) -> Result<HttpResponse> {
-    // Get user ID from either JWT or API key authentication
-    let user_id = auth_user.user_id().ok_or_else(|| {
-        actix_web::error::ErrorUnauthorized("User ID not found in authentication")
-    })?;
+    let user_id = auth_user.user_id;
     // parse permissions
     let permissions: Result<Vec<SecurityType>, String> = req
         .permissions
@@ -276,36 +169,13 @@ pub async fn create_api_key(
         })?;
     }
 
-    // parse key material if provided
-    let key_material = if let (Some(key_type), Some(key_value)) =
-        (&req.key_material_type, &req.key_material_value)
-    {
-        Some(parse_key_material(key_type, key_value).map_err(|e| {
-            actix_web::error::ErrorBadRequest(format!("Invalid key material: {}", e))
-        })?)
-    } else {
-        None
-    };
-
     // generating a new API key
     let api_key = format!("vex_{}", Uuid::new_v4().to_string().replace('-', ""));
 
-    // Generate secret key for HMAC signing (if not provided)
-    let secret_key = if let Some(ref key_material) = key_material {
-        // If user provided key material, extract the secret
-        match key_material {
-            KeyMaterial::HmacSecret(secret) => secret.clone(),
-            _ => {
-                return Err(actix_web::error::ErrorBadRequest(
-                    "Only HMAC secret keys are supported for API key authentication",
-                ));
-            }
-        }
-    } else {
-        // Generate a random secret key
+    // The HMAC secret is always the server's: a client-chosen one may be weak.
+    let secret_key = {
         use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let secret_bytes: [u8; 32] = rng.r#gen();
+        let secret_bytes: [u8; 32] = rand::thread_rng().r#gen();
         base64::engine::general_purpose::STANDARD.encode(secret_bytes)
     };
 
@@ -341,15 +211,37 @@ pub async fn create_api_key(
     }
 }
 
+/// Key `id` if it belongs to `user_id`, else the response to send (403, 404 or 500).
+async fn owned_key(
+    repo: &dyn ApiKeyRepository,
+    id: Uuid,
+    user_id: Uuid,
+) -> Result<ApiKeyModel, HttpResponse> {
+    match repo.find_by_id(id).await {
+        Ok(Some(key)) if key.user_id == Some(user_id) => Ok(key),
+        Ok(Some(_)) => Err(HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "Access denied",
+            "message": "You don't have permission to access this API key"
+        }))),
+        Ok(None) => Err(HttpResponse::NotFound().json(serde_json::json!({
+            "error": "API key not found"
+        }))),
+        Err(e) => {
+            tracing::error!(user_id = %user_id, api_key_id = %id, error = %e, "failed to find API key");
+            Err(HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to find API key",
+                "message": INTERNAL_ERROR_MESSAGE
+            })))
+        }
+    }
+}
+
 /// get all API keys for the authenticated user
 pub async fn list_api_keys(
     repo: web::Data<Arc<dyn ApiKeyRepository>>,
     auth_user: AuthenticatedUser,
 ) -> Result<HttpResponse> {
-    // Get user ID from either JWT or API key authentication
-    let user_id = auth_user.user_id().ok_or_else(|| {
-        actix_web::error::ErrorUnauthorized("User ID not found in authentication")
-    })?;
+    let user_id = auth_user.user_id;
 
     match repo.as_ref().as_ref().find_by_user_id(user_id).await {
         Ok(api_keys) => {
@@ -378,34 +270,9 @@ pub async fn get_api_key(
 ) -> Result<HttpResponse> {
     let api_key_id = path.into_inner();
 
-    // Get user ID from either JWT or API key authentication
-    let user_id = auth_user.user_id().ok_or_else(|| {
-        actix_web::error::ErrorUnauthorized("User ID not found in authentication")
-    })?;
-
-    match repo.as_ref().as_ref().find_by_id(api_key_id).await {
-        Ok(Some(api_key)) => {
-            // checking if the API key belongs to the authenticated user
-            if api_key.user_id != Some(user_id) {
-                return Ok(HttpResponse::Forbidden().json(serde_json::json!({
-                    "error": "Access denied",
-                    "message": "You don't have permission to access this API key"
-                })));
-            }
-
-            let response = ApiKeyResponse::from(api_key);
-            Ok(HttpResponse::Ok().json(response))
-        }
-        Ok(None) => Ok(HttpResponse::NotFound().json(serde_json::json!({
-            "error": "API key not found"
-        }))),
-        Err(e) => {
-            tracing::error!(user_id = %user_id, api_key_id = %api_key_id, error = %e, "failed to get API key");
-            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to get API key",
-                "message": INTERNAL_ERROR_MESSAGE
-            })))
-        }
+    match owned_key(repo.as_ref().as_ref(), api_key_id, auth_user.user_id).await {
+        Ok(api_key) => Ok(HttpResponse::Ok().json(ApiKeyResponse::from(api_key))),
+        Err(response) => Ok(response),
     }
 }
 
@@ -419,34 +286,11 @@ pub async fn update_api_key(
 ) -> Result<HttpResponse> {
     let api_key_id = path.into_inner();
 
-    // Get user ID from either JWT or API key authentication
-    let user_id = auth_user.user_id().ok_or_else(|| {
-        actix_web::error::ErrorUnauthorized("User ID not found in authentication")
-    })?;
+    let user_id = auth_user.user_id;
 
-    // checking if the API key exists and belongs to the user
-    let api_key = match repo.as_ref().find_by_id(api_key_id).await {
-        Ok(Some(api_key)) => {
-            if api_key.user_id != Some(user_id) {
-                return Ok(HttpResponse::Forbidden().json(serde_json::json!({
-                    "error": "Access denied",
-                    "message": "You don't have permission to update this API key"
-                })));
-            }
-            api_key
-        }
-        Ok(None) => {
-            return Ok(HttpResponse::NotFound().json(serde_json::json!({
-                "error": "API key not found"
-            })));
-        }
-        Err(e) => {
-            tracing::error!(user_id = %user_id, api_key_id = %api_key_id, error = %e, "failed to find API key for update");
-            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to find API key",
-                "message": INTERNAL_ERROR_MESSAGE
-            })));
-        }
+    let api_key = match owned_key(repo.as_ref().as_ref(), api_key_id, user_id).await {
+        Ok(api_key) => api_key,
+        Err(response) => return Ok(response),
     };
 
     // parsing permissions
@@ -493,7 +337,7 @@ pub async fn update_api_key(
     }
 }
 
-/// delete an API key (soft delete by disabling)
+/// delete an API key
 pub async fn delete_api_key(
     path: web::Path<Uuid>,
     repo: web::Data<Arc<dyn ApiKeyRepository>>,
@@ -502,34 +346,11 @@ pub async fn delete_api_key(
 ) -> Result<HttpResponse> {
     let api_key_id = path.into_inner();
 
-    // Get user ID from either JWT or API key authentication
-    let user_id = auth_user.user_id().ok_or_else(|| {
-        actix_web::error::ErrorUnauthorized("User ID not found in authentication")
-    })?;
+    let user_id = auth_user.user_id;
 
-    // first, check if the API key exists and belongs to the user
-    let api_key = match repo.as_ref().find_by_id(api_key_id).await {
-        Ok(Some(api_key)) => {
-            if api_key.user_id != Some(user_id) {
-                return Ok(HttpResponse::Forbidden().json(serde_json::json!({
-                    "error": "Access denied",
-                    "message": "You don't have permission to delete this API key"
-                })));
-            }
-            api_key
-        }
-        Ok(None) => {
-            return Ok(HttpResponse::NotFound().json(serde_json::json!({
-                "error": "API key not found"
-            })));
-        }
-        Err(e) => {
-            tracing::error!(user_id = %user_id, api_key_id = %api_key_id, error = %e, "failed to find API key for deletion");
-            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to find API key",
-                "message": INTERNAL_ERROR_MESSAGE
-            })));
-        }
+    let api_key = match owned_key(repo.as_ref().as_ref(), api_key_id, user_id).await {
+        Ok(api_key) => api_key,
+        Err(response) => return Ok(response),
     };
 
     match repo.as_ref().delete(api_key_id).await {
@@ -552,45 +373,19 @@ pub async fn delete_api_key(
 /// Enable/disable an API key
 pub async fn toggle_api_key(
     path: web::Path<Uuid>,
-    req: web::Json<serde_json::Value>,
+    req: web::Json<ToggleApiKeyRequest>,
     repo: web::Data<Arc<dyn ApiKeyRepository>>,
     cache: Option<web::Data<ApiKeyStore>>,
     auth_user: AuthenticatedUser,
 ) -> Result<HttpResponse> {
     let api_key_id = path.into_inner();
-    let enabled = req
-        .get("enabled")
-        .and_then(|v| v.as_bool())
-        .ok_or_else(|| actix_web::error::ErrorBadRequest("Missing or invalid 'enabled' field"))?;
+    let enabled = req.enabled;
 
-    // Get user ID from either JWT or API key authentication
-    let user_id = auth_user.user_id().ok_or_else(|| {
-        actix_web::error::ErrorUnauthorized("User ID not found in authentication")
-    })?;
+    let user_id = auth_user.user_id;
 
-    // First, check if the API key exists and belongs to the user
-    let api_key = match repo.as_ref().find_by_id(api_key_id).await {
-        Ok(Some(api_key)) => {
-            if api_key.user_id != Some(user_id) {
-                return Ok(HttpResponse::Forbidden().json(serde_json::json!({
-                    "error": "Access denied",
-                    "message": "You don't have permission to modify this API key"
-                })));
-            }
-            api_key
-        }
-        Ok(None) => {
-            return Ok(HttpResponse::NotFound().json(serde_json::json!({
-                "error": "API key not found"
-            })));
-        }
-        Err(e) => {
-            tracing::error!(user_id = %user_id, api_key_id = %api_key_id, error = %e, "failed to find API key for toggle");
-            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to find API key",
-                "message": INTERNAL_ERROR_MESSAGE
-            })));
-        }
+    let api_key = match owned_key(repo.as_ref().as_ref(), api_key_id, user_id).await {
+        Ok(api_key) => api_key,
+        Err(response) => return Ok(response),
     };
 
     match repo.as_ref().set_enabled(api_key_id, enabled).await {

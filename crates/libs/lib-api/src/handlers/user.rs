@@ -94,7 +94,7 @@ pub async fn get_balances(
             tracing::error!("failed to get user balances: {}", e);
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "failed to retrieve balances",
-                "message": "An internal error occurred. Please try again later."
+                "message": INTERNAL_ERROR_MESSAGE
             })))
         }
     }
@@ -206,7 +206,7 @@ pub async fn get_open_orders(
             tracing::error!("failed to count open orders for user_id {}: {}", user_id, e);
             return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "failed to retrieve open orders",
-                "message": "An internal error occurred. Please try again later."
+                "message": INTERNAL_ERROR_MESSAGE
             })));
         }
     };
@@ -242,7 +242,7 @@ pub async fn get_open_orders(
             tracing::error!("failed to get open orders for user_id {}: {}", user_id, e);
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "failed to retrieve open orders",
-                "message": "An internal error occurred. Please try again later."
+                "message": INTERNAL_ERROR_MESSAGE
             })))
         }
     }
@@ -345,7 +345,7 @@ pub async fn get_order_history(
             );
             return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "failed to retrieve order history",
-                "message": "An internal error occurred. Please try again later."
+                "message": INTERNAL_ERROR_MESSAGE
             })));
         }
     };
@@ -381,7 +381,7 @@ pub async fn get_order_history(
             tracing::error!("failed to get order history for user_id {}: {}", user_id, e);
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "failed to retrieve order history",
-                "message": "An internal error occurred. Please try again later."
+                "message": INTERNAL_ERROR_MESSAGE
             })))
         }
     }
@@ -701,7 +701,7 @@ pub async fn get_favorite_markets(
             tracing::error!("failed to get favorite markets: {}", e);
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "failed to retrieve favorite markets",
-                "message": "An internal error occurred. Please try again later."
+                "message": INTERNAL_ERROR_MESSAGE
             })))
         }
     }
@@ -788,7 +788,7 @@ pub async fn toggle_favorite_market(
             tracing::error!("failed to toggle favorite market: {}", e);
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "failed to toggle favorite market",
-                "message": "An internal error occurred. Please try again later."
+                "message": INTERNAL_ERROR_MESSAGE
             })))
         }
     }

@@ -17,6 +17,10 @@ pub trait UserRepository: Send + Sync {
         provider_id: &str,
     ) -> Result<Option<Model>, AuthError>;
     async fn create_user(&self, user: &Model) -> Result<Model, AuthError>;
+    /// Deletes a sign-up that never proved its email, so the email is free again. Refuses with
+    /// `EmailAlreadyExists` when the row was verified in the meantime: a verified account is never
+    /// deleted here.
+    async fn delete_unverified(&self, user_id: Uuid) -> Result<(), AuthError>;
     async fn update_last_login(&self, user_id: Uuid) -> Result<(), AuthError>;
     async fn verify_email(&self, user_id: Uuid) -> Result<(), AuthError>;
     async fn update_password(&self, user_id: Uuid, password_hash: &str) -> Result<(), AuthError>;
@@ -84,7 +88,7 @@ impl UserRepository for PostgresUserRepository {
             provider_id: Set(user.provider_id.clone()),
             avatar_url: Set(user.avatar_url.clone()),
             email_verified: Set(user.email_verified),
-            status: Set(UserStatus::Pending), // Safe initial status
+            status: Set(user.status.clone()),
             created_at: Set(now),             // Server-assigned timestamp
             updated_at: Set(now),             // Server-assigned timestamp
             last_login: Set(user.last_login), // Accept caller-supplied last_login if appropriate
@@ -112,6 +116,22 @@ impl UserRepository for PostgresUserRepository {
         })?;
 
         Ok(created_user)
+    }
+
+    async fn delete_unverified(&self, user_id: Uuid) -> Result<(), AuthError> {
+        // A hard delete: `ux_users_email` is a plain unique constraint, so a soft-deleted row
+        // would hold the email forever.
+        let result = Entity::delete_many()
+            .filter(Column::UserId.eq(user_id))
+            .filter(Column::EmailVerified.eq(false))
+            .filter(Column::Status.eq(UserStatus::Pending))
+            .exec(&*self.db)
+            .await
+            .map_err(|e| AuthError::Database(format!("Failed to delete unverified user: {}", e)))?;
+        if result.rows_affected == 0 {
+            return Err(AuthError::EmailAlreadyExists);
+        }
+        Ok(())
     }
 
     async fn update_last_login(&self, user_id: Uuid) -> Result<(), AuthError> {
@@ -173,10 +193,9 @@ impl UserRepository for PostgresUserRepository {
             update_result.rows_affected()
         );
 
+        // The pending row is gone (a later sign-up replaced it) or was verified meanwhile.
         if update_result.rows_affected() == 0 {
-            return Err(AuthError::Database(
-                "User not found or status not eligible for verification".to_string(),
-            ));
+            return Err(AuthError::InvalidCredentials);
         }
 
         Ok(())

@@ -1,3 +1,4 @@
+use actix_web::cookie::{Cookie, SameSite, time::Duration};
 use actix_web::{HttpRequest, HttpResponse, web};
 use bcrypt::{DEFAULT_COST, hash, verify};
 use chrono::Utc;
@@ -6,11 +7,10 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::dto::auth_request_dto::{
-    ChangePasswordRequest, CheckEmailRequest, ForgotPasswordRequest, LoginRequest,
-    RefreshTokenRequest, ResetPasswordRequest, SignupRequest, VerifyEmailRequest,
-    VerifyResetOtpRequest,
+    ChangePasswordRequest, ForgotPasswordRequest, LoginRequest, ResetPasswordRequest,
+    SignupRequest, VerifyEmailRequest, VerifyResetOtpRequest,
 };
-use crate::dto::auth_response_dto::{RefreshTokenResponse, SignupResponse, UserInfo, UserProfile};
+use crate::dto::auth_response_dto::{SignupResponse, UserInfo, UserProfile};
 use crate::error::auth_error::AuthError;
 use crate::middleware::jwt_auth::AuthenticatedUser;
 use crate::models::user::{Model, UserStatus};
@@ -52,14 +52,17 @@ fn refused_login() -> AuthError {
     AuthError::InvalidCredentials
 }
 
-/// Session cookie attributes for `req`. Returns (is_secure, cookie_ttl) where:
-/// - is_secure: the request used HTTPS: a TLS connection, or `X-Forwarded-Proto: https` from a
-///   trusted proxy (`is_https`), the same rule the OAuth handlers apply to their cookies
-/// - cookie_ttl: cookie time-to-live in seconds (24 hours)
-fn get_cookie_config(req: &HttpRequest) -> (bool, i64) {
-    let is_secure = is_https(req);
-    let cookie_ttl = 24 * 3600;
-    (is_secure, cookie_ttl)
+/// The session cookie of every login: password, verified email and OAuth web. It lives 24 hours
+/// in the browser; the session's idle limit is enforced in Redis. `Secure` when the request used
+/// HTTPS: a TLS connection, or `X-Forwarded-Proto: https` from a trusted proxy (`is_https`).
+pub(crate) fn session_cookie(req: &HttpRequest, session_id: String) -> Cookie<'static> {
+    Cookie::build("session_id", session_id)
+        .path("/")
+        .http_only(true)
+        .secure(is_https(req))
+        .same_site(SameSite::Strict)
+        .max_age(Duration::hours(24))
+        .finish()
 }
 
 // Signup handler
@@ -101,9 +104,13 @@ pub async fn signup(
 
     tracing::debug!("Signup request");
 
-    // Check if user already exists
-    if let Some(_existing_user) = user_repo.find_by_email(&req.email).await? {
-        return Err(AuthError::EmailAlreadyExists);
+    if let Some(existing) = user_repo.find_by_email(&req.email).await? {
+        if existing.email_verified {
+            return Err(AuthError::EmailAlreadyExists);
+        }
+        // An unverified sign-up never reserved the email: whoever signs up last and then proves
+        // the inbox and this password owns the account, and nothing of the earlier attempt survives.
+        user_repo.delete_unverified(existing.user_id).await?;
     }
 
     // Hash the password
@@ -112,8 +119,8 @@ pub async fn signup(
         move || hash(&pwd, DEFAULT_COST)
     })
     .await
-    .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
-    .map_err(|e| AuthError::Validation(format!("Password hashing failed: {}", e)))?;
+    .map_err(|e| AuthError::InternalError(format!("Join error: {}", e)))?
+    .map_err(|e| AuthError::InternalError(format!("Password hashing failed: {}", e)))?;
 
     // Create new user
     let now = Utc::now();
@@ -137,7 +144,7 @@ pub async fn signup(
 
     // Send verification email (skip in development if SMTP is not available)
     if let Err(e) = email_service
-        .send_verification_email(&created_user.email, &created_user.username)
+        .send_verification_email(&created_user.email)
         .await
     {
         tracing::warn!(
@@ -226,11 +233,6 @@ pub async fn login(
         None => return Err(refused_login()),
     };
 
-    // Check if user can login
-    if !user.can_login() {
-        return Err(AuthError::EmailNotVerified);
-    }
-
     // Verify password
     let password_hash = match user.password_hash.clone() {
         Some(password_hash) => password_hash,
@@ -255,8 +257,8 @@ pub async fn login(
         move || verify(&p, &h)
     })
     .await
-    .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
-    .map_err(|e| AuthError::Validation(format!("Password verification failed: {}", e)));
+    .map_err(|e| AuthError::InternalError(format!("Join error: {}", e)))?
+    .map_err(|e| AuthError::InternalError(format!("Password verification failed: {}", e)));
 
     let authenticated = match authenticated {
         Ok(authenticated) => authenticated,
@@ -284,6 +286,10 @@ pub async fn login(
     if !authenticated {
         return Err(refused_login());
     }
+    // Only after the password matched, so an unverified or suspended account is not revealed.
+    if !user.can_login() {
+        return Err(AuthError::EmailNotVerified);
+    }
 
     let user_id = user.user_id;
 
@@ -295,29 +301,16 @@ pub async fn login(
     // Update last login
     user_repo.update_last_login(user_id).await?;
 
-    // Create session (store user_id and tokens in Redis)
+    // Create session (store user_id and its access token in Redis)
     let session_id = session_service
-        .create_session(
-            user_id,
-            tokens.access_token.clone(),
-            tokens.refresh_token.clone(),
-        )
+        .create_session(user_id, tokens.access_token)
         .await?;
 
-    // Create session cookie
-    let (is_secure, cookie_ttl) = get_cookie_config(&http_req);
-
-    let session_cookie = actix_web::cookie::Cookie::build("session_id", session_id)
-        .path("/")
-        .http_only(true)
-        .secure(is_secure)
-        .same_site(actix_web::cookie::SameSite::Strict)
-        .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
-        .finish();
-
-    Ok(HttpResponse::Ok().cookie(session_cookie).json(json!({
-        "message": "Logged in successfully"
-    })))
+    Ok(HttpResponse::Ok()
+        .cookie(session_cookie(&http_req, session_id))
+        .json(json!({
+            "message": "Logged in successfully"
+        })))
 }
 
 // Logout handler
@@ -346,16 +339,8 @@ pub async fn logout(
         tracing::warn!("Failed to blacklist token during logout: {}", e);
     }
 
-    // Create cookie to delete the session cookie
-    let (is_secure, _cookie_ttl) = get_cookie_config(&req);
-
-    let delete_session_cookie = actix_web::cookie::Cookie::build("session_id", "")
-        .path("/")
-        .http_only(true)
-        .secure(is_secure)
-        .same_site(actix_web::cookie::SameSite::Strict)
-        .max_age(actix_web::cookie::time::Duration::seconds(0))
-        .finish();
+    let mut delete_session_cookie = session_cookie(&req, String::new());
+    delete_session_cookie.make_removal();
 
     Ok(HttpResponse::Ok()
         .cookie(delete_session_cookie)
@@ -391,24 +376,6 @@ pub async fn get_profile(
     Ok(HttpResponse::Ok().json(profile))
 }
 
-// Refresh token handler
-pub async fn refresh_token(
-    req: web::Json<RefreshTokenRequest>,
-    token_service: web::Data<Arc<TokenService>>,
-) -> Result<HttpResponse, AuthError> {
-    tracing::debug!("Token refresh request");
-
-    let new_tokens = token_service.refresh_tokens(&req.refresh_token).await?;
-
-    let response = RefreshTokenResponse {
-        access_token: new_tokens.access_token,
-        token_type: "Bearer".to_string(),
-        expires_in: new_tokens.expires_in,
-    };
-
-    Ok(HttpResponse::Ok().json(response))
-}
-
 // Verify email with OTP handler (public endpoint)
 pub async fn verify_email_with_otp(
     http_req: HttpRequest,
@@ -442,21 +409,29 @@ pub async fn verify_email_with_otp(
 
     tracing::debug!("Email verification request with OTP");
 
-    // Find user by email
+    // The code proves the inbox; the password proves this caller, not an earlier sign-up, chose
+    // the credentials. Every refusal is the login refusal, so the route reveals nothing about
+    // whether the email has an account or whether it is verified.
     let user = user_repo
         .find_by_email(&req.email)
         .await?
-        .ok_or(AuthError::UserNotFound)?;
-
-    // Check if already verified
-    if user.email_verified {
-        return Err(AuthError::Validation("Email already verified".to_string()));
+        .filter(|user| !user.email_verified)
+        .ok_or_else(refused_login)?;
+    let Some(password_hash) = user.password_hash.clone() else {
+        return Err(refused_login());
+    };
+    let known = tokio::task::spawn_blocking({
+        let p = req.password.clone();
+        move || verify(&p, &password_hash)
+    })
+    .await
+    .map_err(|e| AuthError::InternalError(format!("Join error: {}", e)))?
+    .map_err(|e| AuthError::InternalError(format!("Password verification failed: {}", e)))?;
+    if !known {
+        return Err(refused_login());
     }
 
-    // Verify OTP
     email_service.verify_otp(&req.email, &req.otp).await?;
-
-    // Update user status to verified
     user_repo.verify_email(user.user_id).await?;
 
     // Generate tokens now that email is verified
@@ -467,13 +442,9 @@ pub async fn verify_email_with_otp(
 
     tracing::debug!("Creating session for user_id: {}", user.user_id);
 
-    // Create session (stores user_id and tokens in Redis)
+    // Create session (stores user_id and its access token in Redis)
     let session_id = session_service
-        .create_session(
-            user.user_id,
-            tokens.access_token.clone(),
-            tokens.refresh_token.clone(),
-        )
+        .create_session(user.user_id, tokens.access_token)
         .await
         .map_err(|e| {
             tracing::error!("Failed to create session: {}", e);
@@ -483,38 +454,12 @@ pub async fn verify_email_with_otp(
     // Never log the session id: it is a bearer credential (see combined_auth.rs).
     tracing::debug!("Session created successfully");
 
-    // Create session cookie
-    let (is_secure, cookie_ttl) = get_cookie_config(&http_req);
-
-    let session_cookie = actix_web::cookie::Cookie::build("session_id", session_id)
-        .path("/")
-        .http_only(true)
-        .secure(is_secure)
-        .same_site(actix_web::cookie::SameSite::Strict)
-        .max_age(actix_web::cookie::time::Duration::seconds(cookie_ttl))
-        .finish();
-
-    tracing::debug!("Session cookie created, sending response with cookie");
-
     // Return only success message (session created with cookie)
-    Ok(HttpResponse::Ok().cookie(session_cookie).json(json!({
-        "message": "Email verified successfully"
-    })))
-}
-
-// Verify email handler (internal handler)
-pub async fn verify_email(
-    user: AuthenticatedUser,
-    user_repo: web::Data<Arc<dyn UserRepository>>,
-) -> Result<HttpResponse, AuthError> {
-    tracing::debug!("Email verification request");
-
-    user_repo.verify_email(user.user_id).await?;
-
-    Ok(HttpResponse::Ok().json(json!({
-        "message": "Email verified successfully",
-        "timestamp": chrono::Utc::now().to_rfc3339()
-    })))
+    Ok(HttpResponse::Ok()
+        .cookie(session_cookie(&http_req, session_id))
+        .json(json!({
+            "message": "Email verified successfully"
+        })))
 }
 
 // Change password handler
@@ -525,10 +470,21 @@ pub async fn change_password(
     user_repo: web::Data<Arc<dyn UserRepository>>,
     token_service: web::Data<Arc<TokenService>>,
     session_service: web::Data<Arc<SessionService>>,
+    email_service: web::Data<Arc<EmailService>>,
 ) -> Result<HttpResponse, AuthError> {
     // Validate the request
     body.validate()
         .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
+
+    // The old password gets login's failure budget, so a stolen session cannot guess it.
+    let principal = format!("change_password:{}", user.user_id);
+    email_service
+        .check_login_failure_rate_limit(
+            &principal,
+            LOGIN_PRINCIPAL_MAX_REQUESTS,
+            LOGIN_PRINCIPAL_WINDOW_SECONDS,
+        )
+        .await?;
 
     // Get user
     let user_record = user_repo
@@ -536,20 +492,20 @@ pub async fn change_password(
         .await?
         .ok_or(AuthError::UserNotFound)?;
 
-    // Verify old password
-    if let Some(password_hash) = &user_record.password_hash {
-        if !tokio::task::spawn_blocking({
-            let p = body.old_password.clone();
-            let h = password_hash.clone();
-            move || verify(&p, &h)
-        })
-        .await
-        .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
-        .map_err(|e| AuthError::Validation(format!("Password verification failed: {}", e)))?
-        {
-            return Err(AuthError::InvalidCredentials);
-        }
-    } else {
+    let Some(password_hash) = user_record.password_hash else {
+        return Err(AuthError::InvalidCredentials);
+    };
+    let authenticated = tokio::task::spawn_blocking({
+        let p = body.old_password.clone();
+        move || verify(&p, &password_hash)
+    })
+    .await
+    .map_err(|e| AuthError::InternalError(format!("Join error: {}", e)))?
+    .map_err(|e| AuthError::InternalError(format!("Password verification failed: {}", e)))?;
+    email_service
+        .record_login_authentication(&principal, authenticated, LOGIN_PRINCIPAL_WINDOW_SECONDS)
+        .await?;
+    if !authenticated {
         return Err(AuthError::InvalidCredentials);
     }
 
@@ -559,16 +515,15 @@ pub async fn change_password(
         move || hash(&p, DEFAULT_COST)
     })
     .await
-    .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
-    .map_err(|e| AuthError::Validation(format!("Password hashing failed: {}", e)))?;
+    .map_err(|e| AuthError::InternalError(format!("Join error: {}", e)))?
+    .map_err(|e| AuthError::InternalError(format!("Password hashing failed: {}", e)))?;
 
-    // Update password in database
+    // Invalidate all previously issued access tokens first: if the update then fails, the user is
+    // logged out everywhere, never the reverse.
+    token_service.bump_token_version(user.user_id).await?;
     user_repo
         .update_password(user.user_id, &new_password_hash)
         .await?;
-
-    // Invalidate all previously issued access and refresh tokens.
-    token_service.bump_token_version(user.user_id).await?;
 
     // Generate new tokens at the current version.
     let new_tokens = token_service.mint_tokens(user.user_id).await?;
@@ -577,13 +532,9 @@ pub async fn change_password(
     let current_session_id = req.cookie("session_id").map(|c| c.value().to_string());
 
     if let Some(session_id) = current_session_id {
-        // Update current session with new tokens (keep user logged in)
+        // Update current session with the new token (keep user logged in)
         session_service
-            .update_session_tokens(
-                &session_id,
-                new_tokens.access_token.clone(),
-                new_tokens.refresh_token.clone(),
-            )
+            .update_session_access_token(&session_id, new_tokens.access_token)
             .await
             .map_err(|e| {
                 tracing::warn!("Failed to update current session tokens: {}", e);
@@ -625,89 +576,6 @@ pub async fn change_password(
     })))
 }
 
-// Check if email exists handler
-pub async fn check_email_exists(
-    req: web::Json<CheckEmailRequest>,
-    user_repo: web::Data<Arc<dyn UserRepository>>,
-) -> Result<HttpResponse, AuthError> {
-    // Validate the request
-    req.validate()
-        .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
-
-    tracing::debug!("Check email exists request for: {}", req.email);
-
-    match user_repo.find_by_email(&req.email).await? {
-        Some(user) => Ok(HttpResponse::Ok().json(json!({
-            "exists": true,
-            "email_verified": user.email_verified
-        }))),
-        None => Ok(HttpResponse::Ok().json(json!({
-            "exists": false,
-            "email_verified": false
-        }))),
-    }
-}
-
-// resend verification email handler
-pub async fn resend_verification_email(
-    req: web::Json<CheckEmailRequest>,
-    user_repo: web::Data<Arc<dyn UserRepository>>,
-    email_service: web::Data<Arc<EmailService>>,
-) -> Result<HttpResponse, AuthError> {
-    // validate the request
-    req.validate()
-        .map_err(|e| AuthError::Validation(format!("Validation failed: {}", e)))?;
-
-    tracing::debug!("Resend verification email request for: {}", req.email);
-
-    email_service
-        .enforce_resend_verification_rate_limit(&req.email)
-        .await?;
-
-    // check if user exists by email
-    let user = user_repo.find_by_email(&req.email).await?;
-
-    match user {
-        Some(user_model) => {
-            // checking if email is already verified
-            if user_model.email_verified {
-                return Err(AuthError::Validation("Email already verified".to_string()));
-            }
-
-            // resend verification email
-            match email_service
-                .resend_verification_email(&req.email, &user_model.username)
-                .await
-            {
-                Ok(new_otp_sent) => {
-                    let message = if new_otp_sent {
-                        "New verification code sent successfully"
-                    } else {
-                        "Verification code resent successfully"
-                    };
-
-                    Ok(HttpResponse::Ok().json(json!({
-                        "message": message,
-                        "new_code_sent": new_otp_sent,
-                        "timestamp": chrono::Utc::now().to_rfc3339()
-                    })))
-                }
-                Err(e) => {
-                    tracing::error!("Failed to resend verification email: {}", e);
-                    Err(e)
-                }
-            }
-        }
-        None => {
-            tracing::warn!(
-                "Resend verification requested for non-existent email: {}",
-                req.email
-            );
-            Err(AuthError::UserNotFound)
-        }
-    }
-}
-
 // Forgot password handler
 pub async fn forgot_password(
     req: web::Json<ForgotPasswordRequest>,
@@ -740,9 +608,7 @@ pub async fn forgot_password(
         }
 
         // User exists and has password - send OTP
-        email_service
-            .send_password_reset_otp(&req.email, &user.username)
-            .await?;
+        email_service.send_password_reset_otp(&req.email).await?;
     } else {
         // User not exist
         tracing::debug!(
@@ -770,23 +636,15 @@ pub async fn verify_reset_otp(
 
     tracing::debug!("Verify reset OTP request for email: {}", req.email);
 
-    // Find user by email
-    let user = user_repo
-        .find_by_email(&req.email)
-        .await?
-        .ok_or(AuthError::UserNotFound)?;
-
-    // Check if user has password_hash
-    if user.password_hash.is_none() {
-        return Err(AuthError::Validation(
-            "Password reset is not available for OAuth-only accounts".to_string(),
-        ));
-    }
-
-    // Verify OTP
+    // The code first: an unknown email and one without a code get the same answer.
     email_service
         .verify_password_reset_otp(&req.email, &req.otp)
         .await?;
+    let user = user_repo
+        .find_by_email(&req.email)
+        .await?
+        .filter(|user| user.password_hash.is_some())
+        .ok_or(AuthError::InvalidOtp)?;
 
     // Generate reset token
     let reset_token = email_service.generate_reset_token();
@@ -839,16 +697,15 @@ pub async fn reset_password(
         move || hash(&p, DEFAULT_COST)
     })
     .await
-    .map_err(|e| AuthError::Validation(format!("Join error: {}", e)))?
-    .map_err(|e| AuthError::Validation(format!("Password hashing failed: {}", e)))?;
+    .map_err(|e| AuthError::InternalError(format!("Join error: {}", e)))?
+    .map_err(|e| AuthError::InternalError(format!("Password hashing failed: {}", e)))?;
 
-    // Update password in database
+    // Invalidate all previously issued access tokens first: if the update then fails, the user is
+    // logged out everywhere, never the reverse.
+    token_service.bump_token_version(user_id).await?;
     user_repo
         .update_password(user_id, &new_password_hash)
         .await?;
-
-    // Invalidate all previously issued access and refresh tokens.
-    token_service.bump_token_version(user_id).await?;
 
     // Revoke all user sessions
     if let Err(e) = session_service.revoke_all_user_sessions(user_id).await {
@@ -871,7 +728,7 @@ pub async fn reset_password(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::config::JwtConfig;
     use crate::dto::jwt_response_dto::JwtTokenResponse;
@@ -895,32 +752,47 @@ mod tests {
         let behind_tls = forwarded_https()
             .app_data(load_balancer())
             .to_http_request();
-        assert!(get_cookie_config(&behind_tls).0);
+        let secure = |req| session_cookie(req, "id".to_string()).secure() == Some(true);
+        assert!(secure(&behind_tls));
 
         // Any other peer's header is ignored: this plain-HTTP request did not use HTTPS.
         let untrusted = forwarded_https().to_http_request();
-        assert!(!get_cookie_config(&untrusted).0);
+        assert!(!secure(&untrusted));
         let direct = actix_web::test::TestRequest::default()
             .peer_addr("192.0.2.10:12345".parse().unwrap())
             .insert_header(("X-Forwarded-Proto", "https"))
             .app_data(load_balancer())
             .to_http_request();
-        assert!(!get_cookie_config(&direct).0);
+        assert!(!secure(&direct));
 
         let plain = actix_web::test::TestRequest::default().to_http_request();
-        assert!(!get_cookie_config(&plain).0);
+        assert!(!secure(&plain));
     }
 
+    /// Every login sets the same cookie, OAuth web included: one the browser keeps for 24 hours,
+    /// not one that ends with the server's 30-minute idle limit while the user is active.
+    #[test]
+    fn the_session_cookie_lives_24_hours() {
+        let req = actix_web::test::TestRequest::default().to_http_request();
+        let cookie = session_cookie(&req, "id".to_string());
+
+        assert_eq!(cookie.max_age(), Some(Duration::hours(24)));
+        assert_eq!(
+            (cookie.path(), cookie.http_only(), cookie.same_site()),
+            (Some("/"), Some(true), Some(SameSite::Strict))
+        );
+    }
+
+    /// The JWT middleware renews a session's expired token at the version it was issued at; after
+    /// a logout no token of an earlier version is renewed.
     #[tokio::test]
-    async fn refresh_token_stops_working_after_logout() {
+    async fn session_tokens_are_not_renewed_after_logout() {
         let user_id = Uuid::new_v4();
-        let refresh_token = Uuid::new_v4().to_string();
         let redis_conn = crate::test_redis().await;
         let jwt_config = Arc::new(JwtConfig {
             private_key_path: String::new(),
             public_key_path: String::new(),
             access_token_ttl_minutes: 60,
-            refresh_token_ttl_days: 30,
             issuer: "vex-gateway".to_string(),
             audience: "vex-api".to_string(),
         });
@@ -930,17 +802,8 @@ mod tests {
             Arc::new(EncodingKey::from_secret(b"unused")),
             Arc::new(DecodingKey::from_secret(b"unused")),
         ));
-        let session_service = Arc::new(SessionService::new(redis_conn.clone(), 3600));
-
-        let mut conn = redis_conn;
-        let _: () = conn
-            .set_ex(
-                format!("refresh:{}", refresh_token),
-                format!("{}:{}:0", user_id, Uuid::new_v4()),
-                3600,
-            )
-            .await
-            .unwrap();
+        let session_service = Arc::new(SessionService::new(redis_conn, 3600));
+        let version = token_service.get_token_version(user_id).await.unwrap();
 
         let response = logout(
             actix_web::test::TestRequest::default().to_http_request(),
@@ -952,7 +815,7 @@ mod tests {
         .unwrap();
         assert_eq!(response.status(), actix_web::http::StatusCode::OK);
 
-        let result = token_service.refresh_tokens(&refresh_token).await;
+        let result = token_service.mint_tokens_at_version(user_id, version).await;
         assert!(matches!(result, Err(AuthError::TokenRevoked)));
     }
 
@@ -965,7 +828,7 @@ mod tests {
     };
     use secrecy::SecretString;
     use std::sync::{
-        OnceLock,
+        Mutex, OnceLock,
         atomic::{AtomicUsize, Ordering},
     };
 
@@ -999,6 +862,10 @@ mod tests {
         }
 
         async fn create_user(&self, _user: &Model) -> Result<Model, AuthError> {
+            unreachable!()
+        }
+
+        async fn delete_unverified(&self, _user_id: Uuid) -> Result<(), AuthError> {
             unreachable!()
         }
 
@@ -1049,6 +916,10 @@ mod tests {
             unreachable!()
         }
 
+        async fn delete_unverified(&self, _user_id: Uuid) -> Result<(), AuthError> {
+            unreachable!()
+        }
+
         async fn update_last_login(&self, _user_id: Uuid) -> Result<(), AuthError> {
             unreachable!()
         }
@@ -1088,6 +959,10 @@ mod tests {
         }
 
         async fn create_user(&self, _user: &Model) -> Result<Model, AuthError> {
+            unreachable!()
+        }
+
+        async fn delete_unverified(&self, _user_id: Uuid) -> Result<(), AuthError> {
             unreachable!()
         }
 
@@ -1143,7 +1018,8 @@ mod tests {
         .clone()
     }
 
-    async fn test_services() -> (Arc<EmailService>, Arc<TokenService>, Arc<SessionService>) {
+    pub(crate) async fn test_services()
+    -> (Arc<EmailService>, Arc<TokenService>, Arc<SessionService>) {
         let conn = crate::test_redis().await;
         let email_config = EmailConfig {
             smtp_host: "127.0.0.1".to_string(),
@@ -1153,7 +1029,6 @@ mod tests {
             from_email: "test@example.com".to_string(),
         };
         let otp_config = OtpConfig {
-            otp_length: 6,
             email_verification_expiry_minutes: 15,
             password_reset_expiry_minutes: 15,
         };
@@ -1163,7 +1038,6 @@ mod tests {
             private_key_path: String::new(),
             public_key_path: String::new(),
             access_token_ttl_minutes: 15,
-            refresh_token_ttl_days: 1,
             issuer: "test".to_string(),
             audience: "test".to_string(),
         });
@@ -1689,6 +1563,7 @@ mod tests {
                 .to_http_request(),
             web::Json(VerifyEmailRequest {
                 email: email.clone(),
+                password: "correct-horse-battery-staple".to_string(),
                 otp: "123456".to_string(),
             }),
             web::Data::new(user_repo),
@@ -1715,43 +1590,245 @@ mod tests {
         assert!(!email_key_exists);
     }
 
+    /// Holds at most one password user; records the delete and the create a second sign-up does,
+    /// and the verification.
+    struct SignupRepository {
+        user: Option<Model>,
+        deleted: AtomicUsize,
+        created: Mutex<Option<Model>>,
+        verified: AtomicUsize,
+    }
+
+    impl SignupRepository {
+        fn new(user: Option<Model>) -> Arc<Self> {
+            Arc::new(Self {
+                user,
+                deleted: AtomicUsize::new(0),
+                created: Mutex::new(None),
+                verified: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl UserRepository for SignupRepository {
+        async fn find_by_id(&self, _user_id: Uuid) -> Result<Option<Model>, AuthError> {
+            unreachable!()
+        }
+
+        async fn find_by_email(&self, _email: &str) -> Result<Option<Model>, AuthError> {
+            Ok(self.user.clone())
+        }
+
+        async fn find_by_provider_id(
+            &self,
+            _provider: &str,
+            _provider_id: &str,
+        ) -> Result<Option<Model>, AuthError> {
+            unreachable!()
+        }
+
+        async fn create_user(&self, user: &Model) -> Result<Model, AuthError> {
+            *self.created.lock().unwrap() = Some(user.clone());
+            Ok(user.clone())
+        }
+
+        async fn delete_unverified(&self, user_id: Uuid) -> Result<(), AuthError> {
+            assert_eq!(Some(user_id), self.user.as_ref().map(|user| user.user_id));
+            self.deleted.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn update_last_login(&self, _user_id: Uuid) -> Result<(), AuthError> {
+            Ok(())
+        }
+
+        async fn verify_email(&self, _user_id: Uuid) -> Result<(), AuthError> {
+            self.verified.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn update_password(
+            &self,
+            _user_id: Uuid,
+            _password_hash: &str,
+        ) -> Result<(), AuthError> {
+            unreachable!()
+        }
+    }
+
+    /// A password sign-up that has not verified its email yet.
+    fn pending_user(email: String, password: &str) -> Model {
+        Model {
+            email_verified: false,
+            status: UserStatus::Pending,
+            ..login_user(email, password)
+        }
+    }
+
     #[tokio::test]
-    async fn resend_verification_is_limited_per_email_before_the_lookup() {
+    async fn second_signup_for_an_unverified_email_replaces_it_and_answers_like_a_first_signup() {
         let (email_service, _, _) = test_services().await;
-        let repository = Arc::new(RejectIfCalledRepository {
-            find_by_email_calls: AtomicUsize::new(0),
-        });
-        let resend = |email: &str| {
-            let user_repo: Arc<dyn UserRepository> = repository.clone();
-            resend_verification_email(
-                web::Json(CheckEmailRequest {
-                    email: email.to_string(),
+        let email = format!("{}@example.com", Uuid::new_v4());
+        let username = format!("victim-{}", Uuid::new_v4().simple());
+        let pending = pending_user(email.clone(), "attacker-pw");
+        let signup_as_victim = |repository: Arc<SignupRepository>| {
+            let user_repo: Arc<dyn UserRepository> = repository;
+            signup(
+                actix_web::test::TestRequest::default()
+                    .peer_addr("203.0.113.203:12345".parse().unwrap())
+                    .to_http_request(),
+                web::Json(SignupRequest {
+                    email: email.clone(),
+                    username: username.clone(),
+                    password: "victim-pw".to_string(),
                 }),
                 web::Data::new(user_repo),
                 web::Data::new(email_service.clone()),
             )
         };
+
+        let repository = SignupRepository::new(Some(pending.clone()));
+        let response = signup_as_victim(repository.clone()).await.unwrap();
+
+        assert_eq!(response.status(), actix_web::http::StatusCode::CREATED);
+        assert_eq!(repository.deleted.load(Ordering::SeqCst), 1);
+        let created = repository.created.lock().unwrap().clone().unwrap();
+        assert_eq!(created.username, username);
+        assert!(verify("victim-pw", created.password_hash.as_ref().unwrap()).unwrap());
+        assert_ne!(created.user_id, pending.user_id);
+        // The new code was stored (its email then failed to send: no SMTP server here).
+        let mut conn = crate::test_redis().await;
+        let code_stored: bool = conn
+            .exists(format!("otp:verification:{email}"))
+            .await
+            .unwrap();
+        assert!(code_stored);
+
+        // A verified account keeps its email.
+        let verified = SignupRepository::new(Some(login_user(email.clone(), "owner-pw")));
+        assert!(matches!(
+            signup_as_victim(verified.clone()).await,
+            Err(AuthError::EmailAlreadyExists)
+        ));
+        assert_eq!(verified.deleted.load(Ordering::SeqCst), 0);
+    }
+
+    async fn verify_email_as(
+        email: &str,
+        password: &str,
+        user_repo: Arc<dyn UserRepository>,
+    ) -> Result<HttpResponse, AuthError> {
+        let (email_service, token_service, session_service) = test_services().await;
+        verify_email_with_otp(
+            actix_web::test::TestRequest::default()
+                .peer_addr("198.51.100.40:12345".parse().unwrap())
+                .to_http_request(),
+            web::Json(VerifyEmailRequest {
+                email: email.to_string(),
+                password: password.to_string(),
+                otp: "123456".to_string(),
+            }),
+            web::Data::new(user_repo),
+            web::Data::new(email_service),
+            web::Data::new(token_service),
+            web::Data::new(session_service),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn verify_email_refuses_a_caller_who_does_not_know_the_password() {
         let email = format!("{}@example.com", Uuid::new_v4());
+        let repository = SignupRepository::new(Some(pending_user(email.clone(), "attacker-pw")));
+        let code_key = format!("otp:verification:{email}");
+        let mut conn = crate::test_redis().await;
+        let _: () = conn.set_ex(&code_key, "123456", 60).await.unwrap();
 
-        // Three an hour per email reach the lookup, which this repository fails.
-        for _ in 0..3 {
-            assert!(matches!(
-                resend(&email).await,
-                Err(AuthError::InternalError(_))
-            ));
+        let result = verify_email_as(&email, "victim-pw", repository.clone()).await;
+
+        assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+        assert_eq!(repository.verified.load(Ordering::SeqCst), 0);
+        let code_kept: bool = conn.exists(&code_key).await.unwrap();
+        assert!(code_kept);
+
+        let response = verify_email_as(&email, "attacker-pw", repository.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), actix_web::http::StatusCode::OK);
+        assert!(
+            response
+                .cookies()
+                .any(|cookie| cookie.name() == "session_id")
+        );
+        assert_eq!(repository.verified.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn verify_email_answers_unknown_and_verified_emails_like_a_wrong_password() {
+        let email = format!("{}@example.com", Uuid::new_v4());
+        for user in [None, Some(login_user(email.clone(), "owner-pw"))] {
+            let result = verify_email_as(&email, "owner-pw", SignupRepository::new(user)).await;
+            assert!(
+                matches!(result, Err(AuthError::InvalidCredentials)),
+                "{:?}",
+                result.err()
+            );
         }
-        assert!(matches!(
-            resend(&email).await,
-            Err(AuthError::RateLimited { .. })
-        ));
-        assert_eq!(repository.find_by_email_calls.load(Ordering::SeqCst), 3);
+    }
 
-        // Another email has a limit of its own.
-        let other_email = format!("{}@example.com", Uuid::new_v4());
+    #[tokio::test]
+    async fn login_refuses_a_pending_account_only_after_the_password_matches() {
+        let (email_service, token_service, session_service) = test_services().await;
+        let email = format!("{}@example.com", Uuid::new_v4());
+        let user_repo: Arc<dyn UserRepository> = Arc::new(LoginRepository {
+            user: pending_user(email.clone(), "right-password"),
+            find_by_email_calls: AtomicUsize::new(0),
+        });
+        let login_with = |password: &'static str| {
+            attempt_login(
+                &email,
+                password,
+                "198.51.100.41:12345",
+                user_repo.clone(),
+                email_service.clone(),
+                token_service.clone(),
+                session_service.clone(),
+            )
+        };
+
         assert!(matches!(
-            resend(&other_email).await,
-            Err(AuthError::InternalError(_))
+            login_with("wrong-password").await,
+            Err(AuthError::InvalidCredentials)
         ));
+        assert!(matches!(
+            login_with("right-password").await,
+            Err(AuthError::EmailNotVerified)
+        ));
+    }
+
+    #[tokio::test]
+    async fn unknown_and_registered_emails_get_the_same_answer_from_verify_reset_otp() {
+        let (email_service, _, _) = test_services().await;
+        let email = format!("{}@example.com", Uuid::new_v4());
+        for user in [None, Some(login_user(email.clone(), "owner-pw"))] {
+            let user_repo: Arc<dyn UserRepository> = SignupRepository::new(user);
+            let result = verify_reset_otp(
+                web::Json(VerifyResetOtpRequest {
+                    email: email.clone(),
+                    otp: "123456".to_string(),
+                }),
+                web::Data::new(user_repo),
+                web::Data::new(email_service.clone()),
+            )
+            .await;
+            assert!(
+                matches!(result, Err(AuthError::OtpExpired)),
+                "{:?}",
+                result.err()
+            );
+        }
     }
 
     #[test]
@@ -1764,9 +1841,10 @@ mod tests {
         assert_eq!(client_ip_key(&request), "ip:192.0.2.10");
     }
 
-    /// Serves one password user and accepts its password update.
+    /// Serves one password user and accepts its password update, or fails it.
     struct PasswordRepository {
         user: Model,
+        update_fails: bool,
     }
 
     #[async_trait]
@@ -1791,6 +1869,10 @@ mod tests {
             unreachable!()
         }
 
+        async fn delete_unverified(&self, _user_id: Uuid) -> Result<(), AuthError> {
+            unreachable!()
+        }
+
         async fn update_last_login(&self, _user_id: Uuid) -> Result<(), AuthError> {
             unreachable!()
         }
@@ -1804,6 +1886,9 @@ mod tests {
             _user_id: Uuid,
             _password_hash: &str,
         ) -> Result<(), AuthError> {
+            if self.update_fails {
+                return Err(AuthError::Database("update failed".to_string()));
+            }
             Ok(())
         }
     }
@@ -1816,27 +1901,19 @@ mod tests {
     ) -> (String, JwtTokenResponse) {
         let tokens = token_service.mint_tokens(user_id).await.unwrap();
         let session_id = session_service
-            .create_session(
-                user_id,
-                tokens.access_token.clone(),
-                tokens.refresh_token.clone(),
-            )
+            .create_session(user_id, tokens.access_token.clone())
             .await
             .unwrap();
         (session_id, tokens)
     }
 
-    /// Tokens minted before the version bump are refused: the refresh token by `refresh_tokens`,
-    /// the access token by the version check every JWT request passes (jwt_auth.rs).
+    /// Tokens minted before the version bump are refused by the version check every JWT request
+    /// passes, and not renewed at expiry (jwt_auth.rs).
     async fn assert_tokens_revoked(
         token_service: &TokenService,
         user_id: Uuid,
         tokens: &JwtTokenResponse,
     ) {
-        assert!(matches!(
-            token_service.refresh_tokens(&tokens.refresh_token).await,
-            Err(AuthError::TokenRevoked)
-        ));
         let claims = token_service.validate_jwt(&tokens.access_token).unwrap();
         assert!(claims.token_version < token_service.get_token_version(user_id).await.unwrap());
     }
@@ -1858,7 +1935,10 @@ mod tests {
             .store_reset_token(&reset_token, user_id)
             .await
             .unwrap();
-        let user_repo: Arc<dyn UserRepository> = Arc::new(PasswordRepository { user });
+        let user_repo: Arc<dyn UserRepository> = Arc::new(PasswordRepository {
+            user,
+            update_fails: false,
+        });
 
         let response = reset_password(
             web::Json(ResetPasswordRequest {
@@ -1882,7 +1962,7 @@ mod tests {
 
     #[tokio::test]
     async fn password_change_without_a_session_cookie_revokes_every_session_and_token() {
-        let (_, token_service, session_service) = test_services().await;
+        let (email_service, token_service, session_service) = test_services().await;
         let user = login_user(
             format!("change-{}@example.com", Uuid::new_v4()),
             "old-password",
@@ -1892,7 +1972,10 @@ mod tests {
             sign_in(&token_service, &session_service, user_id).await,
             sign_in(&token_service, &session_service, user_id).await,
         ];
-        let user_repo: Arc<dyn UserRepository> = Arc::new(PasswordRepository { user });
+        let user_repo: Arc<dyn UserRepository> = Arc::new(PasswordRepository {
+            user,
+            update_fails: false,
+        });
 
         let response = change_password(
             actix_web::test::TestRequest::default().to_http_request(),
@@ -1904,6 +1987,7 @@ mod tests {
             web::Data::new(user_repo),
             web::Data::new(token_service.clone()),
             web::Data::new(session_service.clone()),
+            web::Data::new(email_service),
         )
         .await
         .unwrap();
@@ -1917,7 +2001,7 @@ mod tests {
 
     #[tokio::test]
     async fn password_change_keeps_only_the_current_session_on_fresh_tokens() {
-        let (_, token_service, session_service) = test_services().await;
+        let (email_service, token_service, session_service) = test_services().await;
         let user = login_user(
             format!("change-{}@example.com", Uuid::new_v4()),
             "old-password",
@@ -1927,7 +2011,10 @@ mod tests {
             sign_in(&token_service, &session_service, user_id).await;
         let (other_session, other_tokens) =
             sign_in(&token_service, &session_service, user_id).await;
-        let user_repo: Arc<dyn UserRepository> = Arc::new(PasswordRepository { user });
+        let user_repo: Arc<dyn UserRepository> = Arc::new(PasswordRepository {
+            user,
+            update_fails: false,
+        });
 
         let response = change_password(
             actix_web::test::TestRequest::default()
@@ -1944,6 +2031,7 @@ mod tests {
             web::Data::new(user_repo),
             web::Data::new(token_service.clone()),
             web::Data::new(session_service.clone()),
+            web::Data::new(email_service),
         )
         .await
         .unwrap();
@@ -1951,15 +2039,153 @@ mod tests {
         assert_eq!(response.status(), actix_web::http::StatusCode::OK);
         // The device that changed the password stays signed in on tokens minted after the bump.
         let kept = session_service.get_session(&current_session).await.unwrap();
-        assert!(
-            token_service
-                .refresh_tokens(&kept.refresh_token)
-                .await
-                .is_ok()
+        let kept_claims = token_service.validate_jwt(&kept.access_token).unwrap();
+        assert_eq!(
+            kept_claims.token_version,
+            token_service.get_token_version(user_id).await.unwrap()
         );
         // The other device, and every token minted before the change, is revoked.
         assert!(session_service.get_session(&other_session).await.is_err());
         assert_tokens_revoked(&token_service, user_id, &current_tokens).await;
         assert_tokens_revoked(&token_service, user_id, &other_tokens).await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_password_update_still_revokes_every_token() {
+        let (email_service, token_service, session_service) = test_services().await;
+        let user = login_user(
+            format!("fail-{}@example.com", Uuid::new_v4()),
+            "old-password",
+        );
+        let user_id = user.user_id;
+        let user_repo: Arc<dyn UserRepository> = Arc::new(PasswordRepository {
+            user,
+            update_fails: true,
+        });
+        let version_before = token_service.get_token_version(user_id).await.unwrap();
+
+        let reset_token = email_service.generate_reset_token();
+        email_service
+            .store_reset_token(&reset_token, user_id)
+            .await
+            .unwrap();
+        let reset = reset_password(
+            web::Json(ResetPasswordRequest {
+                reset_token,
+                new_password: "new-password".to_string(),
+            }),
+            web::Data::new(user_repo.clone()),
+            web::Data::new(token_service.clone()),
+            web::Data::new(session_service.clone()),
+            web::Data::new(email_service.clone()),
+        )
+        .await;
+        let change = change_password(
+            actix_web::test::TestRequest::default().to_http_request(),
+            AuthenticatedUser { user_id },
+            web::Json(ChangePasswordRequest {
+                old_password: "old-password".to_string(),
+                new_password: "new-password".to_string(),
+            }),
+            web::Data::new(user_repo),
+            web::Data::new(token_service.clone()),
+            web::Data::new(session_service),
+            web::Data::new(email_service),
+        )
+        .await;
+
+        assert!(matches!(reset, Err(AuthError::Database(_))));
+        assert!(matches!(change, Err(AuthError::Database(_))));
+        assert_eq!(
+            token_service.get_token_version(user_id).await.unwrap(),
+            version_before + 2
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_stored_hash_is_a_500_without_detail() {
+        use actix_web::ResponseError;
+
+        let (email_service, token_service, session_service) = test_services().await;
+        let user = Model {
+            password_hash: Some("not-a-bcrypt-hash".to_string()),
+            ..login_user(format!("{}@example.com", Uuid::new_v4()), "unused")
+        };
+        let user_id = user.user_id;
+        let login_result = attempt_login(
+            &user.email,
+            "some-password",
+            "198.51.100.42:12345",
+            Arc::new(LoginRepository {
+                user: user.clone(),
+                find_by_email_calls: AtomicUsize::new(0),
+            }),
+            email_service.clone(),
+            token_service.clone(),
+            session_service.clone(),
+        )
+        .await;
+        let change_result = change_password(
+            actix_web::test::TestRequest::default().to_http_request(),
+            AuthenticatedUser { user_id },
+            web::Json(ChangePasswordRequest {
+                old_password: "some-password".to_string(),
+                new_password: "new-password".to_string(),
+            }),
+            web::Data::new(Arc::new(PasswordRepository {
+                user,
+                update_fails: false,
+            }) as Arc<dyn UserRepository>),
+            web::Data::new(token_service),
+            web::Data::new(session_service),
+            web::Data::new(email_service),
+        )
+        .await;
+
+        for result in [login_result, change_result] {
+            let response = result.unwrap_err().error_response();
+            assert_eq!(
+                response.status(),
+                actix_web::http::StatusCode::INTERNAL_SERVER_ERROR
+            );
+            let body = actix_web::body::to_bytes(response.into_body())
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"]["message"], "Internal server error");
+        }
+    }
+
+    #[tokio::test]
+    async fn change_password_refuses_the_sixth_wrong_old_password_for_the_window() {
+        let (email_service, token_service, session_service) = test_services().await;
+        let user = login_user(
+            format!("change-{}@example.com", Uuid::new_v4()),
+            "old-password",
+        );
+        let user_id = user.user_id;
+        let user_repo: Arc<dyn UserRepository> = Arc::new(PasswordRepository {
+            user,
+            update_fails: false,
+        });
+        let guess = || {
+            change_password(
+                actix_web::test::TestRequest::default().to_http_request(),
+                AuthenticatedUser { user_id },
+                web::Json(ChangePasswordRequest {
+                    old_password: "guessed-password".to_string(),
+                    new_password: "new-password".to_string(),
+                }),
+                web::Data::new(user_repo.clone()),
+                web::Data::new(token_service.clone()),
+                web::Data::new(session_service.clone()),
+                web::Data::new(email_service.clone()),
+            )
+        };
+
+        for _ in 0..LOGIN_PRINCIPAL_MAX_REQUESTS {
+            assert!(matches!(guess().await, Err(AuthError::InvalidCredentials)));
+        }
+        assert!(matches!(guess().await, Err(AuthError::RateLimited { .. })));
     }
 }
