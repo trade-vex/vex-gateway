@@ -933,8 +933,9 @@ a `503` for why it was released (busy, with `Retry-After: 1`, or `Matching engin
 with `Retry-After: 5`), and the retry claims the key as usual.
 
 **Remedy**:
-1. Reconcile the returned `client_order_id` against open orders, order history, and gateway/core
-   logs.
+1. Look for the order the 408 message names (side, type, market, price and size) in the user's
+   open orders and order history, and for its `client_order_id` in the gateway and core logs:
+   no read returns `client_order_id`.
 2. Only after confirming that the order was never published, remove the exact stranded claim:
    ```bash
    redis-cli -u "<auth.redis.url>" DEL "vex:order-idempotency:<user_id>:<key>"
@@ -1072,8 +1073,8 @@ grep -i "memory\|oom" logs/app.log
      cleanly. Until then requests can still time out (408) or get the busy 503. The requests still
      waiting for the core's answer when the link is lost fail at once: a cancel with the
      unavailable 503, an order with the 408 `outcome_unknown` of a timeout. That order was sent
-     and may have executed, so it is recorded under its idempotency key; reconcile its
-     `client_order_id` as for any 408, and do not retry the key.
+     and may have executed, so it is recorded under its idempotency key; as for any 408, look for
+     the order its message names in open orders and order history, and do not retry the key.
    - Everything else keeps working: login, sessions, balances, order history and the other user
      data, and API-key management. `GET /api/health` stays 200.
    - `GET /api/ready` returns 503 `engine_link: not connected to vex-core` until the gateway is

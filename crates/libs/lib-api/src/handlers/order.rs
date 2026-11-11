@@ -383,11 +383,13 @@ fn response_from_outcome(outcome: IdempotentOrderOutcome) -> HttpResponse {
 
 /// Client guidance for every 408 `outcome_unknown`. It must never invite a retry of the key: a
 /// retry can only replay this same 408 for the claim's lifetime, and if the claim was lost (Redis
-/// eviction or failover) the retry is accepted as new and places a second order.
-fn outcome_unknown_message(summary: &str, client_order_id: u64) -> String {
+/// eviction or failover) the retry is accepted as new and places a second order. The read model
+/// has no client_order_id, so the client is told what it can look for, as it sent it.
+fn outcome_unknown_message(summary: &str, order: &OrderRequest) -> String {
     format!(
-        "{summary} Retain client_order_id {client_order_id} and check open orders or order \
-         history after asynchronous persistence catches up. Do not retry this idempotency key."
+        "{summary} Look for the {:?} {:?} order on market {} at price {} for size {} in open \
+         orders or order history once persistence catches up. Do not retry this idempotency key.",
+        order.side, order.order_type, order.market_id, order.price, order.volume
     )
 }
 
@@ -483,6 +485,7 @@ async fn await_in_flight_order(
     idempotency_key: &str,
     fingerprint: &str,
     client_order_id: u64,
+    order: &OrderRequest,
 ) -> HttpResponse {
     match store
         .wait_for_completion(
@@ -504,10 +507,7 @@ async fn await_in_flight_order(
             order_id: 0,
             client_order_id,
             status: "outcome_unknown".to_string(),
-            message: outcome_unknown_message(
-                "Original order is still unresolved.",
-                client_order_id,
-            ),
+            message: outcome_unknown_message("Original order is still unresolved.", order),
         }),
         Err(error) => {
             error!(
@@ -556,7 +556,7 @@ async fn settle_idempotent_order(
 /// The answer to an order sent on a link that was lost before the engine answered. The engine may
 /// have executed it, so it is a timeout's answer, given at once: a 503 would tell the client that
 /// nothing was executed.
-fn link_lost_outcome(client_order_id: u64) -> IdempotentOrderOutcome {
+fn link_lost_outcome(client_order_id: u64, order: &OrderRequest) -> IdempotentOrderOutcome {
     IdempotentOrderOutcome {
         http_status: StatusCode::REQUEST_TIMEOUT.as_u16(),
         order_id: 0,
@@ -565,7 +565,7 @@ fn link_lost_outcome(client_order_id: u64) -> IdempotentOrderOutcome {
         message: outcome_unknown_message(
             "The link to the matching engine was lost after the order was sent, so its outcome \
              is unknown.",
-            client_order_id,
+            order,
         ),
     }
 }
@@ -634,7 +634,7 @@ fn parse_order_id(order_id: &str) -> Result<u64, std::num::ParseIntError> {
 ///   "order_id": "0",
 ///   "client_order_id": "987654321",
 ///   "status": "outcome_unknown",
-///   "message": "Order was sent but its outcome is unknown. Retain client_order_id 987654321 and check open orders or order history after asynchronous persistence catches up. Do not retry this idempotency key."
+///   "message": "Order was sent but its outcome is unknown. Look for the Bid Limit order on market 65538 at price 50000.5 for size 0.25 in open orders or order history once persistence catches up. Do not retry this idempotency key."
 /// }
 /// ```
 ///
@@ -748,6 +748,7 @@ pub async fn place_order(
                 &idempotency_key,
                 &fingerprint,
                 client_order_id,
+                &order_data,
             )
             .await;
         }
@@ -879,7 +880,7 @@ pub async fn place_order(
                     status: "outcome_unknown".to_string(),
                     message: outcome_unknown_message(
                         "Order was sent but its outcome is unknown.",
-                        client_order_id,
+                        &order_data,
                     ),
                 },
             )
@@ -902,7 +903,7 @@ pub async fn place_order(
                 &idempotency_key,
                 &fingerprint,
                 nonce,
-                link_lost_outcome(client_order_id),
+                link_lost_outcome(client_order_id, &order_data),
             )
             .await
         }
@@ -1116,9 +1117,21 @@ mod tests {
 
     /// An order sent before the link was lost may have executed: it gets a timeout's answer, which
     /// never invites a resend, unlike the 503s.
+    /// A limit bid for 0.5 on market 65538 at 3000.1, as a client sends it.
+    fn bid() -> OrderRequest {
+        OrderRequest {
+            price: "3000.1".parse().unwrap(),
+            volume: "0.5".parse().unwrap(),
+            market_id: 65538,
+            side: Side::Bid,
+            time_in_force: TimeInForce::Gtc,
+            order_type: OrderType::Limit,
+        }
+    }
+
     #[actix_web::test]
     async fn order_whose_link_was_lost_has_an_unknown_outcome_and_no_retry_after() {
-        let response = response_from_outcome(link_lost_outcome(7));
+        let response = response_from_outcome(link_lost_outcome(7, &bid()));
 
         assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
         assert!(
@@ -1134,8 +1147,9 @@ mod tests {
         assert_eq!(
             body["message"],
             "The link to the matching engine was lost after the order was sent, so its outcome is \
-             unknown. Retain client_order_id 7 and check open orders or order history after \
-             asynchronous persistence catches up. Do not retry this idempotency key."
+             unknown. Look for the Bid Limit order on market 65538 at price 3000.1 for size 0.5 in \
+             open orders or order history once persistence catches up. Do not retry this \
+             idempotency key."
         );
     }
 
@@ -1477,15 +1491,26 @@ mod tests {
         fn exit(&self, _span: &Id) {}
     }
 
+    /// No read carries client_order_id: the 408 names the order by what open orders and order
+    /// history list, in the client's own units, and never invites a retry.
     #[test]
-    fn outcome_unknown_message_never_invites_a_retry() {
-        let message = outcome_unknown_message("Order was sent but its outcome is unknown.", 42);
+    fn outcome_unknown_message_names_what_the_client_can_check() {
+        let order = OrderRequest {
+            price: "50000.50".parse().unwrap(),
+            volume: "0.25".parse().unwrap(),
+            market_id: 65539,
+            side: Side::Ask,
+            time_in_force: TimeInForce::Ioc,
+            order_type: OrderType::Market,
+        };
+
+        let message = outcome_unknown_message("Order was sent but its outcome is unknown.", &order);
 
         assert_eq!(
             message,
-            "Order was sent but its outcome is unknown. Retain client_order_id 42 and check \
-             open orders or order history after asynchronous persistence catches up. Do not \
-             retry this idempotency key."
+            "Order was sent but its outcome is unknown. Look for the Ask Market order on market \
+             65539 at price 50000.50 for size 0.25 in open orders or order history once \
+             persistence catches up. Do not retry this idempotency key."
         );
     }
 
@@ -1638,7 +1663,7 @@ mod tests {
         .await;
 
         let response =
-            await_in_flight_order(&store, user_id, &key, "payload", client_order_id).await;
+            await_in_flight_order(&store, user_id, &key, "payload", client_order_id, &bid()).await;
 
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
@@ -1707,7 +1732,7 @@ mod tests {
         .await;
 
         let response =
-            await_in_flight_order(&store, user_id, &key, "payload", client_order_id).await;
+            await_in_flight_order(&store, user_id, &key, "payload", client_order_id, &bid()).await;
 
         assert_engine_unavailable_headers(&response);
         assert_eq!(body_message(response).await, ENGINE_UNAVAILABLE_MESSAGE);
@@ -1725,7 +1750,7 @@ mod tests {
         let client_order_id = generate_client_order_id();
 
         let response =
-            await_in_flight_order(&store, user_id, &key, "payload", client_order_id).await;
+            await_in_flight_order(&store, user_id, &key, "payload", client_order_id, &bid()).await;
 
         assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
         assert!(
