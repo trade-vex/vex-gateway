@@ -685,6 +685,15 @@ short (`lock_timeout`, `CREATE INDEX CONCURRENTLY`).
 `connector-task-metrics` status), and consumer lag of the groups `connect-<connector name>`.
 Readers of `trading` are as fresh as that lag.
 
+**Throughput:** the Postgres connectors are sized for 10,000 rows/s per topic sustained, an
+engineering assumption (a venue at about 5,000 orders/s at peak), not a product number; bursts
+above it wait in Kafka as lag. Each task upserted about 11,000 rows/s in the test stack (500
+upserts in at most 46 ms per write), so `tasks.max` 3 holds about three times the target. When
+`kafka_consumergroup_lag{group=~"connect-pg-.*"}` grows for more than a few minutes at or below
+the target, repeat that measurement, then set that connector's `tasks.max` to its topic's
+partition count (`balances` and `orders` 12, `orderbook` 6) and size Postgres' connections for
+the extra writers.
+
 **Recovery:** a task that is still retrying carries on once the cause is fixed. For a failed one,
 read its `trace` in `GET /connectors/<name>/status`, fix the cause, then restart the connector
 with all its tasks; they resume from the record that failed:
