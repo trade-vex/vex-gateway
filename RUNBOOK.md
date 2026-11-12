@@ -325,8 +325,11 @@ empty, as vex-core does. Leave it empty only for a core running without authenti
 on a trusted network segment.
 
 The core sends each gateway's replies unicast to the host its handshake came from, on a port of
-vex-core's `base_gateway_port` to `base_gateway_port + 63`. The gateway host must accept inbound
-UDP on those ports from the core, and must not sit behind NAT towards the core.
+vex-core's `base_gateway_port` to `base_gateway_port + 63` (20000-20063 by default). The gateway
+host must accept inbound UDP on those ports from the core, and must not sit behind NAT towards the
+core. Its ephemeral port range (`sysctl net.ipv4.ip_local_port_range`, 32768-60999 by default) must
+not overlap them: a socket bound to port 0 could take the reply port before the gateway's media
+driver binds it. vex-core checks this only on its own host.
 
 The gateway exits at startup when one of these keys is missing, malformed or unknown, or when
 vex-core's own rules reject the combination (`Invalid vex-core link settings in [core]: ...`, for
@@ -931,6 +934,9 @@ ping <core.address>
 - `Connection rejected: Handshake rejected` in every `Could not connect to vex-core; retrying`
   warning, with `handshake_rejected` and `reason=Authentication failed: Invalid credentials` in the
   vex-core log, means `core.auth_key` differs from vex-core's key
+- `Core unavailable, retry after 10 seconds` means the core had no free pair of gateway ports, or
+  could not set up the session's channels (`handshake_setup_failed` in its log). The gateway tries
+  again on its own; after a setup failure the next attempt gets other ports
 - Check Aeron media driver is running
 - Verify network connectivity to VEX Core
 
