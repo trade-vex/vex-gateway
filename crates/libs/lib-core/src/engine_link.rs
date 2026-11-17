@@ -30,46 +30,28 @@ const RELEASE_CHECK_INTERVAL: Duration = Duration::from_millis(1);
 pub trait LinkPublisher: Send + Sync + 'static {
     /// False once no core reads the publication: the link is lost.
     fn is_connected(&self) -> bool;
+
+    /// Offers the command once, never blocking.
+    fn try_send_order_command(&self, command: &OrderCommand) -> Result<(), GatewayError>;
 }
 
 impl LinkPublisher for Publisher {
     fn is_connected(&self) -> bool {
         self.publication.is_connected()
     }
+
+    fn try_send_order_command(&self, command: &OrderCommand) -> Result<(), GatewayError> {
+        Publisher::try_send_order_command(self, command)
+    }
 }
 
 /// The publisher of the current link to vex-core, or none while [`EngineLinkSupervisor`]
 /// connects. Requests read it without a lock, and no method hands it out, so no request holds it
-/// beyond one call; only the supervisor swaps it.
-pub struct EngineLink<P = Publisher> {
-    publisher: Arc<ArcSwapOption<P>>,
-}
-
-impl<P> Default for EngineLink<P> {
-    /// A link that is not connected yet.
-    fn default() -> Self {
-        Self {
-            publisher: Arc::new(ArcSwapOption::empty()),
-        }
-    }
-}
-
-impl<P> Clone for EngineLink<P> {
-    fn clone(&self) -> Self {
-        Self {
-            publisher: Arc::clone(&self.publisher),
-        }
-    }
-}
-
-impl<P: LinkPublisher> EngineLink<P> {
-    /// Whether a link is established and the core reads its publication.
-    pub fn is_connected(&self) -> bool {
-        self.publisher
-            .load()
-            .as_ref()
-            .is_some_and(|publisher| publisher.is_connected())
-    }
+/// beyond one call; only the supervisor swaps it. It sits behind a second `Arc` because arc-swap
+/// holds only sized values.
+#[derive(Clone, Default)]
+pub struct EngineLink {
+    publisher: Arc<ArcSwapOption<Arc<dyn LinkPublisher>>>,
 }
 
 impl EngineLink {
@@ -78,9 +60,24 @@ impl EngineLink {
         Self::default()
     }
 
+    /// A link established on `publisher`, with no supervisor to replace it (tests).
+    pub fn connected(publisher: Arc<dyn LinkPublisher>) -> Self {
+        let link = Self::new();
+        link.publisher.store(Some(Arc::new(publisher)));
+        link
+    }
+
+    /// Whether a link is established and the core reads its publication.
+    pub fn is_connected(&self) -> bool {
+        self.publisher
+            .load()
+            .as_ref()
+            .is_some_and(|publisher| publisher.is_connected())
+    }
+
     /// Offers the command once on the current link, never blocking: `NotConnected` while there is
     /// none, as when its core does not read it, otherwise what
-    /// [`Publisher::try_send_order_command`] returns.
+    /// [`LinkPublisher::try_send_order_command`] returns.
     pub fn try_send_order_command(&self, command: &OrderCommand) -> Result<(), GatewayError> {
         match &*self.publisher.load() {
             Some(publisher) => publisher.try_send_order_command(command),
@@ -114,7 +111,7 @@ pub trait CoreConnector {
 /// `NotConnected` while there is no link.
 pub struct EngineLinkSupervisor<C: CoreConnector> {
     connector: C,
-    link: EngineLink<C::Publisher>,
+    link: EngineLink,
     correlation_service: CorrelationService,
     backoff: Backoff,
     established: Option<(C::Session, Arc<C::Publisher>)>,
@@ -123,11 +120,7 @@ pub struct EngineLinkSupervisor<C: CoreConnector> {
 impl<C: CoreConnector> EngineLinkSupervisor<C> {
     /// A supervisor for `link`, which is not connected yet. A lost link fails the requests
     /// waiting in `correlation_service`.
-    pub fn new(
-        connector: C,
-        link: EngineLink<C::Publisher>,
-        correlation_service: CorrelationService,
-    ) -> Self {
+    pub fn new(connector: C, link: EngineLink, correlation_service: CorrelationService) -> Self {
         Self {
             connector,
             link,
@@ -169,7 +162,8 @@ impl<C: CoreConnector> EngineLinkSupervisor<C> {
         match self.connector.connect() {
             Ok((session, publisher)) => {
                 let publisher = Arc::new(publisher);
-                self.link.publisher.store(Some(Arc::clone(&publisher)));
+                let shared: Arc<dyn LinkPublisher> = publisher.clone();
+                self.link.publisher.store(Some(Arc::new(shared)));
                 self.established = Some((session, publisher));
                 self.backoff.reset();
                 info!("Connected to vex-core");
@@ -255,6 +249,10 @@ mod tests {
         fn is_connected(&self) -> bool {
             self.core_reads.load(Ordering::SeqCst)
         }
+
+        fn try_send_order_command(&self, _command: &OrderCommand) -> Result<(), GatewayError> {
+            Ok(())
+        }
     }
 
     /// Accepts or refuses each handshake as scripted. Sessions are numbered from 1.
@@ -302,7 +300,7 @@ mod tests {
     #[test]
     fn supervisor_backs_off_connects_and_reconnects_after_losing_the_link() {
         let correlation_service = CorrelationService::new();
-        let link = EngineLink::<FakePublisher>::default();
+        let link = EngineLink::new();
         let core_reads = Arc::new(AtomicBool::new(false));
         let connector = FakeConnector {
             handshakes: VecDeque::from([false, false, true, true]),
@@ -345,7 +343,7 @@ mod tests {
     #[test]
     fn supervisor_reconnects_a_link_whose_responses_keep_timing_out() {
         let correlation_service = CorrelationService::new();
-        let link = EngineLink::<FakePublisher>::default();
+        let link = EngineLink::new();
         let connector = FakeConnector {
             handshakes: VecDeque::from([true, true]),
             core_reads: Arc::new(AtomicBool::new(false)),

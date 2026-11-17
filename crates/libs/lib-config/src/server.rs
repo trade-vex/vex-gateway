@@ -1,11 +1,11 @@
 //! lib-config/src/server.rs
 
 use crate::ConfigError;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::net::{SocketAddr, ToSocketAddrs};
 
 /// Server configuration settings for the VEX Gateway Service: the address the HTTP server binds.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
     /// The host address to bind the server to (e.g., "127.0.0.1", "0.0.0.0")
     pub host: String,

@@ -9,7 +9,7 @@ config = {workspace = true}
 serde_ignored = "0.1.14"
 secrecy = { version = "0.8", features = ["serde"] }
 thiserror = {workspace = true}
-tracing = {workspace = true}
+url = {workspace = true}
 
 lib-auth = {path = "../lib-auth"}
 lib-middleware = {path = "../lib-middleware"}

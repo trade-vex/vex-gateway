@@ -34,13 +34,6 @@ LANGUAGE sql AS $$
         available = EXCLUDED.available, locked = EXCLUDED.locked, total = EXCLUDED.total,
         event_ts = EXCLUDED.event_ts;
 $$;
-CREATE FUNCTION pg_temp.upsert_balance_event(available BIGINT, event_ts BIGINT) RETURNS void
-LANGUAGE sql AS $$
-    INSERT INTO trading.balance_events (user_id, asset_id, available, locked, total, event_ts)
-    VALUES (1, 1, available, 0, available, event_ts)
-    ON CONFLICT (user_id, asset_id, event_ts) DO UPDATE SET
-        available = EXCLUDED.available, locked = EXCLUDED.locked, total = EXCLUDED.total;
-$$;
 
 DO $$
 DECLARE
@@ -58,12 +51,6 @@ BEGIN
     PERFORM pg_temp.upsert_balance(15, 150);
     SELECT * INTO latest FROM trading.balances;
     ASSERT (latest.available, latest.event_ts) = (20, 200), 'an older event is skipped';
-
-    PERFORM pg_temp.upsert_balance_event(10, 100);
-    PERFORM pg_temp.upsert_balance_event(99, 100);
-    PERFORM pg_temp.upsert_balance_event(5, 50);
-    ASSERT (SELECT array_agg(available ORDER BY event_ts) FROM trading.balance_events) = '{5,10}',
-        'history keeps every event once, whatever the order, and a duplicate changes nothing';
 END
 $$;
 
@@ -114,6 +101,7 @@ UPDATE users SET email_verified = true WHERE username = 'role';
 INSERT INTO api_keys (id, api_key, permissions, recv_window, enabled)
 VALUES ('00000000-0000-0000-0000-000000000002', 'role-key', '{trade}', 5000, true);
 UPDATE api_keys SET enabled = false WHERE api_key = 'role-key';
+DELETE FROM api_keys WHERE api_key = 'role-key';
 INSERT INTO user_favorite_markets (user_id, market_id) VALUES (-1, 65538);
 DELETE FROM user_favorite_markets WHERE user_id = -1;
 DO $$

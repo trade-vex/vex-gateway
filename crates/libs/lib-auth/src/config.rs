@@ -7,7 +7,6 @@ pub struct JwtConfig {
     pub private_key_path: String,
     pub public_key_path: String,
     pub access_token_ttl_minutes: i64,
-    pub refresh_token_ttl_days: i64,
     pub issuer: String,
     pub audience: String,
 }
@@ -49,7 +48,7 @@ pub struct OAuthProviderConfig {
     pub client_secret: SecretString,
     pub auth_url: String,
     pub token_url: String,
-    /// Optional OpenID Connect discovery URL (e.g., for Google)
+    /// OpenID Connect discovery URL; required for `google` (lib-config validation).
     pub issuer_url: Option<String>,
 }
 
@@ -132,12 +131,10 @@ pub struct EmailConfig {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct OtpConfig {
-    pub otp_length: usize,
     /// How long an email-verification code is valid, in minutes.
     pub email_verification_expiry_minutes: i64,
     /// How long a password-reset code is valid, in minutes. A setting of its own: a reset code
-    /// takes over the account, and its lifetime bounds how many guesses the fixed reset-code rate
-    /// limit allows per code, so tuning email verification must not lengthen it.
+    /// takes over the account, so tuning email verification must not lengthen it.
     pub password_reset_expiry_minutes: i64,
 }
 

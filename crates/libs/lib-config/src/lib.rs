@@ -12,7 +12,6 @@
 //!     let config = Config::load_auto()?;
 //!
 //!     // Use the configuration
-//!     let server_addr = config.server_address()?;
 //!     println!("Server: {}:{}", config.server.host, config.server.port);
 //!     Ok(())
 //! }
@@ -25,14 +24,13 @@
 //! ```text
 //! config/
 //! +-- development.toml  # Development environment settings
-//! +-- testing.toml      # Testing environment settings  
 //! +-- production.toml   # Production environment settings (gitignored)
 //! ```
 //!
 //! # Environment Variables
 //!
 //! Only two variables are read by name, because they select the configuration file and so cannot
-//! be set in it: `APP_ENV` (required: `development`, `testing` or `production`) and
+//! be set in it: `APP_ENV` (required: `development` or `production`) and
 //! `APP_CONFIG_DIR` (optional: the directory holding `<environment>.toml`).
 //!
 //! Any setting can be overridden with `APP__<SECTION>__<KEY>`: its key path in upper case with `__`
@@ -46,7 +44,7 @@
 //! export APP__SERVER__HOST=0.0.0.0                       # server.host
 //! export APP__LOGGING__LEVEL=info                        # logging.level
 //! export APP__AUTH__SERVER__TRUSTED_PROXIES=10.0.1.0/24  # auth.server.trusted_proxies
-//! export APP__CORE__AUTH_KEY=123456                      # core.auth_key
+//! export APP__CORE__AUTH_KEY=<openssl rand -hex 32>      # core.auth_key
 //! export APP__CLICKHOUSE__PASSWORD=<password>            # clickhouse.password
 //! export APP__METRICS__BIND=0.0.0.0:9091                 # metrics.bind
 //! export APP__RATE_LIMIT__ORDERS__MAX_REQUESTS=600       # rate_limit.orders.max_requests
@@ -61,13 +59,13 @@
 
 mod clickhouse;
 mod core_link;
-pub mod environment;
+mod environment;
 mod error;
-pub mod logging;
+mod logging;
 mod metrics;
 mod rate_limit;
-pub mod server;
-pub mod util;
+mod server;
+mod util;
 
 // Re-export commonly used types for convenience
 pub use clickhouse::ClickHouseConfig;
@@ -84,10 +82,9 @@ use secrecy::ExposeSecret;
 use serde::Deserialize;
 use std::env::VarError;
 use std::ffi::OsString;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use tracing::{debug, info};
+use url::Url;
 
 use crate::util::find_config_dir;
 
@@ -128,7 +125,7 @@ impl Config {
     /// Load configuration for the specified environment.
     ///
     /// This method loads configuration in the following order:
-    /// 1. Environment-specific configuration file (e.g., production.toml, development.toml, testing.toml),
+    /// 1. Environment-specific configuration file (production.toml or development.toml),
     ///    which must exist
     /// 2. `APP__<SECTION>__<KEY>` environment variables
     ///
@@ -213,11 +210,6 @@ impl Config {
         };
         let file = config_dir.join(environment.config_file_name());
 
-        // Log what we're trying to load
-        info!("Loading configuration for environment: {:?}", environment);
-        debug!("Config directory: {:?}", config_dir);
-        debug!("Looking for config file: {:?}", file);
-
         // The key path each `APP__` variable sets, to name the variable if no setting reads it.
         let overridden = overrides
             .collect()
@@ -229,6 +221,9 @@ impl Config {
             .add_source(config::File::from(file.clone()))
             // 2. Override it with the `APP__` environment variables
             .add_source(overrides)
+            // APP_ENV chose the file; the value is not a setting of the file
+            .set_override("environment", environment.name())
+            .map_err(|error| load_error(error, &overridden, &file))?
             .build()
             .map_err(|error| load_error(error, &overridden, &file))?;
 
@@ -258,23 +253,7 @@ impl Config {
         }
         let config = result.map_err(|error| load_error(error, &overridden, &file))?;
 
-        // The selected environment chose the file, so the file (or `APP__ENVIRONMENT`) must agree.
-        if config.environment != environment {
-            return Err(ConfigError::ValidationError(format!(
-                "the configuration's environment ({:?}) is not the selected one ({:?}, from APP_ENV)",
-                config.environment, environment
-            )));
-        }
-
-        // Log what we loaded before validation
-        debug!("Loaded configuration before validation:");
-        debug!("  Environment: {:?}", config.environment);
-        debug!("  Server host: {}", config.server.host);
-        debug!("  Server port: {}", config.server.port);
-        debug!("  Log level: {}", config.logging.level);
-
         config.validate()?;
-        info!("Configuration loaded and validated successfully");
         Ok(config)
     }
 
@@ -316,8 +295,6 @@ impl Config {
     ) -> Result<Self, ConfigError> {
         let app_env = app_env.ok_or(ConfigError::MissingEnvironment)?;
         let environment = Environment::from_str(app_env)?;
-
-        info!("Auto-detected environment: {:?}", environment);
         Self::load(environment, config_dir)
     }
 
@@ -340,37 +317,31 @@ impl Config {
     /// - Server host cannot be empty
     /// - Log level must be valid
     /// - The `core` link settings must pass vex-core's own rules (distinct non-zero ports,
-    ///   gateway id below 16, an empty or signed 32-bit `auth_key`, non-empty `context_dir`), and
+    ///   gateway id below 16, an empty `auth_key` or one of at least 32 characters without
+    ///   whitespace, non-empty `context_dir`), and
     ///   `core.address` cannot be empty
-    /// - Every `auth.server.trusted_proxies` entry must be an IP address or CIDR range
+    /// - Every `auth.server.trusted_proxies` entry must be an IP address or CIDR range, not /0
     /// - `metrics.bind` must be an IP address and a port
     /// - Every `rate_limit` setting must be greater than 0
     /// - `auth.oauth.providers` may list only `google`, `github` and `twitter`
     /// - With an OAuth provider configured, `auth.oauth.frontend_url_web` and `frontend_url_app`
-    ///   must be set
+    ///   must be absolute URLs
+    /// - A `google` provider needs its `issuer_url`
     /// - `auth.otp.email_verification_expiry_minutes` and `password_reset_expiry_minutes` must be
     ///   positive
-    /// - `auth.otp.otp_length` must be 6 to 10 digits
-    /// - `clickhouse.user` cannot be empty, and `clickhouse.database` must be a plain identifier
+    /// - `auth.jwt.access_token_ttl_minutes` must be positive
+    /// - `clickhouse.url` must start with http://, `clickhouse.user` cannot be empty, and
+    ///   `clickhouse.database` must be a plain identifier
     ///
     /// ## Production Environment
     /// - Server port cannot be 0 (must be explicitly configured)
-    /// - Cannot bind to localhost (127.0.0.1 or localhost)
+    /// - Cannot bind to a loopback address (127.0.0.0/8, ::1, or a host name resolving to one)
     /// - Cannot use trace or debug logging levels
     /// - `auth.server.trusted_proxies` cannot be empty: production runs behind a load balancer
     /// - `core.auth_key` cannot be empty, as vex-core requires
     /// - `clickhouse.password` cannot be empty
     /// - `metrics.bind` needs a port of its own: not 0, and not `server.port`
-    ///
-    /// ## Testing Environment
-    /// - Port 0 is allowed for ephemeral port usage
-    /// - If port is not 0, should use non-privileged ports (>= 1024)
     pub fn validate(&self) -> Result<(), ConfigError> {
-        debug!(
-            "Validating configuration for environment: {:?}",
-            self.environment
-        );
-
         // Validate server configuration
         self.server.validate()?;
 
@@ -425,19 +396,34 @@ impl Config {
             )));
         }
 
-        // A completed OAuth login is redirected to one of these; there is no fallback URL.
+        // A completed or cancelled OAuth login is redirected to one of these, with a query
+        // parameter appended, so each must parse as an absolute URL; there is no fallback.
         let oauth = &self.auth.oauth;
         if !oauth.providers.is_empty() {
             for (key, url) in [
                 ("frontend_url_web", &oauth.frontend_url_web),
                 ("frontend_url_app", &oauth.frontend_url_app),
             ] {
-                if url.as_deref().is_none_or(|url| url.trim().is_empty()) {
+                if url.as_deref().is_none_or(|url| Url::parse(url).is_err()) {
                     return Err(ConfigError::ValidationError(format!(
-                        "auth.oauth.{key} is required when OAuth providers are configured"
+                        "auth.oauth.{key} must be an absolute URL when OAuth providers are configured"
                     )));
                 }
             }
+        }
+
+        // Google is OIDC: its ID token is verified against the keys discovery finds at this
+        // issuer. Without it every Google login would fail.
+        if oauth.providers.get("google").is_some_and(|google| {
+            google
+                .issuer_url
+                .as_deref()
+                .is_none_or(|url| url.trim().is_empty())
+        }) {
+            return Err(ConfigError::ValidationError(
+                "auth.oauth.providers.google.issuer_url is required (https://accounts.google.com)"
+                    .into(),
+            ));
         }
 
         // A code's lifetime is the TTL of its Redis key: without a positive one, every signup or
@@ -460,11 +446,12 @@ impl Config {
             }
         }
 
-        // A length of 0 makes every code empty, which an empty submission would match; fewer than
-        // 6 digits is too easy to guess.
-        if !(6..=10).contains(&otp.otp_length) {
+        // An access token's lifetime is its `exp`: without a positive one every login, OAuth
+        // callback and session renewal would mint a token that is already expired.
+        if code_expiry_seconds(self.auth.jwt.access_token_ttl_minutes).is_none() {
             return Err(ConfigError::ValidationError(
-                "auth.otp.otp_length must be between 6 and 10 digits".to_string(),
+                "auth.jwt.access_token_ttl_minutes must be a positive number of minutes"
+                    .to_string(),
             ));
         }
 
@@ -473,22 +460,19 @@ impl Config {
         // Environment-specific validations
         match self.environment {
             Environment::Production => {
-                debug!("Applying production-specific validation rules");
-
-                // Production-specific validations
                 if self.server.port == 0 {
                     return Err(ConfigError::ValidationError(
                         "Production environment must have an explicitly configured port (cannot be 0)".to_string(),
                     ));
                 }
 
-                if self.server.host == "127.0.0.1" || self.server.host == "localhost" {
+                if self.server.socket_addr()?.ip().is_loopback() {
                     return Err(ConfigError::ValidationError(
                         "Production environment should not bind to localhost".to_string(),
                     ));
                 }
 
-                let log_level = self.logging.level.trim().to_lowercase();
+                let log_level = self.logging.level.to_lowercase();
                 if log_level == "trace" || log_level == "debug" {
                     return Err(ConfigError::ValidationError(
                         "Production environment should not use trace or debug logging".to_string(),
@@ -516,7 +500,7 @@ impl Config {
                 }
 
                 // vex-core refuses to run without a key in production. Without one here the
-                // gateway would send a random credential and fail later with an opaque handshake
+                // gateway would send no credential and fail later with an opaque handshake
                 // REJECT whose cause only the core logs.
                 if self.core.auth_key.is_empty() {
                     return Err(ConfigError::ValidationError(
@@ -534,49 +518,10 @@ impl Config {
                     ));
                 }
             }
-            Environment::Development => {
-                debug!("Applying development-specific validation rules");
-            }
-            Environment::Testing => {
-                debug!("Applying testing-specific validation rules");
-
-                // Testing-specific validations
-                // Port 0 is allowed for ephemeral ports, but if a specific port is used, it should be non-privileged
-                if self.server.port != 0 && self.server.port < 1024 {
-                    return Err(ConfigError::ValidationError(
-                        "Testing environment should use non-privileged ports (>= 1024) or port 0 for ephemeral ports".to_string(),
-                    ));
-                }
-            }
+            Environment::Development => {}
         }
 
-        debug!("Configuration validation passed");
         Ok(())
-    }
-
-    /// Get the server socket address for binding.
-    ///
-    /// Converts the server configuration into a SocketAddr suitable
-    /// for binding a TCP listener.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Result<SocketAddr, ConfigError>` - The parsed socket address for server binding.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use lib_config::Config;
-    ///
-    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
-    ///     let config = Config::load_auto()?;
-    ///     let addr = config.server_address()?;
-    ///     // Use addr with your web framework
-    ///     Ok(())
-    /// }
-    /// ```
-    pub fn server_address(&self) -> Result<SocketAddr, ConfigError> {
-        self.server.socket_addr()
     }
 }
 
@@ -655,16 +600,6 @@ fn load_error(
         }
         // A message names no key. serde's for a missing setting names its field.
         config::ConfigError::Message(message) if message.starts_with("missing field ") => message,
-        // config-rs's for `environment`, the only enum, quotes the value after a fixed prefix.
-        config::ConfigError::Message(message)
-            if message.starts_with("enum Environment ")
-                || message.starts_with("value of enum Environment ") =>
-        {
-            format!(
-                "{} must be one of: development, testing, production",
-                setting("environment", overridden, file)
-            )
-        }
         // serde's for a section or list given a single value quotes it before what was expected
         // (`invalid type: string "…", expected struct DatabaseConfig`).
         config::ConfigError::Message(message) => match message.rsplit_once(", expected ") {
@@ -686,6 +621,9 @@ mod tests {
     use lib_middleware::rate_limit::Limit;
     use secrecy::SecretString;
     use std::fs;
+
+    /// The `auth_key` of the test configurations (`openssl rand -hex 32`).
+    const AUTH_KEY: &str = "d2eeaf61d4e3992c6f3b3a8bb344bd5f17fb09edaf4c44432e9ea09641fef461";
 
     fn limit(max_requests: u64, window_seconds: u64) -> Limit {
         Limit {
@@ -756,13 +694,10 @@ mod tests {
             Environment::from_str("prod").unwrap(),
             Environment::Production
         );
-        assert_eq!(
-            Environment::from_str("testing").unwrap(),
-            Environment::Testing
-        );
-        assert_eq!(Environment::from_str("test").unwrap(), Environment::Testing);
-
-        assert!(Environment::from_str("invalid").is_err());
+        // No third environment: `testing` selected a file nothing ships.
+        for name in ["invalid", "testing", "test"] {
+            assert!(Environment::from_str(name).is_err(), "{name}");
+        }
     }
 
     #[test]
@@ -772,7 +707,7 @@ mod tests {
         assert!(matches!(error, ConfigError::MissingEnvironment));
         assert_eq!(
             error.to_string(),
-            "APP_ENV must be set explicitly to one of: development, testing, production"
+            "APP_ENV must be set explicitly to one of: development, production"
         );
     }
 
@@ -795,8 +730,6 @@ mod tests {
 
     /// A complete production configuration.
     const PRODUCTION_TOML: &str = r#"
-environment = "production"
-
 [server]
 host = "0.0.0.0"
 port = 8081
@@ -819,7 +752,6 @@ level = "info"
 private_key_path = "/run/secrets/jwt-private.pem"
 public_key_path = "/run/secrets/jwt-public.pem"
 access_token_ttl_minutes = 15
-refresh_token_ttl_days = 7
 issuer = "vex-gateway"
 audience = "vex-api"
 
@@ -844,13 +776,12 @@ smtp_password = "configured-test-value"
 from_email = "gateway@example.com"
 
 [auth.otp]
-otp_length = 6
 email_verification_expiry_minutes = 15
 password_reset_expiry_minutes = 10
 
 [core]
 gateway_id = 3
-auth_key = "-123456789"
+auth_key = "d2eeaf61d4e3992c6f3b3a8bb344bd5f17fb09edaf4c44432e9ea09641fef461"
 address = "core.internal"
 port = 3521
 control_port = 3522
@@ -885,9 +816,12 @@ database = "vex_analytics"
         let config_dir = tempfile::tempdir().unwrap();
         fs::write(config_dir.path().join("production.toml"), PRODUCTION_TOML).unwrap();
 
-        let config =
-            Config::load_selected(Some("production"), Some(config_dir.path().to_path_buf()))
-                .unwrap();
+        let config = Config::load_with(
+            Environment::Production,
+            Some(config_dir.path().to_path_buf()),
+            Config::app_overrides([]).unwrap(),
+        )
+        .unwrap();
 
         assert_eq!(config.environment, Environment::Production);
         assert_eq!(config.server.host, "0.0.0.0");
@@ -908,7 +842,7 @@ database = "vex_analytics"
         );
         let link = config.core.networking();
         assert_eq!(link.gateway_id, 3);
-        assert_eq!(link.gateway_authentication_key.as_i32(), Some(-123456789));
+        assert_eq!(link.gateway_authentication_key.as_str(), AUTH_KEY);
         assert_eq!(link.core_address, "core.internal");
         assert_eq!((link.core_port, link.core_control_port), (3521, 3522));
         assert_eq!(link.context_dir, "/var/lib/vex/aeron-gateway");
@@ -953,20 +887,21 @@ database = "vex_analytics"
     }
 
     #[test]
-    fn test_config_validation() {
-        let mut config = development_config();
-        assert!(config.validate().is_ok());
-
-        // Test production validation
-        config.environment = Environment::Production;
-        config.auth.server.trusted_proxies = vec!["10.0.0.0/16".to_string()];
-        config.core.auth_key = "-123456789".into();
-        config.server.host = "127.0.0.1".to_string();
-        assert!(config.validate().is_err());
-
-        config.server.host = "0.0.0.0".to_string();
-        config.logging.level = "debug".to_string();
-        assert!(config.validate().is_err());
+    fn production_rejects_loopback_debug_logging_and_port_0() {
+        for (line, replacement, names) in [
+            (r#"host = "0.0.0.0""#, r#"host = "127.0.0.1""#, "localhost"),
+            (r#"host = "0.0.0.0""#, r#"host = "127.0.0.2""#, "localhost"),
+            (r#"host = "0.0.0.0""#, r#"host = "::1""#, "localhost"),
+            (r#"level = "info""#, r#"level = "debug""#, "trace or debug"),
+            ("port = 8081", "port = 0", "cannot be 0"),
+        ] {
+            let error = load_edited_production(line, replacement).unwrap_err();
+            assert!(
+                matches!(error, ConfigError::ValidationError(_))
+                    && error.to_string().contains(names),
+                "{replacement}: unexpected error: {error}"
+            );
+        }
     }
 
     #[test]
@@ -975,7 +910,7 @@ database = "vex_analytics"
         config.environment = Environment::Production;
         config.server.host = "0.0.0.0".to_string();
         config.logging.level = "info".to_string();
-        config.core.auth_key = "-123456789".into();
+        config.core.auth_key = AUTH_KEY.into();
         config.auth.server.trusted_proxies = Vec::new();
 
         let error = config.validate().unwrap_err();
@@ -1014,7 +949,7 @@ database = "vex_analytics"
         let error = Config::load_with(
             Environment::Production,
             Some(config_dir.path().to_path_buf()),
-            Config::app_overrides([("APP__ENVIRONMENT".into(), "production".into())]).unwrap(),
+            Config::app_overrides([("APP__SERVER__PORT".into(), "8081".into())]).unwrap(),
         )
         .unwrap_err();
 
@@ -1043,21 +978,8 @@ database = "vex_analytics"
 
     #[test]
     fn test_oauth_providers_require_both_frontend_urls() {
-        let load = |oauth: &str| {
-            let config_dir = tempfile::tempdir().unwrap();
-            let example = include_str!("../../../../config/development.toml.example");
-            assert_eq!(example.matches("providers = {}").count(), 1);
-            fs::write(
-                config_dir.path().join("development.toml"),
-                example.replace("providers = {}", oauth),
-            )
-            .unwrap();
-            Config::load(
-                Environment::Development,
-                Some(config_dir.path().to_path_buf()),
-            )
-        };
-        let provider = r#"providers = { google = { client_id = "id", client_secret = "secret", auth_url = "https://accounts.example.com/auth", token_url = "https://accounts.example.com/token" } }"#;
+        let load = |oauth: &str| load_edited_example("providers = {}", oauth).0;
+        let provider = r#"providers = { github = { client_id = "id", client_secret = "secret", auth_url = "https://github.com/login/oauth/authorize", token_url = "https://github.com/login/oauth/access_token" } }"#;
         let web = r#"frontend_url_web = "https://app.example.com/oauth/done""#;
         let app = r#"frontend_url_app = "vex://oauth""#;
         let with_provider = |urls: &[&str]| load(&format!("{provider}\n{}", urls.join("\n")));
@@ -1078,6 +1000,11 @@ database = "vex_analytics"
                 vec![web, r#"frontend_url_app = " ""#],
                 "auth.oauth.frontend_url_app",
             ),
+            // A relative URL cannot take the query a cancelled login appends.
+            (
+                vec![r#"frontend_url_web = "/oauth/done""#, app],
+                "auth.oauth.frontend_url_web",
+            ),
         ] {
             let error = with_provider(&urls).unwrap_err();
             assert!(
@@ -1086,6 +1013,37 @@ database = "vex_analytics"
                 "unexpected error: {error}"
             );
         }
+    }
+
+    #[test]
+    fn google_requires_issuer_url() {
+        let load = |issuer: &str| {
+            load_edited_example(
+                "providers = {}",
+                &format!(
+                    r#"providers = {{ google = {{ client_id = "id", client_secret = "secret", auth_url = "https://accounts.google.com/o/oauth2/v2/auth", token_url = "https://oauth2.googleapis.com/token"{issuer} }} }}
+frontend_url_web = "https://app.example.com/oauth/done"
+frontend_url_app = "vex://oauth""#
+                ),
+            )
+            .0
+        };
+
+        for issuer in ["", r#", issuer_url = " ""#] {
+            let error = load(issuer).unwrap_err();
+            assert!(
+                matches!(error, ConfigError::ValidationError(_))
+                    && error
+                        .to_string()
+                        .contains("auth.oauth.providers.google.issuer_url"),
+                "unexpected error: {error}"
+            );
+        }
+        let config = load(r#", issuer_url = "https://accounts.google.com""#).unwrap();
+        assert_eq!(
+            config.auth.oauth.providers["google"].issuer_url.as_deref(),
+            Some("https://accounts.google.com")
+        );
     }
 
     #[test]
@@ -1168,10 +1126,19 @@ database = "vex_analytics"
     }
 
     #[test]
-    fn test_clickhouse_user_and_database_are_validated() {
+    fn test_clickhouse_url_user_and_database_are_validated() {
         assert!(load_development_example(&[("APP__CLICKHOUSE__DATABASE", "_vex_2")]).is_ok());
-
         for (name, value, key) in [
+            (
+                "APP__CLICKHOUSE__URL",
+                "clickhouse.internal:8123",
+                "clickhouse.url",
+            ),
+            (
+                "APP__CLICKHOUSE__URL",
+                "https://clickhouse.internal:8443",
+                "clickhouse.url",
+            ),
             ("APP__CLICKHOUSE__USER", "", "clickhouse.user"),
             ("APP__CLICKHOUSE__USER", " ", "clickhouse.user"),
             ("APP__CLICKHOUSE__DATABASE", "", "clickhouse.database"),
@@ -1241,18 +1208,16 @@ database = "vex_analytics"
     }
 
     #[test]
-    fn test_code_length_is_bounded() {
-        let config = load_development_example(&[("APP__AUTH__OTP__OTP_LENGTH", "8")]).unwrap();
-        assert_eq!(config.auth.otp.otp_length, 8);
-
-        for length in ["0", "5", "11"] {
-            let error =
-                load_development_example(&[("APP__AUTH__OTP__OTP_LENGTH", length)]).unwrap_err();
+    fn test_access_token_lifetime_must_be_positive() {
+        let name = variable("auth.jwt.access_token_ttl_minutes");
+        // Not a positive number of minutes, or one whose seconds overflow.
+        for minutes in ["0", "-5", &i64::MAX.to_string()] {
+            let error = load_development_example(&[(&name, minutes)]).unwrap_err();
             assert_eq!(
                 error.to_string(),
-                "Configuration validation failed: auth.otp.otp_length must be between 6 and 10 \
-                 digits",
-                "otp_length={length}"
+                "Configuration validation failed: auth.jwt.access_token_ttl_minutes must be a \
+                 positive number of minutes",
+                "{name}={minutes}"
             );
         }
     }
@@ -1261,7 +1226,7 @@ database = "vex_analytics"
     fn test_app_overrides_reach_every_core_link_key() {
         let config = load_development_example(&[
             ("APP__CORE__GATEWAY_ID", "7"),
-            ("APP__CORE__AUTH_KEY", "-123456789"),
+            ("APP__CORE__AUTH_KEY", AUTH_KEY),
             ("APP__CORE__ADDRESS", "core.internal"),
             ("APP__CORE__PORT", "40001"),
             ("APP__CORE__CONTROL_PORT", "40002"),
@@ -1271,7 +1236,7 @@ database = "vex_analytics"
 
         let link = config.core.networking();
         assert_eq!(link.gateway_id, 7);
-        assert_eq!(link.gateway_authentication_key.as_i32(), Some(-123456789));
+        assert_eq!(link.gateway_authentication_key.as_str(), AUTH_KEY);
         assert_eq!(link.core_address, "core.internal");
         assert_eq!((link.core_port, link.core_control_port), (40001, 40002));
         assert_eq!(link.context_dir, "/dev/shm/aeron-gateway-7");
@@ -1317,7 +1282,10 @@ database = "vex_analytics"
             ("APP__CORE__PORT", "0"),
             ("APP__CORE__PORT", "3522"),
             ("APP__CORE__AUTH_KEY", "not-a-key"),
-            ("APP__CORE__AUTH_KEY", "2147483648"),
+            (
+                "APP__CORE__AUTH_KEY",
+                "d2eeaf61d4e3992c6f3b3a8bb344bd5f 17fb09edaf4c44432e9ea09641fef461",
+            ),
             ("APP__CORE__CONTEXT_DIR", ""),
         ] {
             let error = load_development_example(&[(name, value)]).unwrap_err();
@@ -1343,7 +1311,7 @@ database = "vex_analytics"
             "unexpected error: {error}"
         );
 
-        config.core.auth_key = "-123456789".into();
+        config.core.auth_key = AUTH_KEY.into();
         config.clickhouse.password = SecretString::new("configured".to_string());
         assert!(config.validate().is_ok());
     }
@@ -1424,7 +1392,7 @@ database = "vex_analytics"
         config.server.host = "0.0.0.0".to_string();
         config.logging.level = "info".to_string();
         config.auth.server.trusted_proxies = vec!["10.0.0.0/16".to_string()];
-        config.core.auth_key = "-123456789".into();
+        config.core.auth_key = AUTH_KEY.into();
         config.clickhouse.password = SecretString::new("configured".to_string());
         assert_eq!(config.server.port, 8081);
 
@@ -1472,6 +1440,10 @@ database = "vex_analytics"
             (
                 "APP__AUTH__OAUTH__PROVIDERS__GOOGLE__TOKEN_URL",
                 "https://accounts.example.com/token",
+            ),
+            (
+                "APP__AUTH__OAUTH__PROVIDERS__GOOGLE__ISSUER_URL",
+                "https://accounts.google.com",
             ),
             (
                 "APP__AUTH__OAUTH__FRONTEND_URL_WEB",
@@ -1532,21 +1504,8 @@ database = "vex_analytics"
 
         // So is a file key that no setting reads, with its file, also when renaming it leaves a
         // required key missing.
-        let config_dir = tempfile::tempdir().unwrap();
-        let example = include_str!("../../../../config/development.toml.example");
-        assert_eq!(example.matches("[server]\nhost = ").count(), 1);
-        fs::write(
-            config_dir.path().join("development.toml"),
-            example.replace("[server]\nhost = ", "[server]\nhots = "),
-        )
-        .unwrap();
-        let error = Config::load_with(
-            Environment::Development,
-            Some(config_dir.path().to_path_buf()),
-            Config::app_overrides([]).unwrap(),
-        )
-        .unwrap_err();
-        let file = config_dir.path().join("development.toml");
+        let (result, file) = load_edited_example("[server]\nhost = ", "[server]\nhots = ");
+        let error = result.unwrap_err();
         assert_eq!(
             error.to_string(),
             format!(
@@ -1568,13 +1527,11 @@ database = "vex_analytics"
     }
 
     #[test]
-    fn test_environment_must_match_the_selected_one() {
-        let error = load_development_example(&[("APP__ENVIRONMENT", "production")]).unwrap_err();
-        assert!(
-            matches!(error, ConfigError::ValidationError(_))
-                && error.to_string().contains("APP_ENV"),
-            "unexpected error: {error}"
-        );
+    fn test_environment_is_the_one_app_env_selected() {
+        // A leftover `environment` line in the file does not change it.
+        let (config, _) =
+            load_edited_example("[server]\n", "environment = \"production\"\n\n[server]\n");
+        assert_eq!(config.unwrap().environment, Environment::Development);
     }
 
     #[test]
@@ -1587,7 +1544,7 @@ database = "vex_analytics"
         };
 
         // A value of the wrong type names its variable, or its key and the file, and what the
-        // setting expects; so does an unknown environment.
+        // setting expects.
         expect(
             load_development_example(&[("APP__SERVER__PORT", secret)]).unwrap_err(),
             "Failed to load configuration: APP__SERVER__PORT must be an integer",
@@ -1596,29 +1553,15 @@ database = "vex_analytics"
             load_development_example(&[("APP__SERVER__PORT", "65536")]).unwrap_err(),
             "Failed to load configuration: APP__SERVER__PORT must be an unsigned 16 bit integer",
         );
-        let (result, file) =
-            load_edited_example("otp_length = 6", &format!("otp_length = \"{secret}\""));
-        expect(
-            result.unwrap_err(),
-            &format!(
-                "Failed to load configuration: auth.otp.otp_length (in {}) must be an integer",
-                file.display()
-            ),
-        );
-        expect(
-            load_development_example(&[("APP__ENVIRONMENT", secret)]).unwrap_err(),
-            "Failed to load configuration: APP__ENVIRONMENT must be one of: development, testing, \
-             production",
-        );
         let (result, file) = load_edited_example(
-            "environment = \"development\"",
-            &format!("environment = \"{secret}\""),
+            "email_verification_expiry_minutes = 15",
+            &format!("email_verification_expiry_minutes = \"{secret}\""),
         );
         expect(
             result.unwrap_err(),
             &format!(
-                "Failed to load configuration: environment (in {}) must be one of: development, \
-                 testing, production",
+                "Failed to load configuration: auth.otp.email_verification_expiry_minutes (in {}) \
+                 must be an integer",
                 file.display()
             ),
         );
@@ -1667,26 +1610,24 @@ database = "vex_analytics"
     }
 
     #[test]
+    fn test_log_level_is_not_trimmed() {
+        let error = load_development_example(&[("APP__LOGGING__LEVEL", "error ")]).unwrap_err();
+        assert!(
+            matches!(error, ConfigError::ValidationError(_))
+                && error.to_string().contains("logging.level"),
+            "unexpected error: {error}"
+        );
+        assert!(load_development_example(&[("APP__LOGGING__LEVEL", "ERROR")]).is_ok());
+    }
+
+    #[test]
     fn test_lenient_conversions_documented_in_the_runbook() {
         let config = load_development_example(&[("APP__SERVER__PORT", "yes")]).unwrap();
         assert_eq!(config.server.port, 1);
 
         // A decimal is rounded in the file, and rejected in a variable.
-        let config_dir = tempfile::tempdir().unwrap();
-        let example = include_str!("../../../../config/development.toml.example");
-        assert_eq!(example.matches("port = 8081\n").count(), 1);
-        fs::write(
-            config_dir.path().join("development.toml"),
-            example.replace("port = 8081\n", "port = 8080.6\n"),
-        )
-        .unwrap();
-        let config = Config::load_with(
-            Environment::Development,
-            Some(config_dir.path().to_path_buf()),
-            Config::app_overrides([]).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(config.server.port, 8081);
+        let (config, _) = load_edited_example("port = 8081\n", "port = 8080.6\n");
+        assert_eq!(config.unwrap().server.port, 8081);
         assert!(matches!(
             load_development_example(&[("APP__SERVER__PORT", "8080.6")]),
             Err(ConfigError::LoadError(_))
@@ -1696,30 +1637,15 @@ database = "vex_analytics"
     #[test]
     fn test_server_address_parsing() {
         let config = development_config();
-        let addr = config.server_address().unwrap();
+        let addr = config.server.socket_addr().unwrap();
         assert_eq!(addr.ip().to_string(), "127.0.0.1");
         assert_eq!(addr.port(), 8081);
     }
 
     #[test]
     fn test_port_0_validation() {
-        // Test that port 0 is allowed in testing environment
-        let mut testing_config = development_config();
-        testing_config.environment = Environment::Testing;
-        testing_config.server.port = 0;
-        assert!(testing_config.validate().is_ok());
-
-        // Test that port 0 is rejected in production environment
-        let mut production_config = development_config();
-        production_config.environment = Environment::Production;
-        production_config.auth.server.trusted_proxies = vec!["10.0.0.0/16".to_string()];
-        production_config.core.auth_key = "-123456789".into();
-        production_config.server.port = 0;
-        production_config.server.host = "0.0.0.0".to_string();
-        production_config.logging.level = "info".to_string();
-        assert!(production_config.validate().is_err());
-
-        // Test that port 0 is allowed in development environment
+        // Port 0 is allowed in development; production_rejects_loopback_debug_logging_and_port_0
+        // covers production.
         let mut dev_config = development_config();
         dev_config.server.port = 0;
         assert!(dev_config.validate().is_ok());

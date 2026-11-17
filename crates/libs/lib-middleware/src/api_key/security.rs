@@ -42,34 +42,22 @@ impl std::fmt::Display for SecurityType {
     }
 }
 
-/// Key material for different signature algorithms
+/// The key's signing secret: an HMAC secret the server generated.
 #[derive(Clone, Serialize, Deserialize)]
 pub enum KeyMaterial {
     /// HMAC secret key
     HmacSecret(String),
-    /// RSA public key in PEM format
-    RsaPublicKey(String),
-    /// Ed25519 public key in PEM format
-    Ed25519PublicKey(String),
 }
 
 impl std::fmt::Debug for KeyMaterial {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            KeyMaterial::HmacSecret(_) => f.debug_tuple("HmacSecret").field(&"[REDACTED]").finish(),
-            KeyMaterial::RsaPublicKey(_) => f.write_str("RsaPublicKey"),
-            KeyMaterial::Ed25519PublicKey(_) => f.write_str("Ed25519PublicKey"),
-        }
+        f.debug_tuple("HmacSecret").field(&"[REDACTED]").finish()
     }
 }
 
 impl KeyMaterial {
     pub fn algorithm(&self) -> SignatureAlgorithm {
-        match self {
-            KeyMaterial::HmacSecret(_) => SignatureAlgorithm::HmacSha256,
-            KeyMaterial::RsaPublicKey(_) => SignatureAlgorithm::RsaSha256,
-            KeyMaterial::Ed25519PublicKey(_) => SignatureAlgorithm::Ed25519,
-        }
+        SignatureAlgorithm::HmacSha256
     }
 }
 
@@ -124,18 +112,6 @@ impl ApiKeyConfig {
     /// Configure HMAC secret key for signing
     pub fn with_hmac_secret(mut self, secret_key: String) -> Self {
         self.key_material = Some(KeyMaterial::HmacSecret(secret_key));
-        self
-    }
-
-    /// Configure RSA public key for signature verification
-    pub fn with_rsa_public_key(mut self, public_key_pem: String) -> Self {
-        self.key_material = Some(KeyMaterial::RsaPublicKey(public_key_pem));
-        self
-    }
-
-    /// Configure Ed25519 public key for signature verification
-    pub fn with_ed25519_public_key(mut self, public_key_pem: String) -> Self {
-        self.key_material = Some(KeyMaterial::Ed25519PublicKey(public_key_pem));
         self
     }
 
@@ -198,10 +174,17 @@ impl ApiKeyConfig {
         true
     }
 
-    /// Check if the request IP is allowed (not blacklisted)
+    /// Whether `ip`, the client IP, is outside every blocked address and CIDR range. A client
+    /// with no address ("unknown", no peer) is allowed: there is nothing to match.
     pub fn is_ip_allowed(&self, ip: &str) -> bool {
-        // If IP is in blacklist, it's not allowed
-        !self.ip_blacklist.contains(&ip.to_string())
+        let Ok(ip) = ip.parse::<std::net::IpAddr>() else {
+            return true;
+        };
+        !self
+            .ip_blacklist
+            .iter()
+            .filter_map(|entry| crate::client_ip::parse_ip_or_net(entry))
+            .any(|net| net.contains(&ip))
     }
 
     /// Get the signature algorithm for this API key
@@ -240,5 +223,20 @@ mod tests {
         let multibyte_debug_output = format!("{:?}", multibyte_config);
 
         assert!(!multibyte_debug_output.contains(multibyte_api_key));
+    }
+
+    #[test]
+    fn cidr_and_noncanonical_ipv6_entries_block() {
+        let config = ApiKeyConfig::new("k".to_string()).with_ip_blacklist(vec![
+            "198.51.100.0/24".to_string(),
+            "2001:0DB8::1".to_string(),
+        ]);
+
+        assert!(!config.is_ip_allowed("198.51.100.7"));
+        // The client IP is the canonical form, lowercase and compressed.
+        assert!(!config.is_ip_allowed("2001:db8::1"));
+        assert!(config.is_ip_allowed("198.51.101.1"));
+        // No peer address: nothing to match.
+        assert!(config.is_ip_allowed("unknown"));
     }
 }

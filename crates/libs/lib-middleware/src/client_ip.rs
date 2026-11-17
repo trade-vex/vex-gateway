@@ -18,17 +18,20 @@ use std::net::IpAddr;
 pub struct TrustedProxies(Vec<IpNet>);
 
 impl TrustedProxies {
-    /// The error names an invalid entry by its position (from 1), never by its value.
+    /// The error names an invalid entry by its position (from 1), never by its value. A /0 range
+    /// is refused: it would believe every peer's `X-Forwarded-For`, so every client could choose
+    /// its own IP.
     pub fn parse<S: AsRef<str>>(entries: &[S]) -> Result<Self, String> {
         entries
             .iter()
             .enumerate()
-            .map(|(index, entry)| {
-                let entry = entry.as_ref().trim();
-                entry
-                    .parse::<IpNet>()
-                    .or_else(|_| entry.parse::<IpAddr>().map(IpNet::from))
-                    .map_err(|_| format!("entry {} is not an IP address or CIDR range", index + 1))
+            .map(|(index, entry)| match parse_ip_or_net(entry.as_ref()) {
+                Some(net) if net.prefix_len() > 0 => Ok(net),
+                Some(_) => Err(format!("entry {} trusts every address (/0)", index + 1)),
+                None => Err(format!(
+                    "entry {} is not an IP address or CIDR range",
+                    index + 1
+                )),
             })
             .collect::<Result<Vec<_>, _>>()
             .map(Self)
@@ -37,20 +40,23 @@ impl TrustedProxies {
     /// The client address of `req`, or `None` when the transport reports no peer.
     pub fn client_ip(&self, req: &HttpRequest) -> Option<IpAddr> {
         let mut client = req.peer_addr()?.ip().to_canonical();
-        let hops: Vec<&str> = req
+        // Split the raw bytes: one byte that is not visible ASCII (which `to_str` refuses) must
+        // spoil only its own hop, not the hops the proxies appended after it.
+        let hops: Vec<&[u8]> = req
             .headers()
             .get_all("x-forwarded-for")
-            .flat_map(|value| value.to_str().unwrap_or("").split(','))
+            .flat_map(|value| value.as_bytes().split(|&byte| byte == b','))
             .collect();
 
         for hop in hops.iter().rev() {
             if !self.is_trusted(client) {
                 break;
             }
-            match hop.trim().parse::<IpAddr>() {
-                Ok(ip) => client = ip.to_canonical(),
+            let hop = std::str::from_utf8(hop).ok();
+            match hop.and_then(|hop| hop.trim().parse::<IpAddr>().ok()) {
+                Some(ip) => client = ip.to_canonical(),
                 // A malformed hop names no one; keep the last address a trusted proxy vouched for.
-                Err(_) => break,
+                None => break,
             }
         }
         Some(client)
@@ -78,6 +84,16 @@ impl TrustedProxies {
     fn is_trusted(&self, ip: IpAddr) -> bool {
         self.0.iter().any(|network| network.contains(&ip))
     }
+}
+
+/// An address (`192.0.2.7`, a single-address range) or a CIDR range (`10.0.0.0/8`), as the
+/// trusted proxies and API-key IP block lists are written; `None` for anything else.
+pub fn parse_ip_or_net(entry: &str) -> Option<IpNet> {
+    let entry = entry.trim();
+    entry
+        .parse::<IpNet>()
+        .or_else(|_| entry.parse::<IpAddr>().map(IpNet::from))
+        .ok()
 }
 
 /// The [`TrustedProxies`] registered as app data. Without one, no proxy is trusted.
@@ -181,6 +197,20 @@ mod tests {
     }
 
     #[test]
+    fn a_non_ascii_hop_does_not_hide_the_proxys_hop() {
+        // nginx appends the address it saw to whatever the client sent, bytes included.
+        let req = TestRequest::default()
+            .peer_addr("10.0.0.2:1234".parse().unwrap())
+            .append_header((
+                "X-Forwarded-For",
+                actix_web::http::header::HeaderValue::from_bytes(b"\xff, 198.51.100.7").unwrap(),
+            ))
+            .to_http_request();
+
+        assert_eq!(resolve(&proxies(&["10.0.0.0/8"]), &req), "198.51.100.7");
+    }
+
+    #[test]
     fn ipv4_mapped_peer_matches_an_ipv4_range() {
         let req = request("[::ffff:10.0.0.2]:1234", &["198.51.100.7"]);
 
@@ -253,6 +283,13 @@ mod tests {
             TrustedProxies::parse(&["proxy.internal"]).unwrap_err(),
             "entry 1 is not an IP address or CIDR range"
         );
+        // A /0 believes every peer's X-Forwarded-For: every client would choose its own IP.
+        for catch_all in ["0.0.0.0/0", "::/0"] {
+            assert_eq!(
+                TrustedProxies::parse(&["10.0.0.0/8", catch_all]).unwrap_err(),
+                "entry 2 trusts every address (/0)"
+            );
+        }
     }
 
     #[test]

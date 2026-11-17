@@ -7,7 +7,7 @@ pub mod repository;
 
 pub use api_key::{
     error::ApiKeyError,
-    middleware::{ApiKeyMiddleware, ApiKeyStore, CacheConfig, CacheMetrics, RouteSecurityConfig},
+    middleware::{ApiKeyMiddleware, ApiKeyStore, CacheConfig, RouteSecurityConfig},
     security::{ApiKeyConfig, KeyMaterial, SecurityType},
     signature::{SignatureAlgorithm, SignatureVerifier},
 };

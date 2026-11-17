@@ -58,7 +58,7 @@ CREATE UNIQUE INDEX ux_users_provider_identity ON users (auth_provider, provider
     WHERE provider_id IS NOT NULL;
 
 CREATE TYPE security_type AS ENUM ('none', 'trade', 'user_data', 'user_stream');
-CREATE TYPE key_material_type AS ENUM ('hmac_secret', 'rsa_public_key', 'ed25519_public_key');
+CREATE TYPE key_material_type AS ENUM ('hmac_secret');
 
 CREATE TABLE api_keys (
     id                 UUID PRIMARY KEY,
@@ -80,23 +80,22 @@ CREATE TABLE api_keys (
 CREATE INDEX api_keys_user_id ON api_keys (user_id);
 
 -- Mirrors of vex-core's symbol configuration, written only by readmodel/seeds. ScalingCache
--- turns engine integers into decimals with them, so they must match the core exactly.
+-- turns engine integers into decimals with them, so they must match the core exactly. A row stays
+-- when its market or asset leaves the configuration: its orders and balances still need its scale.
 -- Their ids have the types ScalingCache reads (i16, i32), while trading.* stores ids, like every
 -- proto integer, as BIGINT: the same id has the same value on both sides only below 2^15
 -- (assets) and 2^31 (markets). Join on the unsigned value: asset_id & 65535,
 -- market_id & 4294967295.
 CREATE TABLE assets (
     asset_id     SMALLINT PRIMARY KEY,                           -- u16
-    native_scale BIGINT NOT NULL CHECK (native_scale <> 0),      -- u64
-    active       BOOLEAN NOT NULL
+    native_scale BIGINT NOT NULL CHECK (native_scale <> 0)       -- u64
 );
 
 CREATE TABLE markets (
     market_id     INTEGER PRIMARY KEY,                           -- u32: quote_asset << 16 | base_asset
     base_asset    SMALLINT NOT NULL REFERENCES assets (asset_id),
     quote_asset   SMALLINT NOT NULL REFERENCES assets (asset_id),
-    quote_scale_k BIGINT NOT NULL CHECK (quote_scale_k <> 0),    -- u64
-    active        BOOLEAN NOT NULL
+    quote_scale_k BIGINT NOT NULL CHECK (quote_scale_k <> 0)     -- u64
 );
 
 CREATE TABLE user_favorite_markets (
@@ -107,18 +106,17 @@ CREATE TABLE user_favorite_markets (
     CONSTRAINT user_favorite_markets_user_market UNIQUE (user_id, market_id)
 );
 
--- trading.*: vex-core's events, written only by Kafka Connect
+-- trading.*: the latest state of vex-core's balances, orders and order books, written only by
+-- Kafka Connect. ClickHouse holds the history of every topic.
 --
 -- Columns are the proto fields of trading.proto after Connect's Flatten (delimiter "_") with the
--- event's timestamp renamed to event_ts. Latest-state tables hold one row per key, history tables
--- one row per (key, event_ts).
+-- event's timestamp renamed to event_ts. Each table holds one row per key.
 
 CREATE SCHEMA trading;
 
 -- Every trading table's BEFORE UPDATE guard. The connectors upsert, so a conflicting row only
--- replaces the stored one when its event is newer: a latest-state row keeps the greatest
--- event_ts whatever the delivery order, and a history row, whose key includes event_ts, is never
--- rewritten. Of two copies of one event the first stays.
+-- replaces the stored one when its event is newer: a row keeps the greatest event_ts whatever the
+-- delivery order. Of two copies of one event the first stays.
 CREATE FUNCTION trading.keep_newer() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF NEW.event_ts <= OLD.event_ts THEN
@@ -143,10 +141,6 @@ CREATE TABLE trading.balances (
     event_ts  BIGINT NOT NULL,
     PRIMARY KEY (user_id, asset_id)
 );
-CREATE TABLE trading.balance_events (
-    LIKE trading.balances,
-    PRIMARY KEY (user_id, asset_id, event_ts)
-);
 
 -- topic orders
 CREATE TABLE trading.orders (
@@ -162,12 +156,12 @@ CREATE TABLE trading.orders (
     market_id           BIGINT NOT NULL
 );
 CREATE INDEX orders_user_event_ts ON trading.orders (order_user_id, event_ts);
-CREATE TABLE trading.order_events (
-    LIKE trading.orders,
-    PRIMARY KEY (order_order_id, event_ts)
-);
+-- The open-order page (lib-core OPEN_ORDER_FILTER): the predicate must stay identical to it.
+CREATE INDEX orders_user_open ON trading.orders (order_user_id, event_ts)
+    WHERE order_status = 'STATUS_PLACED'
+       OR (order_status = 'STATUS_PARTIALLY_FILLED' AND order_time_in_force <> 'TIF_IOC');
 
--- topic orderbook: latest state only
+-- topic orderbook
 CREATE TABLE trading.orderbook (
     market_id BIGINT NOT NULL PRIMARY KEY,
     bids      TEXT   NOT NULL,
@@ -175,61 +169,11 @@ CREATE TABLE trading.orderbook (
     event_ts  BIGINT NOT NULL
 );
 
--- topic cancels: history only
-CREATE TABLE trading.cancel_events (
-    order_id  BIGINT NOT NULL,
-    market_id BIGINT NOT NULL,
-    user_id   BIGINT NOT NULL,
-    event_ts  BIGINT NOT NULL,
-    PRIMARY KEY (order_id, event_ts)
-);
-
--- topic trades: history only
-CREATE TABLE trading.trade_events (
-    maker_user_id  BIGINT NOT NULL,
-    taker_user_id  BIGINT NOT NULL,
-    market_id      BIGINT NOT NULL,
-    price          BIGINT NOT NULL,
-    size           BIGINT NOT NULL,
-    maker_order_id BIGINT NOT NULL,
-    taker_order_id BIGINT NOT NULL,
-    taker_side     TEXT   NOT NULL,
-    event_ts       BIGINT NOT NULL,
-    PRIMARY KEY (taker_order_id, maker_order_id, event_ts)
-);
-
--- topic deposits: history only
-CREATE TABLE trading.deposit_events (
-    user_id  BIGINT NOT NULL,
-    asset_id BIGINT NOT NULL,
-    amount   BIGINT NOT NULL,
-    event_ts BIGINT NOT NULL,
-    PRIMARY KEY (user_id, event_ts)
-);
-
--- topic withdrawals: history only
-CREATE TABLE trading.withdrawal_events (
-    LIKE trading.deposit_events,
-    PRIMARY KEY (user_id, event_ts)
-);
-
 CREATE TRIGGER keep_newer BEFORE UPDATE ON trading.balances
-    FOR EACH ROW EXECUTE FUNCTION trading.keep_newer();
-CREATE TRIGGER keep_newer BEFORE UPDATE ON trading.balance_events
     FOR EACH ROW EXECUTE FUNCTION trading.keep_newer();
 CREATE TRIGGER keep_newer BEFORE UPDATE ON trading.orders
     FOR EACH ROW EXECUTE FUNCTION trading.keep_newer();
-CREATE TRIGGER keep_newer BEFORE UPDATE ON trading.order_events
-    FOR EACH ROW EXECUTE FUNCTION trading.keep_newer();
 CREATE TRIGGER keep_newer BEFORE UPDATE ON trading.orderbook
-    FOR EACH ROW EXECUTE FUNCTION trading.keep_newer();
-CREATE TRIGGER keep_newer BEFORE UPDATE ON trading.cancel_events
-    FOR EACH ROW EXECUTE FUNCTION trading.keep_newer();
-CREATE TRIGGER keep_newer BEFORE UPDATE ON trading.trade_events
-    FOR EACH ROW EXECUTE FUNCTION trading.keep_newer();
-CREATE TRIGGER keep_newer BEFORE UPDATE ON trading.deposit_events
-    FOR EACH ROW EXECUTE FUNCTION trading.keep_newer();
-CREATE TRIGGER keep_newer BEFORE UPDATE ON trading.withdrawal_events
     FOR EACH ROW EXECUTE FUNCTION trading.keep_newer();
 
 -- Roles
@@ -254,7 +198,8 @@ GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA trading TO readmodel_connec
 
 -- The gateway only reads trading.*, so Postgres, not convention, keeps it from writing balances.
 GRANT SELECT ON ALL TABLES IN SCHEMA trading TO readmodel_gateway;
-GRANT SELECT, INSERT, UPDATE ON users, api_keys TO readmodel_gateway;
+GRANT SELECT, INSERT, UPDATE ON users TO readmodel_gateway;
+GRANT SELECT, INSERT, UPDATE, DELETE ON api_keys TO readmodel_gateway;
 GRANT SELECT, INSERT, DELETE ON user_favorite_markets TO readmodel_gateway;
 GRANT SELECT ON assets, markets TO readmodel_gateway;
 

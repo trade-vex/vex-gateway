@@ -29,7 +29,7 @@ use vex_config::{Environment, GatewayNetworkingConfig, VexConfig};
 use vex_networking::client::{OrderCommandHandler, Publisher, VexGateway};
 
 /// The core's address: it shares the network namespace of the `aeron-archive` service. The
-/// control port is the next one after `VEX_SERVER_PORT`.
+/// control port is the next one (compose.yml).
 const CORE_HOST: &str = "aeron-archive";
 const CORE_PORT: u16 = 3521;
 const AERON_DIR: &str = "/dev/shm/aeron-readmodel-traffic";
@@ -61,8 +61,8 @@ const ASKER: u64 = 102;
 /// Order pairs a round places: enough that some of their events are still queued in the core
 /// when it is killed behind paused brokers.
 const PAIRS_PER_ROUND: u64 = 10;
-/// 0.01 ETH.
-const ORDER_SIZE: u64 = 10_000_000_000_000_000;
+/// 0.01 ETH, in gwei.
+const ORDER_SIZE: u64 = 10_000_000;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -165,7 +165,7 @@ fn ledger_round(gateway_id: u8) -> Result<()> {
     if ledger.pairs == 0 {
         for (user, amount, asset) in [
             (BIDDER, 1_000_000_000_000, USD),
-            (ASKER, 5_000_000_000_000_000_000, ETH),
+            (ASKER, 5_000_000_000, ETH),
         ] {
             let response = core.execute(
                 OrderCommand::deposit_funds(user, amount, asset),
@@ -471,7 +471,6 @@ impl Core {
         config.core_port = CORE_PORT;
         config.core_control_port = CORE_PORT + 1;
         config.gateway_id = gateway_id;
-        config.connection_timeout_seconds = 10;
 
         let mut gateway = VexGateway::new(config)?;
         let (sender, responses) = mpsc::channel();

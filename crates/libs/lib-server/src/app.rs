@@ -47,12 +47,9 @@ pub fn create_app(
         // Outermost, so that every response carries the security headers and the request id:
         // 404s and the errors the auth middleware returns included
         .wrap(from_fn(edge::middleware))
-        .app_data(web::Data::new(app_state.clone()))
         .app_data(web::Data::new(app_state.trusted_proxies.clone()))
         .app_data(web::Data::new(api_key_store))
         .app_data(web::Data::new(app_state.user_repo.clone()))
-        .app_data(web::Data::new(app_state.db.clone()))
-        .app_data(web::Data::new(app_state.redis_conn.clone()))
         .app_data(web::Data::new(Arc::new(app_state.token_service.clone())))
         .app_data(web::Data::new(Arc::new(app_state.oauth_service.clone())))
         .app_data(web::Data::new(Arc::new(app_state.email_service.clone())))
@@ -60,16 +57,11 @@ pub fn create_app(
         .app_data(web::Data::new(app_state.engine_link.clone()))
         .app_data(web::Data::new(app_state.correlation_service.clone()))
         .app_data(web::Data::new(app_state.order_idempotency_store.clone()))
+        .app_data(web::Data::new(app_state.scaling_cache.clone()))
         .app_data(web::Data::new(app_state.rate_limiter.clone()))
         // Configure all routes under a single /api scope
         .service(
             web::scope("/api")
-                // Register required data for auth handlers
-                .app_data(web::Data::new(app_state.user_repo.clone()))
-                .app_data(web::Data::new(Arc::new(app_state.email_service.clone())))
-                .app_data(web::Data::new(Arc::new(app_state.token_service.clone())))
-                .app_data(web::Data::new(Arc::new(app_state.oauth_service.clone())))
-                .app_data(web::Data::new(Arc::new(app_state.session_service.clone())))
                 // Public routes (no authentication required). Those whose handlers limit no rate
                 // per client IP of their own draw on the general budget, keyed by the client IP.
                 .configure(|cfg| {

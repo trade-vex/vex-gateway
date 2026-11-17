@@ -2,22 +2,6 @@ use lib_middleware::api_key::error::ApiKeyError;
 use lib_middleware::api_key::signature::{SignatureAlgorithm, SignatureVerifier};
 
 #[test]
-fn test_signature_algorithm_equality() {
-    assert_eq!(
-        SignatureAlgorithm::HmacSha256,
-        SignatureAlgorithm::HmacSha256
-    );
-    assert_eq!(SignatureAlgorithm::RsaSha256, SignatureAlgorithm::RsaSha256);
-    assert_eq!(SignatureAlgorithm::Ed25519, SignatureAlgorithm::Ed25519);
-
-    assert_ne!(
-        SignatureAlgorithm::HmacSha256,
-        SignatureAlgorithm::RsaSha256
-    );
-    assert_ne!(SignatureAlgorithm::RsaSha256, SignatureAlgorithm::Ed25519);
-}
-
-#[test]
 fn test_signature_algorithm_clone() {
     let original = SignatureAlgorithm::HmacSha256;
     let cloned = original.clone();
@@ -78,76 +62,6 @@ fn test_generate_hmac_roundtrip() {
     let verification = SignatureVerifier::verify_hmac(payload, &signature, secret_key).unwrap();
 
     assert!(verification);
-}
-
-#[test]
-fn test_verify_rsa_invalid_signature() {
-    let payload = "test";
-    let invalid_signature = "not_base64";
-    let public_key_pem = "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA...\n-----END PUBLIC KEY-----";
-
-    let result = SignatureVerifier::verify_rsa(payload, invalid_signature, public_key_pem);
-    assert!(result.is_err());
-
-    match result.unwrap_err() {
-        ApiKeyError::InvalidSignature(msg) => {
-            assert!(msg.contains("Failed to decode base64 signature"))
-        }
-        _ => panic!("Expected InvalidSignature error"),
-    }
-}
-
-#[test]
-fn test_verify_rsa_invalid_key() {
-    let payload = "test";
-    let signature = "dGVzdA=="; // "test" in base64
-    let invalid_key = "not a pem key";
-
-    let result = SignatureVerifier::verify_rsa(payload, signature, invalid_key);
-    assert!(result.is_err());
-
-    match result.unwrap_err() {
-        ApiKeyError::InvalidSignature(msg) => {
-            assert!(msg.contains("Failed to parse RSA public key"))
-        }
-        _ => panic!("Expected InvalidSignature error"),
-    }
-}
-
-#[test]
-fn test_verify_ed25519_invalid_signature() {
-    let payload = "test";
-    let invalid_signature = "not_base64";
-    let public_key_pem =
-        "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA...\n-----END PUBLIC KEY-----";
-
-    let result = SignatureVerifier::verify_ed25519(payload, invalid_signature, public_key_pem);
-    assert!(result.is_err());
-
-    match result.unwrap_err() {
-        ApiKeyError::InvalidSignature(msg) => {
-            assert!(msg.contains("Failed to decode base64 signature"))
-        }
-        _ => panic!("Expected InvalidSignature error"),
-    }
-}
-
-#[test]
-fn test_verify_ed25519_invalid_key() {
-    let payload = "test";
-    let signature = "dGVzdA=="; // "test" in base64 (too short for Ed25519)
-    let invalid_key = "not a pem key";
-
-    let result = SignatureVerifier::verify_ed25519(payload, signature, invalid_key);
-    assert!(result.is_err());
-
-    match result.unwrap_err() {
-        ApiKeyError::InvalidSignature(msg) => {
-            // The error message might be about signature format or key parsing
-            assert!(msg.contains("Ed25519") || msg.contains("signature") || msg.contains("key"));
-        }
-        _ => panic!("Expected InvalidSignature error"),
-    }
 }
 
 #[test]
@@ -373,6 +287,14 @@ fn test_validate_timestamp_valid() {
 
     let result = SignatureVerifier::validate_timestamp(valid_timestamp, recv_window, server_time);
     assert!(result.is_ok());
+
+    // Boundaries: 1 s of future drift is allowed, recv_window of age is allowed, one ms more is not.
+    let validate =
+        |timestamp| SignatureVerifier::validate_timestamp(timestamp, recv_window, server_time);
+    assert!(validate(server_time + 1000).is_ok());
+    assert!(validate(server_time + 1001).is_err());
+    assert!(validate(server_time - recv_window).is_ok());
+    assert!(validate(server_time - recv_window - 1).is_err());
 }
 
 #[test]
@@ -394,18 +316,6 @@ fn test_validate_timestamp_future() {
         }
         _ => panic!("Expected FutureTimestamp error"),
     }
-}
-
-#[test]
-fn test_validate_timestamp_edge_cases() {
-    let server_time = 1640995200000;
-    let recv_window = 5000;
-
-    // Test edge case where implementation might have integer overflow
-    // Use a small past timestamp that won't cause overflow
-    let past_timestamp = server_time - 1000;
-    let result = SignatureVerifier::validate_timestamp(past_timestamp, recv_window, server_time);
-    assert!(result.is_ok()); // Should be valid as it's within window
 }
 
 #[test]

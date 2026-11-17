@@ -2,6 +2,7 @@
 
 use actix_web::{HttpRequest, HttpResponse, http::StatusCode, web};
 use common::{OrderCommand, OrderCommandType, Side, Status, TimeInForce, UserBalance};
+use lib_core::cache::scaling_cache::ScalingCache;
 use lib_core::{
     CompletionWait, CorrelationService, EngineLink, IdempotentOrderOutcome, OrderClaim,
     OrderIdempotencyError, OrderIdempotencyStore, ReleaseReason, ResponseError,
@@ -9,6 +10,7 @@ use lib_core::{
 };
 use lib_middleware::metrics::{self, EngineOutcome};
 use lib_utils::{AuthenticatedUserId, uuid_to_u64};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -29,8 +31,8 @@ fn unix_timestamp_nanos(now: SystemTime) -> u64 {
 /// Request payload for placing a new order
 ///
 /// # Fields
-/// * `price` - Order price in smallest currency unit (e.g., cents, satoshis)
-/// * `volume` - Order size/quantity in base asset units
+/// * `price` - Order price in the quote asset, as a decimal string
+/// * `volume` - Order size in the base asset, as a decimal string
 /// * `market_id` - Unique identifier for the trading market/pair
 /// * `side` - Order side (Bid for buy, Ask for sell)
 /// * `time_in_force` - Order duration policy (GTC, IOC, FOK, etc.)
@@ -40,9 +42,9 @@ fn unix_timestamp_nanos(now: SystemTime) -> u64 {
 /// # Example
 /// ```json
 /// {
-///   "price": 5000000,
-///   "volume": 100,
-///   "market_id": 1,
+///   "price": "50000.5",
+///   "volume": "0.25",
+///   "market_id": 65538,
 ///   "side": "Bid",
 ///   "time_in_force": "Gtc",
 ///   "order_type": "Limit"
@@ -56,11 +58,13 @@ pub enum OrderType {
 
 #[derive(Debug, Deserialize)]
 pub struct OrderRequest {
-    /// Order price in smallest currency unit
-    pub price: u64,
+    /// In the quote asset, as a decimal string ("50000.5"): a multiple of the market's price step.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub price: Decimal,
 
-    /// Order volume/size in base asset units
-    pub volume: u64,
+    /// In the base asset, as a decimal string ("0.25"): a multiple of its smallest unit.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub volume: Decimal,
 
     /// Market identifier (trading pair)
     pub market_id: u32,
@@ -220,12 +224,15 @@ fn send_failure_response(
     match error {
         GatewayError::Busy => engine_busy_response(order_id, client_order_id),
         GatewayError::NotConnected => engine_unavailable_response(order_id, client_order_id),
-        _ => HttpResponse::InternalServerError().json(OrderResponse {
-            order_id,
-            client_order_id,
-            status: "error".to_string(),
-            message: format!("Failed to send {request}: {error}"),
-        }),
+        _ => {
+            error!(%error, "Failed to send {request}");
+            HttpResponse::InternalServerError().json(OrderResponse {
+                order_id,
+                client_order_id,
+                status: "error".to_string(),
+                message: format!("Failed to send {request}"),
+            })
+        }
     }
 }
 
@@ -379,11 +386,13 @@ fn response_from_outcome(outcome: IdempotentOrderOutcome) -> HttpResponse {
 
 /// Client guidance for every 408 `outcome_unknown`. It must never invite a retry of the key: a
 /// retry can only replay this same 408 for the claim's lifetime, and if the claim was lost (Redis
-/// eviction or failover) the retry is accepted as new and places a second order.
-fn outcome_unknown_message(summary: &str, client_order_id: u64) -> String {
+/// eviction or failover) the retry is accepted as new and places a second order. The read model
+/// has no client_order_id, so the client is told what it can look for, as it sent it.
+fn outcome_unknown_message(summary: &str, order: &OrderRequest) -> String {
     format!(
-        "{summary} Retain client_order_id {client_order_id} and check open orders or order \
-         history after asynchronous persistence catches up. Do not retry this idempotency key."
+        "{summary} Look for the {:?} {:?} order on market {} at price {} for size {} in open \
+         orders or order history once persistence catches up. Do not retry this idempotency key.",
+        order.side, order.order_type, order.market_id, order.price, order.volume
     )
 }
 
@@ -413,10 +422,17 @@ async fn complete_idempotent_order(
     user_id: u64,
     idempotency_key: &str,
     fingerprint: &str,
+    nonce: u64,
     outcome: IdempotentOrderOutcome,
 ) -> HttpResponse {
     let result = store
-        .complete(user_id, idempotency_key, fingerprint, outcome.clone())
+        .complete(
+            user_id,
+            idempotency_key,
+            fingerprint,
+            nonce,
+            outcome.clone(),
+        )
         .await;
     record_idempotent_completion(result, outcome.client_order_id, idempotency_key);
     response_from_outcome(outcome)
@@ -431,6 +447,7 @@ async fn release_idempotency_claim(
     idempotency_key: &str,
     fingerprint: &str,
     client_order_id: u64,
+    nonce: u64,
     reason: ReleaseReason,
 ) {
     match store
@@ -439,6 +456,7 @@ async fn release_idempotency_claim(
             idempotency_key,
             fingerprint,
             client_order_id,
+            nonce,
             reason,
         )
         .await
@@ -470,6 +488,7 @@ async fn await_in_flight_order(
     idempotency_key: &str,
     fingerprint: &str,
     client_order_id: u64,
+    order: &OrderRequest,
 ) -> HttpResponse {
     match store
         .wait_for_completion(
@@ -491,10 +510,7 @@ async fn await_in_flight_order(
             order_id: 0,
             client_order_id,
             status: "outcome_unknown".to_string(),
-            message: outcome_unknown_message(
-                "Original order is still unresolved.",
-                client_order_id,
-            ),
+            message: outcome_unknown_message("Original order is still unresolved.", order),
         }),
         Err(error) => {
             error!(
@@ -520,6 +536,7 @@ async fn settle_idempotent_order(
     user_id: u64,
     idempotency_key: &str,
     fingerprint: &str,
+    nonce: u64,
     engine_status: Status,
     outcome: IdempotentOrderOutcome,
 ) -> HttpResponse {
@@ -530,18 +547,19 @@ async fn settle_idempotent_order(
             idempotency_key,
             fingerprint,
             outcome.client_order_id,
+            nonce,
             ReleaseReason::Busy,
         )
         .await;
         return engine_busy_response(0, outcome.client_order_id);
     }
-    complete_idempotent_order(store, user_id, idempotency_key, fingerprint, outcome).await
+    complete_idempotent_order(store, user_id, idempotency_key, fingerprint, nonce, outcome).await
 }
 
 /// The answer to an order sent on a link that was lost before the engine answered. The engine may
 /// have executed it, so it is a timeout's answer, given at once: a 503 would tell the client that
 /// nothing was executed.
-fn link_lost_outcome(client_order_id: u64) -> IdempotentOrderOutcome {
+fn link_lost_outcome(client_order_id: u64, order: &OrderRequest) -> IdempotentOrderOutcome {
     IdempotentOrderOutcome {
         http_status: StatusCode::REQUEST_TIMEOUT.as_u16(),
         order_id: 0,
@@ -550,13 +568,9 @@ fn link_lost_outcome(client_order_id: u64) -> IdempotentOrderOutcome {
         message: outcome_unknown_message(
             "The link to the matching engine was lost after the order was sent, so its outcome \
              is unknown.",
-            client_order_id,
+            order,
         ),
     }
-}
-
-fn parse_order_id(order_id: &str) -> Result<u64, std::num::ParseIntError> {
-    order_id.parse()
 }
 
 // API Handlers
@@ -564,8 +578,7 @@ fn parse_order_id(order_id: &str) -> Result<u64, std::num::ParseIntError> {
 /// Place a new order in the market
 ///
 /// Submits a new order to the VEX Core matching engine for processing.
-/// The market ID is checked for the database storage range, then the order is sent
-/// asynchronously and tracked using a correlation ID.
+/// The order is sent asynchronously and tracked using a correlation ID.
 ///
 /// # Endpoint
 /// `POST /api/order`
@@ -574,7 +587,8 @@ fn parse_order_id(order_id: &str) -> Result<u64, std::num::ParseIntError> {
 /// Requires valid JWT token in Authorization header: `Bearer <token>`
 ///
 /// # Request Body
-/// See [`OrderRequest`] for request payload structure.
+/// See [`OrderRequest`] for request payload structure. A price or size off the market's step is
+/// a 400 that names the step.
 ///
 /// # Response
 /// Returns [`OrderResponse`] with order details and status.
@@ -591,9 +605,9 @@ fn parse_order_id(order_id: &str) -> Result<u64, std::num::ParseIntError> {
 ///   -H "Content-Type: application/json" \
 ///   -H "Idempotency-Key: <unique-logical-order-key>" \
 ///   -d '{
-///     "price": 5000000,
-///     "volume": 100,
-///     "market_id": 1,
+///     "price": "50000.5",
+///     "volume": "0.25",
+///     "market_id": 65538,
 ///     "side": "Bid",
 ///     "time_in_force": "Gtc",
 ///     "order_type": "Limit"
@@ -619,7 +633,7 @@ fn parse_order_id(order_id: &str) -> Result<u64, std::num::ParseIntError> {
 ///   "order_id": "0",
 ///   "client_order_id": "987654321",
 ///   "status": "outcome_unknown",
-///   "message": "Order was sent but its outcome is unknown. Retain client_order_id 987654321 and check open orders or order history after asynchronous persistence catches up. Do not retry this idempotency key."
+///   "message": "Order was sent but its outcome is unknown. Look for the Bid Limit order on market 65538 at price 50000.5 for size 0.25 in open orders or order history once persistence catches up. Do not retry this idempotency key."
 /// }
 /// ```
 ///
@@ -639,6 +653,7 @@ pub async fn place_order(
     engine_link: web::Data<EngineLink>,
     correlation_service: web::Data<Arc<CorrelationService>>,
     idempotency_store: web::Data<Arc<OrderIdempotencyStore>>,
+    scaling: web::Data<Arc<ScalingCache>>,
 ) -> HttpResponse {
     let start = Instant::now();
 
@@ -671,27 +686,27 @@ pub async fn place_order(
     let order_data = order_data.into_inner();
 
     let OrderRequest {
-        price,
-        volume,
         market_id,
         side,
         time_in_force,
         order_type,
+        ..
     } = order_data;
 
-    // Validate market_id fits in i32 (database storage type)
-    if market_id > i32::MAX as u32 {
-        return HttpResponse::BadRequest().json(OrderResponse {
-            order_id: 0,
-            client_order_id: 0,
-            status: "rejected".to_string(),
-            message: format!(
-                "market_id {} exceeds maximum allowed value {}",
-                market_id,
-                i32::MAX
-            ),
-        });
-    }
+    let (price, volume) = match (
+        scaling.price_to_engine(market_id, order_data.price),
+        scaling.volume_to_engine(market_id, order_data.volume),
+    ) {
+        (Ok(price), Ok(volume)) => (price, volume),
+        (Err(message), _) | (_, Err(message)) => {
+            return HttpResponse::BadRequest().json(OrderResponse {
+                order_id: 0,
+                client_order_id: 0,
+                status: "rejected".to_string(),
+                message,
+            });
+        }
+    };
 
     if let Err(message) = validate_order_inputs(price, volume, time_in_force, &order_type) {
         return HttpResponse::BadRequest().json(OrderResponse {
@@ -719,11 +734,11 @@ pub async fn place_order(
     // Generate unique client order ID for correlation
     let client_order_id = generate_client_order_id();
 
-    match idempotency_store
+    let nonce = match idempotency_store
         .claim(user_id, &idempotency_key, &fingerprint, client_order_id)
         .await
     {
-        Ok(OrderClaim::Acquired) => {}
+        Ok(OrderClaim::Acquired { nonce }) => nonce,
         Ok(OrderClaim::Completed(outcome)) => return response_from_outcome(outcome),
         Ok(OrderClaim::InFlight { client_order_id }) => {
             return await_in_flight_order(
@@ -732,6 +747,7 @@ pub async fn place_order(
                 &idempotency_key,
                 &fingerprint,
                 client_order_id,
+                &order_data,
             )
             .await;
         }
@@ -755,7 +771,7 @@ pub async fn place_order(
                     .to_string(),
             });
         }
-    }
+    };
 
     // Register this request - get receiver for response
     let response_receiver = correlation_service.register_request(client_order_id);
@@ -798,11 +814,10 @@ pub async fn place_order(
             &idempotency_key,
             &fingerprint,
             client_order_id,
+            nonce,
             release_reason(&e),
         )
         .await;
-        // PR #92 distinguishes engine back-pressure (503) from a hard send failure (500);
-        // PR #105's unconditional 503 would mislabel the latter.
         return send_failure_response(&e, "order", 0, client_order_id);
     }
 
@@ -817,16 +832,12 @@ pub async fn place_order(
                 start.elapsed(),
             );
 
-            // PR #83 removed the gateway-side cancelled-order insert: order history is
-            // written by the Kafka consumer, and the duplicate writer used a status
-            // vocabulary no read query matched.
-            // PR #81: an engine rejection must not be a 200. PR #105 records the outcome
-            // for idempotent replays, so it has to record the SAME status the client sees.
             settle_idempotent_order(
                 &idempotency_store,
                 user_id,
                 &idempotency_key,
                 &fingerprint,
+                nonce,
                 response.status,
                 IdempotentOrderOutcome {
                     http_status: http_status.as_u16(),
@@ -853,6 +864,7 @@ pub async fn place_order(
                 user_id,
                 &idempotency_key,
                 &fingerprint,
+                nonce,
                 IdempotentOrderOutcome {
                     http_status: StatusCode::REQUEST_TIMEOUT.as_u16(),
                     order_id: 0,
@@ -860,7 +872,7 @@ pub async fn place_order(
                     status: "outcome_unknown".to_string(),
                     message: outcome_unknown_message(
                         "Order was sent but its outcome is unknown.",
-                        client_order_id,
+                        &order_data,
                     ),
                 },
             )
@@ -882,7 +894,8 @@ pub async fn place_order(
                 user_id,
                 &idempotency_key,
                 &fingerprint,
-                link_lost_outcome(client_order_id),
+                nonce,
+                link_lost_outcome(client_order_id, &order_data),
             )
             .await
         }
@@ -948,7 +961,7 @@ pub async fn place_order(
 ///   "order_id": "123456789",
 ///   "client_order_id": "987654321",
 ///   "status": "error",
-///   "message": "Failed to send cancel: connection refused"
+///   "message": "Failed to send cancel"
 /// }
 /// ```
 pub async fn cancel_order(
@@ -963,7 +976,7 @@ pub async fn cancel_order(
     let cancel_data = cancel_data.into_inner();
 
     // Parse order_id from string to u64
-    let order_id = match parse_order_id(&cancel_data.order_id) {
+    let order_id = match cancel_data.order_id.parse::<u64>() {
         Ok(id) => id,
         Err(e) => {
             error!(
@@ -1096,9 +1109,21 @@ mod tests {
 
     /// An order sent before the link was lost may have executed: it gets a timeout's answer, which
     /// never invites a resend, unlike the 503s.
+    /// A limit bid for 0.5 on market 65538 at 3000.1, as a client sends it.
+    fn bid() -> OrderRequest {
+        OrderRequest {
+            price: "3000.1".parse().unwrap(),
+            volume: "0.5".parse().unwrap(),
+            market_id: 65538,
+            side: Side::Bid,
+            time_in_force: TimeInForce::Gtc,
+            order_type: OrderType::Limit,
+        }
+    }
+
     #[actix_web::test]
     async fn order_whose_link_was_lost_has_an_unknown_outcome_and_no_retry_after() {
-        let response = response_from_outcome(link_lost_outcome(7));
+        let response = response_from_outcome(link_lost_outcome(7, &bid()));
 
         assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
         assert!(
@@ -1114,53 +1139,77 @@ mod tests {
         assert_eq!(
             body["message"],
             "The link to the matching engine was lost after the order was sent, so its outcome is \
-             unknown. Retain client_order_id 7 and check open orders or order history after \
-             asynchronous persistence catches up. Do not retry this idempotency key."
+             unknown. Look for the Bid Limit order on market 65538 at price 3000.1 for size 0.5 in \
+             open orders or order history once persistence catches up. Do not retry this \
+             idempotency key."
         );
     }
 
-    #[actix_web::test]
-    async fn order_endpoints_answer_unavailable_while_the_engine_link_is_down() {
+    /// The order routes for the authenticated `user`, on `engine_link`, with market 65538: price
+    /// step 0.1, size step 0.00000001. No rate limits: the routes' own handlers answer.
+    fn order_app(
+        engine_link: EngineLink,
+        correlation: Arc<CorrelationService>,
+        store: OrderIdempotencyStore,
+        user: uuid::Uuid,
+    ) -> actix_web::App<
+        impl actix_web::dev::ServiceFactory<
+            actix_web::dev::ServiceRequest,
+            Config = (),
+            Response = actix_web::dev::ServiceResponse,
+            Error = actix_web::Error,
+            InitError = (),
+        >,
+    > {
         use actix_web::HttpMessage as _;
         use actix_web::dev::Service as _;
 
-        let Some(store) = live_idempotency_store().await else {
-            return;
-        };
-        // No engine link has been established, and the caller is authenticated.
-        let app = actix_web::test::init_service(
-            actix_web::App::new()
-                .app_data(web::Data::new(EngineLink::new()))
-                .app_data(web::Data::new(Arc::new(CorrelationService::new())))
-                .app_data(web::Data::new(Arc::new(store)))
-                .wrap_fn(|request, service| {
-                    request.extensions_mut().insert(
-                        lib_auth::middleware::jwt_auth::AuthenticatedUser {
-                            user_id: uuid::Uuid::new_v4(),
-                        },
-                    );
-                    service.call(request)
-                })
-                // No rate limits: the routes' own handlers answer.
-                .configure(|cfg| crate::routes::order_route::configure(cfg, |route, _| route)),
-        )
-        .await;
+        let scaling = ScalingCache::with_scales(&[(65538, 2, 10)], &[(2, 100_000_000)]);
+        actix_web::App::new()
+            .app_data(web::Data::new(engine_link))
+            .app_data(web::Data::new(correlation))
+            .app_data(web::Data::new(Arc::new(store)))
+            .app_data(web::Data::new(Arc::new(scaling)))
+            .wrap_fn(move |request, service| {
+                request
+                    .extensions_mut()
+                    .insert(lib_auth::middleware::jwt_auth::AuthenticatedUser { user_id: user });
+                service.call(request)
+            })
+            .configure(|cfg| crate::routes::order_route::configure(cfg, |route, _| route))
+    }
 
-        let order = actix_web::test::TestRequest::post()
+    /// A limit bid for 0.5 on market 65538 at `price`, under `idempotency_key`.
+    fn order_request(idempotency_key: &str, price: &str) -> actix_web::test::TestRequest {
+        actix_web::test::TestRequest::post()
             .uri("/order")
-            .insert_header((
-                IDEMPOTENCY_KEY_HEADER,
-                format!("no-link-{}", generate_client_order_id()),
-            ))
+            .insert_header((IDEMPOTENCY_KEY_HEADER, idempotency_key))
             .set_json(serde_json::json!({
-                "price": 100,
-                "volume": 1,
-                "market_id": 1,
+                "price": price,
+                "volume": "0.5",
+                "market_id": 65538,
                 "side": "Bid",
                 "time_in_force": "Gtc",
                 "order_type": "Limit",
             }))
-            .to_request();
+    }
+
+    #[actix_web::test]
+    async fn order_endpoints_answer_unavailable_while_the_engine_link_is_down() {
+        let Some(store) = live_idempotency_store().await else {
+            return;
+        };
+        // No engine link has been established, and the caller is authenticated.
+        let app = actix_web::test::init_service(order_app(
+            EngineLink::new(),
+            Arc::new(CorrelationService::new()),
+            store,
+            uuid::Uuid::new_v4(),
+        ))
+        .await;
+
+        let order =
+            order_request(&format!("no-link-{}", generate_client_order_id()), "100").to_request();
         let cancel = actix_web::test::TestRequest::post()
             .uri("/cancel")
             .set_json(serde_json::json!({ "order_id": "9", "market_id": 1 }))
@@ -1181,6 +1230,91 @@ mod tests {
         }
     }
 
+    /// Records each command it is sent and answers it at once: placed, as order 9.
+    struct FakeEngine {
+        sent: Mutex<Vec<OrderCommand>>,
+        correlation: Arc<CorrelationService>,
+    }
+
+    impl lib_core::LinkPublisher for FakeEngine {
+        fn is_connected(&self) -> bool {
+            true
+        }
+
+        fn try_send_order_command(&self, command: &OrderCommand) -> Result<(), GatewayError> {
+            self.sent.lock().unwrap().push(command.clone());
+            self.correlation.route_response(OrderCommand {
+                order_id: 9,
+                status: Status::Placed,
+                ..command.clone()
+            });
+            Ok(())
+        }
+    }
+
+    /// The handler's wiring: claim, register, send, wait, record. A retry with the same key
+    /// replays the engine's answer without sending the order again.
+    #[actix_web::test]
+    async fn an_engine_answer_is_recorded_and_a_retry_with_the_same_key_sends_once() {
+        let Some(store) = live_idempotency_store().await else {
+            return;
+        };
+        let correlation = Arc::new(CorrelationService::new());
+        let engine = Arc::new(FakeEngine {
+            sent: Mutex::new(Vec::new()),
+            correlation: correlation.clone(),
+        });
+        let app = actix_web::test::init_service(order_app(
+            EngineLink::connected(engine.clone()),
+            correlation,
+            store,
+            uuid::Uuid::new_v4(),
+        ))
+        .await;
+        let key = format!("answered-{}", generate_client_order_id());
+
+        for _ in 0..2 {
+            let order = order_request(&key, "3000.1").to_request();
+            let response = actix_web::test::call_service(&app, order).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: serde_json::Value = actix_web::test::read_body_json(response).await;
+            assert_eq!(
+                (&body["order_id"], &body["status"]),
+                (&"9".into(), &"Placed".into())
+            );
+        }
+        let sent = engine.sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!((sent[0].price, sent[0].size), (30_001, 50_000_000));
+    }
+
+    #[actix_web::test]
+    async fn place_order_refuses_a_price_off_the_step() {
+        let Some(store) = live_idempotency_store().await else {
+            return;
+        };
+        let app = actix_web::test::init_service(order_app(
+            EngineLink::new(),
+            Arc::new(CorrelationService::new()),
+            store,
+            uuid::Uuid::new_v4(),
+        ))
+        .await;
+
+        let order = order_request(
+            &format!("off-step-{}", generate_client_order_id()),
+            "3000.15",
+        );
+        let response = actix_web::test::call_service(&app, order.to_request()).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = actix_web::test::read_body_json(response).await;
+        assert_eq!(
+            body["message"],
+            "price must be a non-negative multiple of 0.1"
+        );
+    }
+
     #[actix_web::test]
     async fn unusable_publication_is_a_500_naming_the_request() {
         let response = send_failure_response(
@@ -1196,10 +1330,7 @@ mod tests {
                 .headers()
                 .contains_key(actix_web::http::header::RETRY_AFTER)
         );
-        assert_eq!(
-            body_message(response).await,
-            "Failed to send cancel: Failed to send message: publication closed"
-        );
+        assert_eq!(body_message(response).await, "Failed to send cancel");
     }
 
     #[test]
@@ -1407,20 +1538,31 @@ mod tests {
         fn exit(&self, _span: &Id) {}
     }
 
+    /// No read carries client_order_id: the 408 names the order by what open orders and order
+    /// history list, in the client's own units, and never invites a retry.
     #[test]
-    fn outcome_unknown_message_never_invites_a_retry() {
-        let message = outcome_unknown_message("Order was sent but its outcome is unknown.", 42);
+    fn outcome_unknown_message_names_what_the_client_can_check() {
+        let order = OrderRequest {
+            price: "50000.50".parse().unwrap(),
+            volume: "0.25".parse().unwrap(),
+            market_id: 65539,
+            side: Side::Ask,
+            time_in_force: TimeInForce::Ioc,
+            order_type: OrderType::Market,
+        };
+
+        let message = outcome_unknown_message("Order was sent but its outcome is unknown.", &order);
 
         assert_eq!(
             message,
-            "Order was sent but its outcome is unknown. Retain client_order_id 42 and check \
-             open orders or order history after asynchronous persistence catches up. Do not \
-             retry this idempotency key."
+            "Order was sent but its outcome is unknown. Look for the Ask Market order on market \
+             65539 at price 50000.50 for size 0.25 in open orders or order history once \
+             persistence catches up. Do not retry this idempotency key."
         );
     }
 
     /// The store on `REDIS_URL` (default local 6379), or `None` when Redis is unreachable so the
-    /// calling test skips, as lib-core's own idempotency tests do.
+    /// calling test skips, as lib-core's own idempotency tests do; CI (`CI` set) must reach it.
     async fn live_idempotency_store() -> Option<OrderIdempotencyStore> {
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -1428,9 +1570,21 @@ mod tests {
         match redis::aio::ConnectionManager::new(client).await {
             Ok(connection) => Some(OrderIdempotencyStore::new(connection)),
             Err(error) => {
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "CI needs the Redis at {redis_url}: {error}"
+                );
                 eprintln!("Skipping live-Redis test: unable to connect to {redis_url}: {error}");
                 None
             }
+        }
+    }
+
+    /// The nonce of an `Acquired` claim; any other claim fails the test.
+    fn acquired(claim: OrderClaim) -> u64 {
+        match claim {
+            OrderClaim::Acquired { nonce } => nonce,
+            other => panic!("expected Acquired, got {other:?}"),
         }
     }
 
@@ -1452,12 +1606,11 @@ mod tests {
         let user_id = generate_client_order_id();
         let key = format!("busy-answer-{}", generate_client_order_id());
         let client_order_id = generate_client_order_id();
-        assert_eq!(
+        let nonce = acquired(
             store
                 .claim(user_id, &key, "payload", client_order_id)
                 .await
                 .unwrap(),
-            OrderClaim::Acquired
         );
 
         let response = settle_idempotent_order(
@@ -1465,6 +1618,7 @@ mod tests {
             user_id,
             &key,
             "payload",
+            nonce,
             Status::Busy,
             engine_outcome_record(client_order_id, "Busy"),
         )
@@ -1477,12 +1631,11 @@ mod tests {
                 .contains_key(actix_web::http::header::RETRY_AFTER)
         );
         let retry_client_order_id = generate_client_order_id();
-        assert_eq!(
+        let retry_nonce = acquired(
             store
                 .claim(user_id, &key, "payload", retry_client_order_id)
                 .await
                 .unwrap(),
-            OrderClaim::Acquired
         );
         store
             .release(
@@ -1490,6 +1643,7 @@ mod tests {
                 &key,
                 "payload",
                 retry_client_order_id,
+                retry_nonce,
                 ReleaseReason::Busy,
             )
             .await
@@ -1504,10 +1658,12 @@ mod tests {
         let user_id = generate_client_order_id();
         let key = format!("final-answer-{}", generate_client_order_id());
         let client_order_id = generate_client_order_id();
-        store
-            .claim(user_id, &key, "payload", client_order_id)
-            .await
-            .unwrap();
+        let nonce = acquired(
+            store
+                .claim(user_id, &key, "payload", client_order_id)
+                .await
+                .unwrap(),
+        );
         let outcome = engine_outcome_record(client_order_id, "Placed");
 
         let response = settle_idempotent_order(
@@ -1515,6 +1671,7 @@ mod tests {
             user_id,
             &key,
             "payload",
+            nonce,
             Status::Placed,
             outcome.clone(),
         )
@@ -1538,12 +1695,11 @@ mod tests {
         let user_id = generate_client_order_id();
         let key = format!("released-wait-{}", generate_client_order_id());
         let client_order_id = generate_client_order_id();
-        assert_eq!(
+        let nonce = acquired(
             store
                 .claim(user_id, &key, "payload", client_order_id)
                 .await
                 .unwrap(),
-            OrderClaim::Acquired
         );
         // The engine turned the owner away, so the owner releases its claim.
         settle_idempotent_order(
@@ -1551,13 +1707,14 @@ mod tests {
             user_id,
             &key,
             "payload",
+            nonce,
             Status::Busy,
             engine_outcome_record(client_order_id, "Busy"),
         )
         .await;
 
         let response =
-            await_in_flight_order(&store, user_id, &key, "payload", client_order_id).await;
+            await_in_flight_order(&store, user_id, &key, "payload", client_order_id, &bid()).await;
 
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
@@ -1569,12 +1726,11 @@ mod tests {
         );
         assert_eq!(body_message(response).await, ENGINE_BUSY_MESSAGE);
         let retry_client_order_id = generate_client_order_id();
-        assert_eq!(
+        let retry_nonce = acquired(
             store
                 .claim(user_id, &key, "payload", retry_client_order_id)
                 .await
                 .unwrap(),
-            OrderClaim::Acquired
         );
         store
             .release(
@@ -1582,6 +1738,7 @@ mod tests {
                 &key,
                 "payload",
                 retry_client_order_id,
+                retry_nonce,
                 ReleaseReason::Busy,
             )
             .await
@@ -1607,12 +1764,11 @@ mod tests {
         let user_id = generate_client_order_id();
         let key = format!("unavailable-wait-{}", generate_client_order_id());
         let client_order_id = generate_client_order_id();
-        assert_eq!(
+        let nonce = acquired(
             store
                 .claim(user_id, &key, "payload", client_order_id)
                 .await
                 .unwrap(),
-            OrderClaim::Acquired
         );
         // The owner's publish failed because no core is connected, so it releases its claim.
         release_idempotency_claim(
@@ -1621,12 +1777,13 @@ mod tests {
             &key,
             "payload",
             client_order_id,
+            nonce,
             release_reason(&GatewayError::NotConnected),
         )
         .await;
 
         let response =
-            await_in_flight_order(&store, user_id, &key, "payload", client_order_id).await;
+            await_in_flight_order(&store, user_id, &key, "payload", client_order_id, &bid()).await;
 
         assert_engine_unavailable_headers(&response);
         assert_eq!(body_message(response).await, ENGINE_UNAVAILABLE_MESSAGE);
@@ -1644,7 +1801,7 @@ mod tests {
         let client_order_id = generate_client_order_id();
 
         let response =
-            await_in_flight_order(&store, user_id, &key, "payload", client_order_id).await;
+            await_in_flight_order(&store, user_id, &key, "payload", client_order_id, &bid()).await;
 
         assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
         assert!(
@@ -1724,12 +1881,6 @@ mod tests {
         let result = validate_order_inputs(100, 1, TimeInForce::Gtc, &OrderType::Limit);
 
         assert_eq!(result, Ok(()));
-    }
-
-    #[test]
-    fn parses_cancel_order_id() {
-        assert_eq!(parse_order_id("18446744073709551615"), Ok(u64::MAX));
-        assert!(parse_order_id("not-an-order-id").is_err());
     }
 
     #[test]

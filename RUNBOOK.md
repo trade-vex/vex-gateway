@@ -24,7 +24,8 @@
 2. **System Dependencies**
    - PostgreSQL client libraries
    - Redis client libraries
-   - Aeron media driver (for VEX Core communication)
+   - Aeron media driver (for VEX Core communication): `io.aeron.driver.MediaDriver` from
+     `aeron-all-1.49.0.jar`, the jar vex-core's archive image uses
    - [golang-migrate](https://github.com/golang-migrate/migrate) for the database schema
      (see [Read Model](#read-model))
 
@@ -51,8 +52,8 @@ APP_ENV=production ./target/release/gateway
 
 The gateway reads two environment variables by name, and does not read a `.env` file:
 
-- `APP_ENV` (required): `development`, `testing` or `production`. Selects `<APP_ENV>.toml`, whose
-  `environment` key must name the same environment.
+- `APP_ENV` (required): `development` or `production`. Selects `<APP_ENV>.toml` and the
+  environment's rules; an `environment` key in the file, or `APP__ENVIRONMENT`, is ignored.
 - `APP_CONFIG_DIR` (optional): the directory holding that file. The gateway refuses to start
   when it does not name a directory. When it is unset, the gateway uses the nearest `config/`
   directory at or above its working directory.
@@ -66,7 +67,7 @@ vex-core link) lives in that file (see [Configuration](#configuration)), and the
 APP_ENV=production
 APP__SERVER__HOST=0.0.0.0                                  # server.host
 APP__AUTH__SERVER__TRUSTED_PROXIES=10.0.1.0/24,10.0.2.0/24 # auth.server.trusted_proxies
-APP__CORE__AUTH_KEY=<signed 32-bit integer>                # core.auth_key, kept out of the file
+APP__CORE__AUTH_KEY=<openssl rand -hex 32>                 # core.auth_key, kept out of the file
 APP__CLICKHOUSE__PASSWORD=<password>                       # clickhouse.password, kept out of the file
 APP__METRICS__BIND=0.0.0.0:9091                            # metrics.bind
 ```
@@ -81,10 +82,9 @@ Configuration is loaded from TOML files in the `config/` directory:
 
 - `config/development.toml` - Development settings; `scripts/setup_dev.sh` creates it from the
   committed `config/development.toml.example`
-- `config/testing.toml` - Testing settings
 - `config/production.toml` - Production settings
 
-The three environment files are gitignored. The selected environment's file must exist: without
+The two environment files are gitignored. The selected environment's file must exist: without
 it the gateway does not start.
 
 ### Configuration Precedence
@@ -119,21 +119,27 @@ optional setting.
 ### Configuration Validation
 
 The service validates configuration on startup:
-- **Production**: Cannot bind to localhost, cannot use debug logging, port must be > 0,
-  `auth.server.trusted_proxies`, `core.auth_key` and `clickhouse.password` must not be empty, and
-  `metrics.bind` needs a port of its own (not 0, and not `server.port`)
+- **Production**: Cannot bind to a loopback address (127.0.0.0/8, ::1, or a name resolving to
+  one), cannot use debug logging, port must be > 0, `auth.server.trusted_proxies`,
+  `core.auth_key` and `clickhouse.password` must not be empty, and `metrics.bind` needs a port of
+  its own (not 0, and not `server.port`)
 - **Development**: More lenient validation
-- **Testing**: Allows ephemeral ports (port 0)
 - **Every environment**: `auth.oauth.providers` may list only `google`, `github` and `twitter`;
-  another provider stops the gateway at startup, and the error names it. The code lifetimes in
-  `[auth.otp]` must be positive, `clickhouse.user` must not be empty, `clickhouse.database` must
-  be a plain identifier, `metrics.bind` must be an IP address and a port, and every `rate_limit`
-  setting must be greater than 0
+  another provider stops the gateway at startup, and the error names it. A `google` provider needs
+  `issuer_url = "https://accounts.google.com"`, where the gateway discovers Google's endpoints at
+  startup (10 s timeout) and fetches its signing keys at each login. For `twitter` (X), the X
+  developer app must have "Request email from users" enabled (it needs Terms of Service and
+  Privacy Policy URLs in the app settings): without it X sends no confirmed email and every X
+  login is refused with 400 `USER_INFO_FAILED`. The code lifetimes in `[auth.otp]` and
+  `auth.jwt.access_token_ttl_minutes` must be positive, `clickhouse.url` must start with
+  `http://`, `clickhouse.user` must not be empty, `clickhouse.database` must be a
+  plain identifier, `metrics.bind` must be an IP address and a port, and every `rate_limit` setting
+  must be greater than 0
 
 ### OAuth Redirects
 
 Once `auth.oauth.providers` lists a provider, the gateway needs the two URLs a completed OAuth
-login is redirected to, and refuses to start without them:
+login is redirected to, and refuses to start unless both are absolute URLs:
 
 - `auth.oauth.frontend_url_web`: the web frontend page that finishes a browser login (the session
   cookie is already set).
@@ -142,12 +148,19 @@ login is redirected to, and refuses to start without them:
 
 ### Email Codes
 
-`[auth.otp]` sets the codes the gateway emails: `otp_length` digits (6 to 10, checked at load), valid for
+`[auth.otp]` sets how long the six-digit codes the gateway emails are valid:
 `email_verification_expiry_minutes` (signup email verification) or `password_reset_expiry_minutes`
 (password reset). Every key is required, and a lifetime that is not a positive number of minutes
 stops the gateway at startup. Keep the password-reset lifetime short: a reset code takes over the
-account, and its check allows 5 attempts per email per 15 minutes, so a longer-lived code can be
-guessed more often.
+account. After 5 wrong attempts a code is void (the 5th answers 429), and a new one must be
+requested.
+
+`[auth.email]` sends them. On `smtp_port` 465 the connection is TLS from the first byte; on any
+other port (587, the submission port) it starts plain and must upgrade with STARTTLS. The relay's
+certificate is checked against the public CA roots built into the gateway (webpki-roots), not the
+host's trust store, so a relay with a certificate from a private CA is refused. An
+`smtp_host` of `localhost`, `127.0.0.1` or `host.docker.internal` sends without TLS or credentials,
+for a local test server.
 
 ### ClickHouse
 
@@ -156,8 +169,9 @@ endpoints read from. Every key is required, with no default, and `APP__CLICKHOUS
 overrides one:
 
 - `url` (`APP__CLICKHOUSE__URL`): the HTTP endpoint, such as `http://clickhouse.internal:8123`.
-  The gateway's ClickHouse client speaks plain HTTP only, not HTTPS, so this endpoint must be
-  reachable only from the gateway's private network.
+  The gateway's ClickHouse client speaks plain HTTP only, not HTTPS (a URL that does not start
+  with `http://` stops the gateway at startup), so this endpoint must be reachable only from the
+  gateway's private network.
 - `user` (`APP__CLICKHOUSE__USER`): the user the gateway reads as, ClickHouse's gateway login
   ([Read Model](#read-model)). It must not be empty.
 - `password` (`APP__CLICKHOUSE__PASSWORD`): that user's password, never logged. Empty only for a
@@ -203,15 +217,20 @@ Every series is reported from the first scrape, at 0 until its first count:
 - `unknown`: it was sent but no answer came back: the wait timed out (408), or the answer was
   lost (500).
 
+Alert on these, not on vex-core's log, which keeps per-order rejections and busy answers at debug:
+on `rate(vex_gateway_orders_total{outcome="busy"}[1m]) > 0` (the engine's queue is full), and on
+the share of `rejected` among all outcomes.
+
 `method` is one of:
 
 - `jwt`: a bearer token, or a session cookie whose session holds one, refused with 401 (invalid,
   expired or revoked, or an expired or unknown session).
 - `api_key`: an `X-MBX-APIKEY` request refused with a 4xx: an unknown, disabled or expired key, a
-  refused IP or permission, or a bad, stale or replayed signature. A 5xx, such as the replay store
-  being unreachable, is the gateway's fault and is not counted.
-- `login`: a `POST /api/login` refused for its email and password (401). A rate-limited or
-  unverified login is not counted.
+  refused IP or permission, a bad, stale or replayed signature, or a client IP over its refusal
+  budget (429, see [Rate Limits](#rate-limits)). A 5xx, such as Postgres or Redis being
+  unreachable, is the gateway's fault and is not counted.
+- `login`: a `POST /api/login` or `POST /api/verify-email` refused for its email and password
+  (401). A rate-limited or unverified login is not counted.
 
 A request to a protected route without any credentials is not counted.
 
@@ -254,20 +273,27 @@ The routes:
 - `general`, per user: every other authenticated route: `POST /api/cancel`, `/api/balances`,
   `/api/orders/open`, `/api/orders/history`, `/api/portfolio`, `/api/balance-chart`,
   `/api/pnl-chart`, `/api/favorites`, `/api/api-key/*`, `/api/session-check`, `/api/profile`,
-  `/api/logout`, `/api/change-password`, `/api/session/info`, `/api/session/refresh`.
+  `/api/logout`, `/api/change-password`, `/api/session/info`.
 - `general`, per client IP: `GET /api/oauth/providers`, `POST /api/oauth/exchange`,
-  `POST /api/refresh`, `POST /api/session/refresh-tokens`, `POST /api/check-email`,
-  `POST /api/resend-verification`, `POST /api/forgot-password`, `POST /api/verify-reset-otp`,
-  `POST /api/reset-password`.
+  `POST /api/forgot-password`, `POST /api/verify-reset-otp`, `POST /api/reset-password`.
 - Neither budget: the routes with fixed limits of their own per client IP (and some per email or
   username too): `POST /api/signup`, `POST /api/login`, `POST /api/verify-email`,
   `GET /api/oauth/{provider}`, `GET /api/oauth/{provider}/callback`. And `GET /api/health`, the
   load balancer's health check, which reads a flag and touches no store.
 
-The routes that send an email, or check a code sent by email, also have a fixed limit per email
-address, on top of their client IP's `general` budget: `POST /api/forgot-password` and
-`POST /api/resend-verification` 3 an hour, `POST /api/verify-reset-otp` 5 in 15 minutes. Over it
-they answer the same 429.
+`POST /api/forgot-password`, which sends an email, also has a fixed limit per email address on top
+of its client IP's `general` budget: 3 an hour. Over it, it answers the same 429. A code sent by
+email has an attempt cap instead (see [Email Codes](#email-codes)).
+
+`POST /api/change-password` has the login's failure budget, per user: after 5 wrong old passwords
+in 5 minutes it answers 429 until the window ends.
+
+API-key authentication has a budget of its own, a code constant: each client IP (an IPv6 client
+by its /64) may make 60 refused API-key authentications a minute (an unknown, disabled or expired
+key, or a wrong signature). Over that, every API-key request from that IP is refused with the same
+429 and `Retry-After` until the window ends, before the key is looked up. A request whose key and
+signature are valid is never counted, so a working client never reaches it. When Redis cannot
+read the budget, the request gets 503 `API key store is unavailable`.
 
 When Redis cannot count a request (it is unreachable, or full under `noeviction`), the gateway
 refuses it with 503
@@ -280,21 +306,30 @@ windows.
 The `[core]` section holds the Aeron link to vex-core (see `config/development.toml.example`).
 `APP__CORE__<KEY>` overrides a key, such as `APP__CORE__CONTROL_PORT` for `core.control_port`:
 
-- `gateway_id`: this gateway's id at the core, 0-15, unique among the gateways connected to it.
+- `gateway_id`: this gateway's id at the core, 0-15, unique among the gateways connected to it:
+  at most 16 gateways per core.
 - `auth_key`: the handshake credential (below).
 - `address`: vex-core's Aeron address.
 - `port`, `control_port`: vex-core's `core_networking.initial_port` and `initial_control_port`:
   3521 and 3522 for a production core, 40001 and 40002 for vex-core's development and test
   defaults. The two must differ.
-- `context_dir`: this gateway's Aeron media driver directory.
+- `context_dir`: the directory of this gateway's Aeron media driver, the Java `MediaDriver` of
+  `aeron-all-1.49.0.jar` ([Prerequisites](#prerequisites)).
 
-`auth_key` is a signed 32-bit integer equal to vex-core's
-`VEX__GATEWAY_NETWORKING__GATEWAY_AUTHENTICATION_KEY`, shared by every gateway. With
-`APP_ENV=production` the gateway refuses to start when it is empty, as vex-core does. Leave it
-empty only for a core running without authentication
+`auth_key` is an opaque key of at least 32 characters without whitespace (generate it with
+`openssl rand -hex 32`), equal to vex-core's `VEX__CORE_NETWORKING__GATEWAY_AUTHENTICATION_KEY`
+and shared by every gateway. With `APP_ENV=production` the gateway refuses to start when it is
+empty, as vex-core does. Leave it empty only for a core running without authentication
 (`VEX__CORE_NETWORKING__ENABLE_AUTHENTICATION=false`). To keep it out of the file, set
 `APP__CORE__AUTH_KEY`. The key travels in cleartext in the handshake, so keep gateway-to-core traffic
 on a trusted network segment.
+
+The core sends each gateway's replies unicast to the host its handshake came from, on a port of
+vex-core's `base_gateway_port` to `base_gateway_port + 63` (20000-20063 by default). The gateway
+host must accept inbound UDP on those ports from the core, and must not sit behind NAT towards the
+core. Its ephemeral port range (`sysctl net.ipv4.ip_local_port_range`, 32768-60999 by default) must
+not overlap them: a socket bound to port 0 could take the reply port before the gateway's media
+driver binds it. vex-core checks this only on its own host.
 
 The gateway exits at startup when one of these keys is missing, malformed or unknown, or when
 vex-core's own rules reject the combination (`Invalid vex-core link settings in [core]: ...`, for
@@ -337,12 +372,13 @@ Set `auth.server.trusted_proxies` in the TOML file, or `APP__AUTH__SERVER__TRUST
 a request whose TCP peer is in that list is `X-Forwarded-For` read, from the right; the first hop
 that is not itself a trusted proxy is the client. List only proxies that append to
 `X-Forwarded-For`: a listed address that forwards a client's header unchanged lets that client
-choose its own IP. An invalid entry stops the gateway at startup, before it connects to vex-core.
+choose its own IP. An invalid entry, or a /0 range (it would trust every client), stops the
+gateway at startup, before it connects to vex-core.
 The error gives the entry's position in the list, never its value; empty items of a
 comma-separated value are skipped and not counted.
 
 With `APP_ENV=production` the list is required: the gateway refuses to start when it is empty.
-Development and testing default to an empty list, so the TCP peer is the client.
+Development defaults to an empty list, so the TCP peer is the client.
 
 Production runs behind an AWS Application Load Balancer (ALB):
 
@@ -364,8 +400,8 @@ Production runs behind an AWS Application Load Balancer (ALB):
 
 Run Redis with `maxmemory-policy noeviction`. Two kinds of gateway state must never be evicted:
 
-- `token_version:<user_id>` has no TTL and is what revokes a user's outstanding access and refresh
-  tokens after logout, password change or password reset. An `allkeys-*` policy can evict it, which
+- `token_version:<user_id>` has no TTL and is what revokes a user's outstanding access tokens
+  after logout, password change or password reset. An `allkeys-*` policy can evict it, which
   silently makes those tokens valid again.
 - Order idempotency claims (`vex:order-idempotency:*`, 24-hour TTL) stop a retried order from being
   published twice. A `volatile-*` or `allkeys-*` policy can evict a claim early, and the retry is
@@ -390,13 +426,14 @@ openssl rsa -in private_key.pem -pubout -out public_key.pem
 
 The gateway's Postgres database holds the gateway's own tables (`users`, `api_keys`,
 `user_favorite_markets`, and `markets` and `assets`, which mirror vex-core's symbol configuration)
-and the `trading` schema: vex-core's Kafka events, which Kafka Connect writes there. The gateway
-may only read `trading`: `GET /api/balances` reads `trading.balances`, and `GET /api/orders/open`
-and `/api/orders/history` read `trading.orders`, as fresh as the connectors' lag. ClickHouse holds
-the same events for the portfolio and balance-chart endpoints, which Kafka Connect writes there
-too; the gateway may only read its views. Redis holds only the gateway's own state (sessions,
-tokens, OTP and OAuth state, rate limits, API-key signatures, order idempotency claims).
-Everything for both lives in `readmodel/`:
+and the `trading` schema: the latest state of vex-core's balances, orders and order books, which
+Kafka Connect writes there from vex-core's Kafka events. The gateway may only read `trading`:
+`GET /api/balances` reads `trading.balances`, and `GET /api/orders/open` and `/api/orders/history`
+read `trading.orders`, as fresh as the connectors' lag. ClickHouse holds every event, the history
+of every topic, for the portfolio and balance-chart endpoints and for ad-hoc and compliance
+queries, which Kafka Connect writes there too; the gateway may only read its views. Redis holds only
+the gateway's own state (sessions, tokens, OTP and OAuth state, rate limits, API-key signatures,
+order idempotency claims). Everything for both lives in `readmodel/`:
 
 - `migrations/postgres/`, `migrations/clickhouse/`: the schemas, as forward-only plain SQL
   migrations for golang-migrate.
@@ -408,26 +445,26 @@ Everything for both lives in `readmodel/`:
   (`connectors/*.json`), and `apply-connectors.sh`.
 - `tests/`: the read model's test stack and tests.
 
-In `trading`, each latest-state table (`balances`, `orders`, `orderbook`) holds one row per key and
-each history table (`balance_events`, `order_events`, `cancel_events`, `trade_events`,
-`deposit_events`, `withdrawal_events`) one row per key and event timestamp (`event_ts`, vex-core's
-`timestamp` in nanoseconds). Every table's `keep_newer` trigger turns the connectors' upserts into
-"newer `event_ts` wins; of two copies of one event, the first stays", so duplicates and events
-delivered out of order change nothing. vex-core's `u64` values are stored with the same bits in
-`BIGINT` columns: read them as `i64` and decode with `as u64`; in SQL, `trading.u64(column)` gives
-the unsigned value.
+In `trading`, each table (`balances`, `orders`, `orderbook`) holds one row per key, with the
+timestamp of its latest event (`event_ts`, vex-core's `timestamp` in nanoseconds). Every table's
+`keep_newer` trigger turns the connectors' upserts into "newer `event_ts` wins; of two copies of
+one event, the first stays", so duplicates and events delivered out of order change nothing.
+vex-core's `u64` values are stored with the same bits in `BIGINT` columns: read them as `i64` and
+decode with `as u64`; in SQL, `trading.u64(column)` gives the unsigned value.
 
 In ClickHouse, each topic has a raw table (`balance_events`, `order_events`, `orderbook_events`,
-`cancel_events`, `trade_events`, `deposit_events`, `withdrawal_events`) whose columns are those of
-the Postgres tables, with every proto integer a `UInt64`, plus `ts`, the time `event_ts` names.
+`cancel_events`, `trade_events`, `deposit_events`, `withdrawal_events`) whose columns are the
+event's proto fields after Flatten, as in Postgres, with every proto integer a `UInt64`, plus `ts`,
+the time `event_ts` names.
 Each is a `ReplacingMergeTree` keyed by the event's key and `event_ts`, which keeps one copy of an
 event, the last one written, once its parts merge; until then the copies are stored too, so read
 the tables through `FINAL`. Materialized views keep each minute's last balance and last trade price
-(`balances_last_per_min`, `market_prices_last_per_min`). The gateway reads only five views, which
-read through `FINAL` and scale vex-core's integers to decimals with the `assets` and `markets` rows
-as the gateway's `ScalingCache` does: `balances_per_minute`, `asset_prices_per_minute`,
-`deposits`, `withdrawals` and `trade_volumes`. Every view and materialized view runs as
-`readmodel_owner`, a user nobody can log in as.
+(`balances_last_per_min`, `market_prices_last_per_min`) and each fill once per user, keyed by user
+(`user_trades`). The gateway reads only five views, which read through `FINAL` and scale
+vex-core's integers to decimals with the `assets` and `markets` rows as the gateway's
+`ScalingCache` does: `balances_per_minute`, `asset_prices_per_minute`, `deposits`, `withdrawals`
+and `trade_volumes`. Every view and materialized view runs as `readmodel_owner`, a user nobody can
+log in as.
 
 ### Bringing Up an Environment
 
@@ -491,8 +528,9 @@ In this order:
    ```
    No migration holds a password: every secret comes from the deploy's secret store.
 4. **Seeds,** on every deploy, from the configuration file vex-core runs with. The Postgres
-   output upserts every configured market and asset and deactivates the others, so applying it
-   again is harmless:
+   output upserts every configured market and asset and keeps the rows of those that left the
+   configuration, since their orders and balances still need their scales, so applying it again
+   is harmless:
    ```bash
    cargo run --release -p readmodel-seeds -- postgres <vex-core config file> \
      | psql "<owner URL>" -v ON_ERROR_STOP=1
@@ -593,12 +631,18 @@ In this order:
 7. **The gateway,** with the gateway login: in Postgres through `auth.database.url`, and in
    ClickHouse through `clickhouse.user` and `clickhouse.password` ([ClickHouse](#clickhouse)).
 
+**Listing a market** is a deploy, in this order: the market (and any new asset) in vex-core's
+configuration file, the seeds from that file (step 4, Postgres and ClickHouse), a restart of
+vex-core, which registers markets only at startup, then a rolling restart of the gateways, which
+load the `markets` and `assets` rows once at startup: they show a market they do not know in raw
+engine integers and refuse its orders with 400 `unknown market`.
+
 ### Read Model Roles
 
 | Role | May |
 |---|---|
 | `readmodel_connect` | `SELECT`, `INSERT` and `UPDATE` on every `trading` table (an upsert needs all three). Nothing else. |
-| `readmodel_gateway` | `SELECT` on every `trading` table, so Postgres denies the gateway any write to it. `SELECT`, `INSERT`, `UPDATE` on `users` and `api_keys`; `SELECT`, `INSERT`, `DELETE` on `user_favorite_markets`; `SELECT` on `markets` and `assets`. |
+| `readmodel_gateway` | `SELECT` on every `trading` table, so Postgres denies the gateway any write to it. `SELECT`, `INSERT`, `UPDATE` on `users`; `SELECT`, `INSERT`, `UPDATE`, `DELETE` on `api_keys`; `SELECT`, `INSERT`, `DELETE` on `user_favorite_markets`; `SELECT` on `markets` and `assets`. |
 
 Only the owner runs migrations and seeds, and only the owner creates objects, in schema `public`
 too.
@@ -609,7 +653,7 @@ In ClickHouse:
 |---|---|
 | `readmodel_connect` (role) | `INSERT` into the seven raw tables, which also lets the sink describe them. Nothing else. |
 | `readmodel_gateway` (role) | `SELECT` on the five views. Nothing else: every read the gateway makes goes through `FINAL` and is scaled. |
-| `readmodel_owner` (user) | Owns every view and materialized view, which run with its privileges (`SQL SECURITY DEFINER`): `SELECT` on the tables they read, `INSERT` into the per-minute tables. The deploy creates it; the migrations set its `HOST NONE`, so nobody can log in as it. |
+| `readmodel_owner` (user) | Owns every view and materialized view, which run with its privileges (`SQL SECURITY DEFINER`): `SELECT` on the tables they read, `INSERT` into the per-minute tables and `user_trades`. The deploy creates it; the migrations set its `HOST NONE`, so nobody can log in as it. |
 
 Roles and users belong to the server, not to a database: migrating a second database on the same
 server grants the same roles on its tables, so a login holding `readmodel_gateway` reads the views
@@ -677,6 +721,19 @@ short (`lock_timeout`, `CREATE INDEX CONCURRENTLY`).
 `connector-task-metrics` status), and consumer lag of the groups `connect-<connector name>`.
 Readers of `trading` are as fresh as that lag.
 
+**Throughput:** the Postgres connectors are sized for 10,000 rows/s per topic sustained, an
+engineering assumption (a venue at about 5,000 orders/s at peak), not a product number; bursts
+above it wait in Kafka as lag. Each task upserted about 11,000 rows/s in the test stack (500
+upserts in at most 46 ms per write), so `tasks.max` 3 holds about three times the target. When
+`kafka_consumergroup_lag{group=~"connect-pg-.*"}` grows for more than a few minutes at or below
+the target, repeat that measurement, then set that connector's `tasks.max` to its topic's
+partition count (`balances` and `orders` 12, `orderbook` 6) and size Postgres' connections for
+the extra writers. The ClickHouse connector inserts one topic-partition after another, and each
+insert waits for ClickHouse to flush its asynchronous buffer (`clickhouseSettings`; about 60 ms
+measured, at most 200 ms), so a task writes at most `max.poll.records` (500) rows per wait: about
+8,000 rows/s, 2,500 at worst. When `kafka_consumergroup_lag{group="connect-clickhouse"}` grows while
+the `connect-pg-*` groups keep up, raise its `tasks.max`, up to 54 (its seven topics' partitions).
+
 **Recovery:** a task that is still retrying carries on once the cause is fixed. For a failed one,
 read its `trace` in `GET /connectors/<name>/status`, fix the cause, then restart the connector
 with all its tasks; they resume from the record that failed:
@@ -718,8 +775,9 @@ certificate or `server`; restart the connector if its tasks failed.
 ### Schema Changes
 
 - A migration is a new file, `<next number>_<name>.up.sql`. Never edit one that has been applied.
-- A new `trading.proto` field needs its column, in Postgres and in its ClickHouse raw table,
-  deployed before the vex-core that publishes it.
+- A new `trading.proto` field needs its column in its ClickHouse raw table, and for `balances`,
+  `orders` and `orderbook` in its Postgres table too, deployed before the vex-core that publishes
+  it.
 - A new `trading` table needs its `keep_newer` trigger, its grants to `readmodel_connect` and
   `readmodel_gateway`, and a connector file.
 - A new ClickHouse view states `DEFINER = readmodel_owner SQL SECURITY DEFINER`, reads its tables
@@ -731,7 +789,7 @@ certificate or `server`; restart the connector if its tasks failed.
   stack with the vex-core rev `Cargo.lock` pins, its topics from that rev's
   `deploy/kafka/topics.toml`; CI runs it (the "Read model" job, which keeps the images' layers in
   the GitHub Actions cache) on pushes to `main` and `develop` and on pull requests that change
-  `readmodel/`, `Cargo.lock`, the gateway's repository or model code, or `ci.yml`.
+  `readmodel/`, `Cargo.lock` or `ci.yml` (it builds no gateway crate).
 - After re-pinning vex-core, `cargo test -p readmodel-seeds` fails if its `config.dev.yaml` changed;
   regenerate the development seeds with
   `cargo run -p readmodel-seeds -- postgres <vex-core checkout>/config.dev.yaml > readmodel/seeds/development.sql`
@@ -876,6 +934,9 @@ ping <core.address>
 - `Connection rejected: Handshake rejected` in every `Could not connect to vex-core; retrying`
   warning, with `handshake_rejected` and `reason=Authentication failed: Invalid credentials` in the
   vex-core log, means `core.auth_key` differs from vex-core's key
+- `Core unavailable, retry after 10 seconds` means the core had no free pair of gateway ports, or
+  could not set up the session's channels (`handshake_setup_failed` in its log). The gateway tries
+  again on its own; after a setup failure the next attempt gets other ports
 - Check Aeron media driver is running
 - Verify network connectivity to VEX Core
 
@@ -894,6 +955,9 @@ grep "timeout" logs/app.log
 - Check VEX Core health and performance
 - Increase timeout (currently 5 seconds hardcoded)
 - Check network latency between gateway and core
+- A 408 `outcome_unknown` also follows vex-core closing this gateway's session because it stopped
+  reading replies for 1 s (`slow_gateway_closed` in the core log); resolve the order from the
+  read model, as the message says
 
 ### Stranded Order Idempotency Claims
 
@@ -911,8 +975,9 @@ a `503` for why it was released (busy, with `Retry-After: 1`, or `Matching engin
 with `Retry-After: 5`), and the retry claims the key as usual.
 
 **Remedy**:
-1. Reconcile the returned `client_order_id` against open orders, order history, and gateway/core
-   logs.
+1. Look for the order the 408 message names (side, type, market, price and size) in the user's
+   open orders and order history, and for its `client_order_id` in the gateway and core logs:
+   no read returns `client_order_id`.
 2. Only after confirming that the order was never published, remove the exact stranded claim:
    ```bash
    redis-cli -u "<auth.redis.url>" DEL "vex:order-idempotency:<user_id>:<key>"
@@ -1001,6 +1066,8 @@ grep -i "memory\|oom" logs/app.log
    - User registration/login may fail
    - Balance, open-order and order-history queries will fail: they read the read model
    - API key management will fail
+   - API-key requests get 503 (`API key store is unavailable`) once their key has been out of
+     the gateway's cache for 5 s
    - **Order placement may still work** (if VEX Core is up)
 
 3. **Mitigation**
@@ -1016,15 +1083,14 @@ grep -i "memory\|oom" logs/app.log
    ```
 
 2. **Service Impact**
-   - Every JWT-authenticated request gets 503 (`service_unavailable`): the token revocation
-     checks read Redis.
-   - Signed API-key requests get 503 (`Signature replay protection failed`): their signatures
-     are recorded in Redis against replay.
+   - Every JWT-authenticated request, session cookies included, gets 503 (`service_unavailable`):
+     the token revocation checks and the sessions read Redis. No one is logged out by it.
+   - Every API-key request gets 503 (`API key store is unavailable`): each client IP's budget
+     of refused API-key authentications, and every signature (against replay), are kept in Redis.
    - **Order placement fails**: every order's idempotency claim is kept in Redis, so nothing is
      sent to the engine. An order that gets past authentication is answered 503 (`Order was not
      sent because idempotency storage is unavailable`).
    - OAuth flows will fail (state storage)
-   - Session refresh may fail
 
 3. **Mitigation**
    - Restart Redis
@@ -1050,8 +1116,8 @@ grep -i "memory\|oom" logs/app.log
      cleanly. Until then requests can still time out (408) or get the busy 503. The requests still
      waiting for the core's answer when the link is lost fail at once: a cancel with the
      unavailable 503, an order with the 408 `outcome_unknown` of a timeout. That order was sent
-     and may have executed, so it is recorded under its idempotency key; reconcile its
-     `client_order_id` as for any 408, and do not retry the key.
+     and may have executed, so it is recorded under its idempotency key; as for any 408, look for
+     the order its message names in open orders and order history, and do not retry the key.
    - Everything else keeps working: login, sessions, balances, order history and the other user
      data, and API-key management. `GET /api/health` stays 200.
    - `GET /api/ready` returns 503 `engine_link: not connected to vex-core` until the gateway is
@@ -1106,12 +1172,19 @@ grep -i "memory\|oom" logs/app.log
 
 - `GET /api/health` - Liveness: 200 while the process serves
 - `GET /api/ready` - Readiness: 503 while the vex-core link is down
-- `POST /api/signup` - User registration
+- `POST /api/signup` - User registration. A second sign-up for an email whose account is not
+  verified yet replaces that sign-up and sends a new code; a verified email answers 409.
+- `POST /api/verify-email` - Takes the email, the password chosen at sign-up and the emailed code.
+  An unknown or already verified email and a wrong password all get the login's 401
 - `POST /api/login` - User login
-- `POST /api/refresh` - Refresh JWT token
 - `GET /api/oauth/providers` - List OAuth providers
 - `GET /api/oauth/{provider}` - Initiate OAuth flow
-- `GET /api/oauth/{provider}/callback` - OAuth callback
+- `GET /api/oauth/{provider}/callback` - OAuth callback. Refused with 403 `EMAIL_NOT_VERIFIED`
+  when the provider has not verified the email or the account cannot log in, and with 409
+  `EMAIL_EXISTS` when a verified account already holds the email; a provider-verified email
+  replaces a password sign-up that was never verified. A login cancelled at the provider (an
+  `error`, or no `code`) is redirected to `frontend_url_web` (`frontend_url_app` without the
+  browser's state cookie) with `?error=oauth_cancelled`
 
 ### Protected Endpoints (Requires Authentication)
 
@@ -1137,8 +1210,22 @@ grep -i "memory\|oom" logs/app.log
 - `DELETE /api/api-key/{id}` - Delete API key
 - `PATCH /api/api-key/{id}/toggle` - Enable/disable API key
 
+A key holds the permissions `trade`, `user_data` or both, and every API-key request is signed.
+`trade` is needed to place and cancel orders (`POST /api/order`, `POST /api/cancel`); `user_data`
+for every other route an API key may reach (balances, orders, portfolio, charts, favorites,
+`/api/session-check`). `/api/api-key/*`, `/api/logout`, `/api/profile` and `/api/change-password`
+are for the signed-in person only: they answer an API key with 401 whatever its permissions.
+
+Deleting, disabling or changing a key takes effect at once on the gateway replica that served the
+request, and within 5 seconds on the others: each replica caches a key for at most 5 s.
+
 #### Session
-- `GET /api/session/check` - Check session validity
+- `GET /api/session-check` - Check session validity
+- `GET /api/session/info` - The session's user and access token. There are no refresh tokens: the
+  session (30 minutes idle; every login sets its `session_id` cookie for 24 hours) renews its
+  access token when it expires. A Bearer client whose access token expired calls
+  `GET /api/session/info` with its session cookie; the middleware renews the token on that call
+  and the response carries the new one.
 
 ### Authentication Methods
 
@@ -1176,21 +1263,27 @@ curl -X POST http://localhost:8081/api/order \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: <unique-logical-order-key>" \
-  -d '{"price": 5000000, "volume": 100, "market_id": 1, "side": "Bid", "time_in_force": "Gtc", "order_type": "Limit"}'
+  -d '{"price": "50000.5", "volume": "0.25", "market_id": 65538, "side": "Bid", "time_in_force": "Gtc", "order_type": "Limit"}'
 ```
 
 The body:
 
 ```json
 {
-  "price": 5000000,
-  "volume": 100,
-  "market_id": 1,
+  "price": "50000.5",
+  "volume": "0.25",
+  "market_id": 65538,
   "side": "Bid",
   "time_in_force": "Gtc",
   "order_type": "Limit"
 }
 ```
+
+`price` (quote asset per base asset) and `volume` (base asset) are decimal strings in the units the
+balance and order reads return; JSON numbers are refused. The gateway converts them to the
+engine's integers with the market's scales from the read model (`markets.quote_scale_k`, the base
+asset's `assets.native_scale`). An unknown market, or a value that is not a multiple of the
+market's price step or the asset's smallest unit, gets 400 with a message naming the step.
 
 ### Order Response Format
 

@@ -7,7 +7,7 @@ use lib_core::{
     OrderStore, OrdersHistoryListResponse, OrdersListResponse, ToggleFavoriteMarketRequest,
     UserBalanceResponse, UserBalanceStore,
 };
-use lib_core::{PnlResolution, PortfolioRepository, TradingRepository};
+use lib_core::{PnlResolution, PortfolioRepository, TradingError, TradingRepository};
 use lib_utils::{AuthenticatedUserId, uuid_to_u64};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -42,7 +42,7 @@ use std::sync::Arc;
 ///       "available": 1000000,
 ///       "locked": 50000,
 ///       "total": 1050000,
-///       "timestamp": 1697452800000000
+///       "timestamp": "1697452800000000000"
 ///     },
 ///     {
 ///       "user_id": 123456,
@@ -50,7 +50,7 @@ use std::sync::Arc;
 ///       "available": 5000000,
 ///       "locked": 100000,
 ///       "total": 5100000,
-///       "timestamp": 1697452800000000
+///       "timestamp": "1697452800000000000"
 ///     }
 ///   ],
 ///   "total_assets": 2
@@ -94,7 +94,7 @@ pub async fn get_balances(
             tracing::error!("failed to get user balances: {}", e);
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "failed to retrieve balances",
-                "message": "An internal error occurred. Please try again later."
+                "message": INTERNAL_ERROR_MESSAGE
             })))
         }
     }
@@ -137,13 +137,11 @@ pub async fn get_balances(
 ///       "price": 5000000,
 ///       "size": 100,
 ///       "side": "Bid",
-///       "timestamp": 1697452800000000
+///       "timestamp": "1697452800000000000"
 ///     }
 ///   ],
-///   "total": 2,
 ///   "page": 1,
 ///   "limit": 20,
-///   "total_pages": 1,
 ///   "has_next": false,
 ///   "has_prev": false
 /// }
@@ -163,15 +161,12 @@ pub async fn get_balances(
 ///
 /// # Order States
 /// Only returns orders in "open" states:
-/// - Placed - Order placed but not yet processed
-/// - Pending - Order submitted but not yet processed
-/// - PartiallyFilled - Order partially executed
-/// - Processing - Order being matched
+/// - Placed - Order resting on the book
+/// - PartiallyFilled - Order partially executed, unless immediate-or-cancel
 ///
 /// Excludes:
 /// - Filled - Completely executed orders
 /// - Cancelled - User-cancelled orders
-/// - Rejected - Orders rejected by matching engine
 #[derive(Debug, Deserialize)]
 pub struct OrdersQuery {
     pub page: Option<usize>,
@@ -194,46 +189,27 @@ pub async fn get_open_orders(
     let page = query.page.unwrap_or(1).clamp(1, MAX_PAGE);
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
     let offset = (page as u64).saturating_sub(1).saturating_mul(limit as u64);
-    let limit_u64 = limit as u64;
 
-    // Get total count for pagination metadata
-    let total_count = match trading_repo
-        .count_open_orders(user_id, query.market_id)
-        .await
-    {
-        Ok(count) => count as usize,
-        Err(e) => {
-            tracing::error!("failed to count open orders for user_id {}: {}", user_id, e);
-            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "failed to retrieve open orders",
-                "message": "An internal error occurred. Please try again later."
-            })));
-        }
-    };
-
+    // One row more than the page says whether a next page exists, without counting the rest.
     match trading_repo
-        .get_open_orders_paginated(user_id, offset, limit_u64, query.market_id)
+        .get_open_orders_paginated(user_id, offset, limit as u64 + 1, query.market_id)
         .await
     {
-        Ok(orders) => {
+        Ok(mut orders) => {
+            let has_next = orders.len() > limit && page < MAX_PAGE;
+            orders.truncate(limit);
             // order_store descales them
             let order_responses: Vec<OrderResponse> = orders
                 .into_iter()
                 .filter_map(|order| order_store.to_response(order))
                 .collect();
 
-            let total_pages = total_count.div_ceil(limit);
-            let has_next = page < total_pages && page < MAX_PAGE;
-            let has_prev = page > 1;
-
             let response = OrdersListResponse {
                 orders: order_responses,
-                total: total_count,
                 page,
                 limit,
-                total_pages,
                 has_next,
-                has_prev,
+                has_prev: page > 1,
             };
 
             Ok(HttpResponse::Ok().json(response))
@@ -242,7 +218,7 @@ pub async fn get_open_orders(
             tracing::error!("failed to get open orders for user_id {}: {}", user_id, e);
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "failed to retrieve open orders",
-                "message": "An internal error occurred. Please try again later."
+                "message": INTERNAL_ERROR_MESSAGE
             })))
         }
     }
@@ -286,15 +262,13 @@ pub async fn get_open_orders(
 ///       "size": 100,
 ///       "filled": 100,
 ///       "side": "Bid",
-///       "timestamp": 1697452800000000,
+///       "timestamp": "1697452800000000000",
 ///       "time_in_force": "GTC",
 ///       "status": "Filled"
 ///     }
 ///   ],
-///   "total": 3,
 ///   "page": 1,
 ///   "limit": 20,
-///   "total_pages": 1,
 ///   "has_next": false,
 ///   "has_prev": false
 /// }
@@ -329,50 +303,27 @@ pub async fn get_order_history(
     let page = query.page.unwrap_or(1).clamp(1, MAX_PAGE);
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
     let offset = (page as u64).saturating_sub(1).saturating_mul(limit as u64);
-    let limit_u64 = limit as u64;
 
-    // Get total count for pagination metadata
-    let total_count = match trading_repo
-        .count_order_history(user_id, query.market_id)
-        .await
-    {
-        Ok(count) => count as usize,
-        Err(e) => {
-            tracing::error!(
-                "failed to count order history for user_id {}: {}",
-                user_id,
-                e
-            );
-            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "failed to retrieve order history",
-                "message": "An internal error occurred. Please try again later."
-            })));
-        }
-    };
-
+    // One row more than the page says whether a next page exists, without counting the rest.
     match trading_repo
-        .get_order_history_paginated(user_id, offset, limit_u64, query.market_id)
+        .get_order_history_paginated(user_id, offset, limit as u64 + 1, query.market_id)
         .await
     {
-        Ok(orders) => {
+        Ok(mut orders) => {
+            let has_next = orders.len() > limit && page < MAX_PAGE;
+            orders.truncate(limit);
             // order_store descales them
             let order_responses: Vec<OrderHistoryResponse> = orders
                 .into_iter()
                 .filter_map(|order| order_store.to_history_response(order))
                 .collect();
 
-            let total_pages = total_count.div_ceil(limit);
-            let has_next = page < total_pages && page < MAX_PAGE;
-            let has_prev = page > 1;
-
             let response = OrdersHistoryListResponse {
                 orders: order_responses,
-                total: total_count,
                 page,
                 limit,
-                total_pages,
                 has_next,
-                has_prev,
+                has_prev: page > 1,
             };
 
             Ok(HttpResponse::Ok().json(response))
@@ -381,7 +332,7 @@ pub async fn get_order_history(
             tracing::error!("failed to get order history for user_id {}: {}", user_id, e);
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "failed to retrieve order history",
-                "message": "An internal error occurred. Please try again later."
+                "message": INTERNAL_ERROR_MESSAGE
             })))
         }
     }
@@ -405,10 +356,11 @@ pub async fn get_order_history(
 /// - `balance` (now): last ASOF-valued equity at or before current time
 /// - `balance_24h_ago`: last ASOF-valued equity at or before now - 24h
 /// - `pnl_7d`: `equity(now) - equity(now - 7d) - cashflow(7d)`, each flow valued at its asset's
-///   ASOF price (the latest price when there is none at or before the flow)
-/// - `max_drawdown_1m`: max peak-to-trough drawdown of ASOF-valued equity over last 30d
-/// - `volume_24h`: sum of `trade_volumes.volume`, each fill's price times size in its quote asset,
-///   for `ts in [now-24h, now]`
+///   ASOF price in its minute (zero before the asset's first trade, as equity values it)
+/// - `max_drawdown_1m`: peak-to-trough decline over equity net of deposits and withdrawals in the
+///   last 30 days
+/// - `volume_24h`: sum of `trade_volumes.volume`, each fill's price times size, of the user's fills
+///   in markets quoted in USD for `ts in [now-24h, now]`
 ///
 /// The handler is backend-agnostic and uses the injected `PortfolioRepository` which is
 /// implemented against ClickHouse in production.
@@ -680,17 +632,10 @@ pub async fn get_favorite_markets(
 
     match trading_repo.get_user_favorite_markets(user_id).await {
         Ok(favorites) => {
+            // Stored with the same bits in an INTEGER (schema: markets.market_id).
             let market_ids: Vec<u32> = favorites
                 .into_iter()
-                .filter_map(|fav| {
-                    u32::try_from(fav.market_id).ok().or_else(|| {
-                        tracing::warn!(
-                            market_id = fav.market_id,
-                            "Invalid market_id (negative value), skipping"
-                        );
-                        None
-                    })
-                })
+                .map(|fav| fav.market_id as u32)
                 .collect();
 
             let response = FavoriteMarketsListResponse { market_ids };
@@ -701,7 +646,7 @@ pub async fn get_favorite_markets(
             tracing::error!("failed to get favorite markets: {}", e);
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "failed to retrieve favorite markets",
-                "message": "An internal error occurred. Please try again later."
+                "message": INTERNAL_ERROR_MESSAGE
             })))
         }
     }
@@ -753,6 +698,14 @@ pub async fn get_favorite_markets(
 /// }
 /// ```
 ///
+/// # Example Error Response (404), for a market the read model does not list
+/// ```json
+/// {
+///   "error": "unknown market",
+///   "market_id": 4000000000
+/// }
+/// ```
+///
 /// # Example Error Response (500)
 /// ```json
 /// {
@@ -771,7 +724,6 @@ pub async fn toggle_favorite_market(
     let user_id = uuid_to_u64(user.0);
     let market_id = request.market_id;
 
-    // Use atomic toggle operation to prevent race conditions
     match trading_repo
         .toggle_favorite_market(user_id, market_id)
         .await
@@ -784,11 +736,17 @@ pub async fn toggle_favorite_market(
                 "market_id": market_id
             })))
         }
+        Err(TradingError::UnknownMarket(_)) => {
+            Ok(HttpResponse::NotFound().json(serde_json::json!({
+                "error": "unknown market",
+                "market_id": market_id
+            })))
+        }
         Err(e) => {
             tracing::error!("failed to toggle favorite market: {}", e);
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "failed to toggle favorite market",
-                "message": "An internal error occurred. Please try again later."
+                "message": INTERNAL_ERROR_MESSAGE
             })))
         }
     }

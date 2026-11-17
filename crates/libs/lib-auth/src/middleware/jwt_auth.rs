@@ -1,3 +1,6 @@
+use crate::dto::jwt_response_dto::AppClaims;
+use crate::error::auth_error::AuthError;
+use crate::service::token_service::{blacklist_key, token_version_key};
 use actix_web::http::header::{AUTHORIZATION, HeaderValue};
 use actix_web::{
     Error, HttpMessage, HttpResponse,
@@ -16,20 +19,21 @@ use std::rc::Rc;
 use std::sync::Arc;
 use uuid::Uuid;
 
-async fn refreshed_token_is_revoked(
+/// The revocation rule, the one every token passes before its request is served: its id was
+/// blacklisted (logout), or the user's token version moved past the token's (logout, password
+/// change or reset).
+async fn token_is_revoked(
     conn: &mut ConnectionManager,
     user_id: Uuid,
     jti: &str,
     token_version: u64,
 ) -> redis::RedisResult<bool> {
-    if conn.exists::<_, bool>(format!("blacklist:{}", jti)).await? {
-        return Ok(true);
-    }
-
-    let stored_version: Option<u64> = conn
-        .get(crate::service::token_service::token_version_key(user_id))
+    let (blacklisted, stored_version): (bool, Option<u64>) = redis::pipe()
+        .exists(blacklist_key(jti))
+        .get(token_version_key(user_id))
+        .query_async(conn)
         .await?;
-    Ok(token_version < stored_version.unwrap_or_default())
+    Ok(blacklisted || token_version < stored_version.unwrap_or_default())
 }
 
 /// Refuses the request's token with a 401 carrying `code` and `message`, and counts it as a JWT
@@ -64,21 +68,17 @@ pub fn service_unavailable(message: &str) -> HttpResponse {
     }))
 }
 
+/// Refuses the request with 503 because Redis failed: a store error is not the caller's fault,
+/// so it neither logs the caller out nor revokes its token.
+fn unavailable(req: ServiceRequest) -> Result<ServiceResponse<BoxBody>, Error> {
+    Ok(req.into_response(service_unavailable(
+        "Authentication service temporarily unavailable",
+    )))
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AuthenticatedUser {
     pub user_id: Uuid,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct JwtClaims {
-    pub sub: String, // user_id
-    exp: usize,
-    iat: usize,
-    iss: String,
-    aud: String,
-    jti: String,
-    pwd: i64, // password changed timestamp
-    token_version: u64,
 }
 
 #[derive(Clone)]
@@ -231,12 +231,12 @@ where
             validation.set_issuer(&[issuer]);
             validation.set_audience(&[audience]);
 
-            match decode::<JwtClaims>(token, &decoding_key, &validation) {
+            match decode::<AppClaims>(token, &decoding_key, &validation) {
                 Ok(token_data) => {
                     tracing::debug!("JWT middleware: JWT validation successful");
                     if let Ok(user_id) = Uuid::parse_str(&token_data.claims.sub) {
                         let jti = token_data.claims.jti.clone();
-                        let token_exp = token_data.claims.exp as i64;
+                        let token_exp = token_data.claims.exp;
                         let token_version = token_data.claims.token_version;
                         let authenticated_user: AuthenticatedUser = AuthenticatedUser { user_id };
 
@@ -245,50 +245,13 @@ where
 
                         // Clone handles to move into the async block
                         let svc = self.service.clone();
-                        let token_service_opt = self.token_service.clone();
                         let session_service_opt = self.session_service.clone();
 
                         return Box::pin(async move {
                             tracing::debug!("JWT middleware: Checking blacklist for JTI: {}", jti);
                             // Check revocation state BEFORE calling the inner service.
-                            let revocation_result = {
-                                let mut conn = redis_conn.clone();
-                                let blacklist_key = format!("blacklist:{}", jti);
-                                match conn.exists::<_, bool>(&blacklist_key).await {
-                                    Ok(true) => {
-                                        tracing::warn!(
-                                            "Attempted use of blacklisted token with JTI: {}",
-                                            jti
-                                        );
-                                        Ok(true)
-                                    }
-                                    Ok(false) => {
-                                        let version_key =
-                                            crate::service::token_service::token_version_key(
-                                                user_id,
-                                            );
-                                        match conn.get::<_, Option<u64>>(version_key).await {
-                                            Ok(stored_version) => {
-                                                Ok(token_version
-                                                    < stored_version.unwrap_or_default())
-                                            }
-                                            Err(e) => {
-                                                tracing::error!(
-                                                    "Failed to check token version: {}",
-                                                    e
-                                                );
-                                                Err("Redis token version check failed")
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::error!("Failed to check token blacklist: {}", e);
-                                        Err("Redis blacklist check failed")
-                                    }
-                                }
-                            };
-
-                            match revocation_result {
+                            let mut conn = redis_conn.clone();
+                            match token_is_revoked(&mut conn, user_id, &jti, token_version).await {
                                 Ok(true) => {
                                     tracing::warn!(
                                         "JWT middleware: Token is revoked with JTI: {}",
@@ -304,39 +267,32 @@ where
                                     if let Some(cookie) = req.cookie("session_id")
                                         && let Some(session_service) = &session_service_opt
                                     {
-                                        match session_service.refresh_session(cookie.value()).await
+                                        match session_service
+                                            .refresh_session(cookie.value(), user_id)
+                                            .await
                                         {
                                             Ok(()) => {
-                                                tracing::debug!(
-                                                    "Session TTL refreshed for session_id={}",
-                                                    cookie.value()
-                                                );
+                                                // Never log the session id: it is a bearer
+                                                // credential (see combined_auth.rs).
+                                                tracing::debug!("Session TTL refreshed");
                                             }
-                                            Err(_) => {
+                                            Err(AuthError::InvalidRequest) => {
                                                 // Session missing → idle-expired: blacklist and 401
                                                 let now = chrono::Utc::now().timestamp();
                                                 if token_exp > now {
                                                     let ttl_secs = (token_exp - now) as u64;
-                                                    if let Some(token_service) = &token_service_opt
+                                                    if let Err(e) = conn
+                                                        .set_ex::<_, _, ()>(
+                                                            blacklist_key(&jti),
+                                                            "1",
+                                                            ttl_secs,
+                                                        )
+                                                        .await
                                                     {
-                                                        if let Err(e) = token_service
-                                                            .blacklist_jti(&jti, ttl_secs)
-                                                            .await
-                                                        {
-                                                            tracing::warn!(
-                                                                "Failed to blacklist JTI on idle-expiry: {}",
-                                                                e
-                                                            );
-                                                        }
-                                                    } else {
-                                                        let mut conn = redis_conn.clone();
-                                                        let _: Result<(), _> = conn
-                                                            .set_ex(
-                                                                format!("blacklist:{}", jti),
-                                                                "1",
-                                                                ttl_secs,
-                                                            )
-                                                            .await;
+                                                        tracing::warn!(
+                                                            "Failed to blacklist JTI on idle-expiry: {}",
+                                                            e
+                                                        );
                                                     }
                                                 }
 
@@ -346,6 +302,13 @@ where
                                                     "Session expired due to inactivity",
                                                 );
                                             }
+                                            Err(e) => {
+                                                tracing::error!(
+                                                    "Failed to refresh session TTL: {}",
+                                                    e
+                                                );
+                                                return unavailable(req);
+                                            }
                                         }
                                     }
 
@@ -353,20 +316,17 @@ where
                                     let res = svc.call(req).await?;
                                     Ok(res.map_into_boxed_body())
                                 }
-                                Err(_) => {
-                                    // Redis failure - fail closed with service unavailable
-                                    let (req, _) = req.into_parts();
-                                    let response = service_unavailable(
-                                        "Authentication service temporarily unavailable",
-                                    );
-                                    Ok(ServiceResponse::new(req, response).map_into_boxed_body())
+                                // Redis failure - fail closed with service unavailable
+                                Err(e) => {
+                                    tracing::error!("Failed to check token revocation: {}", e);
+                                    unavailable(req)
                                 }
                             }
                         });
                     }
                 }
                 Err(e) => {
-                    // Check if token expired and we have auto-refresh enabled
+                    // An expired token is renewed for the session the request carries.
                     if let ErrorKind::ExpiredSignature = *e.kind()
                         && let (Some(token_service), Some(session_service)) =
                             (self.token_service.clone(), self.session_service.clone())
@@ -374,154 +334,142 @@ where
                     {
                         tracing::debug!("JWT middleware: Token expired, attempting auto-refresh");
 
+                        // The signature was valid and only `exp` failed, so the claims are
+                        // trustworthy: the version they carry is the one the session was issued at.
+                        let mut expired = validation.clone();
+                        expired.validate_exp = false;
+                        let old = decode::<AppClaims>(token, &decoding_key, &expired);
                         let svc = self.service.clone();
-                        let decoding_key = self.decoding_key.clone();
-                        let issuer = self.issuer.clone();
-                        let audience = self.audience.clone();
-                        let algorithm = self.algorithm;
-                        let redis_conn = self.redis_conn.clone();
 
                         return Box::pin(async move {
                             let mut req = req;
                             let session_id = cookie.value();
+                            let Ok(old) = old else {
+                                return unauthorized(
+                                    req,
+                                    "invalid_token",
+                                    "Invalid authentication token",
+                                );
+                            };
 
-                            // Get session data
-                            match session_service.get_session(session_id).await {
-                                Ok(session_data) => {
-                                    // Try to refresh tokens
-                                    match token_service
-                                        .refresh_tokens(&session_data.refresh_token)
-                                        .await
-                                    {
-                                        Ok(new_tokens) => {
-                                            // Update session with new tokens
-                                            if let Err(e) = session_service
-                                                .update_session_tokens(
-                                                    session_id,
-                                                    new_tokens.access_token.clone(),
-                                                    new_tokens.refresh_token.clone(),
-                                                )
-                                                .await
-                                            {
-                                                tracing::error!(
-                                                    "Failed to update session tokens: {}",
-                                                    e
-                                                );
-                                                let (req, _) = req.into_parts();
-                                                let response = HttpResponse::InternalServerError()
-                                                    .json(serde_json::json!({
-                                                        "error": {
-                                                            "code": "refresh_failed",
-                                                            "message": "Failed to update session",
-                                                            "status": 500
-                                                        }
-                                                    }));
-                                                return Ok(ServiceResponse::new(req, response)
-                                                    .map_into_boxed_body());
-                                            }
-
-                                            // Validate the new access token
-                                            let mut validation = Validation::new(algorithm);
-                                            validation.set_issuer(&[issuer]);
-                                            validation.set_audience(&[audience]);
-
-                                            match decode::<JwtClaims>(
-                                                &new_tokens.access_token,
-                                                &decoding_key,
-                                                &validation,
-                                            ) {
-                                                Ok(token_data) => {
-                                                    if let Ok(user_id) =
-                                                        Uuid::parse_str(&token_data.claims.sub)
-                                                    {
-                                                        let jti = token_data.claims.jti.clone();
-                                                        let authenticated_user =
-                                                            AuthenticatedUser { user_id };
-                                                        req.extensions_mut()
-                                                            .insert(authenticated_user.clone());
-
-                                                        // Recheck revocation after refresh before forwarding.
-                                                        let mut conn = redis_conn.clone();
-                                                        match refreshed_token_is_revoked(
-                                                            &mut conn,
-                                                            user_id,
-                                                            &jti,
-                                                            token_data.claims.token_version,
-                                                        )
-                                                        .await
-                                                        {
-                                                            Ok(true) => {
-                                                                tracing::warn!(
-                                                                    "Refreshed token is revoked"
-                                                                );
-                                                                return unauthorized(
-                                                                    req,
-                                                                    "token_revoked",
-                                                                    "Token has been revoked",
-                                                                );
-                                                            }
-                                                            Ok(false) => {}
-                                                            Err(e) => {
-                                                                tracing::error!(
-                                                                    "Failed to check refreshed token revocation: {}",
-                                                                    e
-                                                                );
-                                                                let (req, _) = req.into_parts();
-                                                                let response = service_unavailable(
-                                                                    "Authentication service temporarily unavailable",
-                                                                );
-                                                                return Ok(ServiceResponse::new(
-                                                                    req, response,
-                                                                )
-                                                                .map_into_boxed_body());
-                                                            }
-                                                        }
-
-                                                        let bearer = format!(
-                                                            "Bearer {}",
-                                                            new_tokens.access_token
-                                                        );
-                                                        if let Ok(hv) =
-                                                            HeaderValue::from_str(&bearer)
-                                                        {
-                                                            req.headers_mut()
-                                                                .insert(AUTHORIZATION, hv);
-                                                        } else {
-                                                            tracing::warn!(
-                                                                "Failed to set refreshed Authorization header"
-                                                            );
-                                                        }
-
-                                                        tracing::info!(
-                                                            "JWT middleware: Token auto-refreshed successfully; forwarding with updated header"
-                                                        );
-                                                        let res = svc.call(req).await?;
-                                                        return Ok(res.map_into_boxed_body());
-                                                    }
-                                                }
-                                                Err(_) => {
-                                                    tracing::error!(
-                                                        "New access token validation failed after refresh"
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        Err(refresh_err) => {
-                                            tracing::warn!("Token refresh failed: {}", refresh_err);
-                                        }
-                                    }
+                            let session = match session_service.get_session(session_id).await {
+                                Ok(session) if session.user_id.to_string() == old.claims.sub => {
+                                    session
                                 }
-                                Err(_) => {
-                                    tracing::warn!("Session not found for auto-refresh");
+                                Ok(_) | Err(AuthError::InvalidRequest) => {
+                                    return unauthorized(
+                                        req,
+                                        "session_expired",
+                                        "Session expired due to inactivity",
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        "Failed to read the session to renew its token: {}",
+                                        e
+                                    );
+                                    return unavailable(req);
+                                }
+                            };
+
+                            // Requests racing at expiry each mint a token; all of them are valid,
+                            // and the session keeps the last one written.
+                            let new_tokens = match token_service
+                                .mint_tokens_at_version(session.user_id, old.claims.token_version)
+                                .await
+                            {
+                                Ok(tokens) => tokens,
+                                Err(AuthError::TokenRevoked) => {
+                                    return unauthorized(
+                                        req,
+                                        "token_revoked",
+                                        "Token has been revoked",
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to renew the session's token: {}", e);
+                                    return unavailable(req);
+                                }
+                            };
+
+                            if let Err(e) = session_service
+                                .update_session_access_token(
+                                    session_id,
+                                    new_tokens.access_token.clone(),
+                                )
+                                .await
+                            {
+                                tracing::error!("Failed to update session tokens: {}", e);
+                                let (req, _) = req.into_parts();
+                                let response =
+                                    HttpResponse::InternalServerError().json(serde_json::json!({
+                                        "error": {
+                                            "code": "refresh_failed",
+                                            "message": "Failed to update session",
+                                            "status": 500
+                                        }
+                                    }));
+                                return Ok(
+                                    ServiceResponse::new(req, response).map_into_boxed_body()
+                                );
+                            }
+
+                            // Validate the new access token, and recheck revocation before
+                            // forwarding.
+                            let Ok(token_data) = decode::<AppClaims>(
+                                &new_tokens.access_token,
+                                &decoding_key,
+                                &validation,
+                            ) else {
+                                tracing::error!("New access token validation failed after refresh");
+                                return unauthorized(
+                                    req,
+                                    "token_expired",
+                                    "Token has expired and could not be refreshed",
+                                );
+                            };
+                            let mut conn = redis_conn.clone();
+                            match token_is_revoked(
+                                &mut conn,
+                                session.user_id,
+                                &token_data.claims.jti,
+                                token_data.claims.token_version,
+                            )
+                            .await
+                            {
+                                Ok(false) => {}
+                                Ok(true) => {
+                                    tracing::warn!("Refreshed token is revoked");
+                                    return unauthorized(
+                                        req,
+                                        "token_revoked",
+                                        "Token has been revoked",
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        "Failed to check refreshed token revocation: {}",
+                                        e
+                                    );
+                                    return unavailable(req);
                                 }
                             }
 
-                            // If we get here, auto-refresh failed - return expired token error
-                            unauthorized(
-                                req,
-                                "token_expired",
-                                "Token has expired and could not be refreshed",
-                            )
+                            req.extensions_mut().insert(AuthenticatedUser {
+                                user_id: session.user_id,
+                            });
+                            let bearer = format!("Bearer {}", new_tokens.access_token);
+                            if let Ok(hv) = HeaderValue::from_str(&bearer) {
+                                req.headers_mut().insert(AUTHORIZATION, hv);
+                            } else {
+                                tracing::warn!("Failed to set refreshed Authorization header");
+                            }
+
+                            tracing::info!(
+                                "JWT middleware: Token auto-refreshed successfully; forwarding with updated header"
+                            );
+                            let res = svc.call(req).await?;
+                            Ok(res.map_into_boxed_body())
                         });
                     }
 
@@ -621,14 +569,13 @@ mod tests {
             .as_secs();
         let exp = if expired { now - 3600 } else { now + 3600 };
 
-        let claims = JwtClaims {
+        let claims = AppClaims {
             sub: user_id.to_string(),
-            exp: exp as usize,
-            iat: now as usize,
+            exp: exp as i64,
+            iat: now as i64,
             iss: "vex-gateway".to_string(),
             aud: "vex-api".to_string(),
             jti: jti.to_string(),
-            pwd: now as i64, // Use current time as password timestamp for tests
             token_version,
         };
 
@@ -649,7 +596,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            refreshed_token_is_revoked(&mut conn, user_id, "auto-refresh-stale-version", 1)
+            token_is_revoked(&mut conn, user_id, "auto-refresh-stale-version", 1)
                 .await
                 .unwrap()
         );
@@ -815,7 +762,6 @@ mod tests {
                 "iss": "vex-gateway",
                 "aud": "vex-api",
                 "jti": "test-jti-no-version",
-                "pwd": now,
             }),
             &EncodingKey::from_secret("test_secret".as_ref()),
         )

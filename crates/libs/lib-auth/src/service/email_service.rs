@@ -1,6 +1,7 @@
 use lettre::{
-    AsyncSmtpTransport, AsyncTransport, Tokio1Executor, message::header::ContentType,
-    transport::smtp::authentication::Credentials,
+    AsyncSmtpTransport, AsyncTransport, Tokio1Executor,
+    message::header::ContentType,
+    transport::smtp::{SUBMISSIONS_PORT, authentication::Credentials},
 };
 use lib_middleware::rate_limit::{self, Limit};
 use rand::Rng;
@@ -14,6 +15,7 @@ use secrecy::ExposeSecret;
 
 const OTP_KEY_PREFIX: &str = "otp:verification:";
 const PASSWORD_RESET_OTP_PREFIX: &str = "otp:password_reset:";
+const PASSWORD_RESET_ATTEMPT_PREFIX: &str = "otp:password_reset_attempts:";
 const PASSWORD_RESET_TOKEN_PREFIX: &str = "password_reset:";
 const AUTH_RATE_LIMIT_PREFIX: &str = "rate_limit:auth:";
 const LOGIN_INFLIGHT_PREFIX: &str = "auth_rl:login_inflight:";
@@ -23,19 +25,12 @@ const OTP_VERIFY_MAX_ATTEMPTS: u64 = 5;
 const PASSWORD_RESET_RATE_LIMIT_SCOPE: &str = "password_reset";
 const PASSWORD_RESET_MAX_REQUESTS: u64 = 3;
 const PASSWORD_RESET_WINDOW_SECONDS: u64 = 60 * 60;
-const PASSWORD_RESET_OTP_RATE_LIMIT_SCOPE: &str = "password_reset_otp";
-const PASSWORD_RESET_OTP_MAX_REQUESTS: u64 = 5;
-const PASSWORD_RESET_OTP_WINDOW_SECONDS: u64 = 15 * 60;
-const RESEND_VERIFICATION_RATE_LIMIT_SCOPE: &str = "resend_verification";
-const RESEND_VERIFICATION_MAX_REQUESTS: u64 = 3;
-const RESEND_VERIFICATION_WINDOW_SECONDS: u64 = 60 * 60;
 
 #[derive(Clone)]
 pub struct EmailService {
     smtp_transport: AsyncSmtpTransport<Tokio1Executor>,
     conn: ConnectionManager,
     from_email: String,
-    otp_length: usize,
     otp_expiry_minutes: i64,
     password_reset_expiry_minutes: i64,
 }
@@ -51,7 +46,6 @@ impl EmailService {
         tracing::info!("SMTP Port: {}", email_config.smtp_port);
         tracing::info!("SMTP Username: {}", email_config.smtp_username);
         tracing::info!("From Email: {}", email_config.from_email);
-        tracing::info!("OTP Length: {}", otp_config.otp_length);
         tracing::info!(
             "OTP Expiry Minutes: {} (email verification), {} (password reset)",
             otp_config.email_verification_expiry_minutes,
@@ -79,9 +73,14 @@ impl EmailService {
                 .port(email_config.smtp_port)
                 .build()
         } else {
-            // for production SMTP servers, use relay with TLS
             tracing::info!("Configuring SMTP for production with TLS");
-            AsyncSmtpTransport::<Tokio1Executor>::relay(&email_config.smtp_host)
+            // 465 is TLS from the first byte; 587 and others start plain and upgrade with STARTTLS.
+            let builder = if email_config.smtp_port == SUBMISSIONS_PORT {
+                AsyncSmtpTransport::<Tokio1Executor>::relay(&email_config.smtp_host)
+            } else {
+                AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&email_config.smtp_host)
+            };
+            builder
                 .map_err(|e| {
                     tracing::error!(
                         "SMTP relay error for host {}: {}",
@@ -100,7 +99,6 @@ impl EmailService {
             smtp_transport,
             conn,
             from_email: email_config.from_email.clone(),
-            otp_length: otp_config.otp_length,
             otp_expiry_minutes: otp_config.email_verification_expiry_minutes,
             password_reset_expiry_minutes: otp_config.password_reset_expiry_minutes,
         })
@@ -115,175 +113,97 @@ impl EmailService {
         })
     }
 
-    /// Generate a numeric OTP
+    /// A six-digit code: the length the request DTOs accept (`length(min = 6, max = 6)`).
     fn generate_otp(&self) -> String {
-        let mut rng = rand::thread_rng();
-        let mut otp = String::with_capacity(self.otp_length);
-
-        for _ in 0..self.otp_length {
-            let digit = rng.gen_range(0..10);
-            otp.push_str(&digit.to_string());
-        }
-
-        otp
+        format!("{:06}", rand::thread_rng().gen_range(0..1_000_000))
     }
 
-    /// Store OTP in Redis
+    /// Store a verification code for `email`.
     async fn store_otp(&self, email: &str, otp: &str) -> Result<(), AuthError> {
-        tracing::debug!("Storing OTP in Redis for email: {}", email);
-
-        let expiry_seconds_u64 = Self::expiry_seconds(self.otp_expiry_minutes)?;
-
-        tracing::debug!("Getting Redis connection from pool");
-        let mut conn = self.conn.clone();
-
-        let key = format!("{}{}", OTP_KEY_PREFIX, email);
-
-        tracing::debug!("Redis key: {}", key);
-        tracing::debug!(
-            "OTP expiry: {} minutes ({} seconds)",
+        self.store_code(
+            OTP_KEY_PREFIX,
+            OTP_VERIFY_ATTEMPT_PREFIX,
+            email,
+            otp,
             self.otp_expiry_minutes,
-            expiry_seconds_u64
-        );
+        )
+        .await
+    }
 
-        tracing::debug!(
-            "Storing OTP in Redis with key: {} and expiry: {} seconds",
-            key,
-            expiry_seconds_u64
-        );
-        let attempt_key = format!("{}{}", OTP_VERIFY_ATTEMPT_PREFIX, email);
+    /// Store a password-reset code for `email`.
+    async fn store_password_reset_otp(&self, email: &str, otp: &str) -> Result<(), AuthError> {
+        self.store_code(
+            PASSWORD_RESET_OTP_PREFIX,
+            PASSWORD_RESET_ATTEMPT_PREFIX,
+            email,
+            otp,
+            self.password_reset_expiry_minutes,
+        )
+        .await
+    }
+
+    /// Store a code for its lifetime, replacing the last one; a new code starts with no failed
+    /// attempts.
+    async fn store_code(
+        &self,
+        prefix: &str,
+        attempt_prefix: &str,
+        email: &str,
+        otp: &str,
+        minutes: i64,
+    ) -> Result<(), AuthError> {
+        let expiry_seconds = Self::expiry_seconds(minutes)?;
+        let mut conn = self.conn.clone();
         let _: () = redis::pipe()
             .atomic()
-            .set_ex(&key, otp, expiry_seconds_u64)
-            .del(attempt_key)
+            .set_ex(code_key(prefix, email), otp, expiry_seconds)
+            .del(code_key(attempt_prefix, email))
             .query_async(&mut conn)
             .await
-            .map_err(|e| {
-                tracing::error!("Failed to store OTP in Redis: {}", e);
-                AuthError::Redis(format!("Failed to store OTP: {}", e))
-            })?;
-
-        tracing::debug!("OTP stored successfully in Redis");
+            .map_err(|e| AuthError::Redis(format!("Failed to store code: {}", e)))?;
         Ok(())
     }
 
-    /// Send verification email with OTP
-    pub async fn send_verification_email(
-        &self,
-        recipient_email: &str,
-        recipient_name: &str,
-    ) -> Result<(), AuthError> {
-        tracing::info!("Starting verification email send process");
-        tracing::info!("Recipient: {} <{}>", recipient_name, recipient_email);
-
+    /// Store a new verification code for `email` and send it there.
+    pub async fn send_verification_email(&self, email: &str) -> Result<(), AuthError> {
         let otp = self.generate_otp();
-
-        // Store OTP in Redis
-        tracing::debug!("Storing OTP in Redis for email: {}", recipient_email);
-        self.store_otp(recipient_email, &otp).await?;
-        tracing::debug!("OTP stored successfully in Redis");
-
-        let subject = "Verify Your Email";
-        tracing::debug!("Email subject: {}", subject);
-
-        let text_content = format!(
-            r#"Hello {},
-
-Thank you for signing up! Your verification code is:
-
-{}
-
-This code will expire in {} minutes.
-
-If you didn't create an account, please ignore this email.
-
-Best regards,
-The Team"#,
-            recipient_name, otp, self.otp_expiry_minutes
-        );
-
-        let html_content = format!(
-            r#"<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <style>
-        body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-        .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-        .header {{ background-color: #f8f9fa; padding: 20px; text-align: center; }}
-        .content {{ padding: 20px; }}
-        .otp {{ font-size: 32px; font-weight: bold; text-align: center; 
-               padding: 20px; margin: 20px 0; background-color: #f0f0f0; 
-               border-radius: 8px; letter-spacing: 8px; }}
-        .footer {{ text-align: center; padding: 20px; color: #666; font-size: 14px; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h2>Email Verification</h2>
-        </div>
-        <div class="content">
-            <p>Hello {},</p>
-            <p>Thank you for signing up! Please use the verification code below to complete your registration:</p>
-            <div class="otp">{}</div>
-            <p>This code will expire in {} minutes.</p>
-            <p>If you didn't create an account, please ignore this email.</p>
-        </div>
-        <div class="footer">
-            <p>Best regards,<br>The Team</p>
-        </div>
-    </div>
-</body>
-</html>"#,
-            recipient_name, otp, self.otp_expiry_minutes
-        );
-
-        tracing::debug!("Email content prepared, calling send_email");
-        tracing::debug!("Text content length: {} chars", text_content.len());
-        tracing::debug!("HTML content length: {} chars", html_content.len());
-
-        let result = self
-            .send_email(
-                recipient_email,
-                recipient_name,
-                subject,
-                &html_content,
-                &text_content,
-            )
-            .await;
-
-        match &result {
-            Ok(_) => {
-                tracing::info!(
-                    "Verification email sent successfully to: {}",
-                    recipient_email
-                );
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Failed to send verification email to {}: {}",
-                    recipient_email,
-                    e
-                );
-            }
-        }
-
-        result
+        self.store_otp(email, &otp).await?;
+        self.send_code(
+            email,
+            "Verify Your Email",
+            "Email Verification",
+            "Thank you for signing up! Your verification code is:",
+            &otp,
+            self.otp_expiry_minutes,
+        )
+        .await
     }
 
-    /// Send email
+    /// Send `otp` to `recipient_email` in the one code email (`code_email`).
+    async fn send_code(
+        &self,
+        recipient_email: &str,
+        subject: &str,
+        heading: &str,
+        intro: &str,
+        otp: &str,
+        minutes: i64,
+    ) -> Result<(), AuthError> {
+        let (text, html) = code_email(heading, intro, otp, minutes);
+        self.send_email(recipient_email, subject, &html, &text)
+            .await
+    }
+
+    /// Send an email to the bare address: nothing the user typed goes into the mail.
     async fn send_email(
         &self,
         recipient_email: &str,
-        recipient_name: &str,
         subject: &str,
         html_content: &str,
         text_content: &str,
     ) -> Result<(), AuthError> {
         tracing::info!("Building email message");
         tracing::debug!("From: {}", self.from_email);
-        tracing::debug!("To: {} <{}>", recipient_name, recipient_email);
         tracing::debug!("Subject: {}", subject);
 
         let email = lettre::Message::builder()
@@ -291,17 +211,10 @@ The Team"#,
                 tracing::error!("Invalid from email '{}': {}", self.from_email, e);
                 AuthError::InternalError(format!("Invalid from email: {}", e))
             })?)
-            .to(format!("{} <{}>", recipient_name, recipient_email)
-                .parse()
-                .map_err(|e| {
-                    tracing::error!(
-                        "Invalid recipient email '{} <{}>': {}",
-                        recipient_name,
-                        recipient_email,
-                        e
-                    );
-                    AuthError::InternalError(format!("Invalid recipient email: {}", e))
-                })?)
+            .to(recipient_email.parse().map_err(|e| {
+                tracing::error!("Invalid recipient email: {}", e);
+                AuthError::InternalError(format!("Invalid recipient email: {}", e))
+            })?)
             .subject(subject)
             .multipart(
                 lettre::message::MultiPart::alternative()
@@ -373,12 +286,42 @@ The Team"#,
         result.map(|_| ())
     }
 
-    /// Verify OTP
+    /// Check and consume the verification code for `email`.
     pub async fn verify_otp(&self, email: &str, submitted_otp: &str) -> Result<(), AuthError> {
-        let mut conn = self.conn.clone();
+        self.verify_code(
+            OTP_KEY_PREFIX,
+            OTP_VERIFY_ATTEMPT_PREFIX,
+            email,
+            submitted_otp,
+        )
+        .await
+    }
 
-        let key = format!("{}{}", OTP_KEY_PREFIX, email);
-        let attempt_key = format!("{}{}", OTP_VERIFY_ATTEMPT_PREFIX, email);
+    /// Check and consume the password-reset code for `email`.
+    pub async fn verify_password_reset_otp(
+        &self,
+        email: &str,
+        submitted_otp: &str,
+    ) -> Result<(), AuthError> {
+        self.verify_code(
+            PASSWORD_RESET_OTP_PREFIX,
+            PASSWORD_RESET_ATTEMPT_PREFIX,
+            email,
+            submitted_otp,
+        )
+        .await
+    }
+
+    /// One round trip: a matching code is deleted, so it works once; a wrong one counts an
+    /// attempt, and at `OTP_VERIFY_MAX_ATTEMPTS` the code is deleted.
+    async fn verify_code(
+        &self,
+        prefix: &str,
+        attempt_prefix: &str,
+        email: &str,
+        submitted_otp: &str,
+    ) -> Result<(), AuthError> {
+        let mut conn = self.conn.clone();
         let result: (u8, u64, i64) = redis::Script::new(
             r#"
 local otp = redis.call('GET', KEYS[1])
@@ -405,8 +348,8 @@ end
 return {2, attempts, ttl}
 "#,
         )
-        .key(&key)
-        .key(&attempt_key)
+        .key(code_key(prefix, email))
+        .key(code_key(attempt_prefix, email))
         .arg(submitted_otp)
         .arg(OTP_VERIFY_MAX_ATTEMPTS)
         .invoke_async(&mut conn)
@@ -456,33 +399,17 @@ return {2, attempts, ttl}
         max_failures: u64,
         window_seconds: u64,
     ) -> Result<(), AuthError> {
-        let mut conn = self.conn.clone();
         let key = format!(
             "{}login:{}",
             AUTH_RATE_LIMIT_PREFIX,
             identity.trim().to_ascii_lowercase()
         );
-        let result: redis::RedisResult<(u64, i64)> = redis::Script::new(
-            r#"
-local count = tonumber(redis.call('GET', KEYS[1]) or '0')
-local ttl = redis.call('TTL', KEYS[1])
-return {count, ttl}
-"#,
-        )
-        .key(key)
-        .invoke_async(&mut conn)
-        .await;
-        let (count, ttl) = result.map_err(|e| {
-            AuthError::Redis(format!("Failed to check login failure rate limit: {}", e))
-        })?;
+        let limit = Limit {
+            max_requests: max_failures,
+            window_seconds,
+        };
 
-        if count >= max_failures {
-            return Err(AuthError::RateLimited {
-                retry_after_seconds: if ttl > 0 { ttl as u64 } else { window_seconds },
-            });
-        }
-
-        Ok(())
+        Self::rate_limit_result(rate_limit::check(&self.conn, &key, limit).await)
     }
 
     /// Reserve password verification for one request per login principal.
@@ -591,164 +518,6 @@ return count
         }
     }
 
-    /// checking if OTP exists and is not expired
-    pub async fn has_valid_otp(&self, email: &str) -> Result<bool, AuthError> {
-        let mut conn = self.conn.clone();
-
-        let key = format!("{}{}", OTP_KEY_PREFIX, email);
-
-        let stored_otp: Option<String> = conn
-            .get(&key)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to check OTP: {}", e)))?;
-
-        Ok(stored_otp.is_some())
-    }
-
-    /// resend verification email, will send new OTP if expired, keeps existing if valid
-    pub async fn resend_verification_email(
-        &self,
-        recipient_email: &str,
-        recipient_name: &str,
-    ) -> Result<bool, AuthError> {
-        tracing::info!("Starting resend verification email process");
-        tracing::info!("Recipient: {} <{}>", recipient_name, recipient_email);
-
-        // checking if there's already a valid OTP and get it
-        let mut conn = self.conn.clone();
-
-        let key = format!("{}{}", OTP_KEY_PREFIX, recipient_email);
-        let existing_otp: Option<String> = conn
-            .get(&key)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to check existing OTP: {}", e)))?;
-
-        let (otp, is_new_otp) = if let Some(existing_otp) = existing_otp {
-            tracing::info!("Using existing valid OTP for {}", recipient_email);
-            (existing_otp, false)
-        } else {
-            // generating new OTP since the existing one is expired or not exist
-            let new_otp = self.generate_otp();
-
-            // storing new OTP in Redis
-            tracing::debug!("Storing new OTP in Redis for email: {}", recipient_email);
-            self.store_otp(recipient_email, &new_otp).await?;
-            tracing::debug!("New OTP stored successfully in Redis");
-            (new_otp, true)
-        };
-
-        let subject = if is_new_otp {
-            "Verify Your Email - New Code"
-        } else {
-            "Verify Your Email - Resent Code"
-        };
-        tracing::debug!("Email subject: {}", subject);
-
-        let code_description = if is_new_otp {
-            "Your new verification code is:"
-        } else {
-            "Your verification code is:"
-        };
-
-        let text_content = format!(
-            r#"Hello {},
-
-{}
-
-{}
-
-This code will expire in {} minutes.
-
-If you didn't request this code, please ignore this email.
-
-Best regards,
-The Team"#,
-            recipient_name, code_description, otp, self.otp_expiry_minutes
-        );
-
-        let html_content = format!(
-            r#"
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Verify Your Email</title>
-</head>
-<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-    <div style="background: #f8f9fa; padding: 30px; border-radius: 10px; text-align: center;">
-        <h1 style="color: #2c3e50; margin-bottom: 20px;">Verify Your Email</h1>
-        
-        <p style="font-size: 16px; margin-bottom: 30px;">Hello {},</p>
-        
-        <div style="background: #fff; padding: 20px; border-radius: 8px; border: 2px solid #e9ecef; margin: 20px 0;">
-            <p style="font-size: 14px; color: #666; margin-bottom: 10px;">{}</p>
-            <div style="font-size: 32px; font-weight: bold; color: #2c3e50; letter-spacing: 5px; margin: 20px 0;">{}</div>
-        </div>
-        
-        <p style="font-size: 14px; color: #666; margin-bottom: 20px;">
-            This code will expire in <strong>{} minutes</strong>.
-        </p>
-        
-        <p style="font-size: 14px; color: #666;">
-            If you didn't request this code, please ignore this email.
-        </p>
-        
-        <hr style="border: none; border-top: 1px solid #e9ecef; margin: 30px 0;">
-        <p style="font-size: 12px; color: #999; margin: 0;">
-            Best regards,<br>
-            The Team
-        </p>
-    </div>
-</body>
-</html>"#,
-            recipient_name, code_description, otp, self.otp_expiry_minutes
-        );
-
-        tracing::debug!("Sending verification email to: {}", recipient_email);
-        let result = self
-            .send_email(
-                recipient_email,
-                recipient_name,
-                subject,
-                &html_content,
-                &text_content,
-            )
-            .await;
-
-        match result {
-            Ok(_) => {
-                tracing::info!(
-                    "Verification email sent successfully to: {}",
-                    recipient_email
-                );
-                Ok(is_new_otp) // Return whether a new OTP was generated
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Failed to send verification email to {}: {}",
-                    recipient_email,
-                    e
-                );
-                Err(e)
-            }
-        }
-    }
-
-    /// Enforce the verification-code resend limit: every resend sends an email.
-    pub async fn enforce_resend_verification_rate_limit(
-        &self,
-        email: &str,
-    ) -> Result<(), AuthError> {
-        self.enforce_rate_limit(
-            RESEND_VERIFICATION_RATE_LIMIT_SCOPE,
-            email,
-            RESEND_VERIFICATION_MAX_REQUESTS,
-            RESEND_VERIFICATION_WINDOW_SECONDS,
-        )
-        .await
-    }
-
     /// Enforce the existing password-reset request limit.
     pub async fn enforce_password_reset_rate_limit(&self, email: &str) -> Result<(), AuthError> {
         self.enforce_rate_limit(
@@ -760,176 +529,19 @@ The Team"#,
         .await
     }
 
-    /// Enforce the existing password-reset OTP verification limit.
-    async fn enforce_password_reset_otp_rate_limit(&self, email: &str) -> Result<(), AuthError> {
-        self.enforce_rate_limit(
-            PASSWORD_RESET_OTP_RATE_LIMIT_SCOPE,
+    /// Store a new password-reset code for `email` and send it there.
+    pub async fn send_password_reset_otp(&self, email: &str) -> Result<(), AuthError> {
+        let otp = self.generate_otp();
+        self.store_password_reset_otp(email, &otp).await?;
+        self.send_code(
             email,
-            PASSWORD_RESET_OTP_MAX_REQUESTS,
-            PASSWORD_RESET_OTP_WINDOW_SECONDS,
+            "Reset Your Password",
+            "Password Reset",
+            "You requested to reset your password. Your verification code is:",
+            &otp,
+            self.password_reset_expiry_minutes,
         )
         .await
-    }
-
-    /// Store password reset OTP in Redis
-    async fn store_password_reset_otp(&self, email: &str, otp: &str) -> Result<(), AuthError> {
-        let expiry_seconds_u64 = Self::expiry_seconds(self.password_reset_expiry_minutes)?;
-        let mut conn = self.conn.clone();
-
-        let key = format!("{}{}", PASSWORD_RESET_OTP_PREFIX, email);
-
-        let _: () = conn
-            .set_ex(&key, otp, expiry_seconds_u64)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to store password reset OTP: {}", e)))?;
-
-        Ok(())
-    }
-
-    /// Send password reset OTP email
-    pub async fn send_password_reset_otp(
-        &self,
-        recipient_email: &str,
-        recipient_name: &str,
-    ) -> Result<(), AuthError> {
-        tracing::info!("Starting password reset OTP email send process");
-        tracing::info!("Recipient: {} <{}>", recipient_name, recipient_email);
-
-        let otp = self.generate_otp();
-
-        // Store OTP in Redis
-        self.store_password_reset_otp(recipient_email, &otp).await?;
-
-        let subject = "Reset Your Password";
-        let text_content = format!(
-            r#"Hello {},
-
-You requested to reset your password. Your verification code is:
-
-{}
-
-This code will expire in {} minutes.
-
-If you didn't request this, please ignore this email.
-
-Best regards,
-The Team"#,
-            recipient_name, otp, self.password_reset_expiry_minutes
-        );
-
-        let html_content = format!(
-            r#"<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <style>
-        body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-        .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-        .header {{ background-color: #f8f9fa; padding: 20px; text-align: center; }}
-        .content {{ padding: 20px; }}
-        .otp {{ font-size: 32px; font-weight: bold; text-align: center; 
-               padding: 20px; margin: 20px 0; background-color: #f0f0f0; 
-               border-radius: 8px; letter-spacing: 8px; }}
-        .footer {{ text-align: center; padding: 20px; color: #666; font-size: 14px; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h2>Reset Your Password</h2>
-        </div>
-        <div class="content">
-            <p>Hello {},</p>
-            <p>You requested to reset your password. Please use the verification code below:</p>
-            <div class="otp">{}</div>
-            <p>This code will expire in <strong>{} minutes</strong>.</p>
-            <p>If you didn't request this, please ignore this email.</p>
-        </div>
-        <div class="footer">
-            <p>Best regards,<br>The Team</p>
-        </div>
-    </div>
-</body>
-</html>"#,
-            recipient_name, otp, self.password_reset_expiry_minutes
-        );
-
-        let result = self
-            .send_email(
-                recipient_email,
-                recipient_name,
-                subject,
-                &html_content,
-                &text_content,
-            )
-            .await;
-
-        match &result {
-            Ok(_) => {
-                tracing::info!(
-                    "Password reset OTP email sent successfully to: {}",
-                    recipient_email
-                );
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Failed to send password reset OTP email to {}: {}",
-                    recipient_email,
-                    e
-                );
-            }
-        }
-
-        result
-    }
-
-    /// Verify password reset OTP
-    /// Returns Ok(()) if OTP is valid, deletes OTP (one-time use)
-    pub async fn verify_password_reset_otp(
-        &self,
-        email: &str,
-        submitted_otp: &str,
-    ) -> Result<(), AuthError> {
-        self.enforce_password_reset_otp_rate_limit(email).await?;
-
-        let mut conn = self.conn.clone();
-
-        let key = format!("{}{}", PASSWORD_RESET_OTP_PREFIX, email);
-
-        let stored_otp: Option<String> = conn
-            .get(&key)
-            .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get password reset OTP: {}", e)))?;
-
-        match stored_otp {
-            Some(otp) if otp == submitted_otp => {
-                // Delete OTP after successful verification (one-time use)
-                let _: () = conn
-                    .del(&key)
-                    .await
-                    .map_err(|e| AuthError::Redis(format!("Failed to delete OTP: {}", e)))?;
-
-                // Clean up OTP verification rate limit since OTP is no longer valid
-                let rate_limit_key = format!(
-                    "{}{}:{}",
-                    AUTH_RATE_LIMIT_PREFIX,
-                    PASSWORD_RESET_OTP_RATE_LIMIT_SCOPE,
-                    email.trim().to_ascii_lowercase()
-                );
-                let _: () = conn
-                    .del(&rate_limit_key)
-                    .await
-                    .map_err(|e| {
-                        tracing::warn!("Failed to delete OTP verify rate limit: {}", e);
-                        // Don't fail the request if cleanup fails
-                    })
-                    .unwrap_or(());
-
-                Ok(())
-            }
-            Some(_) => Err(AuthError::InvalidOtp),
-            None => Err(AuthError::OtpExpired),
-        }
     }
 
     /// Generate a new password reset token
@@ -944,30 +556,13 @@ The Team"#,
 
         let token_key = format!("{}{}", PASSWORD_RESET_TOKEN_PREFIX, reset_token);
 
-        let user_id_str: Option<String> = conn
-            .get(&token_key)
+        // GETDEL: two requests with the same token cannot both redeem it.
+        let user_id: Option<String> = conn
+            .get_del(&token_key)
             .await
-            .map_err(|e| AuthError::Redis(format!("Failed to get reset token: {}", e)))?;
-
-        match user_id_str {
-            Some(user_id_str) => {
-                // Delete token after validation (one-time use)
-                let _: () = conn.del(&token_key).await.map_err(|e| {
-                    AuthError::Redis(format!("Failed to delete reset token: {}", e))
-                })?;
-
-                // Parse user_id
-                if user_id_str == "pending" {
-                    return Err(AuthError::InvalidResetToken);
-                }
-
-                let user_id =
-                    Uuid::parse_str(&user_id_str).map_err(|_| AuthError::InvalidResetToken)?;
-
-                Ok(user_id)
-            }
-            None => Err(AuthError::ResetTokenExpired),
-        }
+            .map_err(|e| AuthError::Redis(format!("Failed to redeem reset token: {}", e)))?;
+        let user_id = user_id.ok_or(AuthError::ResetTokenExpired)?;
+        Uuid::parse_str(&user_id).map_err(|_| AuthError::InvalidResetToken)
     }
 
     /// Store reset token with user_id
@@ -987,6 +582,36 @@ The Team"#,
 
         Ok(())
     }
+}
+
+/// The Redis key of a code (or its attempt count) for `email`, whatever case it was typed in: the
+/// users table matches emails case-insensitively (CITEXT).
+fn code_key(prefix: &str, email: &str) -> String {
+    format!("{prefix}{}", email.trim().to_lowercase())
+}
+
+/// The text and HTML bodies of a code email, the same for every code the gateway sends.
+fn code_email(heading: &str, intro: &str, otp: &str, minutes: i64) -> (String, String) {
+    let text = format!(
+        "Hello,\n\n{intro}\n\n{otp}\n\nThis code will expire in {minutes} minutes.\n\n\
+         If you didn't request this code, please ignore this email.\n\nBest regards,\nThe Team"
+    );
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+    <h2 style="text-align: center;">{heading}</h2>
+    <p>Hello,</p>
+    <p>{intro}</p>
+    <div style="font-size: 32px; font-weight: bold; letter-spacing: 8px; text-align: center; padding: 20px; margin: 20px 0; background-color: #f0f0f0; border-radius: 8px;">{otp}</div>
+    <p>This code will expire in <strong>{minutes} minutes</strong>.</p>
+    <p>If you didn't request this code, please ignore this email.</p>
+    <p>Best regards,<br>The Team</p>
+</body>
+</html>"#
+    );
+    (text, html)
 }
 
 #[cfg(test)]
@@ -1011,7 +636,6 @@ mod tests {
 
     async fn email_service() -> EmailService {
         email_service_with(&OtpConfig {
-            otp_length: 6,
             email_verification_expiry_minutes: 15,
             password_reset_expiry_minutes: 15,
         })
@@ -1021,7 +645,6 @@ mod tests {
     #[tokio::test]
     async fn each_code_expires_after_its_own_lifetime_setting() {
         let service = email_service_with(&OtpConfig {
-            otp_length: 6,
             email_verification_expiry_minutes: 20,
             password_reset_expiry_minutes: 7,
         })
@@ -1044,6 +667,26 @@ mod tests {
             "{verification_ttl}"
         );
         assert!((7 * 60 - 5..=7 * 60).contains(&reset_ttl), "{reset_ttl}");
+    }
+
+    #[tokio::test]
+    async fn a_code_stored_for_one_spelling_of_the_email_verifies_for_another() {
+        let service = email_service().await;
+        let local = Uuid::new_v4().simple().to_string();
+        let typed_at_signup = format!("{}@Example.COM", local.to_uppercase());
+        let typed_later = format!(" {local}@example.com ");
+
+        service.store_otp(&typed_at_signup, "123456").await.unwrap();
+        service
+            .store_password_reset_otp(&typed_at_signup, "654321")
+            .await
+            .unwrap();
+
+        service.verify_otp(&typed_later, "123456").await.unwrap();
+        service
+            .verify_password_reset_otp(&typed_later, "654321")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1093,6 +736,157 @@ mod tests {
 
         service.store_otp(&email, "654321").await.unwrap();
         service.verify_otp(&email, "654321").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn password_reset_code_works_once_and_dies_at_the_attempt_cap() {
+        let service = email_service().await;
+        let email = format!("{}@example.com", Uuid::new_v4());
+        service
+            .store_password_reset_otp(&email, "123456")
+            .await
+            .unwrap();
+
+        for _ in 0..OTP_VERIFY_MAX_ATTEMPTS - 1 {
+            assert!(matches!(
+                service.verify_password_reset_otp(&email, "000000").await,
+                Err(AuthError::InvalidOtp)
+            ));
+        }
+        assert!(matches!(
+            service.verify_password_reset_otp(&email, "000000").await,
+            Err(AuthError::RateLimited { .. })
+        ));
+        assert!(matches!(
+            service.verify_password_reset_otp(&email, "123456").await,
+            Err(AuthError::OtpExpired)
+        ));
+
+        // A new code starts with a fresh attempt count and works once.
+        service
+            .store_password_reset_otp(&email, "654321")
+            .await
+            .unwrap();
+        service
+            .verify_password_reset_otp(&email, "654321")
+            .await
+            .unwrap();
+        assert!(matches!(
+            service.verify_password_reset_otp(&email, "654321").await,
+            Err(AuthError::OtpExpired)
+        ));
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_redeem_a_reset_code_and_a_reset_token_once() {
+        let service = email_service().await;
+        let email = format!("{}@example.com", Uuid::new_v4());
+        let token = service.generate_reset_token();
+        service
+            .store_password_reset_otp(&email, "123456")
+            .await
+            .unwrap();
+        service
+            .store_reset_token(&token, Uuid::new_v4())
+            .await
+            .unwrap();
+
+        let tasks: Vec<_> = (0..10)
+            .map(|_| {
+                let (service, email, token) = (service.clone(), email.clone(), token.clone());
+                tokio::spawn(async move {
+                    (
+                        service
+                            .verify_password_reset_otp(&email, "123456")
+                            .await
+                            .is_ok(),
+                        service.validate_reset_token(&token).await.is_ok(),
+                    )
+                })
+            })
+            .collect();
+        let (mut codes, mut tokens) = (0, 0);
+        for task in tasks {
+            let (code, token) = task.await.unwrap();
+            codes += usize::from(code);
+            tokens += usize::from(token);
+        }
+
+        assert_eq!((codes, tokens), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn generated_codes_fit_the_requests_that_carry_them() {
+        use crate::dto::auth_request_dto::{VerifyEmailRequest, VerifyResetOtpRequest};
+        use validator::Validate;
+
+        let service = email_service().await;
+        for _ in 0..100 {
+            let otp = service.generate_otp();
+            assert!(otp.bytes().all(|b| b.is_ascii_digit()), "{otp}");
+            let verify = VerifyEmailRequest {
+                email: "user@example.com".to_string(),
+                password: "correct-horse-battery-staple".to_string(),
+                otp: otp.clone(),
+            };
+            let reset = VerifyResetOtpRequest {
+                email: "user@example.com".to_string(),
+                otp,
+            };
+            assert!(verify.validate().is_ok() && reset.validate().is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn smtp_on_a_port_other_than_465_starts_plain_and_upgrades_with_starttls() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // 127.0.0.2 is loopback but not a local-development host: the production transport.
+        // macOS has no 127.0.0.2 without an interface alias; skip there.
+        let Ok(server) = tokio::net::TcpListener::bind("127.0.0.2:0").await else {
+            return;
+        };
+        let config = EmailConfig {
+            smtp_host: "127.0.0.2".to_string(),
+            smtp_port: server.local_addr().unwrap().port(),
+            smtp_username: "test".to_string(),
+            smtp_password: SecretString::new("test".to_string()),
+            from_email: "test@example.com".to_string(),
+        };
+        let otp_config = OtpConfig {
+            email_verification_expiry_minutes: 15,
+            password_reset_expiry_minutes: 15,
+        };
+        let service = EmailService::new(&config, crate::test_redis().await, &otp_config).unwrap();
+        let first_words = tokio::spawn(async move {
+            let (mut socket, _) = server.accept().await.unwrap();
+            socket.write_all(b"220 test ESMTP\r\n").await.unwrap();
+            let mut first = [0; 4];
+            socket.read_exact(&mut first).await.unwrap();
+            first
+        });
+
+        // The send fails once the server hangs up; only what the client said first matters.
+        let _ = service
+            .send_email("user@example.com", "Subject", "<p>html</p>", "text")
+            .await;
+
+        // A STARTTLS client answers the greeting in plain SMTP; an implicit-TLS client would have
+        // opened with a TLS handshake record instead.
+        assert_eq!(&first_words.await.unwrap(), b"EHLO");
+    }
+
+    #[test]
+    fn code_email_carries_the_code_and_its_lifetime() {
+        let (text, html) = code_email("Heading", "Your code is:", "123456", 15);
+
+        for body in [&text, &html] {
+            assert!(body.contains("Your code is:"), "{body}");
+            assert!(body.contains("123456"), "{body}");
+            assert!(body.contains("15 minutes"), "{body}");
+        }
+        assert!(text.starts_with("Hello,\n"), "{text}");
+        assert!(html.contains("<h2 style=\"text-align: center;\">Heading</h2>"));
     }
 
     #[test]

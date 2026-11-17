@@ -1,17 +1,11 @@
 use crate::api_key::error::ApiKeyError;
-use base64::{engine::general_purpose, Engine as _};
-use ed25519_dalek::{Signature, Verifier as Ed25519Verifier, VerifyingKey};
 use hmac::{Hmac, Mac};
-use pkcs8::DecodePublicKey;
-use rsa::{pkcs8::DecodePublicKey as _, Pkcs1v15Sign, PublicKey as RsaPublicKey};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 
 /// Supported signature algorithms
 #[derive(Debug, Clone, PartialEq)]
 pub enum SignatureAlgorithm {
     HmacSha256,
-    RsaSha256,
-    Ed25519,
 }
 
 /// Signature verification for different key types
@@ -35,63 +29,6 @@ impl SignatureVerifier {
 
         // Use the HMAC's built-in verify method
         Ok(mac.verify_slice(&signature_bytes).is_ok())
-    }
-
-    /// Verify RSA signature (base64 encoded) using RSASSA-PKCS1-v1_5 with SHA-256
-    pub fn verify_rsa(
-        payload: &str,
-        signature: &str,
-        public_key_pem: &str,
-    ) -> Result<bool, ApiKeyError> {
-        // Decode the base64 signature
-        let signature_bytes = general_purpose::STANDARD.decode(signature).map_err(|e| {
-            ApiKeyError::InvalidSignature(format!("Failed to decode base64 signature: {}", e))
-        })?;
-
-        // Parse the PEM public key
-        let public_key = RsaPublicKey::from_public_key_pem(public_key_pem).map_err(|e| {
-            ApiKeyError::InvalidSignature(format!("Failed to parse RSA public key: {}", e))
-        })?;
-
-        // Hash the payload with SHA-256
-        let mut hasher = Sha256::new();
-        hasher.update(payload.as_bytes());
-        let hashed = hasher.finalize();
-
-        // Verify using PKCS#1 v1.5 padding with SHA-256. rsa is built on sha2 0.11, so the
-        // padding takes the digest OID from rsa's own sha2 re-export.
-        let padding = Pkcs1v15Sign::new::<rsa::sha2::Sha256>();
-        let verification_result = public_key.verify(padding, &hashed, &signature_bytes);
-
-        Ok(verification_result.is_ok())
-    }
-
-    /// Verify Ed25519 signature (base64 encoded)
-    /// Following the exact Binance specification for Ed25519
-    pub fn verify_ed25519(
-        payload: &str,
-        signature: &str,
-        public_key_pem: &str,
-    ) -> Result<bool, ApiKeyError> {
-        // Decode the base64 signature
-        let signature_bytes = general_purpose::STANDARD.decode(signature).map_err(|e| {
-            ApiKeyError::InvalidSignature(format!("Failed to decode base64 signature: {}", e))
-        })?;
-
-        // Parse the signature
-        let signature = Signature::from_slice(&signature_bytes).map_err(|e| {
-            ApiKeyError::InvalidSignature(format!("Invalid Ed25519 signature format: {}", e))
-        })?;
-
-        // Parse the PEM public key
-        let public_key = VerifyingKey::from_public_key_pem(public_key_pem).map_err(|e| {
-            ApiKeyError::InvalidSignature(format!("Failed to parse Ed25519 public key: {}", e))
-        })?;
-
-        // Verify the signature
-        let verification_result = public_key.verify(payload.as_bytes(), &signature);
-
-        Ok(verification_result.is_ok())
     }
 
     /// Generate HMAC SHA256 signature

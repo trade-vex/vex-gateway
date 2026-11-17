@@ -144,7 +144,8 @@ services:
   core:
     build:
       context: ${CORE_DIR:?}
-      dockerfile: xtask/tests/server.Dockerfile
+      dockerfile: xtask/tests/Dockerfile
+      target: server
     image: vex-readmodel-core:${CORE_REV:?}
     depends_on:
       redpanda-0: {condition: service_healthy}
@@ -153,9 +154,10 @@ services:
       aeron-archive: {condition: service_healthy}
     environment:
       VEX_ENV: development
-      # Set, it binds the core to every interface; it is reached as aeron-archive.
-      VEX_SERVER_HOST: aeron-archive
-      VEX_SERVER_PORT: "3521"
+      # Every interface, as the core is reached as aeron-archive.
+      VEX__CORE_NETWORKING__LOCAL_ADDRESS: 0.0.0.0
+      VEX__CORE_NETWORKING__INITIAL_PORT: "3521"
+      VEX__CORE_NETWORKING__INITIAL_CONTROL_PORT: "3522"
       VEX__KAFKA_BROKER: redpanda-0:9092,redpanda-1:9092,redpanda-2:9092
       VEX__SCHEMA_REGISTRY_URL: http://redpanda-0:8081
       LD_LIBRARY_PATH: /usr/local/lib
@@ -163,10 +165,11 @@ services:
     network_mode: service:aeron-archive
     ipc: service:aeron-archive
     volumes:
-      # The configuration readmodel/seeds/development.sql is generated from.
+      # The configuration readmodel/seeds/development.sql is generated from. Its snapshot_dir is in
+      # the archive's /dev/shm, like the journal it snapshots.
       - ${CORE_DIR:?}/config.dev.yaml:/etc/vex/config.dev.yaml:ro
     healthcheck:
-      test: ["CMD-SHELL", "pgrep -x test_server && test -f /dev/shm/aeron-test-server/cnc.dat"]
+      test: ["CMD-SHELL", "pgrep -x vex-core && test -f /dev/shm/aeron-test-server/cnc.dat"]
       interval: 2s
       timeout: 5s
       retries: 60

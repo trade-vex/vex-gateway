@@ -5,7 +5,6 @@
 
 use actix_web::{dev::Payload, Error as ActixError, FromRequest, HttpMessage, HttpRequest};
 use futures_util::future::{ready, Ready};
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -13,20 +12,8 @@ use lib_auth::middleware::jwt_auth::AuthenticatedUser;
 use lib_middleware::api_key::security::ApiKeyConfig;
 
 /// Represents an authenticated user ID extracted from either JWT or API key authentication
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AuthenticatedUserId(pub Uuid);
-
-impl From<AuthenticatedUser> for AuthenticatedUserId {
-    fn from(user: AuthenticatedUser) -> Self {
-        Self(user.user_id)
-    }
-}
-
-impl From<&AuthenticatedUser> for AuthenticatedUserId {
-    fn from(user: &AuthenticatedUser) -> Self {
-        Self(user.user_id)
-    }
-}
 
 /// Extractor that gets the authenticated user ID from either JWT or API key authentication
 impl FromRequest for AuthenticatedUserId {
@@ -37,7 +24,7 @@ impl FromRequest for AuthenticatedUserId {
         let extensions = req.extensions();
 
         if let Some(jwt_user) = extensions.get::<AuthenticatedUser>() {
-            return ready(Ok(AuthenticatedUserId::from(jwt_user)));
+            return ready(Ok(AuthenticatedUserId(jwt_user.user_id)));
         }
 
         // An API key acts for the user who owns it.
@@ -94,32 +81,6 @@ mod tests {
         authenticate(&mut request.extensions_mut());
 
         actix_test::call_service(&app, request).await
-    }
-
-    #[test]
-    fn from_jwt_user() {
-        assert_eq!(AuthenticatedUserId::from(&jwt_user()).0, test_user_id());
-    }
-
-    #[test]
-    fn from_owned_jwt_user() {
-        assert_eq!(AuthenticatedUserId::from(jwt_user()).0, test_user_id());
-    }
-
-    #[test]
-    fn serializes_and_deserializes() {
-        let serialized = serde_json::to_string(&AuthenticatedUserId(test_user_id())).unwrap();
-        assert!(serialized.contains("550e8400-e29b-41d4-a716-446655440000"));
-
-        let deserialized: AuthenticatedUserId = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(deserialized.0, test_user_id());
-    }
-
-    #[test]
-    fn clone_keeps_the_user_id() {
-        let user_id = AuthenticatedUserId(test_user_id());
-
-        assert_eq!(user_id.clone().0, user_id.0);
     }
 
     #[actix_web::test]

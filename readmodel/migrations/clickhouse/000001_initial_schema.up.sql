@@ -1,7 +1,7 @@
 -- The read model's initial ClickHouse schema (trade-vex/vex-core#189):
 -- - one raw table per vex-core topic, which Kafka Connect's ClickHouse sink fills
 -- - the markets and assets reference tables, which readmodel/seeds fills
--- - per-minute balances and prices, which materialized views keep
+-- - per-minute balances and prices, and each user's fills, which materialized views keep
 -- - the views the gateway reads, each through FINAL, with engine integers scaled to decimals
 -- - the roles that keep the writer and the reader apart, and the views' owner
 --
@@ -103,6 +103,8 @@ CREATE TABLE trade_events (
     taker_order_id UInt64,
     taker_side     LowCardinality(String),
     event_ts       UInt64,
+    maker_fee      UInt64,
+    taker_fee      UInt64,
     ts             DateTime64(9, 'UTC') MATERIALIZED fromUnixTimestamp64Nano(toInt64(event_ts))
 ) ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMM(ts)
@@ -188,6 +190,31 @@ FROM (
 )
 GROUP BY market_id, minute;
 
+-- Per user
+--
+-- Each fill once for each of its two users, keyed by user and time: a user's fills of a day are
+-- one range of the key, where trade_events, keyed by order, holds them among every user's. A copy
+-- of a fill has its key, and so has the second row of a fill whose maker is its taker: each
+-- collapses into the first, as in the raw tables.
+CREATE TABLE user_trades (
+    user_id        UInt64,
+    taker_order_id UInt64,
+    maker_order_id UInt64,
+    market_id      UInt64,
+    price          UInt64,
+    size           UInt64,
+    event_ts       UInt64,
+    ts             DateTime64(9, 'UTC') MATERIALIZED fromUnixTimestamp64Nano(toInt64(event_ts))
+) ENGINE = ReplacingMergeTree
+PARTITION BY toYYYYMM(ts)
+ORDER BY (user_id, ts, taker_order_id, maker_order_id);
+
+CREATE MATERIALIZED VIEW user_trades_mv TO user_trades
+DEFINER = readmodel_owner SQL SECURITY DEFINER AS
+SELECT arrayJoin([maker_user_id, taker_user_id]) AS user_id, taker_order_id, maker_order_id,
+       market_id, price, size, event_ts
+FROM trade_events;
+
 -- The gateway's views
 --
 -- Each reads its tables through FINAL and scales as the gateway's ScalingCache does: a balance or
@@ -229,14 +256,14 @@ SELECT w.user_id AS user_id, a.asset_id AS asset_id, w.ts AS ts,
 FROM withdrawal_events AS w FINAL
 INNER JOIN assets AS a FINAL ON a.asset_id = w.asset_id;
 
--- Each fill's volume: its price times its size, in units of the market's quote asset. The product
--- is taken over the engine integers in Decimal256, then scaled.
+-- Each fill's volume, once for each of its users: its price times its size, in units of the
+-- market's quote asset. The product is taken over the engine integers in Decimal256, then scaled.
 CREATE VIEW trade_volumes
 DEFINER = readmodel_owner SQL SECURITY DEFINER AS
-SELECT t.ts AS ts, t.maker_user_id AS maker_user_id, t.taker_user_id AS taker_user_id,
+SELECT t.ts AS ts, t.user_id AS user_id, m.quote_asset AS quote_asset_id,
        CAST(toDecimal256(t.price, 18) * t.size / (toUInt128(m.quote_scale_k) * a.native_scale)
             AS Decimal(38, 18)) AS volume
-FROM trade_events AS t FINAL
+FROM user_trades AS t FINAL
 INNER JOIN markets AS m FINAL ON m.market_id = t.market_id
 INNER JOIN assets AS a FINAL ON a.asset_id = m.base_asset;
 
@@ -269,3 +296,4 @@ GRANT SELECT ON assets TO readmodel_owner;
 GRANT SELECT ON markets TO readmodel_owner;
 GRANT SELECT, INSERT ON balances_last_per_min TO readmodel_owner;
 GRANT SELECT, INSERT ON market_prices_last_per_min TO readmodel_owner;
+GRANT SELECT, INSERT ON user_trades TO readmodel_owner;

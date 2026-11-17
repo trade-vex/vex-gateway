@@ -22,27 +22,21 @@ use tracing_subscriber::{EnvFilter, filter::LevelFilter, fmt};
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     // Load configuration
-    let config = Config::load_auto().map_err(|e| {
-        eprintln!("Failed to load configuration: {e}");
-        std::io::Error::other(e.to_string())
-    })?;
+    // The error's own text says what failed; returning it from main would print it a second time.
+    let config = Config::load_auto().unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1)
+    });
 
     // Initialize logging.
-    //
-    // The ORM and driver targets are capped at INFO regardless of the configured application
-    // level: at DEBUG/TRACE, SeaORM's instrumented query spans record the `Statement` arguments,
-    // which for an API-key insert are the plaintext key and its HMAC signing secret. That path
-    // bypasses the redacted `Debug` impls on ApiKeyConfig/KeyMaterial entirely, so the cap is the
-    // only thing keeping credentials out of the log (finding G1-1).
     let app_level = config
         .logging
         .level
         .parse::<LevelFilter>()
         .unwrap_or(LevelFilter::INFO);
-    let filter = EnvFilter::new(format!(
-        "{app_level},sea_orm=info,sqlx=info,sqlx::query=warn"
-    ));
-    fmt().with_env_filter(filter).init();
+    fmt()
+        .with_env_filter(EnvFilter::new(log_directives(app_level)))
+        .init();
 
     info!("Starting VEX Gateway Service");
 
@@ -63,4 +57,34 @@ async fn main() -> std::io::Result<()> {
 
     info!("Server startup complete");
     server.await
+}
+
+/// The filter directives for the configured level. The ORM and driver targets log at most INFO
+/// (sqlx's queries at most WARN), and never more than the application: at DEBUG/TRACE, SeaORM's
+/// instrumented query spans record the `Statement` arguments, which for an API-key insert are the
+/// plaintext key and its HMAC signing secret. That path bypasses the redacted `Debug` impls on
+/// ApiKeyConfig/KeyMaterial entirely, so the cap is the only thing keeping credentials out of the
+/// log (finding G1-1).
+fn log_directives(app_level: LevelFilter) -> String {
+    // tracing orders TRACE above ERROR, so `min` is the quieter level.
+    let orm = app_level.min(LevelFilter::INFO);
+    let query = app_level.min(LevelFilter::WARN);
+    format!("{app_level},sea_orm={orm},sqlx={orm},sqlx::query={query}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn orm_targets_log_at_most_info_and_never_more_than_the_application() {
+        assert_eq!(
+            log_directives(LevelFilter::TRACE),
+            "trace,sea_orm=info,sqlx=info,sqlx::query=warn"
+        );
+        assert_eq!(
+            log_directives(LevelFilter::ERROR),
+            "error,sea_orm=error,sqlx=error,sqlx::query=error"
+        );
+    }
 }

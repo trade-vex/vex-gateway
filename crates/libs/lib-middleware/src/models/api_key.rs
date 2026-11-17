@@ -32,29 +32,17 @@ pub struct Model {
 pub enum KeyMaterialType {
     #[sea_orm(string_value = "hmac_secret")]
     HmacSecret,
-    #[sea_orm(string_value = "rsa_public_key")]
-    RsaPublicKey,
-    #[sea_orm(string_value = "ed25519_public_key")]
-    Ed25519PublicKey,
 }
 
 impl From<&KeyMaterial> for KeyMaterialType {
-    fn from(key_material: &KeyMaterial) -> Self {
-        match key_material {
-            KeyMaterial::HmacSecret(_) => KeyMaterialType::HmacSecret,
-            KeyMaterial::RsaPublicKey(_) => KeyMaterialType::RsaPublicKey,
-            KeyMaterial::Ed25519PublicKey(_) => KeyMaterialType::Ed25519PublicKey,
-        }
+    fn from(_: &KeyMaterial) -> Self {
+        KeyMaterialType::HmacSecret
     }
 }
 
 impl KeyMaterialType {
     pub fn to_key_material(&self, value: &str) -> KeyMaterial {
-        match self {
-            KeyMaterialType::HmacSecret => KeyMaterial::HmacSecret(value.to_string()),
-            KeyMaterialType::RsaPublicKey => KeyMaterial::RsaPublicKey(value.to_string()),
-            KeyMaterialType::Ed25519PublicKey => KeyMaterial::Ed25519PublicKey(value.to_string()),
-        }
+        KeyMaterial::HmacSecret(value.to_string())
     }
 }
 
@@ -74,20 +62,6 @@ impl Model {
             None
         };
 
-        // Parse permissions from JSON
-        let _permissions_json = serde_json::to_value(
-            self.permissions
-                .iter()
-                .map(|p| match p {
-                    SecurityType::None => "none",
-                    SecurityType::Trade => "trade",
-                    SecurityType::UserData => "user_data",
-                    SecurityType::UserStream => "user_stream",
-                })
-                .collect::<Vec<_>>(),
-        )
-        .unwrap_or(serde_json::json!(["none"]));
-
         crate::api_key::security::ApiKeyConfig {
             api_key: self.api_key.clone(),
             key_material,
@@ -105,39 +79,6 @@ impl Model {
     /// Check if the API key is currently valid (enabled and not expired)
     pub fn is_valid(&self) -> bool {
         self.enabled && (self.expires_at.is_none() || self.expires_at.unwrap() > Utc::now())
-    }
-
-    /// Check if the API key has the required permission
-    pub fn has_permission(&self, required_permission: &SecurityType) -> bool {
-        // let permissions = self
-        //     .permissions
-        //     .as_array()
-        //     .and_then(|arr| {
-        //         arr.iter()
-        //             .filter_map(|v| v.as_str())
-        //             .map(|s| match s {
-        //                 "none" => Some(SecurityType::None),
-        //                 "trade" => Some(SecurityType::Trade),
-        //                 "user_data" => Some(SecurityType::UserData),
-        //                 "user_stream" => Some(SecurityType::UserStream),
-        //                 _ => None,
-        //             })
-        //             .collect::<Option<Vec<_>>>()
-        //     })
-        //     .unwrap_or_else(|| vec![SecurityType::None]);
-
-        self.permissions.contains(required_permission)
-            || self.permissions.contains(&SecurityType::None)
-    }
-
-    /// Check if the IP address is blacklisted (blocked)
-    pub fn is_ip_blacklisted(&self, ip: &str) -> bool {
-        self.ip_blacklist.contains(&ip.to_string())
-    }
-
-    /// Check if the IP address is allowed (not blacklisted)
-    pub fn is_ip_allowed(&self, ip: &str) -> bool {
-        !self.is_ip_blacklisted(ip)
     }
 }
 
@@ -171,31 +112,14 @@ impl NewApiKey {
     pub fn to_active_model(self) -> ActiveModel {
         let (key_material_type, key_material_value) = if let Some(key_material) = &self.key_material
         {
+            let KeyMaterial::HmacSecret(secret) = key_material;
             (
                 Some(KeyMaterialType::from(key_material)),
-                Some(match key_material {
-                    KeyMaterial::HmacSecret(secret) => secret.clone(),
-                    KeyMaterial::RsaPublicKey(key) => key.clone(),
-                    KeyMaterial::Ed25519PublicKey(key) => key.clone(),
-                }),
+                Some(secret.clone()),
             )
         } else {
             (None, None)
         };
-
-        // Convert permissions to JSON
-        // let permissions_json = serde_json::to_value(
-        //     self.permissions
-        //         .iter()
-        //         .map(|p| match p {
-        //             SecurityType::None => "none",
-        //             SecurityType::Trade => "trade",
-        //             SecurityType::UserData => "user_data",
-        //             SecurityType::UserStream => "user_stream",
-        //         })
-        //         .collect::<Vec<_>>(),
-        // )
-        // .unwrap_or(serde_json::json!(["none"]));
 
         let now = Utc::now();
 
