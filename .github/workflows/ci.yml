@@ -58,6 +58,8 @@ jobs:
           # libssl-dev only for the rusteron (Aeron) build scripts, whose reqwest uses native-tls;
           # the gateway itself links rustls, not OpenSSL.
           sudo apt-get install -y libbsd-dev libssl-dev pkg-config build-essential clang libclang-dev openjdk-21-jdk uuid-dev
+          # ubuntu-latest (26.04) defaults to Java 25, too new for the Gradle in rusteron's Aeron build.
+          echo "JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64" >> "$GITHUB_ENV"
           # Install CMake 3.30+ (required by rusteron-archive/aeron)
           wget -q https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0-linux-x86_64.sh
           # From cmake-3.30.0-SHA-256.txt, published with the release
@@ -137,6 +139,8 @@ jobs:
           # libssl-dev only for the rusteron (Aeron) build scripts, whose reqwest uses native-tls;
           # the gateway itself links rustls, not OpenSSL.
           sudo apt-get install -y libbsd-dev libssl-dev pkg-config build-essential clang libclang-dev openjdk-21-jdk uuid-dev
+          # ubuntu-latest (26.04) defaults to Java 25, too new for the Gradle in rusteron's Aeron build.
+          echo "JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64" >> "$GITHUB_ENV"
           # Install CMake 3.30+ (required by rusteron-archive/aeron)
           wget -q https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0-linux-x86_64.sh
           # From cmake-3.30.0-SHA-256.txt, published with the release
